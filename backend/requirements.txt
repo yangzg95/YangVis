@@ -1,0 +1,25 @@
+fastapi==0.115.0
+uvicorn==0.30.6
+gunicorn==22.0.0
+# uvicorn 的基础包不含 WebSocket 实现，运维终端要用 WS，必须显式装上。
+websockets==14.2
+sqlalchemy==2.0.35
+pymysql==1.1.1
+cryptography==43.0.1
+pydantic==2.9.2
+pydantic-settings==2.5.2
+python-dotenv==1.0.1
+python-multipart==0.0.12
+qdrant-client==1.11.3
+httpx==0.27.2
+pyjwt>=2.13.0
+langchain-core>=1.6.2
+langchain-openai>=1.6.2
+langchain>=1.4.0
+langgraph>=1.2.11
+# 智能运维：SSH（PTY 终端与命令执行）与 Redis 只读客户端。
+asyncssh==2.18.0
+redis==5.2.1
+# 智能办公：简历文本抽取。两者都是纯 Python 依赖，不引入系统级库。
+pypdf==5.9.0
+python-docx==1.2.0

@@ -1,0 +1,96 @@
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: yangvis:latest
+    container_name: yangvis
+    restart: unless-stopped
+    ports:
+      - "18099:18099"
+    environment:
+      APP_NAME: yangvis
+      PORT: "18099"
+      CONTEXT_PATH: /tool
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: root
+      # Required: set it in your .env (compose reads it from there).
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in your .env}
+      DB_NAME: noetix_tool
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: "6333"
+      # Required: the app refuses to start without it.
+      # Generate with: python -c "import secrets; print(secrets.token_urlsafe(48))"
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?set AUTH_JWT_SECRET in your .env}
+      # Required: encrypts stored model api_keys. Rotating it makes every
+      # stored key undecryptable, so treat it as permanent.
+      # Generate with:
+      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in your .env}
+      # First start only: creates the initial administrator.
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    networks:
+      - yangvis-net
+
+  mysql:
+    image: mysql:8.0
+    container_name: yangvis-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in your .env}
+      MYSQL_DATABASE: noetix_tool
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=caching_sha2_password
+    # 仅在需要从宿主机直连数据库时保留；生产部署建议删除此项，
+    # MySQL 只对 compose 内网可见。
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - yangvis-net
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: yangvis-qdrant
+    restart: unless-stopped
+    # 同上：Qdrant 无鉴权，生产部署建议删除端口映射，只走 compose 内网。
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - yangvis-net
+
+volumes:
+  mysql_data:
+  qdrant_data:
+
+networks:
+  yangvis-net:
+    driver: bridge

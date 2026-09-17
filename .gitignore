@@ -1,0 +1,52 @@
+# Backend
+backend/src/main/resources/static/
+backend/static/
+backend/**/__pycache__/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# Frontend
+frontend/dist/
+frontend/node_modules/
+frontend/.vite/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+.env.*.local
+!.env.example
+!.env.development
+!.env.production
+
+# Build artefacts
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Agent tooling (Claude Code skills 等本地工具配置，不进仓库)
+.claude/
+.agents/
+.jbeval/

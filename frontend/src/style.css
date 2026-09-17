@@ -1,0 +1,862 @@
+/* ==========================================================================
+   杨维斯控制台 · 设计系统
+   方向：「安静的工程控制台」—— ink 导航轨 + 唯一信号色 teal，
+   发丝线代替阴影，无装饰渐变。大胆的份额只花在导航轨上。
+   ========================================================================== */
+
+:root {
+  /* -- 表面 ------------------------------------------------------------ */
+  --ink: #11181f;            /* 导航轨、主按钮、终端/代码深色面板 */
+  --ink-hover: #232e38;
+  --paper: #f4f6f7;          /* 内容区背景，纯色 */
+  --surface: #ffffff;
+
+  /* -- 信号色：唯一非语义强调色 -----------------------------------------
+     亮青只用在 ink 深色表面上做装饰信号；浅底文字/控件用 signal-text。 */
+  --signal: #0fb5bf;
+  --signal-bright: #3ad6de;
+  --signal-text: #0a7e86;    /* 白底对比度 ~4.7:1，过 AA */
+  --signal-bg: rgba(15, 181, 191, 0.08);
+  --signal-bg-strong: rgba(15, 181, 191, 0.13);
+  --signal-border: rgba(15, 181, 191, 0.35);
+
+  /* -- 结构与文字 ------------------------------------------------------ */
+  --hairline: rgba(17, 24, 31, 0.09);
+  --text-1: #1c232b;
+  --text-2: #5a6572;
+  /* 白底对比度 ~4.8:1 过 AA（旧值 #98a2ad 只有 ~2.8:1）。辅助文字全站统一
+     用它，页面里不要再写 rgba(0,0,0,0.35/0.45) 这类更浅的灰。 */
+  --text-3: #6b7280;
+
+  /* -- 圆角层级：小元素 / 控件 / 卡片；药丸只留给状态标签 --------------- */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+
+  /* -- 阴影只给浮层（下拉/弹窗/菜单）；静态卡片一律用发丝线 ------------ */
+  --shadow-overlay: 0 8px 24px rgba(17, 24, 31, 0.12);
+
+  --font-sans:
+    'IBM Plex Sans', -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+    'Noto Sans SC', sans-serif;
+  --font-mono:
+    'IBM Plex Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+
+  /* -- legacy alias：仅服务 Ops 三件套（OpsDatabase/OpsServer/OpsChat），
+        清理完引用后删除。 */
+  --color-gray-rgb: 17, 24, 31;
+  --color-surface: #ffffff;
+  --color-surface-strong: #ffffff;
+  --color-border-soft: var(--hairline);
+  --color-text-primary: var(--text-1);
+  --color-text-secondary: var(--text-2);
+  --color-text-on-primary: #ffffff;
+  --font-family-base: var(--font-sans);
+}
+
+/* ---- Base ------------------------------------------------------------- */
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-sans);
+  color: var(--text-1);
+  background: var(--paper);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+/* ---- 共享类 ------------------------------------------------------------
+   各页面 scoped 样式里重复出现的模式集中在这里。注意 scoped 的 [data-v]
+   特异性高于这里的裸类，组件里残留同属性局部规则会盖掉它们。 */
+
+.page-card {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+}
+
+.page-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 16px;
+  color: var(--text-1);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* 列表行 hover/active：原先 #f0f5ff/#e6f4ff 那套在 5 个组件里复制粘贴。 */
+.list-row {
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.list-row:hover {
+  background: var(--signal-bg);
+}
+.list-row.active {
+  background: var(--signal-bg-strong);
+}
+
+/* 辅助说明文字：曾经每个页面各定义一份 .muted/.hint 且色值不一（0.45/0.55
+   混用，均不达 AA）。统一走 --text-3。scoped 同名规则会盖过这里（见头注），
+   组件需要差异时只写差异属性（等宽字体、margin 等），颜色不要动。 */
+.muted {
+  color: var(--text-3);
+  font-size: 12px;
+}
+.hint {
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 面板收起后的展开竖条：数据库工作台 / 数据库问答两页共用（终端页是深色
+   语境，用自己的 .term-rail）。 */
+.rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: 36px;
+  flex-shrink: 0;
+  padding: 12px 0;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.rail:hover {
+  color: var(--signal-text);
+}
+.rail-text {
+  writing-mode: vertical-rl;
+  letter-spacing: 2px;
+  font-size: 12px;
+}
+
+/* 纯图标按钮：bare 全屏页的顶栏 / 面板头共用。深色语境（终端页）自行覆盖。 */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 15px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.icon-btn:hover {
+  background: rgba(17, 24, 31, 0.06);
+  color: var(--text-1);
+}
+
+/* host:port 输入组（Ops 台账表单），70/30 分宽。特异性写到 0-2-0：
+   antd 运行时注入的 .ant-input/.ant-input-number 宽度规则排在静态 CSS
+   后面，平级拼写会输。 */
+.host-input.ant-input {
+  width: 70%;
+}
+.port-input.ant-input-number {
+  width: 30%;
+}
+
+/* 弹窗都写死了 640/720px 宽，窄屏会溢出视口。max-width 与内联 width 不是
+   同一属性，不会被内联样式顶掉，一条规则兜住所有弹窗。 */
+.ant-modal {
+  max-width: calc(100vw - 32px);
+}
+
+/* ---- 主按钮：ink 化 ----------------------------------------------------
+   antd-vue 4.2.6 的 Button ComponentToken 是空接口，只能靠覆盖。 */
+
+.ant-btn-primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  box-shadow: none;
+}
+
+.ant-btn-primary:not(:disabled):not(.ant-btn-dangerous):hover {
+  background: var(--ink-hover);
+  border-color: var(--ink-hover);
+}
+
+.ant-btn-primary:not(:disabled):not(.ant-btn-dangerous):active {
+  background: var(--ink);
+  border-color: var(--ink);
+}
+
+/* ---- 登录页 ------------------------------------------------------------
+   概念「入口即导航轨」：左侧 ink 栏与登录后的侧边栏同宽（200px）、
+   同色、logo 同位——登录成功的瞬间，品牌栏无缝长成工作台导航轨。
+   栏内标语用中文竖排，既是窄栏的解法，也是入口的唯一高光时刻。 */
+
+.page-shell {
+  position: relative;
+  min-height: 100vh;
+  background: var(--paper);
+}
+
+.login-panel {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.login-brand {
+  display: flex;
+  flex-direction: column;
+  background: var(--ink);
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.72);
+}
+
+/* 栏顶与 sidebar-brand 完全同位：同 padding、同 logo 宽、同底部分隔线。 */
+.login-brand-head {
+  position: relative;
+  flex-shrink: 0;
+  padding: 20px 25px 14px;
+}
+
+.login-brand-head::after {
+  content: '';
+  position: absolute;
+  right: 18px;
+  bottom: 0;
+  left: 18px;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.login-brand-logo {
+  display: block;
+  width: 100%;
+  max-width: 148px;
+  height: auto;
+}
+
+/* 栏中竖排标语：200px 窄栏里横排必挤，竖排反而成为身份。 */
+.login-brand-middle {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  min-height: 0;
+}
+
+.login-brand-signal {
+  width: 2px;
+  height: 36px;
+  background: var(--signal-bright);
+}
+
+.login-brand-tagline {
+  margin: 0;
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 0.32em;
+  line-height: 1;
+  color: #fff;
+}
+
+.login-brand-foot {
+  flex-shrink: 0;
+  padding: 18px 25px 24px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.login-brand-sub {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.8;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* 表单区铺「图纸底」：比 paper 深半度的灰 + 发丝级网格线——
+   白卡有了衬底，大面积留白也有了工程纹理，但不抢戏。 */
+.login-main {
+  position: relative;
+  overflow: hidden;
+  background: #eaeef1;
+  background-image:
+    linear-gradient(rgba(17, 24, 31, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(17, 24, 31, 0.045) 1px, transparent 1px);
+  background-size: 34px 34px;
+  background-position: center;
+}
+
+/* 弧反应堆水印挪到图纸区右下角，大幅出血、淡化成身份纹理。 */
+.login-main-mark {
+  position: absolute;
+  right: -120px;
+  bottom: -140px;
+  width: min(46vw, 560px);
+  height: auto;
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* 表单收进一张白卡，相对整个视口绝对居中——骑跨左右两区之上。
+   登录是「阴影只给浮层」的唯一例外：卡片需要从网格底上浮起来。 */
+.login-main-inner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 2;
+  transform: translate(-50%, -50%);
+  width: min(388px, calc(100% - 48px));
+  padding: 36px 32px 32px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 32px rgba(17, 24, 31, 0.08);
+}
+
+.login-header {
+  margin-bottom: 8px;
+}
+
+.login-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.login-subtitle {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+.login-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 24px;
+}
+
+.login-form .ant-input,
+.login-form .ant-input-affix-wrapper {
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.login-form .ant-input-affix-wrapper .ant-input {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.login-form .ant-input-affix-wrapper .ant-input-prefix,
+.login-form .ant-input-affix-wrapper .ant-input-suffix {
+  color: var(--text-3);
+}
+
+.login-form .ant-input-affix-wrapper:hover {
+  border-color: var(--signal-border);
+}
+
+.login-form .ant-input-affix-wrapper-focused,
+.login-form .ant-input:focus {
+  border-color: var(--signal-text);
+  box-shadow: 0 0 0 3px rgba(15, 181, 191, 0.15);
+}
+
+.login-form .ant-input-password .ant-input-suffix {
+  padding-right: 0;
+}
+
+.login-form .ant-input-password-icon {
+  color: var(--text-3);
+  transition: color 140ms ease;
+}
+
+.login-form .ant-input-password-icon:hover {
+  color: var(--signal-text);
+}
+
+.login-submit.ant-btn {
+  width: 100%;
+  height: auto;
+  padding: 12px 18px;
+  border: 0;
+  border-radius: var(--radius-md);
+  font-weight: 600;
+  font-size: 15px;
+  background: var(--ink);
+  color: var(--color-text-on-primary);
+}
+
+.login-submit.ant-btn:hover {
+  background: var(--ink-hover);
+  color: var(--color-text-on-primary);
+}
+
+.form-error {
+  margin-top: 14px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: rgba(220, 38, 38, 0.07);
+  color: #b91c1c;
+  font-size: 13px;
+}
+
+/* 登录密码框下的大写锁定提示：告警橙，比错误轻一级。 */
+.caps-hint {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  color: #d46b08;
+  font-size: 12px;
+}
+
+@media (max-width: 768px) {
+  .login-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .login-brand {
+    display: none;
+  }
+
+  .login-main {
+    padding: 40px 28px;
+  }
+}
+
+/* ---- 工作台外壳（导航轨 + 顶栏 + 标签页） ----------------------------- */
+
+.dashboard-layout {
+  height: 100vh;
+  overflow: hidden;
+}
+
+.dashboard-sider.ant-layout-sider {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--ink);
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.dashboard-sider.ant-layout-sider > .ant-layout-sider-children {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sidebar-brand {
+  position: relative;
+  flex-shrink: 0;
+  padding: 20px 25px 10px;
+}
+
+.sidebar-brand::after {
+  content: '';
+  position: absolute;
+  right: 18px;
+  bottom: 0;
+  left: 18px;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.sidebar-logo-w {
+  display: block;
+  width: 100%;
+  max-width: 148px;
+  height: auto;
+  margin-bottom: 14px;
+}
+
+/* 收起态：横向字标放不下 64px，裁出左侧图标部分，品牌区居中收窄。 */
+.dashboard-sider.ant-layout-sider-collapsed .sidebar-brand {
+  padding: 16px 0 10px;
+  display: flex;
+  justify-content: center;
+}
+
+.dashboard-sider.ant-layout-sider-collapsed .sidebar-logo-w {
+  width: 32px;
+  height: 32px;
+  margin-bottom: 4px;
+  object-fit: cover;
+  object-position: left center;
+}
+
+/* 收起后菜单项只剩图标，两侧留白跟着收窄。 */
+.dashboard-sider.ant-layout-sider-collapsed .sidebar-menu.ant-menu {
+  padding: 0 6px;
+}
+
+/* 底部收起/展开触发条，和 ink 导航轨同一族色。 */
+.dashboard-sider .ant-layout-sider-trigger {
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.68);
+}
+
+.dashboard-sider .ant-layout-sider-trigger:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.sidebar-menu-shell {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 12px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+
+.sidebar-menu-shell::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sidebar-menu-shell::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sidebar-menu-shell::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.sidebar-menu-shell::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.sidebar-menu-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 12px 18px 0 10px;
+}
+
+.sidebar-menu-search-input.ant-input-affix-wrapper {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: none;
+}
+
+.sidebar-menu-search-input.ant-input-affix-wrapper:hover,
+.sidebar-menu-search-input.ant-input-affix-wrapper.ant-input-affix-wrapper-focused {
+  border-color: rgba(58, 214, 222, 0.5);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.sidebar-menu-search-input.ant-input-affix-wrapper .ant-input {
+  color: #fff;
+  background: transparent;
+}
+
+.sidebar-menu-search-input.ant-input-affix-wrapper .ant-input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.sidebar-menu-search-input.ant-input-affix-wrapper .ant-input-prefix,
+.sidebar-menu-search-input.ant-input-affix-wrapper .ant-input-clear-icon {
+  color: rgba(255, 255, 255, 0.48);
+}
+
+.sidebar-menu.ant-menu {
+  flex: 1;
+  min-height: 0;
+  background: transparent;
+  border-inline-end: 0;
+  padding: 0 10px;
+}
+
+.sidebar-menu.ant-menu-dark {
+  color: rgba(255, 255, 255, 0.68);
+}
+
+.sidebar-menu.ant-menu-dark .ant-menu-item {
+  height: 40px;
+  line-height: 40px;
+  margin: 2px 0;
+  border-radius: var(--radius-md);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  transition:
+    background-color 150ms ease,
+    color 150ms ease;
+}
+
+.sidebar-menu.ant-menu-dark .ant-menu-item .ant-menu-item-icon {
+  font-size: 16px;
+  color: rgba(255, 255, 255, 0.52);
+  transition: color 150ms ease;
+}
+
+.sidebar-menu-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 内联子菜单的 <ul> 同样带 .ant-menu 类，却没有 .ant-menu-dark——会被
+   antd 基础样式 .ant-menu { color: colorText }（全局深文字色）直接命中，
+   切断从深色菜单继承白色文字的链路，子项变成深底深字。这里显式还回
+   浅色文字，并把 antd 默认的蓝黑盒子 #000c17 换成与 ink 轨同族的微亮分组。 */
+.sidebar-menu.ant-menu-dark.ant-menu-inline .ant-menu-sub.ant-menu-inline {
+  color: rgba(255, 255, 255, 0.68);
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: var(--radius-md);
+}
+
+/* hover 规则要写到 0-6-0：antd 运行时注入的等特异性样式排在静态 CSS
+   后面，平级拼写会输给它从 light token 派生的 hover 底色。 */
+.sidebar-menu.ant-menu-dark.ant-menu-inline .ant-menu-item:not(.ant-menu-item-selected):hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* 收起态的悬停/点击弹层：和内联子菜单同一个坑——弹层 <ul> 带 .ant-menu
+   却没有 .ant-menu-dark，被 antd 基础样式的全局深文字色命中后深底深字。
+   显式还回浅色文字，并把 antd 默认的蓝黑盒子 #001529 换成 ink 纯色
+   （弹层浮在页面上，半透明会透出内容）。特异性写到 0-4-0：antd 运行时
+   注入的样式排在静态 CSS 后面，平级会被它从 dark token 派生的底色赢走。 */
+.ant-menu-submenu-popup .ant-menu.ant-menu-sub.ant-menu-vertical {
+  color: rgba(255, 255, 255, 0.68);
+  background: var(--ink);
+  border-radius: var(--radius-md);
+}
+
+.ant-menu-submenu-popup .ant-menu.ant-menu-sub.ant-menu-vertical .ant-menu-item:not(.ant-menu-item-selected):hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.ant-menu-submenu-popup .ant-menu.ant-menu-sub.ant-menu-vertical .ant-menu-item-selected {
+  color: var(--signal-bright);
+  background: rgba(58, 214, 222, 0.13);
+}
+
+.sidebar-menu.ant-menu-dark .ant-menu-item:hover .ant-menu-item-icon {
+  color: #fff;
+}
+
+/* 选中态 = 信号灯：亮青 tint + 左侧信号条。这是整个控制台全部的记忆点。 */
+.sidebar-menu.ant-menu-dark .ant-menu-item-selected {
+  color: var(--signal-bright);
+  background: rgba(58, 214, 222, 0.13);
+  box-shadow: inset 2px 0 0 var(--signal-bright);
+}
+
+.sidebar-menu.ant-menu-dark .ant-menu-item-selected .ant-menu-item-icon {
+  color: var(--signal-bright);
+}
+
+.sidebar-menu.ant-menu-dark .ant-menu-submenu-title {
+  border-radius: var(--radius-md);
+  transition:
+    background-color 150ms ease,
+    color 150ms ease;
+}
+
+.sidebar-menu.ant-menu-dark.ant-menu-inline .ant-menu-submenu-title:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.sidebar-menu-empty {
+  display: grid;
+  place-items: center;
+  padding: 8px 16px 20px;
+}
+
+.sidebar-menu-empty .ant-empty {
+  margin: 0;
+}
+
+.sidebar-menu-empty .ant-empty-description {
+  color: rgba(255, 255, 255, 0.52);
+}
+
+.dashboard-content-shell.ant-layout {
+  background: transparent;
+  min-width: 0;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.global-tabbar {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  padding: 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
+}
+
+/* 标签页和用户区都在这一行里：用户区不许被挤（内容很短），空间不够时
+   标签页用自带的左右滚动箭头翻页。 */
+.topbar-main {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 6px 12px;
+}
+
+.topbar-user {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
+.user-dropdown-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding-right: 16px;
+  border: 0;
+  background: transparent;
+  color: var(--text-1);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.user-avatar.ant-avatar {
+  background: var(--ink);
+}
+
+.user-name {
+  white-space: nowrap;
+}
+
+.header-tablist.ant-tabs {
+  flex: 1;
+  min-width: 0;
+  padding-top: 0;
+}
+
+.header-tablist.ant-tabs .ant-tabs-nav {
+  margin: 0;
+  height: auto;
+  padding: 0;
+}
+
+.header-tablist.ant-tabs .ant-tabs-nav-wrap,
+.header-tablist.ant-tabs .ant-tabs-nav-list {
+  align-items: center;
+}
+
+.header-tablist.ant-tabs .ant-tabs-tab {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 999px !important;
+  min-height: 34px;
+  margin: 0 8px 0 0 !important;
+  padding: 5px 14px;
+  color: var(--text-2);
+  background: transparent;
+  transition:
+    background-color 150ms ease,
+    color 150ms ease,
+    border-color 150ms ease;
+}
+
+.header-tablist.ant-tabs .ant-tabs-tab-active {
+  border-color: var(--signal-border) !important;
+  background: var(--signal-bg);
+}
+
+.header-tablist.ant-tabs-card > .ant-tabs-nav .ant-tabs-tab,
+.header-tablist.ant-tabs-editable-card > .ant-tabs-nav .ant-tabs-tab {
+  border-radius: 999px !important;
+}
+
+.header-tablist.ant-tabs .ant-tabs-nav::before {
+  border: 0;
+}
+
+.header-tablist.ant-tabs .ant-tabs-content-holder {
+  display: none;
+  border: 0;
+}
+
+.header-tablist.ant-tabs .ant-tabs-tab:hover {
+  color: var(--text-1);
+  background: rgba(17, 24, 31, 0.04);
+}
+
+.header-tablist.ant-tabs .ant-tabs-tab-btn {
+  color: inherit;
+}
+
+.header-tablist.ant-tabs .ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: var(--signal-text);
+}
+
+.header-tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.header-tab-label .anticon {
+  font-size: 14px;
+  color: currentColor;
+}
+
+.header-tablist.ant-tabs .ant-tabs-tab-remove {
+  color: var(--text-3);
+}
+
+.header-tablist.ant-tabs .ant-tabs-tab-remove:hover {
+  color: var(--signal-text);
+}
+
+.dashboard-main.ant-layout-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}

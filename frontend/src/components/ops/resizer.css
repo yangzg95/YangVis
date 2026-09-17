@@ -1,0 +1,11 @@
+/* 拖拽调大小期间的全局态：光标固定、禁止选中文字。
+   挂在 body 上才能压住面板里各自定义了 cursor 的子元素。 */
+body.dragging-col {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.dragging-row {
+  cursor: row-resize;
+  user-select: none;
+}

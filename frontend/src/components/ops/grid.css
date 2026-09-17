@@ -1,0 +1,98 @@
+/* 数据库网格的统一外观：ops 下所有结果表（查询结果 / 数据浏览 / 表结构 /
+   Redis 值）都挂 .db-grid。值用等宽字体便于对齐扫描，斑马纹和竖向分隔线
+   都压到刚好看得见的程度，重音交给悬停的信号色。 */
+
+.db-grid .ant-table-thead > tr > th {
+  background: rgba(17, 24, 31, 0.03);
+  border-bottom: 1px solid var(--hairline);
+  color: rgba(0, 0, 0, 0.6);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.db-grid .ant-table-tbody > tr > td {
+  border-bottom: 1px solid rgba(17, 24, 31, 0.05);
+  color: rgba(0, 0, 0, 0.8);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 竖向细分隔线：列跟着视线走，宽表不串列。 */
+.db-grid .ant-table-thead > tr > th + th,
+.db-grid .ant-table-tbody > tr > td + td {
+  border-left: 1px solid rgba(17, 24, 31, 0.04);
+}
+
+/* 斑马纹极淡；与悬停同优先级，悬停写在后面盖住斑马。 */
+.db-grid .ant-table-tbody > tr:nth-child(even) > td {
+  background: rgba(17, 24, 31, 0.02);
+}
+
+.db-grid .ant-table-tbody > tr:hover > td {
+  background: var(--signal-bg);
+}
+
+/* 数字右对齐：量级一眼可比（组件在 bodyCell 里按 typeof 加 .num）。 */
+.db-grid .cell.num {
+  text-align: right;
+}
+
+/* 列宽硬上限：scroll.x 用 max-content 时 antd 走 table-layout: auto，列的
+   width 只是下限，长内容（JSON、注释、Redis 值）会把列撑到和内容一样宽。
+   给单元格夹 max-width，超出的省略号截断；完整值仍可右键复制。 */
+.db-grid .ant-table-thead > tr > th,
+.db-grid .ant-table-tbody > tr > td {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 数据/查询页签的单元格内容包了一层 .cell（负边距占满整格），td 上的
+   text-overflow 管不到子块里的文本，省略号得落在它自己身上。 */
+.db-grid .cell {
+  position: relative;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 列宽拖拽手柄：贴在列头右缘、横跨一点到下一列，悬停才显色。 */
+.db-grid .ant-table-thead > tr > th {
+  position: relative;
+}
+
+.db-grid .col-resize {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  bottom: 0;
+  z-index: 1;
+  width: 7px;
+  cursor: col-resize;
+}
+
+.db-grid .col-resize:hover {
+  background: var(--signal-border, #91caff);
+}
+
+/* 长内容的「展开」按钮：平时收起，悬停单元格时钉在右上角。 */
+.db-grid .cell-expand {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: none;
+  align-items: center;
+  padding: 1px 3px;
+  border-radius: 3px;
+  background: var(--signal-bg, #e6f4ff);
+  color: var(--signal-text, #1677ff);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.db-grid .cell:hover .cell-expand {
+  display: inline-flex;
+}

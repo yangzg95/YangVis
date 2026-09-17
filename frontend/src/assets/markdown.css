@@ -1,0 +1,113 @@
+/* ==========================================================================
+   markdown-it 渲染内容的统一排版
+   v-html 插进来的节点带不上 scoped 属性标记，过去对话页 / 简历报告 / 运维问答
+   各写一份 :deep() 排版，色值间距还略有出入。收敛到全局 .markdown：
+   容器挂上 .markdown 即可获得完整排版；组件需要差异时用 scoped 规则覆盖
+   （[data-v] 特异性更高，见 style.css 头注）。
+   ========================================================================== */
+
+.markdown {
+  /* 渲染出来的是真实块级元素；容器若同时带 pre-wrap（纯文本消息常用），
+     必须还原成 normal，否则段落之间会多出空行。 */
+  white-space: normal;
+  word-break: break-word;
+}
+
+.markdown > :first-child {
+  margin-top: 0;
+}
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown p {
+  margin: 0 0 8px;
+}
+.markdown ul,
+.markdown ol {
+  margin: 0 0 8px;
+  padding-left: 22px;
+}
+.markdown li {
+  margin-bottom: 2px;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: 12px 0 8px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.markdown h1 {
+  font-size: 18px;
+}
+.markdown h2 {
+  font-size: 16px;
+}
+.markdown h3,
+.markdown h4 {
+  font-size: 14px;
+}
+
+.markdown a {
+  color: var(--signal-text);
+}
+
+.markdown code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(17, 24, 31, 0.06);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+.markdown pre {
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--ink);
+  color: #f5f5f5;
+  overflow-x: auto;
+}
+.markdown pre code {
+  padding: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.markdown blockquote {
+  margin: 0 0 8px;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid rgba(10, 126, 134, 0.4);
+  color: var(--text-2);
+}
+
+/* 表格可能比容器宽：单独给它一层横向滚动，避免撑破气泡/抽屉。 */
+.markdown table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  margin: 0 0 8px;
+  border-collapse: collapse;
+  overflow-x: auto;
+}
+.markdown th,
+.markdown td {
+  padding: 6px 10px;
+  border: 1px solid var(--hairline);
+  text-align: left;
+}
+.markdown th {
+  background: rgba(17, 24, 31, 0.04);
+  font-weight: 600;
+}
+
+.markdown hr {
+  margin: 12px 0;
+  border: none;
+  border-top: 1px solid var(--hairline);
+}
+.markdown img {
+  max-width: 100%;
+}
