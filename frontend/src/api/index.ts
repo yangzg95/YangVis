@@ -22,8 +22,9 @@ const http: AxiosInstance = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
-/** token 已失效，清除后跳转回登录页。 */
-function handleUnauthorized() {
+/** token 已失效，清除后跳转回登录页。fetch 直连（流式下载/SSE）绕过 axios
+ * 拦截器，也要用它，所以导出。 */
+export function handleUnauthorized() {
   clearAccessToken()
   if (window.location.pathname !== LOGIN_PATH) {
     window.location.replace(LOGIN_PATH)
@@ -1016,6 +1017,11 @@ export interface SftpListResult {
   path: string
   items: SftpEntry[]
   truncated: boolean
+}
+
+/** SFTP 下载地址。流式落盘走 fetch（不经 axios），URL 在这里集中拼。 */
+export function sftpDownloadUrl(id: number, path: string): string {
+  return `/api/ops/servers/${id}/files/download?path=${encodeURIComponent(path)}`
 }
 
 export const opsApi = {

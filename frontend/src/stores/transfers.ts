@@ -7,8 +7,13 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import axios from 'axios'
 import { message } from 'ant-design-vue'
-import { opsApi } from '@/api'
-import { saveBlobResponse } from '@/utils/download'
+import { opsApi, sftpDownloadUrl } from '@/api'
+import {
+  pickSaveTarget,
+  saveBlobResponse,
+  streamToDisk,
+  supportsStreamingSave,
+} from '@/utils/download'
 
 export type TransferStatus = 'running' | 'done' | 'error' | 'cancelled'
 
@@ -64,7 +69,9 @@ export const useTransfersStore = defineStore('transfers', () => {
   }
 
   function fail(item: TransferItem, err: unknown, fallback: string) {
-    if (axios.isCancel(err)) {
+    // AbortError 来自 fetch 路径的 signal.abort()（DOMException），和 axios
+    // 的取消一样是用户主动取消，不能误报成错误。
+    if (axios.isCancel(err) || (err as Error)?.name === 'AbortError') {
       item.status = 'cancelled'
       return
     }
@@ -93,7 +100,45 @@ export const useTransfersStore = defineStore('transfers', () => {
     return item
   }
 
-  async function startDownload(serverId: number, remotePath: string, name: string): Promise<TransferItem> {
+  /** 用户取消保存框时不产生任务，返回 undefined。 */
+  async function startDownload(
+    serverId: number,
+    remotePath: string,
+    name: string,
+  ): Promise<TransferItem | undefined> {
+    if (supportsStreamingSave()) {
+      let handle: FileSystemFileHandle | null = null
+      let pickerFailed = false
+      try {
+        // 必须是本函数第一个 await：showSaveFilePicker 要求用户手势激活
+        // （点击后约 5 秒有效），前面插任何网络 await 都会让它抛 SecurityError。
+        handle = await pickSaveTarget(name)
+      } catch {
+        // SecurityError 等：环境不允许弹框，继续往下走 blob 路径。
+        pickerFailed = true
+      }
+      if (handle) {
+        const streaming = push('download', serverId, name, remotePath, 0)
+        try {
+          await streamToDisk(sftpDownloadUrl(serverId, remotePath), handle, {
+            signal: streaming.controller.signal,
+            onProgress: (loaded, total) => {
+              streaming.loaded = loaded
+              if (total) streaming.total = total
+            },
+          })
+          streaming.loaded = streaming.total || streaming.loaded
+          streaming.status = 'done'
+        } catch (err) {
+          fail(streaming, err, '下载失败')
+        }
+        return streaming
+      }
+      // handle 为 null 且 picker 没抛错：用户取消了保存框。在 push() 之前返回，
+      // 不留幻影条目，也不触发「传输」标签页切换。
+      if (!pickerFailed) return undefined
+    }
+
     const item = push('download', serverId, name, remotePath, 0)
     try {
       const res = await opsApi.sftpDownload(serverId, remotePath, {

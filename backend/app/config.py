@@ -75,13 +75,19 @@ class Settings(BaseSettings):
     OPS_WS_TICKET_TTL: int = 60
     # AI 提议写操作后等待用户点确认的时间。超时按「未批准」处理。
     OPS_CONFIRM_TIMEOUT: float = 180.0
-    # SFTP 远程文件浏览器。上传是整块读进内存（不分块），这个上限同时也是
-    # 单个上传请求的内存占用上限。
-    OPS_SFTP_MAX_UPLOAD_BYTES: int = 50 * 1024 * 1024
+    # SFTP 远程文件浏览器。上传按块流式读入（Starlette 对超 1MB 的 multipart
+    # 自动落临时盘），这个上限是边传边计数的字节上限，不再是内存上限；
+    # 单请求内存占用约为 OPS_SFTP_CHUNK_SIZE × OPS_SFTP_PIPELINE_REQUESTS。
+    OPS_SFTP_MAX_UPLOAD_BYTES: int = 2 * 1024 * 1024 * 1024
     # 单次列目录的条目上限，超出截断并标记 truncated，防止巨型目录拖垮面板。
     OPS_SFTP_LIST_LIMIT: int = 2000
-    # 下载流式回传的读块大小。
+    # 上传/下载流式传输的块大小。不得调大：OpenSSH 收到超过 256KB 的单条
+    # SFTP 消息会直接断开连接（写路径靠 asyncssh 按服务端 write_len 自动再
+    # 切分兜底）。
     OPS_SFTP_CHUNK_SIZE: int = 256 * 1024
+    # SFTP 读写窗口内的并发请求数。和 CHUNK_SIZE 一起决定单条传输的内存上界
+    # （默认 8 × 256KB = 2MB），也决定高延迟链路下的吞吐。
+    OPS_SFTP_PIPELINE_REQUESTS: int = 8
 
     # 智能办公 · 百度网盘（xpan 开放平台）。三项任一为空白 = 网盘功能未启用，
     # 前端会隐藏绑定入口。AppKey/SecretKey 在开放平台控制台申请；APP_NAME 是

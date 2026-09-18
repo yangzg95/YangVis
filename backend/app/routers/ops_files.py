@@ -13,7 +13,16 @@ from typing import AsyncIterator, Optional
 from urllib.parse import quote
 
 import asyncssh
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -160,10 +169,12 @@ async def download_file(
     async def stream() -> AsyncIterator[bytes]:
         try:
             async with sftp.open(target, "rb") as remote:
-                while True:
-                    chunk = await remote.read(settings.OPS_SFTP_CHUNK_SIZE)
-                    if not chunk:
-                        break
+                async for chunk in ops_sftp.iter_file_chunks(
+                    remote,
+                    attrs.size,
+                    chunk_size=settings.OPS_SFTP_CHUNK_SIZE,
+                    max_requests=settings.OPS_SFTP_PIPELINE_REQUESTS,
+                ):
                     yield chunk
             _audit(db, user.user_id, server, f"sftp download {target}", True)
         except (asyncssh.Error, OSError) as exc:
@@ -187,8 +198,32 @@ async def download_file(
 # ---- 上传 ---------------------------------------------------------------------
 
 
+class _UploadTooLarge(Exception):
+    """流式计数超限。upload_stream 已负责清理远端半截文件，这里只管报错。"""
+
+
+async def _iter_body_chunks(
+    file: UploadFile, limit: int, chunk_size: int
+) -> AsyncIterator[bytes]:
+    """按块读上传体并累计字节数，超限抛 ``_UploadTooLarge``。
+
+    Starlette 对超 1MB 的 multipart 自动落临时盘，这里读的是 spool，内存有界。
+    提成模块级函数是为了能直接单测（任何有 ``async read(n)`` 的对象都能喂）。
+    """
+    sent = 0
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        sent += len(chunk)
+        if sent > limit:
+            raise _UploadTooLarge
+        yield chunk
+
+
 @router.post("/{server_id}/files/upload", response_model=APIResponse[None])
 async def upload_file(
+    request: Request,
     path: str = Query(..., min_length=1, max_length=1024),
     file: UploadFile = File(...),
     user: CurrentUser = Depends(require_user),
@@ -197,12 +232,14 @@ async def upload_file(
     _require_ops_write(user)
     server, db = ctx
 
-    raw = await file.read()
     limit = settings.OPS_SFTP_MAX_UPLOAD_BYTES
-    if len(raw) > limit:
-        return APIResponse(
-            code=-1, message=f"文件过大，上限 {limit // 1024 // 1024} MB"
-        )
+    oversize_message = f"文件过大，上限 {limit // 1024 // 1024} MB"
+
+    # 提前拒绝：Content-Length 是整个 multipart 的大小，留 1MB 余量给表单开销。
+    # 不能用 UploadFile.size——处理器入口时它只反映已 spool 的部分。
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > limit + 1024 * 1024:
+        return APIResponse(code=-1, message=oversize_message)
 
     # 文件名只留 basename：multipart 里偶尔会带上客户端的本地路径分隔符。
     name = (file.filename or "unnamed").replace("\\", "/").rsplit("/", 1)[-1]
@@ -214,14 +251,22 @@ async def upload_file(
     try:
         directory = await ops_sftp.resolve_path(conn, path)
         target = posixpath.join(directory, name)
-        await ops_sftp.upload(conn, target, raw)
+        written = await ops_sftp.upload_stream(
+            conn,
+            target,
+            _iter_body_chunks(file, limit, settings.OPS_SFTP_CHUNK_SIZE),
+            max_requests=settings.OPS_SFTP_PIPELINE_REQUESTS,
+        )
+    except _UploadTooLarge:
+        # 半截文件已由 upload_stream 清掉；和改动前一样，超限不记审计。
+        return APIResponse(code=-1, message=oversize_message)
     except ops_sftp.SftpError as exc:
         _audit(db, user.user_id, server, f"sftp upload {path}/{name}", False, str(exc))
         return APIResponse(code=-1, message=str(exc))
     finally:
         conn.close()
 
-    _audit(db, user.user_id, server, f"sftp upload {target} ({len(raw)} bytes)", True)
+    _audit(db, user.user_id, server, f"sftp upload {target} ({written} bytes)", True)
     return APIResponse(data=None, message="uploaded")
 
 
