@@ -162,6 +162,9 @@ class ChatOpsToolbox:
         if conn is None:
             conn = await server_ops.connect(server)
             self._conns[server.id] = conn
+            logger.debug("opened an ssh connection to server %s for this answer", server.id)
+        else:
+            logger.debug("reusing the ssh connection to server %s", server.id)
         return conn
 
     # -- 绑定目标 -------------------------------------------------------------
@@ -284,6 +287,15 @@ class ChatOpsToolbox:
         self._db.commit()
         self._db.refresh(action)
         self.pending_proposals.append(action)
+        # 命令全文可能带敏感参数，审计表已有全文，日志只留首词。
+        logger.info(
+            "owner %s proposed ops action %s on server %s (%s): %s",
+            self._owner_id,
+            action.id,
+            server.id,
+            server.name,
+            command.split(None, 1)[0] if command.strip() else "",
+        )
         return (
             f"命令已提交用户确认（action #{action.id}）。请立即结束本轮回答，"
             "告知用户在界面点击确认后系统会自动执行并把结果交给你继续分析；"
@@ -297,6 +309,9 @@ class ChatOpsToolbox:
         （verdict=confirmed，带上 pending_action_id 双向关联）。
         """
         started = time.monotonic()
+        logger.info(
+            "executing confirmed ops action %s on server %s", action.id, action.target_id
+        )
         status: Optional[int] = None
         try:
             server = self._servers.get(action.target_id)
@@ -309,6 +324,20 @@ class ChatOpsToolbox:
         elapsed_ms = int((time.monotonic() - started) * 1000)
 
         success = status == 0
+        if success:
+            logger.info(
+                "ops action %s executed: exit_status=%s, elapsed=%dms",
+                action.id,
+                status,
+                elapsed_ms,
+            )
+        else:
+            logger.warning(
+                "ops action %s failed: exit_status=%s, elapsed=%dms",
+                action.id,
+                status,
+                elapsed_ms,
+            )
         truncated = (output or "(无输出)")[:OUTPUT_LIMIT]
         finish_execution(
             self._db, action, success=success, result=truncated, exit_status=status

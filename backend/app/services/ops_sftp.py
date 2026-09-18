@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import posixpath
 import stat as stat_module
 from typing import AsyncIterator, Optional
@@ -15,6 +16,8 @@ import asyncssh
 
 from app.config import get_settings
 from app.models.schemas import SftpEntry, SftpListResult
+
+logger = logging.getLogger("yangvis.ops_sftp")
 
 
 class SftpError(RuntimeError):
@@ -172,6 +175,7 @@ async def iter_file_chunks(
         return
 
     pending: list[asyncio.Task] = []
+    produced = 0
     try:
         next_offset = 0
         while next_offset < size or pending:
@@ -187,7 +191,13 @@ async def iter_file_chunks(
             if not block:
                 # 文件在下载途中被截断：提前结束（HTTP 侧响应随之变短，
                 # 浏览器报下载失败，和改动前的行为一致）。
+                logger.warning(
+                    "remote file shrank during a pipelined read: stat said %d bytes, stopping at %d",
+                    size,
+                    produced,
+                )
                 break
+            produced += len(block)
             yield block
     finally:
         await _cancel_all(pending)
@@ -208,6 +218,7 @@ async def upload_stream(
     """
     offset = 0
     completed = False
+    opened = False
     pending: set[asyncio.Task] = set()
     sftp: Optional[asyncssh.SFTPClient] = None
     try:
@@ -215,6 +226,7 @@ async def upload_stream(
         # open 保持默认参数：写路径由 asyncssh 按服务端 write_len 自动切分，
         # 传大块 block_size 会让不广播 limits 的 OpenSSH 服务端直接断连。
         async with sftp.open(remote_path, "wb") as remote:
+            opened = True
             async for chunk in chunks:
                 pending.add(asyncio.ensure_future(remote.write(chunk, offset)))
                 offset += len(chunk)
@@ -234,16 +246,17 @@ async def upload_stream(
         # 失败/取消都从这里走：先回收在途写任务，再清理远端半截文件。
         # remove 失败（比如连接已断）不影响原异常的传播。
         await _cancel_all(list(pending))
-        if sftp is not None and not completed:
+        if sftp is not None and opened and not completed:
             try:
                 await sftp.remove(remote_path)
-            except Exception:
-                pass
+                logger.info("removed partial upload %s after a failed transfer", remote_path)
+            except Exception as exc:
+                logger.warning("failed to remove partial upload %s: %s", remote_path, exc)
         if sftp is not None:
             try:
                 await sftp.exit()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("sftp session exit failed: %s", exc)
 
 
 async def remove(conn: asyncssh.SSHClientConnection, path: str) -> None:

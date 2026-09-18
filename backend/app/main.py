@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.exceptions import HTTPException
+from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -35,9 +35,14 @@ from app.routers import (
 )
 
 logger = logging.getLogger("yangvis")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
 settings = get_settings()
+
+_log_level = getattr(logging, settings.LOG_LEVEL.upper(), None)
+if not isinstance(_log_level, int):
+    # 配置写错（比如 "inf"）不至于让服务起不来，回退 INFO。
+    _log_level = logging.INFO
+logging.basicConfig(level=_log_level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -83,6 +88,15 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     的错误格式（``{"detail": ...}``），401 就会绕过拦截逻辑，页面也就不会跳转到
     登录页。
     """
+    # 5xx 是服务端问题的信号；4xx 是客户端问题，留 debug 给排障。
+    if exc.status_code >= 500:
+        logger.warning(
+            "http %s on %s %s: %s", exc.status_code, request.method, request.url.path, exc.detail
+        )
+    else:
+        logger.debug(
+            "http %s on %s %s: %s", exc.status_code, request.method, request.url.path, exc.detail
+        )
     return JSONResponse(
         status_code=exc.status_code,
         content=APIResponse(code=exc.status_code, message=str(exc.detail)).model_dump(),
@@ -98,9 +112,42 @@ async def business_error_handler(request: Request, exc: BusinessError) -> JSONRe
     embedding 模型」）驱动的是一套引导用户去配置的流程，而不是弹一个笼统的
     错误提示。
     """
+    # 业务拒绝是用户可见的正常分支，不值得 warning；但排障时要能看见是哪条。
+    logger.debug(
+        "business error %s on %s %s: %s", exc.code, request.method, request.url.path, exc.msg
+    )
     return JSONResponse(
         status_code=200,
         content=APIResponse(code=exc.code, message=exc.msg).model_dump(),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """请求体校验失败也套统一信封（FastAPI 默认吐 ``{"detail": [...]}``，会绕过
+    SPA 拦截器，和上面 HTTPException 处理器要解决的问题一样）。"""
+    logger.debug(
+        "request validation failed on %s %s: %s",
+        request.method,
+        request.url.path,
+        exc.errors()[0] if exc.errors() else exc,
+    )
+    return JSONResponse(
+        status_code=422,
+        content=APIResponse(code=422, message="请求参数不合法").model_dump(),
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """未捕获异常的最后一道网：带请求上下文记堆栈，回 500 统一信封。
+
+    没有它的话堆栈只落在 uvicorn.error 里，和具体哪个请求对不上。
+    """
+    logger.exception("unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content=APIResponse(code=500, message="服务器内部错误").model_dump(),
     )
 
 
@@ -184,10 +231,23 @@ def _placeholder() -> Path:
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    validate_settings(settings)
-    create_tables()
-    migrate_schema()
-    bootstrap_admin(settings)
-    seed_agents()
-    reset_stale_jobs()
+    # 每步单独记失败：裸 traceback 看不出死在哪一步。
+    for step_name, step in (
+        ("validate_settings", lambda: validate_settings(settings)),
+        ("create_tables", create_tables),
+        ("migrate_schema", migrate_schema),
+        ("bootstrap_admin", lambda: bootstrap_admin(settings)),
+        ("seed_agents", seed_agents),
+        ("reset_stale_jobs", reset_stale_jobs),
+    ):
+        try:
+            step()
+        except Exception:
+            logger.error("startup step %s failed", step_name, exc_info=True)
+            raise
     logger.info("yangvis backend started on port %s", settings.PORT)
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    logger.info("yangvis backend shutting down")

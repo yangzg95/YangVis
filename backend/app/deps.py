@@ -47,6 +47,9 @@ async def require_user(
     # WebSocket 入场票只能用来握手。它走的是 query string、会落进访问日志，
     # 拿它调 REST 接口等于把认证降级到日志可见的强度。
     if payload.get("scope"):
+        # 正常用户不会走到这里：票据是从响应体里取的，不会出现在 query 之外。
+        # 看到了就是有人在试，记一笔。
+        logger.warning("websocket ticket used against a rest endpoint, rejected")
         raise _UNAUTHORIZED
 
     try:
@@ -70,6 +73,8 @@ async def require_user(
 async def require_admin(user: CurrentUser = Depends(require_user)) -> CurrentUser:
     """限定某个接口只能由管理员访问。"""
     if not user.is_admin:
+        # 普通用户摸到管理员端点：前端没有入口，多半是手动试探，记一笔。
+        logger.warning("non-admin user %s hit an admin endpoint, rejected", user.username)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
     return user
 

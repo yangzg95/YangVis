@@ -7,8 +7,10 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import posixpath
+import time
 from typing import AsyncIterator, Optional
 from urllib.parse import quote
 
@@ -40,6 +42,11 @@ from app.models.schemas import (
 from app.services import ops_sftp, ops_server as server_ops
 
 logger = logging.getLogger("yangvis.ops_files")
+
+
+def _mb_per_sec(nbytes: int, elapsed: float) -> float:
+    """传输速率。elapsed 可能小到测不出来，给个下限防止除零。"""
+    return nbytes / 1024 / 1024 / max(elapsed, 1e-6)
 
 router = APIRouter(prefix="/ops/servers", tags=["ops-files"])
 
@@ -167,6 +174,7 @@ async def download_file(
         return _json_error(str(exc))
 
     async def stream() -> AsyncIterator[bytes]:
+        started = time.monotonic()
         try:
             async with sftp.open(target, "rb") as remote:
                 async for chunk in ops_sftp.iter_file_chunks(
@@ -176,10 +184,23 @@ async def download_file(
                     max_requests=settings.OPS_SFTP_PIPELINE_REQUESTS,
                 ):
                     yield chunk
+            elapsed = time.monotonic() - started
+            logger.info(
+                "sftp download %s on server %s finished: %d bytes in %.1fs (%.1f MB/s)",
+                target,
+                server.id,
+                attrs.size or 0,
+                elapsed,
+                _mb_per_sec(attrs.size or 0, elapsed),
+            )
             _audit(db, user.user_id, server, f"sftp download {target}", True)
         except (asyncssh.Error, OSError) as exc:
             _audit(db, user.user_id, server, f"sftp download {target}", False, str(exc))
             logger.warning("sftp download %s on server %s failed: %s", target, server.id, exc)
+        except (asyncio.CancelledError, GeneratorExit):
+            # 客户端断开（取消下载/关页面）：正常用户行为，不记审计、不刷告警。
+            logger.debug("sftp download %s on server %s cancelled by the client", target, server.id)
+            raise
         finally:
             await sftp.exit()
             conn.close()
@@ -239,6 +260,13 @@ async def upload_file(
     # 不能用 UploadFile.size——处理器入口时它只反映已 spool 的部分。
     content_length = request.headers.get("content-length")
     if content_length and int(content_length) > limit + 1024 * 1024:
+        logger.debug(
+            "sftp upload %s on server %s rejected early: content-length %s over the %d-byte limit",
+            file.filename,
+            server.id,
+            content_length,
+            limit,
+        )
         return APIResponse(code=-1, message=oversize_message)
 
     # 文件名只留 basename：multipart 里偶尔会带上客户端的本地路径分隔符。
@@ -248,6 +276,7 @@ async def upload_file(
 
     conn = await _connect(server, db)
     target = ""
+    started = time.monotonic()
     try:
         directory = await ops_sftp.resolve_path(conn, path)
         target = posixpath.join(directory, name)
@@ -259,13 +288,33 @@ async def upload_file(
         )
     except _UploadTooLarge:
         # 半截文件已由 upload_stream 清掉；和改动前一样，超限不记审计。
+        logger.info(
+            "sftp upload %s on server %s aborted: over the %d-byte limit",
+            f"{path}/{name}",
+            server.id,
+            limit,
+        )
         return APIResponse(code=-1, message=oversize_message)
     except ops_sftp.SftpError as exc:
         _audit(db, user.user_id, server, f"sftp upload {path}/{name}", False, str(exc))
+        logger.warning("sftp upload %s on server %s failed: %s", f"{path}/{name}", server.id, exc)
         return APIResponse(code=-1, message=str(exc))
+    except asyncio.CancelledError:
+        # 客户端断开：半截文件由 upload_stream 清理，不记审计。
+        logger.debug("sftp upload %s on server %s cancelled by the client", f"{path}/{name}", server.id)
+        raise
     finally:
         conn.close()
 
+    elapsed = time.monotonic() - started
+    logger.info(
+        "sftp upload %s on server %s finished: %d bytes in %.1fs (%.1f MB/s)",
+        target,
+        server.id,
+        written,
+        elapsed,
+        _mb_per_sec(written, elapsed),
+    )
     _audit(db, user.user_id, server, f"sftp upload {target} ({written} bytes)", True)
     return APIResponse(data=None, message="uploaded")
 

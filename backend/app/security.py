@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
@@ -15,6 +16,8 @@ from typing import Any, Dict, Optional
 import jwt
 
 from app.config import get_settings
+
+logger = logging.getLogger("yangvis.security")
 
 settings = get_settings()
 
@@ -58,6 +61,8 @@ def verify_password(password: str, encoded: str) -> bool:
         salt = _b64decode(salt_raw)
         expected = _b64decode(hash_raw)
     except (ValueError, TypeError):
+        # 对外仍按「密码错误」处理，但库里的哈希坏了是数据完整性信号，得留痕。
+        logger.warning("encountered a malformed stored password hash")
         return False
 
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)

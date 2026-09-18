@@ -42,6 +42,7 @@ async def list_users(db: Session = Depends(get_db)) -> APIResponse[ListResponse[
 @router.post("", response_model=APIResponse[UserItem])
 async def create_user(
     payload: UserCreateRequest,
+    admin: CurrentUser = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> APIResponse[UserItem]:
     """创建一个账号。"""
@@ -61,7 +62,9 @@ async def create_user(
     db.add(user)
     db.commit()
     db.refresh(user)
-    logger.info("created user %s (admin=%s)", user.username, user.is_admin)
+    logger.info(
+        "admin %s created user %s (admin=%s)", admin.username, user.username, user.is_admin
+    )
     return APIResponse(data=UserItem.model_validate(user))
 
 
@@ -82,6 +85,7 @@ async def update_user(
 
     # 和「不能禁用自己」同理：把自己降级会留下一个可能没有管理员的实例。
     if fields.get("is_admin") is False and user.id == admin.user_id:
+        logger.warning("admin %s tried to demote themselves, rejected", admin.username)
         return APIResponse(code=-1, message="不能取消当前登录账号的管理员身份")
 
     for name, value in fields.items():
@@ -89,7 +93,9 @@ async def update_user(
 
     db.commit()
     db.refresh(user)
-    logger.info("updated user %s (%s)", user.username, ", ".join(fields) or "no change")
+    logger.info(
+        "admin %s updated user %s (%s)", admin.username, user.username, ", ".join(fields) or "no change"
+    )
     return APIResponse(data=UserItem.model_validate(user))
 
 
@@ -111,12 +117,13 @@ async def update_user_status(
 
     # Locking yourself out would leave the instance with no way back in.
     if user.id == admin.user_id and not payload.status:
+        logger.warning("admin %s tried to disable themselves, rejected", admin.username)
         return APIResponse(code=-1, message="不能禁用当前登录的账号")
 
     user.status = payload.status
     db.commit()
     db.refresh(user)
-    logger.info("user %s status set to %s", user.username, user.status)
+    logger.info("admin %s set user %s status to %s", admin.username, user.username, user.status)
     return APIResponse(data=UserItem.model_validate(user))
 
 
@@ -124,6 +131,7 @@ async def update_user_status(
 async def reset_user_password(
     user_id: int,
     payload: PasswordResetRequest,
+    admin: CurrentUser = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> APIResponse[None]:
     """Reset someone else's password without knowing the old one."""
@@ -133,5 +141,5 @@ async def reset_user_password(
 
     user.password_hash = hash_password(payload.new_password)
     db.commit()
-    logger.info("password reset for user %s", user.username)
+    logger.info("admin %s reset the password for user %s", admin.username, user.username)
     return APIResponse(data=None, message="密码已重置")

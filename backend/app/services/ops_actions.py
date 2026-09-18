@@ -99,6 +99,7 @@ def claim_for_confirm(db: Session, owner_id: int, action_id: int) -> OpsPendingA
     db.commit()
     if result.rowcount != 1:  # type: ignore[union-attr]
         raise LookupError("待确认项不存在、已处理或已超时")
+    logger.debug("owner %s claimed ops action %s as approved", owner_id, action_id)
     return get_owned(db, owner_id, action_id)
 
 
@@ -117,6 +118,7 @@ def claim_for_reject(db: Session, owner_id: int, action_id: int) -> OpsPendingAc
     db.commit()
     if result.rowcount != 1:  # type: ignore[union-attr]
         raise LookupError("待确认项不存在或已处理")
+    logger.debug("owner %s marked ops action %s as rejected", owner_id, action_id)
     return get_owned(db, owner_id, action_id)
 
 
@@ -136,6 +138,7 @@ def finish_execution(
     action.result = result
     action.exit_status = exit_status
     db.commit()
+    logger.debug("ops action %s finished as %s", action.id, action.status)
 
 
 def reset_stale_ops_actions(db: Session) -> None:

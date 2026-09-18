@@ -131,6 +131,15 @@ class OpsDatabaseService:
         self._db.add(item)
         self._commit_unique(f"数据库名称「{item.name}」已存在")
         self._db.refresh(item)
+        logger.info(
+            "owner %s created database %s (%s %s:%s, writable=%s)",
+            self._owner_id,
+            item.id,
+            item.db_type,
+            item.host,
+            item.port,
+            item.writable,
+        )
         return item
 
     def update(self, database_id: int, payload: OpsDatabaseUpdate) -> OpsDatabase:
@@ -164,12 +173,20 @@ class OpsDatabaseService:
 
         self._commit_unique(f"数据库名称「{item.name}」已存在")
         self._db.refresh(item)
+        logger.info(
+            "owner %s updated database %s (writable_toggled=%s, password_changed=%s)",
+            self._owner_id,
+            item.id,
+            data.get("writable") is not None,
+            bool(password and not is_masked(password)),
+        )
         return item
 
     def delete(self, database_id: int) -> None:
         item = self.get(database_id)
         self._db.delete(item)
         self._db.commit()
+        logger.info("owner %s deleted database %s (%s)", self._owner_id, item.id, item.name)
 
     def record_check(self, item: OpsDatabase, *, ok: bool, message: str = "") -> None:
         item.last_checked_at = datetime.now(timezone.utc)
@@ -185,6 +202,8 @@ class OpsDatabaseService:
             password = mask(secret) if secret else ""
             error = None
         except DecryptionError as exc:
+            # 同 ops_server：解密失败意味着密钥轮换或数据损坏，必须留痕。
+            logger.warning("failed to decrypt the password of database %s", item.id)
             password = ""
             error = str(exc)
 
@@ -319,18 +338,29 @@ def _connect_mysql(
     ``database`` 是本次会话的默认库；缺省回落到台账里的 ``db_name``。
     """
     settings = get_settings()
-    conn = pymysql.connect(
-        host=item.host,
-        port=item.port,
-        user=item.username or "",
-        password=password,
-        database=database or item.db_name or None,
-        connect_timeout=int(settings.OPS_SSH_TIMEOUT),
-        read_timeout=int(settings.OPS_CMD_TIMEOUT),
-        write_timeout=int(settings.OPS_CMD_TIMEOUT),
-        charset="utf8mb4",
-        autocommit=writable,
-    )
+    try:
+        conn = pymysql.connect(
+            host=item.host,
+            port=item.port,
+            user=item.username or "",
+            password=password,
+            database=database or item.db_name or None,
+            connect_timeout=int(settings.OPS_SSH_TIMEOUT),
+            read_timeout=int(settings.OPS_CMD_TIMEOUT),
+            write_timeout=int(settings.OPS_CMD_TIMEOUT),
+            charset="utf8mb4",
+            autocommit=writable,
+        )
+    except pymysql.Error as exc:
+        # 连接失败值得排查（网络/凭据/实例挂了）；查询失败高频，走 BusinessError 链不记。
+        logger.warning(
+            "mysql connection to database %s (%s:%s) failed: %s",
+            item.id,
+            item.host,
+            item.port,
+            exc,
+        )
+        raise
     try:
         with conn.cursor() as cur:
             if not writable:

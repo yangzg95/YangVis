@@ -123,6 +123,14 @@ class OpsServerService:
         self._db.add(server)
         self._commit_unique(f"服务器名称「{server.name}」已存在")
         self._db.refresh(server)
+        logger.info(
+            "owner %s created server %s (%s@%s:%s)",
+            self._owner_id,
+            server.id,
+            server.username,
+            server.host,
+            server.port,
+        )
         return server
 
     def update(self, server_id: int, payload: OpsServerUpdate) -> OpsServer:
@@ -168,12 +176,20 @@ class OpsServerService:
 
         self._commit_unique(f"服务器名称「{server.name}」已存在")
         self._db.refresh(server)
+        logger.info(
+            "owner %s updated server %s (endpoint_changed=%s, credential_changed=%s)",
+            self._owner_id,
+            server.id,
+            endpoint_changed,
+            credential_changed,
+        )
         return server
 
     def delete(self, server_id: int) -> None:
         server = self.get(server_id)
         self._db.delete(server)
         self._db.commit()
+        logger.info("owner %s deleted server %s (%s)", self._owner_id, server.id, server.name)
 
     def record_check(self, server: OpsServer, *, ok: bool, message: str = "") -> None:
         server.last_checked_at = datetime.now(timezone.utc)
@@ -202,6 +218,8 @@ class OpsServerService:
             credential = mask(secret) if secret else ""
             error = None
         except DecryptionError as exc:
+            # 解密失败通常意味着 ENCRYPTION_KEY 轮换或数据损坏，必须留痕。
+            logger.warning("failed to decrypt the credential of server %s", server.id)
             credential = ""
             error = str(exc)
 
@@ -286,13 +304,32 @@ async def connect(
             timeout=settings.OPS_SSH_TIMEOUT + 5,
         )
     except asyncssh.HostKeyNotVerifiable as exc:
+        # 指纹对不上 = 服务器被重装或存在中间人，安全信号必须醒目。
+        logger.warning(
+            "host key mismatch for server %s (%s:%s): pinned %s, observed %s",
+            server.id,
+            server.host,
+            server.port,
+            server.host_key,
+            client.observed,
+        )
         raise HostKeyMismatch(
             f"主机公钥与首次连接时记录的不一致（现为 {client.observed}）。"
             "服务器可能已重装，也可能存在中间人；请确认后在编辑页面重置该服务器。"
         ) from exc
     except asyncio.TimeoutError as exc:
+        logger.warning(
+            "ssh connection to server %s (%s:%s) timed out", server.id, server.host, server.port
+        )
         raise OpsConnectError(f"连接 {server.host}:{server.port} 超时") from exc
     except (OSError, asyncssh.Error) as exc:
+        logger.warning(
+            "ssh connection to server %s (%s:%s) failed: %s",
+            server.id,
+            server.host,
+            server.port,
+            exc,
+        )
         raise OpsConnectError(f"连接失败：{exc}") from exc
 
     if service is not None and client.observed and not server.host_key:
@@ -322,8 +359,15 @@ async def run_once(
             conn.run(command, check=False), timeout=timeout
         )
     except asyncio.TimeoutError:
+        # 只记命令首词：完整命令可能带敏感参数，留痕责任在审计表。
+        logger.debug(
+            "command %r on an ssh connection timed out after %.0fs",
+            command.split(None, 1)[0] if command.strip() else "",
+            timeout,
+        )
         return 124, f"命令执行超过 {timeout:.0f} 秒，已中断"
     except asyncssh.Error as exc:
+        logger.debug("ssh command failed: %s", exc)
         return 1, f"执行失败：{exc}"
 
     stdout = result.stdout if isinstance(result.stdout, str) else ""

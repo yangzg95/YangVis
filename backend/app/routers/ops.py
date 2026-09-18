@@ -183,6 +183,7 @@ async def test_server(
     try:
         banner = await server_ops.test_connection(server, service)
     except server_ops.OpsConnectError as exc:
+        logger.warning("connectivity test of server %s failed: %s", server_id, exc)
         service.record_check(server, ok=False, message=str(exc))
         return APIResponse(data=TestResult(success=False, message=str(exc)))
 
@@ -258,6 +259,7 @@ async def test_database(
     try:
         banner = await db_ops.test_connection(row)
     except (db_ops.OpsDbError, db_ops.OpsDbForbidden) as exc:
+        logger.warning("connectivity test of database %s failed: %s", database_id, exc)
         service.record_check(row, ok=False, message=str(exc))
         return APIResponse(data=TestResult(success=False, message=str(exc)))
 
@@ -883,6 +885,12 @@ async def terminal(
         try:
             conn = await server_ops.connect(server, service)
         except server_ops.OpsConnectError as exc:
+            logger.warning(
+                "terminal handshake failed: user %s, server %s: %s",
+                user.user_id,
+                server_id,
+                exc,
+            )
             service.record_check(server, ok=False, message=str(exc))
             await websocket.send_text(f"\r\n\x1b[31m{exc}\x1b[0m\r\n")
             await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="连接失败")
@@ -933,17 +941,38 @@ async def terminal(
                 _record_manual_command(user.user_id, audit_target[0], audit_target[1], command)
             process.stdin.write(message)
 
+    logger.info("terminal tunnel opened: user %s, server %s", user.user_id, server_id)
     tasks = [asyncio.create_task(pump_out()), asyncio.create_task(pump_in())]
     try:
         # 任意一边断掉，整条隧道就结束——另一半单独留着没有意义。
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     except WebSocketDisconnect:
-        pass
+        logger.debug("terminal websocket disconnected: user %s, server %s", user.user_id, server_id)
     finally:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        for task in tasks:
+            if task.cancelled():
+                continue
+            exc = task.exception()
+            if exc is None:
+                continue
+            if isinstance(exc, WebSocketDisconnect):
+                logger.debug(
+                    "terminal websocket disconnected: user %s, server %s",
+                    user.user_id,
+                    server_id,
+                )
+            else:
+                logger.warning(
+                    "terminal pump task died: user %s, server %s: %s",
+                    user.user_id,
+                    server_id,
+                    exc,
+                )
         conn.close()
+        logger.info("terminal tunnel closed: user %s, server %s", user.user_id, server_id)
         try:
             await websocket.close()
         except RuntimeError:
