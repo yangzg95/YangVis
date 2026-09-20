@@ -162,6 +162,26 @@ BUILTIN_AGENTS: tuple[BuiltinAgent, ...] = (
         sort_order=45,
     ),
     BuiltinAgent(
+        slug="career-advisor",
+        name="求职顾问",
+        description="围绕简历分析与求职报告做对话式答疑，报告页「发起对话」的默认智能体",
+        system_prompt=(
+            "你是一位资深 HR 与职业发展顾问，正在和用户围绕他的简历或求职报告进行对话。\n"
+            "工作方式：\n"
+            "1. 对话通常以一份完整报告（简历分析、简历对比或求职方案）开场：先简要确认已读，"
+            "点出其中最值得优先处理的 2-3 点，不要复述整份报告。\n"
+            "2. 追问时紧扣报告与简历的真实内容回答：建议要具体、可执行；改进表达时给出"
+            "可直接替换进简历的示例文字，而不是泛泛的原则。\n"
+            "3. 不虚构报告和简历里没有的经历、技能或数字；信息不够时直接问用户要。\n"
+            "4. 全部使用简体中文（技术名词保留英文原词）。"
+        ),
+        use_knowledge=False,
+        use_ops=False,
+        chat_visible=True,
+        temperature=40,
+        sort_order=46,
+    ),
+    BuiltinAgent(
         slug="server-ops",
         name="服务器运维专家",
         description="通过 SSH 排查服务器问题，只读命令直接执行，写操作需你确认",

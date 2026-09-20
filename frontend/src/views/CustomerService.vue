@@ -712,6 +712,9 @@ async function removeConversation(id: number) {
 const REPORT_QUERY_RE = /^(resume|comparison|toolkit)\/(\d+)$/
 /** 首条消息上限与后端 CompletionRequest.message 的 20000 对齐。 */
 const REPORT_MESSAGE_LIMIT = 20000
+/** 报告讨论的默认智能体（内置，backend/services/agents.py 里 seed）。
+ *  找不到（后端没重启 seed、或被用户停用）就退回当前选中的智能体。 */
+const REPORT_DISCUSS_AGENT_SLUG = 'career-advisor'
 
 async function handleReportDiscuss() {
   const raw = route.query.report
@@ -736,6 +739,14 @@ async function handleReportDiscuss() {
     // 防御后端哪天再收紧上限：宁可截断并明说，也不让 AI 悄悄基于残缺报告作答。
     firstMessage = `${firstMessage.slice(0, REPORT_MESSAGE_LIMIT)}\n\n（报告内容过长，已按长度上限截断）`
   }
+
+  // 报告讨论默认用「求职顾问」：要在 canSend 判断之前切换，gate 检查
+  // （比如知识库项目）针对的才是这场对话真正要用的智能体。messages 还是空的，
+  // watch(activeAgentId) 的 startNew 保护不会误触发。
+  const advisor = agents.value.find(
+    (a) => a.slug === REPORT_DISCUSS_AGENT_SLUG && a.chat_visible,
+  )
+  if (advisor) activeAgentId.value = advisor.id
 
   if (!canSend.value) {
     // 没配模型这类 gate 场景：不建孤儿空会话，内容放输入框，用户按 gate 提示
