@@ -330,7 +330,11 @@ function actorLabel(actor: string): string {
 }
 
 function connect(item: OpsServer) {
-  router.push({ name: 'OpsServerTerminal', params: { id: item.id } })
+  // 终端页另起独立窗口打开（bare 路由不带主布局，天然适合做弹窗页），
+  // 运维时列表页留着对照监控，不会被导航顶掉。带尺寸参数浏览器才开真窗口，
+  // 否则只给 _blank 会被当成新标签页。
+  const { href } = router.resolve({ name: 'OpsServerTerminal', params: { id: item.id } })
+  window.open(href, '_blank', 'width=1440,height=900,noopener')
 }
 
 function confirmDelete(item: OpsServer) {
