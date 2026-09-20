@@ -186,6 +186,7 @@ async def find_ops_conversation(
 @router.post("/actions/{action_id}/reject", response_model=APIResponse[OpsActionItem])
 async def reject_action(
     action_id: int,
+    user: CurrentUser = Depends(require_user),
     service: ChatService = Depends(get_service),
 ) -> APIResponse[OpsActionItem]:
     # BusinessError（已处理/已超时）交给全局处理器：HTTP 200 + 响应体非零 code。
@@ -193,6 +194,8 @@ async def reject_action(
         item = service.reject_action(action_id)
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    # 用户拒绝一条 AI 提议的写命令是审计事件，留一条 info。
+    logger.info("user %s rejected ops action %s", user.user_id, action_id)
     return APIResponse(data=item)
 
 
@@ -226,7 +229,7 @@ async def confirm_action(
         except LookupError as exc:
             yield _sse("error", {"code": 404, "message": str(exc)})
         except Exception as exc:  # noqa: BLE001 - the stream must not just stop
-            logger.exception("ops action confirm failed")
+            logger.exception("ops action %s confirm failed", action_id)
             yield _sse("error", {"code": -1, "message": f"命令执行失败：{exc}"})
 
     return StreamingResponse(
@@ -251,6 +254,8 @@ async def update_message(
         row = service.update_message_content(message_id, payload.content)
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    # 手动编辑改的是历史本身，下一轮回放给模型的就是这个版本，留痕。
+    logger.info("message %s was manually edited", message_id)
     return APIResponse(data=ChatService.to_message(row))
 
 
@@ -285,6 +290,7 @@ async def completions(
     question = payload.message.strip()
 
     async def stream() -> AsyncIterator[str]:
+        conversation = None  # 异常可能发生在会话建出来之前，错误日志里要容忍它
         try:
             agent = service.resolve_agent(payload.agent_id)
 
@@ -350,7 +356,10 @@ async def completions(
         except LookupError as exc:
             yield _sse("error", {"code": 404, "message": str(exc)})
         except Exception as exc:  # noqa: BLE001 - the stream must not just stop
-            logger.exception("chat completion failed")
+            logger.exception(
+                "chat completion failed for conversation %s",
+                getattr(conversation, "id", None),
+            )
             yield _sse("error", {"code": -1, "message": f"回答生成失败：{exc}"})
 
     return StreamingResponse(
@@ -414,7 +423,7 @@ async def retry_last_answer(
         except LookupError as exc:
             yield _sse("error", {"code": 404, "message": str(exc)})
         except Exception as exc:  # noqa: BLE001 - the stream must not just stop
-            logger.exception("chat retry failed")
+            logger.exception("chat retry failed for conversation %s", conversation_id)
             yield _sse("error", {"code": -1, "message": f"重试失败：{exc}"})
 
     return StreamingResponse(

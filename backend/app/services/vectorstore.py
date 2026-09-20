@@ -70,6 +70,7 @@ async def drop_collection(name: str) -> None:
     try:
         if await client.collection_exists(name):
             await client.delete_collection(name)
+            logger.info("dropped qdrant collection %s", name)
     except Exception as exc:  # noqa: BLE001
         raise VectorStoreError(f"删除向量集合失败：{exc}") from exc
     finally:

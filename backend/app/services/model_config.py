@@ -86,6 +86,14 @@ class ModelConfigService:
 
         self._db.commit()
         self._db.refresh(config)
+        logger.info(
+            "owner %s created model config %s (%s, %s, default=%s)",
+            self._owner_id,
+            config.id,
+            config.purpose,
+            config.model_name,
+            config.is_default,
+        )
         return config
 
     def update(self, config_id: int, payload: ModelConfigUpdate) -> ModelConfig:
@@ -124,6 +132,12 @@ class ModelConfigService:
 
         self._db.commit()
         self._db.refresh(config)
+        logger.info(
+            "owner %s updated model config %s (credentials_changed=%s)",
+            self._owner_id,
+            config.id,
+            credentials_changed,
+        )
         return config
 
     def delete(self, config_id: int) -> None:
@@ -147,6 +161,14 @@ class ModelConfigService:
                 replacement.is_default = True
 
         self._db.commit()
+        logger.info(
+            "owner %s deleted model config %s (%s, was_default=%s, replacement=%s)",
+            self._owner_id,
+            config_id,
+            purpose.value,
+            was_default,
+            replacement.id if was_default and replacement is not None else None,
+        )
 
     def set_default(self, config_id: int) -> ModelConfig:
         config = self.get(config_id)
@@ -161,6 +183,21 @@ class ModelConfigService:
 
         self._db.commit()
         self._db.refresh(config)
+        # embedding 默认切换意味着既有索引和新模型可能不一致，审计意义单独标注。
+        if config.purpose == ModelPurpose.EMBEDDING.value:
+            logger.info(
+                "owner %s switched the default embedding model to config %s "
+                "(existing index may need a rebuild)",
+                self._owner_id,
+                config.id,
+            )
+        else:
+            logger.info(
+                "owner %s set model config %s as the default for %s",
+                self._owner_id,
+                config.id,
+                config.purpose,
+            )
         return config
 
     def record_test_result(
@@ -177,6 +214,8 @@ class ModelConfigService:
         if vector_size is not None:
             config.vector_size = vector_size
         self._db.commit()
+        # 失败原因 providers 里已经记过 warning，这里只留状态变更。
+        logger.info("model config %s connectivity test: ok=%s", config.id, ok)
 
     # -- 序列化 -------------------------------------------------------------
 
@@ -186,6 +225,8 @@ class ModelConfigService:
             api_key = mask(decrypt(config.api_key_enc))
             key_error = None
         except DecryptionError as exc:
+            # 同 ops：解密失败意味着密钥轮换或数据损坏，必须留痕。
+            logger.warning("failed to decrypt the api key of model config %s", config.id)
             api_key = ""
             key_error = str(exc)
 

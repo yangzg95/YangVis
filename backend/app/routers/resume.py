@@ -117,6 +117,7 @@ async def upload_resume(
         try:
             fs_id, path = await netdisk.upload_file(f"resumes/{resume.id}_{filename}", raw)
             service.mark_netdisk(resume, fs_id, path)
+            logger.info("resume %s synced to netdisk (%s)", resume.id, path)
         except Exception as exc:  # noqa: BLE001 - 网盘只是备份通道
             logger.warning("resume %s netdisk sync failed: %s", resume.id, exc)
 
@@ -200,6 +201,7 @@ async def download_resume(
         response = await client.send(request, stream=True)
     except httpx.HTTPError as exc:
         await client.aclose()
+        logger.warning("netdisk proxy download of resume %s failed to connect", resume_id)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"连接网盘下载服务失败：{exc}",
@@ -207,6 +209,9 @@ async def download_resume(
     if response.status_code != 200:
         await response.aclose()
         await client.aclose()
+        logger.warning(
+            "netdisk proxy download of resume %s got http %s", resume_id, response.status_code
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"网盘返回了 HTTP {response.status_code}，下载失败",
@@ -216,6 +221,10 @@ async def download_resume(
         try:
             async for chunk in response.aiter_bytes(_DOWNLOAD_CHUNK):
                 yield chunk
+        except httpx.HTTPError:
+            # 中途断流：客户端只收到半截文件，原因必须留下来。
+            logger.warning("netdisk proxy download of resume %s broke mid-stream", resume_id)
+            raise
         finally:
             await response.aclose()
             await client.aclose()
@@ -259,8 +268,8 @@ async def _analyze_task(owner_id: int, resume_id: int) -> None:
         service = ResumeService(db, owner_id)
         try:
             await service.run_analysis(resume_id)
-        except Exception as exc:  # noqa: BLE001 - run_analysis 内部已落状态
-            logger.warning("resume analyze task ended with an error: %s", exc)
+        except Exception:  # noqa: BLE001 - run_analysis 内部已带堆栈记录
+            pass
 
 
 # ---- 简历对比 ---------------------------------------------------------------
@@ -323,8 +332,8 @@ async def _compare_task(owner_id: int, comparison_id: int) -> None:
         service = ResumeService(db, owner_id)
         try:
             await service.run_comparison(comparison_id)
-        except Exception as exc:  # noqa: BLE001 - 同上
-            logger.warning("resume compare task ended with an error: %s", exc)
+        except Exception:  # noqa: BLE001 - 同上
+            pass
 
 
 # ---- 求职助手（toolkit）-------------------------------------------------------
@@ -388,5 +397,5 @@ async def _toolkit_task(owner_id: int, task_id: int) -> None:
         service = ResumeService(db, owner_id)
         try:
             await service.run_toolkit_task(task_id)
-        except Exception as exc:  # noqa: BLE001 - 同上
-            logger.warning("resume toolkit task ended with an error: %s", exc)
+        except Exception:  # noqa: BLE001 - 同上
+            pass

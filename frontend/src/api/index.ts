@@ -1415,6 +1415,14 @@ export const netdiskApi = {
       skipErrorToast: true,
     }),
   unbind: () => request<null>({ url: '/office/netdisk/unbind', method: 'POST' }),
+  /** 把一段文本（分析报告等）存进网盘的 reports/ 子目录，返回完整路径。 */
+  saveText: (filename: string, content: string) =>
+    request<{ path: string }>({
+      url: '/office/netdisk/save-text',
+      method: 'POST',
+      data: { filename, content },
+      timeout: 60000,
+    }),
 }
 
 /** 拼一条同源的 ws:// 或 wss:// 地址，路径沿用 axios 的 `/api` 前缀。 */

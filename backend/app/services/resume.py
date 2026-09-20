@@ -296,6 +296,8 @@ def _parse_analysis(raw_text: str) -> tuple[str, List[str]]:
         except (json.JSONDecodeError, AttributeError, TypeError):
             pass
 
+    # 模型没按约定输出 JSON：整段当成报告，格式异常的原因留在这里可查。
+    logger.debug("analysis output was not valid json, falling back to raw text")
     return raw_text.strip(), []
 
 
@@ -375,6 +377,13 @@ class ResumeService:
         self._db.add(resume)
         self._db.commit()
         self._db.refresh(resume)
+        logger.info(
+            "owner %s created resume %s (%s, %d bytes)",
+            self._owner_id,
+            resume.id,
+            filename,
+            size,
+        )
         return resume
 
     def update_resume(
@@ -399,6 +408,7 @@ class ResumeService:
             raise ValueError("简历正在分析中，请稍后再删")
         self._db.delete(resume)
         self._db.commit()
+        logger.info("owner %s deleted resume %s (%s)", self._owner_id, resume_id, resume.title)
 
     def mark_netdisk(self, resume: Resume, fs_id: int, path: str) -> None:
         """网盘同步成功后回填原文件在网盘里的位置。"""
@@ -512,6 +522,12 @@ class ResumeService:
         self._db.add(comparison)
         self._db.commit()
         self._db.refresh(comparison)
+        logger.info(
+            "owner %s created resume comparison %s over %d resume(s)",
+            self._owner_id,
+            comparison.id,
+            len(resume_ids),
+        )
         return comparison
 
     def list_comparisons(self) -> List[ResumeComparison]:

@@ -464,6 +464,8 @@ def seed_builtin_agents(db: Session) -> None:
             )
             created += 1
         else:
+            if current.system_prompt != builtin.system_prompt:
+                logger.debug("refreshed the prompt of built-in agent %s", builtin.slug)
             current.name = builtin.name
             current.description = builtin.description
             current.system_prompt = builtin.system_prompt
@@ -515,6 +517,8 @@ class AgentService:
         那是功能自己的人设，不是可选项。缺失说明初始化没跑过。"""
         agent = self.get_by_slug(slug)
         if agent is None:
+            # 内置智能体缺失说明 seed 没跑成，是初始化损坏的信号。
+            logger.warning("built-in agent %s is missing", slug)
             raise BusinessError(
                 CODE_CHAT_NOT_READY, f"内置智能体 {slug} 缺失，请重启服务重新初始化"
             )
@@ -548,21 +552,30 @@ class AgentService:
         self._db.add(agent)
         self._db.commit()
         self._db.refresh(agent)
+        logger.info("owner %s created agent %s (%s)", self._owner_id, agent.slug, agent.id)
         return agent
 
     def update(self, agent_id: int, payload: AgentUpdate) -> Agent:
         agent = self._owned(agent_id)
-        for field, value in payload.model_dump(exclude_unset=True).items():
-            if value is not None:
-                setattr(agent, field, value)
+        data = payload.model_dump(exclude_unset=True)
+        changed = [field for field, value in data.items() if value is not None]
+        for field in changed:
+            setattr(agent, field, data[field])
         self._db.commit()
         self._db.refresh(agent)
+        logger.info(
+            "owner %s updated agent %s (%s)",
+            self._owner_id,
+            agent.slug,
+            ",".join(changed) or "nothing",
+        )
         return agent
 
     def delete(self, agent_id: int) -> None:
         agent = self._owned(agent_id)
         self._db.delete(agent)
         self._db.commit()
+        logger.info("owner %s deleted agent %s (%s)", self._owner_id, agent.slug, agent_id)
 
     def duplicate(self, agent_id: int) -> Agent:
         """把智能体复制一份到用户自己的空间里，好让它可以被编辑。"""
@@ -591,6 +604,9 @@ class AgentService:
         self._db.add(clone)
         self._db.commit()
         self._db.refresh(clone)
+        logger.info(
+            "owner %s duplicated agent %s as %s", self._owner_id, source.slug, clone.slug
+        )
         return clone
 
     @staticmethod

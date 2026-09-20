@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import List, Optional, Sequence, Tuple
 
@@ -613,6 +614,7 @@ class KnowledgeService:
         docs = self.pending_documents()
         indexed_docs = 0
         indexed_chunks = 0
+        started = time.monotonic()
 
         try:
             await vectorstore.ensure_collection(self._collection, vector_size, recreate=True)
@@ -627,6 +629,13 @@ class KnowledgeService:
 
         self.set_index_status(IndexStatus.READY)
         self._refresh_counts()
+        logger.info(
+            "owner %s rebuilt the index: %d document(s), %d chunk(s), %.1fs",
+            self._owner_id,
+            indexed_docs,
+            indexed_chunks,
+            time.monotonic() - started,
+        )
         return indexed_docs, indexed_chunks
 
     # -- 检索 ---------------------------------------------------------------
@@ -681,17 +690,23 @@ class KnowledgeService:
             settings.KB_SCORE_THRESHOLD if score_threshold is None else score_threshold
         )
 
-        embeddings = build_embeddings(config)
-        vector = await embeddings.aembed_query(query)
+        try:
+            embeddings = build_embeddings(config)
+            vector = await embeddings.aembed_query(query)
 
-        points = await vectorstore.search(
-            self._collection,
-            vector=vector,
-            owner_id=self._owner_id,
-            top_k=top_k,
-            type_ids=scope,
-            score_threshold=threshold,
-        )
+            points = await vectorstore.search(
+                self._collection,
+                vector=vector,
+                owner_id=self._owner_id,
+                top_k=top_k,
+                type_ids=scope,
+                score_threshold=threshold,
+            )
+        except Exception as exc:
+            # 外部调用失败（embed provider / qdrant）：用户只看到「检索失败」，
+            # 原因得留在这里。
+            logger.warning("knowledge search failed for owner %s: %s", self._owner_id, exc)
+            raise
         if not points:
             return []
 
@@ -714,6 +729,7 @@ class KnowledgeService:
             chunk = rows.get(int(payload.get("chunk_id", 0)))
             if chunk is None:
                 # 这条向量比它对应的记录活得还久（查询过程中文档被删了）。
+                logger.debug("skipping an orphan vector (chunk %s)", payload.get("chunk_id"))
                 continue
             hits.append(
                 SearchHit(
@@ -743,10 +759,19 @@ async def index_document_task(owner_id: int, doc_id: int) -> None:
         except LookupError:
             return
 
+        started = time.monotonic()
         try:
             config = service.require_embedding_config()
-            await service.index_document(doc, config)
+            chunks = await service.index_document(doc, config)
+            logger.info(
+                "indexed document %s (%s): %d chunk(s), %.1fs",
+                doc_id,
+                doc.filename,
+                chunks,
+                time.monotonic() - started,
+            )
         except BusinessError as exc:
+            logger.warning("indexing document %s was rejected: %s", doc_id, exc.msg)
             service.set_document_status(doc, DocumentStatus.ERROR, error=exc.msg)
         except Exception as exc:  # noqa: BLE001 - 绝不让后台任务无声无息地死掉
             logger.exception("indexing failed for document %s", doc_id)

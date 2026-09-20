@@ -128,6 +128,12 @@ async def delete_project(
 
     for doc_id in doc_ids:
         background.add_task(_purge_vectors, service.collection, service.owner_id, doc_id)
+    logger.info(
+        "owner %s deleted project %s (cascaded %d document(s))",
+        service.owner_id,
+        project_id,
+        len(doc_ids),
+    )
     return APIResponse(data=None, message="deleted")
 
 
@@ -298,6 +304,13 @@ async def upload_document(
         type_id=type_id,
     )
     background.add_task(index_document_task, service.owner_id, doc.id)
+    logger.info(
+        "owner %s uploaded document %s (%s, %d bytes), queued for indexing",
+        service.owner_id,
+        doc.id,
+        filename,
+        len(raw),
+    )
     return APIResponse(data=KnowledgeService.to_document(doc))
 
 
@@ -414,6 +427,9 @@ async def rebuild_index(
         )
 
     background.add_task(_rebuild_task, service.owner_id)
+    logger.info(
+        "owner %s started an index rebuild over %d document(s)", service.owner_id, len(docs)
+    )
     return APIResponse(
         data=RebuildResult(
             started=True,
@@ -431,8 +447,8 @@ async def _rebuild_task(owner_id: int) -> None:
         try:
             config = service.require_embedding_config()
             await service.rebuild_all(config)
-        except Exception as exc:  # noqa: BLE001 - state already records it
-            logger.warning("rebuild task ended with an error: %s", exc)
+        except Exception:  # noqa: BLE001 - rebuild_all 里已带堆栈记录
+            pass
 
 
 # ---- Retrieval --------------------------------------------------------------

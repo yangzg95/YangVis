@@ -655,12 +655,18 @@ class ChatService:
             越好。问题涉及多个方面时，分多次调用、每次只查一个方面，比一次
             塞进一个笼统的问题效果好。
             """
-            hits = await self._knowledge.search(
-                query,
-                top_k=RETRIEVAL_TOP_K,
-                project_id=project_id,
-                type_ids=scope,
-            )
+            try:
+                hits = await self._knowledge.search(
+                    query,
+                    top_k=RETRIEVAL_TOP_K,
+                    project_id=project_id,
+                    type_ids=scope,
+                )
+            except Exception as exc:
+                # 不拦：ToolNode 会把异常包成 ToolMessage 喂回模型，让它换个
+                # 查法重试。但只留在那里就完全不可见，这里记一笔。
+                logger.warning("knowledge search tool failed: %s", exc)
+                raise
             if not hits:
                 return "没有检索到相关资料。"
             return _format_hits(registry.register(hits))
@@ -752,6 +758,12 @@ class ChatService:
             raise BusinessError(CODE_CHAT_NOT_READY, "请先选择项目")
 
         conversation = self.get_conversation(conversation_id)
+        logger.info(
+            "streaming an answer for conversation %s (model config %s, agent %s)",
+            conversation_id,
+            config.id,
+            agent.slug,
+        )
 
         registry = _CitationRegistry()
         tools: list = [self._datetime_tool()]
@@ -889,6 +901,15 @@ class ChatService:
             for action in toolbox.pending_proposals:
                 action.message_id = row.id
             self._db.commit()
+
+        logger.debug(
+            "answer for conversation %s saved as message %s (%d chars, %d citation(s), aborted=%s)",
+            conversation_id,
+            row.id,
+            len(answer),
+            len(citations),
+            aborted,
+        )
 
         if aborted:
             # 不发 "done"：客户端已经走了。这里的意义就在于把内容存下来。

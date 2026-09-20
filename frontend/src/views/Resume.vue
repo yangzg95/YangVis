@@ -422,13 +422,35 @@
     </a-modal>
 
     <!-- ================= 报告抽屉 ================= -->
-    <a-drawer v-model:open="reportDrawer.open" :title="reportDrawer.title" width="720">
+    <a-drawer
+      v-model:open="reportDrawer.open"
+      :title="reportDrawer.title"
+      :width="reportDrawer.fullscreen ? '100%' : 720"
+    >
       <template #extra>
-        <a-tooltip :title="reportDrawer.report ? '保存为 Markdown 文件' : ''">
-          <a-button size="small" :disabled="!reportDrawer.report" @click="onDownloadReport">
-            <DownloadOutlined /> 下载报告
-          </a-button>
-        </a-tooltip>
+        <a-space :size="8">
+          <a-tooltip :title="reportDrawer.report ? '保存为 Markdown 文件' : ''">
+            <a-button size="small" :disabled="!reportDrawer.report" @click="onDownloadReport">
+              <DownloadOutlined /> 下载报告
+            </a-button>
+          </a-tooltip>
+          <a-tooltip v-if="netdiskBound" :title="reportDrawer.report ? '保存到百度网盘的 reports/ 目录' : ''">
+            <a-button
+              size="small"
+              :disabled="!reportDrawer.report"
+              :loading="savingToNetdisk"
+              @click="onSaveReportToNetdisk"
+            >
+              <CloudUploadOutlined /> 存到网盘
+            </a-button>
+          </a-tooltip>
+          <a-tooltip :title="reportDrawer.fullscreen ? '退出全屏' : '全屏浏览'">
+            <a-button size="small" @click="reportDrawer.fullscreen = !reportDrawer.fullscreen">
+              <FullscreenExitOutlined v-if="reportDrawer.fullscreen" />
+              <FullscreenOutlined v-else />
+            </a-button>
+          </a-tooltip>
+        </a-space>
       </template>
       <a-spin :spinning="reportDrawer.loading">
         <template v-if="reportDrawer.suggestions?.length">
@@ -452,14 +474,17 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Empty, message } from 'ant-design-vue'
 import {
   AuditOutlined,
   CloudOutlined,
+  CloudUploadOutlined,
   CompassOutlined,
   DownloadOutlined,
+  FullscreenExitOutlined,
+  FullscreenOutlined,
   HighlightOutlined,
   InboxOutlined,
   LoadingOutlined,
@@ -473,6 +498,7 @@ import {
 import type { UploadFile } from 'ant-design-vue'
 import MarkdownIt from 'markdown-it'
 import {
+  netdiskApi,
   resumeApi,
   settingsApi,
   type ResumeComparisonItem,
@@ -684,10 +710,32 @@ const compareModal = reactive({
 const reportDrawer = reactive({
   open: false,
   loading: false,
+  fullscreen: false,
   title: '',
   report: null as string | null,
   suggestions: null as string[] | null,
 })
+
+// 抽屉关掉就收起大视野，下次打开还是 720 的侧栏形态。
+watch(
+  () => reportDrawer.open,
+  (open) => {
+    if (!open) reportDrawer.fullscreen = false
+  },
+)
+
+/** 用户绑定了网盘才出现「存到网盘」按钮；未配置 AppKey 时整个入口都不该有。 */
+const netdiskBound = ref(false)
+const savingToNetdisk = ref(false)
+
+async function loadNetdiskStatus() {
+  try {
+    const status = await netdiskApi.status()
+    netdiskBound.value = status.configured && status.bound
+  } catch {
+    netdiskBound.value = false
+  }
+}
 
 const downloadingId = ref(0)
 
@@ -1072,20 +1120,41 @@ async function onRemoveToolkit(record: ResumeToolkitItem) {
 
 // ---- 报告 --------------------------------------------------------------------
 
-/** 把当前抽屉里的报告导出成 .md。改进意见单独呈现在抽屉顶部，
- *  导出时拼回正文前面，下载下来的才是完整的一份。 */
-function onDownloadReport() {
-  if (!reportDrawer.report) return
-  let content = reportDrawer.report
+/** 改进意见单独呈现在抽屉顶部，导出/存档时拼回正文前面，出去的才是完整的一份。 */
+function composeReportMarkdown(): string {
+  let content = reportDrawer.report || ''
   if (reportDrawer.suggestions?.length) {
     const list = reportDrawer.suggestions.map((item, index) => `${index + 1}. ${item}`).join('\n')
     content = `## 改进意见\n\n${list}\n\n---\n\n${content}`
   }
-  // 抽屉标题（如「生成报告 · 面试准备 · 高级前端工程师」）做文件名，
-  // 清掉 Windows 不允许的字符。
-  const name = `${reportDrawer.title.replace(/[\\/:*?"<>|\s]+/g, '-') || '报告'}.md`
-  saveTextFile(name, content)
+  return content
+}
+
+/** 抽屉标题（如「生成报告 · 面试准备 · 高级前端工程师」）做文件名，
+ *  清掉 Windows 与网盘路径都不允许的字符。 */
+function reportFileName(): string {
+  return `${reportDrawer.title.replace(/[\\/:*?"<>|\s]+/g, '-') || '报告'}.md`
+}
+
+/** 把当前抽屉里的报告导出成 .md。 */
+function onDownloadReport() {
+  if (!reportDrawer.report) return
+  saveTextFile(reportFileName(), composeReportMarkdown())
   message.success('报告已开始下载')
+}
+
+/** 把当前抽屉里的报告存到百度网盘的 reports/ 目录。 */
+async function onSaveReportToNetdisk() {
+  if (!reportDrawer.report || savingToNetdisk.value) return
+  savingToNetdisk.value = true
+  try {
+    const result = await netdiskApi.saveText(reportFileName(), composeReportMarkdown())
+    message.success(`已保存到网盘：${result.path}`)
+  } catch (err) {
+    message.error(errorText(err, '保存到网盘失败'))
+  } finally {
+    savingToNetdisk.value = false
+  }
 }
 
 
@@ -1161,6 +1230,8 @@ function errorText(err: unknown, fallback: string): string {
 onMounted(async () => {
   await Promise.all([loadReadiness(), loadResumes(), loadComparisons(), loadToolkit()])
   syncPolling()
+  // 网盘状态只是「存到网盘」按钮的显隐条件，不该卡住主数据加载。
+  void loadNetdiskStatus()
 })
 
 // keep-alive：切去别的标签页时停表，回来时按当前状态恢复。

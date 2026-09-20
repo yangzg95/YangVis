@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 from urllib.parse import urlencode
@@ -255,6 +256,7 @@ class NetdiskService:
         token = await self._access_token()
         path = self._remote_path(rel_path)
         filename = path.rsplit("/", 1)[-1]
+        started = time.monotonic()
 
         slices = [raw[i : i + _SLICE_BYTES] for i in range(0, len(raw), _SLICE_BYTES)] or [b""]
         block_list = json.dumps([hashlib.md5(part).hexdigest() for part in slices])
@@ -274,6 +276,7 @@ class NetdiskService:
         self._check_errno(pre, "网盘上传预创建失败")
         upload_id = pre.get("uploadid")
         if not upload_id:
+            logger.warning("netdisk precreate response for %s carried no uploadid", path)
             raise BusinessError(
                 CODE_NETDISK_API_ERROR, "网盘上传预创建失败：响应里没有 uploadid"
             )
@@ -308,7 +311,16 @@ class NetdiskService:
         self._check_errno(created, "网盘创建文件失败")
         fs_id = created.get("fs_id")
         if fs_id is None:
+            logger.warning("netdisk create response for %s carried no fs_id", path)
             raise BusinessError(CODE_NETDISK_API_ERROR, "网盘创建文件失败：响应里没有 fs_id")
+        logger.info(
+            "owner %s uploaded %s to netdisk: %d bytes in %d slice(s), %.1fs",
+            self._owner_id,
+            path,
+            len(raw),
+            len(slices),
+            time.monotonic() - started,
+        )
         return int(fs_id), path
 
     async def open_download(self, fs_id: int) -> Tuple[str, dict]:
@@ -331,6 +343,7 @@ class NetdiskService:
         items = data.get("list") or []
         dlink = items[0].get("dlink") if items else None
         if not dlink:
+            logger.warning("netdisk returned no dlink for fs_id %s", fs_id)
             raise BusinessError(
                 CODE_NETDISK_API_ERROR, "获取网盘下载地址失败：文件可能已被删除"
             )
@@ -359,6 +372,8 @@ class NetdiskService:
         if "error" not in data:
             return
         description = data.get("error_description") or data.get("error")
+        # 只记操作名与服务端描述；params/URL/token 永不进日志。
+        logger.warning("netdisk oauth error: %s (%s)", prefix, description)
         raise BusinessError(CODE_NETDISK_API_ERROR, f"{prefix}：{description}")
 
     @staticmethod
@@ -370,6 +385,7 @@ class NetdiskService:
         if message is None:
             detail = data.get("errmsg") or data.get("error_msg") or ""
             message = f"网盘接口返回错误（errno={errno}）{detail}".strip()
+        logger.warning("netdisk api error: %s (errno=%s)", prefix, errno)
         raise BusinessError(CODE_NETDISK_API_ERROR, f"{prefix}：{message}")
 
     async def _get_json(self, url: str, *, params: dict) -> dict:
@@ -377,6 +393,8 @@ class NetdiskService:
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
                 resp = await client.get(url, params=params)
         except httpx.HTTPError as exc:
+            # 异常文本可能带请求 URL（query 里有 access_token），只记异常类型。
+            logger.warning("netdisk http get failed: %s", type(exc).__name__)
             raise BusinessError(CODE_NETDISK_API_ERROR, f"访问百度网盘失败：{exc}") from exc
         return self._parse(resp)
 
@@ -392,6 +410,7 @@ class NetdiskService:
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
                 resp = await client.post(url, params=params, data=data, files=files)
         except httpx.HTTPError as exc:
+            logger.warning("netdisk http post failed: %s", type(exc).__name__)
             raise BusinessError(CODE_NETDISK_API_ERROR, f"访问百度网盘失败：{exc}") from exc
         return self._parse(resp)
 
@@ -400,11 +419,13 @@ class NetdiskService:
         try:
             data = resp.json()
         except ValueError as exc:
+            logger.warning("netdisk returned an unparseable response (http %s)", resp.status_code)
             raise BusinessError(
                 CODE_NETDISK_API_ERROR,
                 f"百度网盘返回了无法解析的响应（HTTP {resp.status_code}）",
             ) from exc
         if not isinstance(data, dict):
+            logger.warning("netdisk returned an unexpected response (http %s)", resp.status_code)
             raise BusinessError(
                 CODE_NETDISK_API_ERROR,
                 f"百度网盘返回了意料之外的响应（HTTP {resp.status_code}）",

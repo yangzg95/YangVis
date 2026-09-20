@@ -1052,3 +1052,20 @@ class NetdiskBindRequest(BaseModel):
     """OAuth 授权码（redirect_uri=oob 模式下用户从授权页手动复制回来）。"""
 
     code: str = Field(..., min_length=1, max_length=128)
+
+
+class NetdiskSaveTextRequest(BaseModel):
+    """把一段文本（分析报告等）存成网盘里的一个文件。
+
+    落在应用目录下的 ``reports/`` 子目录；1MB 上限对一份报告绰绰有余，
+    也挡住了拿这个端点当免费文件存储的用法。
+    """
+
+    filename: str = Field(..., min_length=1, max_length=200)
+    content: str = Field(..., min_length=1, max_length=1024 * 1024)
+
+
+class NetdiskSaveTextResult(BaseModel):
+    """保存成功后网盘里的完整路径，给前端展示用。"""
+
+    path: str

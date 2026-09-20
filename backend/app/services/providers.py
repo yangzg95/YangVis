@@ -109,7 +109,7 @@ async def test_chat_model(config: ModelConfig) -> Tuple[bool, str]:
             ]
         )
     except Exception as exc:  # noqa: BLE001 - provider SDK 抛出的异常类型五花八门
-        logger.info("chat model test failed for config %s: %s", config.id, exc)
+        logger.warning("chat model test failed for config %s: %s", config.id, exc)
         return False, _friendly_error(exc)
 
     text = (result.content or "").strip() if hasattr(result, "content") else ""
@@ -126,7 +126,7 @@ async def probe_embedding_dimension(config: ModelConfig) -> Tuple[bool, str, int
         client = build_embeddings(config)
         vector: List[float] = await client.aembed_query(PROBE_TEXT)
     except Exception as exc:  # noqa: BLE001 - provider SDK 抛出的异常类型五花八门
-        logger.info("embedding test failed for config %s: %s", config.id, exc)
+        logger.warning("embedding test failed for config %s: %s", config.id, exc)
         return False, _friendly_error(exc), None
 
     if not vector:

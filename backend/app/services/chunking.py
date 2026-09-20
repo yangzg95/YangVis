@@ -52,6 +52,7 @@ def extract_text(filename: str, raw: bytes) -> str:
             continue
     else:
         # 最后的兜底：与其把这次上传直接打回，不如尽量保住能读出来的部分。
+        logger.debug("could not detect the encoding of %s, decoding with replacement", filename)
         text = raw.decode("utf-8", errors="replace")
 
     return normalise(text)
