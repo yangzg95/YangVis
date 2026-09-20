@@ -421,70 +421,18 @@
       </template>
     </a-modal>
 
-    <!-- ================= 报告抽屉 ================= -->
-    <a-drawer
-      v-model:open="reportDrawer.open"
-      :title="reportDrawer.title"
-      :width="reportDrawer.fullscreen ? '100%' : 720"
-    >
-      <template #extra>
-        <a-space :size="8">
-          <a-tooltip :title="reportDrawer.report ? '保存为 Markdown 文件' : ''">
-            <a-button size="small" :disabled="!reportDrawer.report" @click="onDownloadReport">
-              <DownloadOutlined /> 下载报告
-            </a-button>
-          </a-tooltip>
-          <a-tooltip v-if="netdiskBound" :title="reportDrawer.report ? '保存到百度网盘的 reports/ 目录' : ''">
-            <a-button
-              size="small"
-              :disabled="!reportDrawer.report"
-              :loading="savingToNetdisk"
-              @click="onSaveReportToNetdisk"
-            >
-              <CloudUploadOutlined /> 存到网盘
-            </a-button>
-          </a-tooltip>
-          <a-tooltip :title="reportDrawer.fullscreen ? '退出全屏' : '全屏浏览'">
-            <a-button size="small" @click="reportDrawer.fullscreen = !reportDrawer.fullscreen">
-              <FullscreenExitOutlined v-if="reportDrawer.fullscreen" />
-              <FullscreenOutlined v-else />
-            </a-button>
-          </a-tooltip>
-        </a-space>
-      </template>
-      <a-spin :spinning="reportDrawer.loading">
-        <template v-if="reportDrawer.suggestions?.length">
-          <div class="drawer-section-title">改进意见</div>
-          <a-list size="small" :data-source="reportDrawer.suggestions" class="suggestion-list">
-            <template #renderItem="{ item, index }">
-              <a-list-item>
-                <span class="suggestion-index">{{ index + 1 }}</span>
-                <span>{{ item }}</span>
-              </a-list-item>
-            </template>
-          </a-list>
-          <a-divider />
-        </template>
-        <div class="drawer-section-title">分析报告</div>
-        <!-- 与对话页同样的安全设定：html:false，模型吐出的原始 HTML 一律转义。 -->
-        <div class="markdown report-body" v-html="renderMarkdown(reportDrawer.report)" />
-      </a-spin>
-    </a-drawer>
+    <!-- 报告不再用抽屉看：「查看报告」统一新开标签页进 /office/report/...（见 ReportView）。 -->
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, h, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Empty, message } from 'ant-design-vue'
+import { Button, Empty, message, notification } from 'ant-design-vue'
 import {
   AuditOutlined,
   CloudOutlined,
-  CloudUploadOutlined,
   CompassOutlined,
-  DownloadOutlined,
-  FullscreenExitOutlined,
-  FullscreenOutlined,
   HighlightOutlined,
   InboxOutlined,
   LoadingOutlined,
@@ -496,9 +444,7 @@ import {
   UploadOutlined,
 } from '@ant-design/icons-vue'
 import type { UploadFile } from 'ant-design-vue'
-import MarkdownIt from 'markdown-it'
 import {
-  netdiskApi,
   resumeApi,
   settingsApi,
   type ResumeComparisonItem,
@@ -508,16 +454,11 @@ import {
   type ResumeToolkitItem,
   type ToolkitKind,
 } from '@/api'
-import { saveBlobResponse, saveTextFile } from '@/utils/download'
+import { saveBlobResponse } from '@/utils/download'
 import { fmtSize } from '@/utils/format'
 
 const simpleEmpty = Empty.PRESENTED_IMAGE_SIMPLE
 const router = useRouter()
-
-const md = new MarkdownIt({ html: false, linkify: true })
-function renderMarkdown(text: string | null): string {
-  return md.render(text || '')
-}
 
 // ---- 求职助手工具定义 ----------------------------------------------------------
 // 声明式配置：新增工具只动这张表与后端 TOOLKIT_KINDS，弹窗表单按字段自动渲染。
@@ -706,36 +647,6 @@ const compareModal = reactive({
   resumes: [] as ResumeItem[],
   title: '',
 })
-
-const reportDrawer = reactive({
-  open: false,
-  loading: false,
-  fullscreen: false,
-  title: '',
-  report: null as string | null,
-  suggestions: null as string[] | null,
-})
-
-// 抽屉关掉就收起大视野，下次打开还是 720 的侧栏形态。
-watch(
-  () => reportDrawer.open,
-  (open) => {
-    if (!open) reportDrawer.fullscreen = false
-  },
-)
-
-/** 用户绑定了网盘才出现「存到网盘」按钮；未配置 AppKey 时整个入口都不该有。 */
-const netdiskBound = ref(false)
-const savingToNetdisk = ref(false)
-
-async function loadNetdiskStatus() {
-  try {
-    const status = await netdiskApi.status()
-    netdiskBound.value = status.configured && status.bound
-  } catch {
-    netdiskBound.value = false
-  }
-}
 
 const downloadingId = ref(0)
 
@@ -968,7 +879,7 @@ async function submitCompare() {
     selectedIds.value = []
     await loadComparisons()
     syncPolling()
-    // 等这份对比跑完，自动把报告弹出来，用户不用干等着盯状态。
+    // 等这份对比跑完，弹出带「查看报告」按钮的通知，用户不用干等着盯状态。
     watchComparison(comparison.id)
   } catch (err) {
     message.error(errorText(err, '对比发起失败'))
@@ -977,7 +888,7 @@ async function submitCompare() {
   }
 }
 
-/** 轮询单条对比直到终态，完成时直接打开报告抽屉。
+/** 轮询单条对比直到终态，完成时弹出带「查看报告」按钮的通知。
  *  定时器和盯着的 id 都登记在模块变量里：之前 timer 是局部变量，组件卸载后
  *  没人能清掉它，离开页面也会一直请求下去（泄漏）。 */
 let watchTimer: number | undefined
@@ -997,10 +908,28 @@ async function checkWatchedComparison() {
     if (detail.status === 'analyzing') return
     stopWatchingComparison()
     if (detail.status === 'ready') {
-      reportDrawer.title = detail.title || `对比 #${detail.id}`
-      reportDrawer.report = detail.report
-      reportDrawer.suggestions = null
-      reportDrawer.open = true
+      // 报告在新标签页里看，而轮询回调不是用户手势，window.open 会被
+      // 浏览器拦。所以这里弹一条带按钮的通知，点开那一下就是手势。
+      notification.success({
+        key: `comparison-done-${detail.id}`,
+        message: '对比分析完成',
+        description: detail.title || `对比 #${detail.id}`,
+        btn: () =>
+          h(
+            Button,
+            {
+              type: 'primary',
+              size: 'small',
+              onClick: () => {
+                // antd-vue 的 destroy 类型不收 key 参数（实际实现也不支持按 key 关），
+                // 点进报告这个时机把通知全清掉也合理。
+                notification.destroy()
+                openReportTab('comparison', detail.id)
+              },
+            },
+            () => '查看报告',
+          ),
+      })
     } else {
       message.error(detail.error_msg || '对比分析失败')
     }
@@ -1092,22 +1021,6 @@ async function submitTool() {
   }
 }
 
-async function openToolkitReport(id: number) {
-  reportDrawer.loading = true
-  reportDrawer.open = true
-  try {
-    const detail = await resumeApi.toolkitTaskDetail(id)
-    reportDrawer.title = `生成报告 · ${detail.title}`
-    reportDrawer.report = detail.report
-    reportDrawer.suggestions = null
-  } catch (err) {
-    message.error(errorText(err, '报告加载失败'))
-    reportDrawer.open = false
-  } finally {
-    reportDrawer.loading = false
-  }
-}
-
 async function onRemoveToolkit(record: ResumeToolkitItem) {
   try {
     await resumeApi.removeToolkitTask(record.id)
@@ -1120,75 +1033,16 @@ async function onRemoveToolkit(record: ResumeToolkitItem) {
 
 // ---- 报告 --------------------------------------------------------------------
 
-/** 改进意见单独呈现在抽屉顶部，导出/存档时拼回正文前面，出去的才是完整的一份。 */
-function composeReportMarkdown(): string {
-  let content = reportDrawer.report || ''
-  if (reportDrawer.suggestions?.length) {
-    const list = reportDrawer.suggestions.map((item, index) => `${index + 1}. ${item}`).join('\n')
-    content = `## 改进意见\n\n${list}\n\n---\n\n${content}`
-  }
-  return content
+/** 「查看报告」统一新开一个浏览器标签页，整页展示（ReportView）。
+ *  这里只负责拼地址；加载、下载、存网盘都在那个页面里。 */
+function openReportTab(kind: 'resume' | 'comparison' | 'toolkit', id: number) {
+  const href = router.resolve({ name: 'ReportView', params: { kind, id } }).href
+  window.open(href, '_blank', 'noopener')
 }
 
-/** 抽屉标题（如「生成报告 · 面试准备 · 高级前端工程师」）做文件名，
- *  清掉 Windows 与网盘路径都不允许的字符。 */
-function reportFileName(): string {
-  return `${reportDrawer.title.replace(/[\\/:*?"<>|\s]+/g, '-') || '报告'}.md`
-}
-
-/** 把当前抽屉里的报告导出成 .md。 */
-function onDownloadReport() {
-  if (!reportDrawer.report) return
-  saveTextFile(reportFileName(), composeReportMarkdown())
-  message.success('报告已开始下载')
-}
-
-/** 把当前抽屉里的报告存到百度网盘的 reports/ 目录。 */
-async function onSaveReportToNetdisk() {
-  if (!reportDrawer.report || savingToNetdisk.value) return
-  savingToNetdisk.value = true
-  try {
-    const result = await netdiskApi.saveText(reportFileName(), composeReportMarkdown())
-    message.success(`已保存到网盘：${result.path}`)
-  } catch (err) {
-    message.error(errorText(err, '保存到网盘失败'))
-  } finally {
-    savingToNetdisk.value = false
-  }
-}
-
-
-async function openReport(id: number) {
-  reportDrawer.loading = true
-  reportDrawer.open = true
-  try {
-    const detail = await resumeApi.detail(id)
-    reportDrawer.title = `分析报告 · ${detail.title}`
-    reportDrawer.report = detail.report
-    reportDrawer.suggestions = detail.suggestions
-  } catch (err) {
-    message.error(errorText(err, '报告加载失败'))
-    reportDrawer.open = false
-  } finally {
-    reportDrawer.loading = false
-  }
-}
-
-async function openComparisonReport(id: number) {
-  reportDrawer.loading = true
-  reportDrawer.open = true
-  try {
-    const detail = await resumeApi.comparisonDetail(id)
-    reportDrawer.title = `对比报告 · ${detail.title || `#${detail.id}`}`
-    reportDrawer.report = detail.report
-    reportDrawer.suggestions = null
-  } catch (err) {
-    message.error(errorText(err, '报告加载失败'))
-    reportDrawer.open = false
-  } finally {
-    reportDrawer.loading = false
-  }
-}
+const openReport = (id: number) => openReportTab('resume', id)
+const openComparisonReport = (id: number) => openReportTab('comparison', id)
+const openToolkitReport = (id: number) => openReportTab('toolkit', id)
 
 // ---- 辅助 ---------------------------------------------------------------------
 
@@ -1230,8 +1084,6 @@ function errorText(err: unknown, fallback: string): string {
 onMounted(async () => {
   await Promise.all([loadReadiness(), loadResumes(), loadComparisons(), loadToolkit()])
   syncPolling()
-  // 网盘状态只是「存到网盘」按钮的显隐条件，不该卡住主数据加载。
-  void loadNetdiskStatus()
 })
 
 // keep-alive：切去别的标签页时停表，回来时按当前状态恢复。
@@ -1307,27 +1159,6 @@ onUnmounted(() => {
 .drawer-section-title {
   font-weight: 600;
   margin-bottom: 12px;
-}
-.suggestion-list {
-  margin-bottom: 8px;
-}
-.suggestion-index {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  margin-right: 8px;
-  border-radius: 50%;
-  background: rgba(10, 126, 134, 0.1);
-  color: #0a7e86;
-  font-size: 12px;
-  flex: none;
-}
-/* 排版在全局 assets/markdown.css（.markdown），这里只留报告正文的字号行高。 */
-.report-body {
-  line-height: 1.75;
-  font-size: 14px;
 }
 /* 求职助手工具卡片：静态卡片用发丝线，hover 才给信号色。 */
 .tool-grid {

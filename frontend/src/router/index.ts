@@ -33,6 +33,14 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '简历'},
     },
     {
+        // 报告整页展示：列表页「查看报告」新开标签页进这里，bare 跳过主布局外壳，
+        // 与全屏终端页同一模式。不加 public，未登录照样被守卫拦下。
+        path: '/office/report/:kind(resume|comparison|toolkit)/:id(\\d+)',
+        name: 'ReportView',
+        component: () => import('@/views/ReportView.vue'),
+        meta: {title: '报告', bare: true},
+    },
+    {
         path: '/ops',
         redirect: '/ops/server',
     },

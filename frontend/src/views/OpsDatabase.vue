@@ -678,10 +678,10 @@ function onMenuClick(key: string) {
   switch (key) {
     case 'open-chat': {
       // 全屏智能问答页：查询台 + AI 的独立交互空间，和服务器终端页同一模式。
-      // 另起独立窗口打开（bare 路由不带主布局），带尺寸参数浏览器才开真窗口，
-      // 否则只给 _blank 会被当成新标签页。
+      // 同一浏览器新标签页打开（bare 路由不带主布局）；不带尺寸参数才是普通
+      // 标签页，否则浏览器会开成弹出窗口。
       const { href } = router.resolve({ name: 'OpsDatabaseChat', params: { id: conn.id } })
-      window.open(href, '_blank', 'width=1440,height=900,noopener')
+      window.open(href, '_blank', 'noopener')
       break
     }
     case 'toggle-conn':
