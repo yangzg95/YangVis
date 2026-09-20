@@ -676,10 +676,14 @@ function onMenuClick(key: string) {
   const conn = node.conn
 
   switch (key) {
-    case 'open-chat':
+    case 'open-chat': {
       // 全屏智能问答页：查询台 + AI 的独立交互空间，和服务器终端页同一模式。
-      router.push({ name: 'OpsDatabaseChat', params: { id: conn.id } })
+      // 另起独立窗口打开（bare 路由不带主布局），带尺寸参数浏览器才开真窗口，
+      // 否则只给 _blank 会被当成新标签页。
+      const { href } = router.resolve({ name: 'OpsDatabaseChat', params: { id: conn.id } })
+      window.open(href, '_blank', 'width=1440,height=900,noopener')
       break
+    }
     case 'toggle-conn':
       treeRef.value?.toggleConn(node)
       break
