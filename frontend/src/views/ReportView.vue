@@ -3,6 +3,11 @@
     <header class="report-header">
       <div class="report-title" :title="state.title">{{ state.title || '报告' }}</div>
       <a-space :size="8">
+        <a-tooltip :title="state.report ? '基于这份报告发起 AI 对话（新标签页）' : ''">
+          <a-button size="small" :disabled="!state.report" @click="onStartDiscuss">
+            <CommentOutlined /> 发起对话
+          </a-button>
+        </a-tooltip>
         <a-tooltip :title="state.report ? '保存为 Markdown 文件' : ''">
           <a-button size="small" :disabled="!state.report" @click="onDownload">
             <DownloadOutlined /> 下载报告
@@ -51,17 +56,19 @@
 
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { Empty, message } from 'ant-design-vue'
-import { CloudUploadOutlined, DownloadOutlined } from '@ant-design/icons-vue'
+import { CloudUploadOutlined, CommentOutlined, DownloadOutlined } from '@ant-design/icons-vue'
 import MarkdownIt from 'markdown-it'
 import { netdiskApi, resumeApi } from '@/api'
 import { saveTextFile } from '@/utils/download'
+import { composeReportMarkdown } from '@/utils/report'
 
 /** 三类报告共用的整页展示：/office/report/<kind>/<id>，由列表页新开标签页打开。 */
 
 const simpleEmpty = Empty.PRESENTED_IMAGE_SIMPLE
 const route = useRoute()
+const router = useRouter()
 
 const kind = String(route.params.kind)
 const id = Number(route.params.id)
@@ -111,14 +118,15 @@ async function loadReport() {
   }
 }
 
-/** 改进意见单独呈现在正文前面，导出/存档时拼回去，出去的才是完整的一份。 */
-function composeReportMarkdown(): string {
-  let content = state.report || ''
-  if (state.suggestions?.length) {
-    const list = state.suggestions.map((item, index) => `${index + 1}. ${item}`).join('\n')
-    content = `## 改进意见\n\n${list}\n\n---\n\n${content}`
-  }
-  return content
+/** 报告全文不塞进 URL：对话页拿到 kind/id 后自己拉取并组装（utils/report.ts），
+ *  与「查看报告」同一 window.open 新标签页模式。 */
+function onStartDiscuss() {
+  if (!state.report) return
+  const href = router.resolve({
+    name: 'CustomerService',
+    query: { report: `${kind}/${id}` },
+  }).href
+  window.open(href, '_blank', 'noopener')
 }
 
 /** 标题（如「生成报告 · 面试准备 · 高级前端工程师」）做文件名，
@@ -129,7 +137,7 @@ function reportFileName(): string {
 
 function onDownload() {
   if (!state.report) return
-  saveTextFile(reportFileName(), composeReportMarkdown())
+  saveTextFile(reportFileName(), composeReportMarkdown(state.report, state.suggestions))
   message.success('报告已开始下载')
 }
 
@@ -150,7 +158,10 @@ async function onSaveToNetdisk() {
   if (!state.report || savingToNetdisk.value) return
   savingToNetdisk.value = true
   try {
-    const result = await netdiskApi.saveText(reportFileName(), composeReportMarkdown())
+    const result = await netdiskApi.saveText(
+      reportFileName(),
+      composeReportMarkdown(state.report, state.suggestions),
+    )
     message.success(`已保存到网盘：${result.path}`)
   } catch (err) {
     message.error(errorText(err, '保存到网盘失败'))

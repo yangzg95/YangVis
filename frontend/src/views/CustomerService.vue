@@ -328,7 +328,7 @@ import {
   RobotOutlined,
   SearchOutlined,
 } from '@ant-design/icons-vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import MermaidCard from '@/components/MermaidCard.vue'
 import ConfirmCard from '@/components/ConfirmCard.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -341,6 +341,7 @@ import {
   type MessageSegment,
 } from '@/utils/messageSegments'
 import { copyText } from '@/utils/clipboard'
+import { loadReportForChat } from '@/utils/report'
 import {
   agentsApi,
   chatApi,
@@ -356,6 +357,7 @@ import {
 } from '@/api'
 
 const router = useRouter()
+const route = useRoute()
 const auth = useAuthStore()
 const simpleEmpty = Empty.PRESENTED_IMAGE_SIMPLE
 
@@ -702,6 +704,78 @@ async function removeConversation(id: number) {
   await loadConversations()
 }
 
+// ---- 基于报告发起对话 ---------------------------------------------------------
+// 报告页（ReportView）「发起对话」新开标签页进 /customer-service?report=<kind>/<id>。
+// query 只传引用不传全文：报告全文由这里重新拉取（noopener 下拿不到 opener 的
+// sessionStorage，URL 也塞不下几千字），数据以后端为准。
+
+const REPORT_QUERY_RE = /^(resume|comparison|toolkit)\/(\d+)$/
+/** 首条消息上限与后端 CompletionRequest.message 的 20000 对齐。 */
+const REPORT_MESSAGE_LIMIT = 20000
+
+async function handleReportDiscuss() {
+  const raw = route.query.report
+  const match = REPORT_QUERY_RE.exec(typeof raw === 'string' ? raw : '')
+  // 垃圾参数静默忽略——与路由 \d+ 约束「不进页面」同一哲学。
+  if (!match) return
+
+  // 先清 query 再干活：即使后面任何一步失败，刷新这个标签页都不会重发一遍。
+  void router.replace({ query: {} })
+
+  let title: string
+  let markdown: string
+  try {
+    ;({ title, markdown } = await loadReportForChat(match[1], Number(match[2])))
+  } catch {
+    // 拦截器已经弹过错误提示；query 已清，页面停在普通空白会话态即可。
+    return
+  }
+
+  let firstMessage = `以下是报告《${title}》的完整内容，请先阅读，稍后我会基于它向你提问。\n\n---\n\n${markdown}`
+  if (firstMessage.length > REPORT_MESSAGE_LIMIT) {
+    // 防御后端哪天再收紧上限：宁可截断并明说，也不让 AI 悄悄基于残缺报告作答。
+    firstMessage = `${firstMessage.slice(0, REPORT_MESSAGE_LIMIT)}\n\n（报告内容过长，已按长度上限截断）`
+  }
+
+  if (!canSend.value) {
+    // 没配模型这类 gate 场景：不建孤儿空会话，内容放输入框，用户按 gate 提示
+    // 配好后点发送即可，内容不丢。
+    draft.value = firstMessage
+    toast.warning('报告内容已放入输入框，按上方提示完成配置后即可发送')
+    return
+  }
+
+  startNew()
+  // 显式建会话而不是让首条消息触发自动建：自动建的标题是从首问截 40 字
+  // （derive_title），首问是报告全文时标题会是一截报告正文。
+  const rawTitle = `报告讨论 · ${title}`
+  const convTitle = rawTitle.length <= 50 ? rawTitle : `${rawTitle.slice(0, 50)}…`
+  let conv
+  try {
+    conv = await chatApi.createConversation({
+      title: convTitle,
+      agent_id: activeAgentId.value,
+      model_config_id: activeModelConfigId.value,
+      // 与 send() 同一规则：只有依赖知识库的智能体才带检索范围。
+      project_id: needsKnowledge.value ? activeProjectId.value ?? undefined : undefined,
+      type_ids:
+        needsKnowledge.value && selectedTypeIds.value.length
+          ? [...selectedTypeIds.value]
+          : undefined,
+    })
+  } catch {
+    // 拦截器已弹错；内容放输入框，用户可手动重试。
+    draft.value = firstMessage
+    return
+  }
+  // 不走 selectConversation：新会话的消息/actions 必然为空（白拉两次），它还会
+  // 重置 agent/模型选择——而我们正是按当前选择建的会话，重置是绕回原点的空转。
+  conversations.value.unshift(conv)
+  activeId.value = conv.id
+  draft.value = firstMessage
+  send()
+}
+
 // ---- 发送 ------------------------------------------------------------------
 
 function onComposerEnter(e: KeyboardEvent) {
@@ -1005,6 +1079,9 @@ onMounted(async () => {
   } finally {
     booting.value = false
   }
+  // 报告页「发起对话」带着 ?report=kind/id 进这里：能不能直接发送取决于
+  // 模型/智能体/项目是否就绪，所以要等上面全部加载完再处理。
+  await handleReportDiscuss()
 })
 
 onUnmounted(() => abort?.())

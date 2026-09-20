@@ -20,4 +20,6 @@ const app = createApp(App)
 app.use(createPinia())
 app.use(router)
 app.use(Antd)
-app.mount('#app')
+// 等首屏导航解析完再挂载：否则直接打开 bare 页（报告、终端）时，App 会先按
+// 未解析的空路由渲染出带菜单的主布局，导航完成后才换成裸页，闪一下外壳。
+void router.isReady().then(() => app.mount('#app'))

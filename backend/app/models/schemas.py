@@ -279,7 +279,10 @@ class CompletionRequest(BaseModel):
 
     model_config = _ALLOW_MODEL_PREFIX
 
-    message: str = Field(..., min_length=1, max_length=4000)
+    # 上限对齐手动改消息（上面 MessageUpdate.content）的 20000：报告页
+    # 「发起对话」会把整份报告（含改进意见）作为首条消息发出；库字段是
+    # _LONG_TEXT，没有更紧的约束。
+    message: str = Field(..., min_length=1, max_length=20000)
     conversation_id: Optional[int] = None
     agent_id: Optional[int] = None
 
