@@ -282,6 +282,19 @@
         </div>
       </div>
     </div>
+
+    <!-- Navicat 式底部栏：展示最近一次执行的 SQL，悬停看全文，可一键复制。 -->
+    <div v-if="executedSql" class="sql-bar">
+      <span class="sql-bar-label">SQL</span>
+      <a-tooltip :title="executedSql" :mouse-enter-delay="0.3">
+        <span class="sql-bar-text">{{ executedSql }}</span>
+      </a-tooltip>
+      <a-tooltip title="复制 SQL">
+        <a-button size="small" type="text" class="sql-bar-copy" @click="copyExecutedSql">
+          <CopyOutlined />
+        </a-button>
+      </a-tooltip>
+    </div>
   </div>
 </template>
 
@@ -290,6 +303,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { Empty, message as toast } from 'ant-design-vue'
 import {
   CaretRightOutlined,
+  CopyOutlined,
   DeleteOutlined,
   EditOutlined,
   FormatPainterOutlined,
@@ -311,6 +325,7 @@ import {
 } from '@/api'
 import DbResultGrid from './DbResultGrid.vue'
 import SqlEditor from './SqlEditor.vue'
+import { copyText } from './grid'
 import { clampSize, readSize, saveSize, startDragResize } from './resizer'
 import { storageKeys } from '@/utils/storage'
 import { formatSql } from '@/utils/sqlFormat'
@@ -342,6 +357,14 @@ const sql = ref(props.initialSql ?? '')
 const running = ref(false)
 const batch = ref<DbBatchResult | null>(null)
 const error = ref('')
+
+// 底部 SQL 栏（Navicat 同款）：记最近一次送出去的完整命令，执行失败也保留展示。
+const executedSql = ref('')
+
+async function copyExecutedSql() {
+  if (await copyText(executedSql.value)) toast.success('SQL 已复制')
+  else toast.error('复制失败，浏览器拒绝了剪贴板访问')
+}
 
 // 默认库：执行时作为连接参数传给后端，SQL 里就不用写库名前缀了。
 const selectedSchema = ref<string | undefined>(props.schema)
@@ -540,6 +563,7 @@ async function run() {
   const selected = currentSelection().trim()
   const command = (selected || sql.value).trim()
   if (!command || running.value) return
+  executedSql.value = command
   running.value = true
   error.value = ''
   batch.value = null

@@ -33,6 +33,17 @@
   background: var(--signal-bg);
 }
 
+/* 空表占位行不参与悬停高亮：留白区就保持空白（Navicat 式）。 */
+.db-grid .ant-table-tbody > tr.ant-table-placeholder:hover > td {
+  background: transparent;
+}
+
+/* 空表占位：占位行本身撑一点高度，其余空白交给容器底色（Navicat 式留白）。
+   与 #emptyText 插槽配合，查询结果 / 数据浏览页签共用。 */
+.db-grid .grid-blank {
+  height: 32px;
+}
+
 /* 数字右对齐：量级一眼可比（组件在 bodyCell 里按 typeof 加 .num）。 */
 .db-grid .cell.num {
   text-align: right;
@@ -76,6 +87,40 @@
 
 .db-grid .col-resize:hover {
   background: var(--signal-border, #91caff);
+}
+
+/* Navicat 式底部 SQL 栏：展示产生当前网格的那条语句，单行等宽、超出省略，
+   全文看 tooltip。查询页签 / 数据页签共用。 */
+.sql-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: 1px solid var(--hairline, #f0f0f0);
+  border-radius: 6px;
+  background: #fafafa;
+}
+
+.sql-bar-label {
+  flex-shrink: 0;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.sql-bar-text {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+
+.sql-bar-copy {
+  flex-shrink: 0;
 }
 
 /* 长内容的「展开」按钮：平时收起，悬停单元格时钉在右上角。 */

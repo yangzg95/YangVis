@@ -379,9 +379,12 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
       scrollToBottom()
     },
     onExec: (ev) => {
-      // useOpsConfirm 已把结果写回卡片；这里补步骤标签并通知父组件——
-      // 服务器问答时父组件把命令和输出打到终端窗口展示。
-      answer().steps.push(`已执行：${ev.command}（exit ${ev.exit_status ?? '—'}）`)
+      // 确认流的 exec：useOpsConfirm 已把结果写回卡片，这里补步骤标签。
+      // 只读命令（action_id 为空）在 step 里已经亮过命令，不再重复打标签。
+      if (ev.action_id != null) {
+        answer().steps.push(`已执行：${ev.command}（exit ${ev.exit_status ?? '—'}）`)
+      }
+      // 两种 exec 都通知父组件——服务器问答时父组件把命令和输出打到终端窗口。
       emit('exec', {
         command: ev.command,
         output: ev.output,

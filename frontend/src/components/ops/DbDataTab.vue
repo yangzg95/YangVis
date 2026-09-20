@@ -80,6 +80,10 @@
         row-key="__i"
         @change="onChange"
       >
+      <!-- Navicat 式空表：0 行时只留表头 + 空白区，不渲染「暂无数据」占位图。 -->
+      <template #emptyText>
+        <div class="grid-blank" />
+      </template>
       <template #headerCell="{ column }">
         <span class="col-head">
           <span class="col-name">{{ column.title }}</span>
@@ -115,8 +119,13 @@
         />
         <span
           v-else
-          :class="['cell', { targeting: menu.open && menu.record === record && menu.column === String(column.title), num: typeof text === 'number', editable: canEdit }]"
+          :class="['cell', {
+            selected: selected.record === record && selected.column === String(column.title),
+            targeting: menu.open && menu.record === record && menu.column === String(column.title),
+            num: typeof text === 'number',
+          }]"
           @click="onCellClick(record, String(column.title), text)"
+          @dblclick="onCellDblClick(text)"
           @contextmenu.prevent="onCellMenu($event, String(column.title), text, record)"
         >
           <span v-if="text === null || text === undefined" class="null">(Null)</span>
@@ -132,6 +141,19 @@
         </span>
       </template>
       </a-table>
+    </div>
+
+    <!-- Navicat 式底部栏：展示产生当前页数据的那条 SELECT（服务端代回字面量后返回）。 -->
+    <div v-if="result?.sql" class="sql-bar">
+      <span class="sql-bar-label">SQL</span>
+      <a-tooltip :title="result.sql" :mouse-enter-delay="0.3">
+        <span class="sql-bar-text">{{ result.sql }}</span>
+      </a-tooltip>
+      <a-tooltip title="复制 SQL">
+        <a-button size="small" type="text" class="sql-bar-copy" @click="copyExecutedSql">
+          <CopyOutlined />
+        </a-button>
+      </a-tooltip>
     </div>
 
     <GridContextMenu
@@ -178,6 +200,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import {
+  CopyOutlined,
   DownOutlined,
   ExpandOutlined,
   FilterOutlined,
@@ -500,6 +523,7 @@ const menuEntries = computed<GridMenuEntry[]>(() => {
 })
 
 function onCellMenu(event: MouseEvent, column: string, value: unknown, record: Record<string, unknown>) {
+  selectCell(record, column)
   menu.mode = 'cell'
   menu.column = column
   menu.value = value
@@ -526,19 +550,40 @@ async function copyOrToast(text: string, what: string) {
   else toast.error('复制失败，浏览器拒绝了剪贴板访问')
 }
 
-// 只读时单击单元格 = 复制全文（右键菜单那套复制仍然保留）。
+/** 底部 SQL 栏的复制按钮。 */
+function copyExecutedSql() {
+  if (result.value?.sql) void copyOrToast(result.value.sql, 'SQL ')
+}
+
+// Navicat 式单元格交互：左键选中（高亮），双击复制全文，右键出菜单。
+const selected = reactive({
+  record: null as Record<string, unknown> | null,
+  column: '',
+})
+
+function selectCell(record: Record<string, unknown>, column: string) {
+  selected.record = record
+  selected.column = column
+}
+
+/** 只读时双击单元格 = 复制全文（右键菜单那套复制仍然保留）。 */
 function copyCell(value: unknown) {
   if (value === null || value === undefined) return
   void copyOrToast(String(value), '内容')
 }
 
 /**
- * 单元格单击：可编辑（连接开了写开关 + 账号有写通行证）时直接进入行内编辑，
- * 复制挪到右键菜单；只读时保持单击复制。光标样式（cell / copy）与之一致。
+ * 单元格单击：可编辑（连接开了写开关 + 账号有写通行证）时直接进入行内编辑；
+ * 只读时只是选中（Navicat 式），复制挪到双击和右键菜单。
  */
 function onCellClick(record: Record<string, unknown>, column: string, value: unknown) {
   if (canEdit.value) startEdit(record, column, value)
-  else copyCell(value)
+  else selectCell(record, column)
+}
+
+/** 双击复制只在只读时生效：可编辑时第一击已进行内编辑，第二击落在输入框上。 */
+function onCellDblClick(value: unknown) {
+  if (!canEdit.value) copyCell(value)
 }
 
 // 长内容的「展开」弹窗：一份实例复用，内容是点开那一刻快照下来的。
@@ -852,16 +897,19 @@ function submitCustomFilter() {
 }
 
 /* 占满整个单元格，右键点在空白处也能命中；菜单打开时高亮目标格。
-   只读时单击是复制，光标用 copy 表明这一点；可编辑时换成 cell 光标提示单击可改。 */
+   左键是选中（Navicat 式），光标统一用表格十字。 */
 .cell {
   display: block;
   margin: -5px -12px;
   padding: 5px 12px;
-  cursor: copy;
+  cursor: cell;
 }
 
-.cell.editable {
-  cursor: cell;
+/* 选中格：信号色描边 + 浅底，比悬停重一档，一眼定位当前格。 */
+.cell.selected {
+  background: var(--signal-bg, #e6f4ff);
+  outline: 2px solid var(--signal-border, #91caff);
+  outline-offset: -2px;
 }
 
 /* 行内编辑框：与 .cell 同样的负边距手法撑满整个单元格。 */

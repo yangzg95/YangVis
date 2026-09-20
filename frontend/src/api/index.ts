@@ -529,9 +529,10 @@ export interface ConfirmEvent {
   timeout_seconds: number
 }
 
-/** confirm 流内的 exec 事件：已确认命令的执行结果。 */
+/** exec 事件：一条 AI 命令的执行结果。confirm 流里带被确认 action 的 id；
+ *  completions 流里是只读命令的直接执行，action_id 为 null。 */
 export interface ExecEvent {
-  action_id: number
+  action_id: number | null
   command: string
   exit_status: number | null
   output: string
@@ -937,6 +938,8 @@ export interface DbRowsResult {
   page: number
   page_size: number
   elapsed_ms: number
+  /** 展示用：产生这一页的 SELECT 文本（参数已代回字面量），给底部 SQL 栏用。 */
+  sql: string
 }
 
 /** 行级写的行定位：整行原值（列名 → 原值，null 表示 NULL），服务端自取主键子集。 */

@@ -11,6 +11,10 @@
       :scroll="{ x: 'max-content', y: scrollY }"
       row-key="__i"
     >
+      <!-- Navicat 式空表：0 行时只留表头 + 空白区，不渲染「暂无数据」占位图。 -->
+      <template #emptyText>
+        <div class="grid-blank" />
+      </template>
       <template #headerCell="{ column }">
         <span>{{ column.title }}</span>
         <span
@@ -22,8 +26,13 @@
       </template>
       <template #bodyCell="{ text, record, column }">
         <span
-          :class="['cell', { targeting: menu.open && menu.record === record && menu.column === String(column.title), num: typeof text === 'number' }]"
-          @click="copyCell(text)"
+          :class="['cell', {
+            selected: selected.record === record && selected.column === String(column.title),
+            targeting: menu.open && menu.record === record && menu.column === String(column.title),
+            num: typeof text === 'number',
+          }]"
+          @click="selectCell(record, String(column.title))"
+          @dblclick="copyCell(text)"
           @contextmenu.prevent="onCellMenu($event, String(column.title), text, record)"
         >
           <span v-if="text === null || text === undefined" class="null">(Null)</span>
@@ -194,6 +203,7 @@ const menuEntries = computed<GridMenuEntry[]>(() => [
 ])
 
 function onCellMenu(event: MouseEvent, column: string, value: unknown, record: Record<string, unknown>) {
+  selectCell(record, column)
   menu.column = column
   menu.value = value
   menu.record = record
@@ -207,7 +217,18 @@ async function copyOrToast(text: string, what: string) {
   else toast.error('复制失败，浏览器拒绝了剪贴板访问')
 }
 
-// 单击单元格 = 复制全文（右键菜单那套复制仍然保留）。
+// Navicat 式单元格交互：左键只选中（高亮），双击复制全文，右键出菜单。
+const selected = reactive({
+  record: null as Record<string, unknown> | null,
+  column: '',
+})
+
+function selectCell(record: Record<string, unknown>, column: string) {
+  selected.record = record
+  selected.column = column
+}
+
+/** 双击单元格 = 复制全文（右键菜单那套复制仍然保留）。 */
 function copyCell(value: unknown) {
   if (value === null || value === undefined) return
   void copyOrToast(String(value), '内容')
@@ -266,12 +287,19 @@ function onMenuPick(key: string) {
 }
 
 /* 占满整个单元格，右键点在空白处也能命中；菜单打开时高亮目标格。
-   单击是复制，光标用 copy 表明这一点。 */
+   左键是选中（Navicat 式），光标用表格十字。 */
 .cell {
   display: block;
   margin: -5px -12px;
   padding: 5px 12px;
-  cursor: copy;
+  cursor: cell;
+}
+
+/* 选中格：信号色描边 + 浅底，比悬停重一档，一眼定位当前格。 */
+.cell.selected {
+  background: var(--signal-bg, #e6f4ff);
+  outline: 2px solid var(--signal-border, #91caff);
+  outline-offset: -2px;
 }
 
 .cell.targeting {

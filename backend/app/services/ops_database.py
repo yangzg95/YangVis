@@ -881,8 +881,12 @@ def _browse_rows_sync(
     filters: Sequence[DbRowFilter] = (),
     sorts: Sequence[DbRowSort] = (),
     where: str = "",
-) -> Tuple[List[str], List[Sequence[Any]], int]:
-    """同一连接里跑 COUNT(*) + 一页数据，保证分页总数与内容一致。"""
+) -> Tuple[List[str], List[Sequence[Any]], int, str]:
+    """同一连接里跑 COUNT(*) + 一页数据，保证分页总数与内容一致。
+
+    返回值最后一项是数据 SELECT 的展示文本（参数已代回字面量），
+    给前端底部的「执行的 SQL」栏用。
+    """
     target = f"{_quote_ident(schema)}.{_quote_ident(table)}"
     structured, params = _build_where(filters)
     parts = [f"({where})"] if where else []
@@ -890,22 +894,27 @@ def _browse_rows_sync(
         parts.append(structured)
     where_sql = f" WHERE {' AND '.join(parts)}" if parts else ""
     order_sql = _build_order_by(sorts)
+    # 空参数必须传 None 而不是空序列：pymysql 对非 None 参数会做一次 % 格式化，
+    # 手输条件里的字面 %（如 LIKE '%张%'）会被误当占位符，直接抛 ValueError。
+    args = tuple(params) or None
+    data_sql = (
+        f"SELECT * FROM {target}{where_sql}{order_sql} "
+        f"LIMIT {page_size} OFFSET {(page - 1) * page_size}"
+    )
     conn = _connect_mysql(item, password)
     try:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM {target}{where_sql}", params)
+            cur.execute(f"SELECT COUNT(*) FROM {target}{where_sql}", args)
             total = int(cur.fetchone()[0])
-            cur.execute(
-                f"SELECT * FROM {target}{where_sql}{order_sql} "
-                f"LIMIT {page_size} OFFSET {(page - 1) * page_size}",
-                params,
-            )
+            cur.execute(data_sql, args)
             columns = [d[0] for d in (cur.description or [])]
             rows = list(cur.fetchall())
+            # 展示用 SQL：mogrify 把参数代回字面量，即实际发往服务端的文本。
+            display_sql = cur.mogrify(data_sql, args)
         conn.rollback()
     finally:
         conn.close()
-    return columns, rows, total
+    return columns, rows, total, display_sql
 
 
 async def browse_rows(
@@ -938,7 +947,7 @@ async def browse_rows(
     password = _password_of(item)
     started = time.perf_counter()
     try:
-        columns, rows, total = await asyncio.to_thread(
+        columns, rows, total, display_sql = await asyncio.to_thread(
             _browse_rows_sync, item, password, schema, table, page, page_size, filters, sorts, where
         )
     except pymysql.Error as exc:
@@ -951,6 +960,7 @@ async def browse_rows(
         page=page,
         page_size=page_size,
         elapsed_ms=elapsed,
+        sql=display_sql,
     )
 
 

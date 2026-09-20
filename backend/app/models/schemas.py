@@ -841,6 +841,8 @@ class DbRowsResult(BaseModel):
     page: int = 1
     page_size: int = 100
     elapsed_ms: int = 0
+    # 展示用：产生这一页的 SELECT 文本（参数已代回字面量），给底部 SQL 栏用。
+    sql: str = ""
 
 
 class DbRowUpdateRequest(BaseModel):

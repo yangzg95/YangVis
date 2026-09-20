@@ -812,6 +812,7 @@ class ChatService:
         parts: List[str] = []
         aborted = False
         sent_proposals = 0
+        sent_execs = 0
 
         stream = executor.astream_events(
             {
@@ -840,6 +841,19 @@ class ChatService:
                     }
                 elif kind == "on_tool_end":
                     yield "citations", [c.model_dump() for c in registry.all()]
+                    if toolbox is not None and len(toolbox.readonly_execs) > sent_execs:
+                        # 只读命令也发 exec（action_id 为空表示未经确认的直接
+                        # 执行）：运维终端页靠它把命令与输出回显进终端窗口。
+                        for executed in toolbox.readonly_execs[sent_execs:]:
+                            yield "exec", {
+                                "action_id": None,
+                                "command": executed["command"],
+                                "exit_status": executed["exit_status"],
+                                "output": executed["output"],
+                                "elapsed_ms": executed["elapsed_ms"],
+                                "success": executed["exit_status"] == 0,
+                            }
+                        sent_execs = len(toolbox.readonly_execs)
                     # propose_command 落库后立刻把待确认项推给前端：确认卡片
                     # 要跟本轮回答一起出现，而不是等 done。
                     if toolbox is not None and len(toolbox.pending_proposals) > sent_proposals:

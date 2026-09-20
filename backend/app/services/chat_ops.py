@@ -149,6 +149,10 @@ class ChatOpsToolbox:
         # 本轮回答里新落库的待确认项，按落库顺序排列；stream_answer 据此发
         # confirm 事件、在回答落库后回填 message_id。
         self.pending_proposals: List[OpsPendingAction] = []
+        # 本轮回答里实际执行过的只读服务器命令，按执行顺序排列；stream_answer
+        # 据此发 exec 事件，运维终端页把它们打进终端窗口，让用户看到 AI 干了
+        # 什么（与确认后的写命令同一条回显通道）。
+        self.readonly_execs: List[Dict[str, Any]] = []
 
     async def aclose(self) -> None:
         """关掉这次回答期间建立的 SSH 连接。"""
@@ -221,9 +225,12 @@ class ChatOpsToolbox:
 
         # AI 通道用更宽的超时：du/find 这类盘点命令在大磁盘上远超交互通道的
         # 20 秒，用交互通道的超时会被误杀。
+        started = time.monotonic()
         status, output = await server_ops.run_once(
             conn, command, timeout=settings.OPS_AGENT_CMD_TIMEOUT
         )
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        truncated = (output or "(无输出)")[:OUTPUT_LIMIT]
         self._server_audit.record(
             target_id=server.id,
             target_name=server.name,
@@ -232,7 +239,15 @@ class ChatOpsToolbox:
             success=status == 0,
             error=None if status == 0 else output[:512],
         )
-        return f"exit={status}\n{(output or '(无输出)')[:OUTPUT_LIMIT]}"
+        self.readonly_execs.append(
+            {
+                "command": command,
+                "exit_status": status,
+                "output": truncated,
+                "elapsed_ms": elapsed_ms,
+            }
+        )
+        return f"exit={status}\n{truncated}"
 
     def _refuse_forbidden(self, server: OpsServer, command: str, reason: str) -> str:
         self._server_audit.record(
