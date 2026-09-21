@@ -858,5 +858,6 @@ input {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 16px;
+  /* 上下收紧到 8px：顶栏和内容区之间不再留一大段空白，列表能多出一行。 */
+  padding: 8px 16px;
 }

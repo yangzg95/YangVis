@@ -1007,6 +1007,15 @@ body.dragging-col .col-resizer::after {
   white-space: nowrap;
 }
 
+/* 页签压矮：上下 padding 8px→3px，页签栏与内容区的间距 16px→8px。 */
+.main-panel :deep(.ant-tabs-card > .ant-tabs-nav .ant-tabs-tab) {
+  padding: 3px 16px;
+}
+
+.main-panel :deep(.ant-tabs-top > .ant-tabs-nav) {
+  margin-bottom: 8px;
+}
+
 /* 页签整格染色：::before 以 .ant-tabs-tab 为定位盒铺满整格（inset:0 不受
    tab 内边距影响），label 里的图标 / 文案和关闭钮提到染色层之上；
    pointer-events 关掉，点关闭钮不会被这层挡住。 */

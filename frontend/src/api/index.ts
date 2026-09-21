@@ -1277,6 +1277,15 @@ export interface ResumeDetail extends ResumeItem {
   suggestions: string[] | null
 }
 
+export interface ResumePreview {
+  id: number
+  title: string
+  filename: string
+  mime: string | null
+  size: number
+  content: string
+}
+
 export interface ResumeComparisonItem {
   id: number
   title: string | null
@@ -1300,7 +1309,6 @@ export type ToolkitKind =
   | 'interview-prep'
   | 'portfolio-plan'
   | 'salary-negotiation'
-  | 'follow-up'
 
 export interface ResumeToolkitCreate {
   kind: ToolkitKind
@@ -1311,7 +1319,6 @@ export interface ResumeToolkitCreate {
   position?: string
   background?: string
   offer_amount?: string
-  recruiter_name?: string
   notes?: string
 }
 
@@ -1347,6 +1354,8 @@ export const resumeApi = {
     })
   },
   detail: (id: number) => request<ResumeDetail>({ url: `/office/resumes/${id}` }),
+  preview: (id: number) =>
+    request<ResumePreview>({ url: `/office/resumes/${id}/preview`, skipErrorToast: true }),
   update: (id: number, payload: { title?: string; description?: string }) =>
     request<ResumeItem>({ url: `/office/resumes/${id}`, method: 'PUT', data: payload }),
   remove: (id: number) => request<null>({ url: `/office/resumes/${id}`, method: 'DELETE' }),

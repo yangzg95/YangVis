@@ -975,6 +975,18 @@ class ResumeDetail(ResumeItem):
     suggestions: Optional[List[str]] = None
 
 
+class ResumePreview(BaseModel):
+    """预览用的抽取文本。与详情分开返回：详情给报告页用，这个只给预览抽屉，
+    两边都不替对方背大字段。"""
+
+    id: int
+    title: str
+    filename: str
+    mime: Optional[str] = None
+    size: int = 0
+    content: str
+
+
 class ResumeCompareRequest(BaseModel):
     resume_ids: List[int] = Field(..., min_length=2, max_length=10)
     title: Optional[str] = Field(default=None, max_length=128)
@@ -996,7 +1008,7 @@ class ResumeComparisonDetail(ResumeComparisonItem):
 
 # ---- 智能办公 · 求职助手 -------------------------------------------------------
 
-# 7 类生成任务；各 kind 的必填字段规则在 services/resume.py 的 TOOLKIT_KINDS 里校验。
+# 6 类生成任务；各 kind 的必填字段规则在 services/resume.py 的 TOOLKIT_KINDS 里校验。
 ToolkitKind = Literal[
     "optimize",          # 简历优化
     "career-match",      # 职业匹配分析
@@ -1004,7 +1016,6 @@ ToolkitKind = Literal[
     "interview-prep",    # 面试准备策略
     "portfolio-plan",    # 证明构建计划
     "salary-negotiation",  # 薪资最大化框架
-    "follow-up",         # 后续互动策略
 ]
 
 
@@ -1019,7 +1030,6 @@ class ResumeToolkitCreate(BaseModel):
     position: Optional[str] = Field(default=None, max_length=128)
     background: Optional[str] = Field(default=None, max_length=20000)
     offer_amount: Optional[str] = Field(default=None, max_length=64)
-    recruiter_name: Optional[str] = Field(default=None, max_length=128)
     notes: Optional[str] = Field(default=None, max_length=2000)
 
 

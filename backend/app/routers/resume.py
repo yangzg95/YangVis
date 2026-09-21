@@ -31,6 +31,7 @@ from app.models.schemas import (
     ResumeComparisonItem,
     ResumeDetail,
     ResumeItem,
+    ResumePreview,
     ResumeToolkitCreate,
     ResumeToolkitDetail,
     ResumeToolkitItem,
@@ -134,6 +135,28 @@ async def get_resume(
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return APIResponse(data=service.to_detail(resume))
+
+
+@router.get("/resumes/{resume_id}/preview", response_model=APIResponse[ResumePreview])
+async def preview_resume(
+    resume_id: int,
+    service: ResumeService = Depends(get_service),
+) -> APIResponse[ResumePreview]:
+    """返回上传时抽取好的纯文本，供前端预览抽屉直接展示。"""
+    try:
+        resume = service.get_resume(resume_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return APIResponse(
+        data=ResumePreview(
+            id=resume.id,
+            title=resume.title,
+            filename=resume.filename,
+            mime=resume.mime,
+            size=resume.size,
+            content=resume.content,
+        )
+    )
 
 
 @router.put("/resumes/{resume_id}", response_model=APIResponse[ResumeItem])
@@ -344,7 +367,7 @@ async def create_toolkit_task(
     background: BackgroundTasks,
     service: ResumeService = Depends(get_service),
 ) -> APIResponse[ResumeToolkitItem]:
-    """发起一次求职助手生成（简历优化 / 匹配审计 / 面试准备等 7 类）。"""
+    """发起一次求职助手生成（简历优化 / 匹配审计 / 面试准备等 6 类）。"""
     service.require_chat_config()
     try:
         task = service.create_toolkit_task(payload)

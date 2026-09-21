@@ -672,7 +672,7 @@ class ResumeToolkitTask(Base):
     owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
 
     # optimize | career-match | jd-match | interview-prep | portfolio-plan |
-    # salary-negotiation | follow-up（合法值见 services/resume.py 的 TOOLKIT_KINDS）
+    # salary-negotiation（合法值见 services/resume.py 的 TOOLKIT_KINDS）
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     title: Mapped[str] = mapped_column(String(128), nullable=False)
     inputs: Mapped[dict] = mapped_column(JSON, nullable=False)

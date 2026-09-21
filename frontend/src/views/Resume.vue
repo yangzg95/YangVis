@@ -70,6 +70,7 @@
             </template>
             <template v-else-if="column.key === 'actions'">
               <a-space :size="4" wrap>
+                <a-button size="small" type="link" @click="openPreview(record)">预览</a-button>
                 <a-button
                   v-if="record.has_report"
                   size="small"
@@ -421,6 +422,25 @@
       </template>
     </a-modal>
 
+    <!-- ================= 预览抽屉 ================= -->
+    <a-drawer
+      v-model:open="previewDrawer.open"
+      :width="720"
+      :title="previewDrawer.title || '简历预览'"
+    >
+      <div v-if="previewDrawer.loading" class="preview-loading">
+        <a-spin />
+      </div>
+      <template v-else>
+        <div class="preview-meta muted">
+          {{ previewDrawer.filename }}<template v-if="previewDrawer.size">
+            · {{ fmtSize(previewDrawer.size) }}
+          </template>
+        </div>
+        <pre class="preview-content">{{ previewDrawer.content }}</pre>
+      </template>
+    </a-drawer>
+
     <!-- 报告不再用抽屉看：「查看报告」统一新开标签页进 /office/report/...（见 ReportView）。 -->
   </div>
 </template>
@@ -436,7 +456,6 @@ import {
   HighlightOutlined,
   InboxOutlined,
   LoadingOutlined,
-  MailOutlined,
   PayCircleOutlined,
   QuestionCircleOutlined,
   RocketOutlined,
@@ -464,7 +483,7 @@ const router = useRouter()
 // 声明式配置：新增工具只动这张表与后端 TOOLKIT_KINDS，弹窗表单按字段自动渲染。
 
 interface ToolFieldDef {
-  key: 'position' | 'job_description' | 'background' | 'offer_amount' | 'recruiter_name' | 'notes'
+  key: 'position' | 'job_description' | 'background' | 'offer_amount' | 'notes'
   label: string
   placeholder?: string
   textarea?: boolean
@@ -580,24 +599,6 @@ const TOOL_DEFS: ToolDef[] = [
       },
     ],
   },
-  {
-    kind: 'follow-up',
-    name: '后续互动策略',
-    desc: '面试后的一封好跟进邮件，让你从「候选人之一」变成「就是他了」',
-    icon: MailOutlined,
-    resumeSource: null,
-    fields: [
-      { key: 'recruiter_name', label: '招聘人员姓名', required: true, placeholder: '如：王女士' },
-      { key: 'position', label: '职位名称', required: true, placeholder: '如：高级前端工程师' },
-      {
-        key: 'notes',
-        label: '补充说明（可选）',
-        textarea: true,
-        rows: 3,
-        placeholder: '如：面试中聊到的重点项目、想补充强调的经历',
-      },
-    ],
-  },
 ]
 
 // ---- 状态 -------------------------------------------------------------------
@@ -650,13 +651,22 @@ const compareModal = reactive({
 
 const downloadingId = ref(0)
 
+const previewDrawer = reactive({
+  open: false,
+  loading: false,
+  title: '',
+  filename: '',
+  size: 0,
+  content: '',
+})
+
 const resumeColumns = [
   { key: 'title', title: '简历', dataIndex: 'title', ellipsis: true },
   { key: 'size', title: '大小', dataIndex: 'size', width: 90 },
   { key: 'description', title: '描述', dataIndex: 'description', ellipsis: true },
   { key: 'status', title: '状态', dataIndex: 'status', width: 110 },
   { key: 'created_at', title: '上传时间', dataIndex: 'created_at', width: 180 },
-  { key: 'actions', title: '操作', width: 260 },
+  { key: 'actions', title: '操作', width: 300 },
 ]
 
 const comparisonColumns = [
@@ -828,6 +838,27 @@ async function onRemove(record: ResumeItem) {
     await loadResumes()
   } catch (err) {
     message.error(errorText(err, '删除失败'))
+  }
+}
+
+// ---- 预览 --------------------------------------------------------------------
+// 看的是上传时抽取好的纯文本（PDF/DOCX/TXT 统一了），不依赖网盘里有没有原件。
+
+async function openPreview(record: ResumeItem) {
+  previewDrawer.open = true
+  previewDrawer.loading = true
+  previewDrawer.title = record.title
+  previewDrawer.filename = record.filename
+  previewDrawer.size = record.size
+  previewDrawer.content = ''
+  try {
+    const detail = await resumeApi.preview(record.id)
+    previewDrawer.content = detail.content
+  } catch (err) {
+    previewDrawer.open = false
+    message.error(errorText(err, '加载预览失败'))
+  } finally {
+    previewDrawer.loading = false
   }
 }
 
@@ -1212,5 +1243,21 @@ onUnmounted(() => {
 .resume-source-control {
   width: 100%;
   margin-top: 8px;
+}
+.preview-loading {
+  display: flex;
+  justify-content: center;
+  padding: 48px 0;
+}
+.preview-meta {
+  margin-bottom: 12px;
+  font-size: 12px;
+}
+.preview-content {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.7;
 }
 </style>

@@ -405,26 +405,6 @@ BUILTIN_AGENTS: tuple[BuiltinAgent, ...] = (
         sort_order=150,
     ),
     BuiltinAgent(
-        slug="followup-writer",
-        name="跟进邮件写手",
-        description="「智能办公 · 求职助手」撰写面试后的跟进邮件，不用于直接对话",
-        system_prompt=(
-            "你是一位求职沟通顾问，负责撰写面试后的跟进邮件。\n"
-            "要求：\n"
-            "1. 用 markdown 输出邮件的主题行与正文。正文要短：150 字以内，三段以内。\n"
-            "2. 结构：感谢机会与具体时间 → 重申一两个与岗位最匹配的资质点（不是复述简历）、"
-            "可补充面试中没发挥好的一个点 → 表达持续兴趣并礼貌询问后续流程。\n"
-            "3. 语气专业而有温度：不催促、不卑微、不群发感。能称呼对方姓名就用姓名。\n"
-            "4. 另附 2-3 条发送建议（时机、是否需要针对多位面试官分别发送等）。\n"
-            "5. 全部使用简体中文。"
-        ),
-        use_knowledge=False,
-        use_ops=False,
-        chat_visible=False,
-        temperature=40,
-        sort_order=160,
-    ),
-    BuiltinAgent(
         slug="ops-assistant",
         name="运维助手",
         description="在主对话里只读排查你登记的服务器与数据库",

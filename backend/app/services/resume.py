@@ -122,11 +122,6 @@ TOOLKIT_KINDS: dict = {
         agent_slug="salary-negotiator",
         required_fields=(("offer_amount", "offer 年薪"),),
     ),
-    "follow-up": ToolkitKindSpec(
-        label="后续互动策略",
-        agent_slug="followup-writer",
-        required_fields=(("recruiter_name", "招聘人员姓名"), ("position", "职位名称")),
-    ),
 }
 
 
@@ -146,7 +141,7 @@ def _toolkit_title(kind: str, inputs: dict) -> str:
         subject = source_name or "个人背景"
     elif kind == "jd-match":
         subject = source_name
-    elif kind in ("interview-prep", "portfolio-plan", "follow-up"):
+    elif kind in ("interview-prep", "portfolio-plan"):
         subject = position
     elif kind == "salary-negotiation":
         subject = (inputs.get("offer_amount") or "").strip()
@@ -207,14 +202,7 @@ def _toolkit_prompt(kind: str, inputs: dict) -> str:
             parts.append(f"补充说明：{notes}")
         return "\n".join(parts)
 
-    # follow-up
-    parts = [
-        f"招聘人员：{(inputs.get('recruiter_name') or '').strip()}",
-        f"职位：{position}",
-    ]
-    if notes:
-        parts.append(f"补充说明：{notes}")
-    return "\n".join(parts)
+    raise ValueError(f"未知的求职助手类型：{kind}")
 
 
 def extract_resume_text(filename: str, raw: bytes) -> str:
