@@ -651,12 +651,21 @@ export const chatApi = {
 
   // ---- 运维问答会话与写命令确认 ------------------------------------------------
 
-  /** 运维页面嵌入面板的入口：每个目标一个会话，找到复用、没有就建。 */
-  findOpsConversation: (targetType: 'server' | 'database', targetId: number) =>
+  /** 某个运维目标的全部历史问答会话（最近活跃的在前）：面板的历史下拉用。 */
+  listOpsConversations: (targetType: 'server' | 'database', targetId: number) =>
+    request<{ items: Conversation[]; total: number }>({
+      url: '/chat/ops-conversations',
+      params: { target_type: targetType, target_id: targetId },
+    }),
+  /**
+   * 为运维目标新开一个问答会话。面板是懒创建：打开就是新窗口，第一条提问
+   * 发出去时才调这里落库，免得历史列表堆满一句话都没说的空会话。
+   */
+  createOpsConversation: (targetType: 'server' | 'database', targetId: number, title?: string) =>
     request<Conversation>({
-      url: '/chat/ops-conversation',
+      url: '/chat/ops-conversations',
       method: 'POST',
-      data: { target_type: targetType, target_id: targetId },
+      data: { target_type: targetType, target_id: targetId, title },
     }),
   /** 一个会话的全部待确认项（含已处理的）：历史回放时确认卡片靠它恢复。 */
   listActions: (conversationId: number) =>

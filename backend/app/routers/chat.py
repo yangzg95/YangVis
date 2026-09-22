@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.deps import require_user
 from app.errors import BusinessError
+from app.models.entities import ChatConversation
 from app.models.schemas import (
     APIResponse,
     CompletionRequest,
@@ -158,29 +159,53 @@ async def list_actions(
 # ---- 运维问答会话与写命令确认 -------------------------------------------------
 
 
-@router.post("/ops-conversation", response_model=APIResponse[ConversationItem])
-async def find_ops_conversation(
+def _conversation_item(
+    row: ChatConversation, message_count: int = 0
+) -> ConversationItem:
+    return ConversationItem(
+        id=row.id,
+        title=row.title,
+        agent_id=row.agent_id,
+        project_id=row.project_id,
+        type_ids=row.type_ids,
+        model_config_id=row.model_config_id,
+        message_count=message_count,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+@router.get(
+    "/ops-conversations",
+    response_model=APIResponse[ListResponse[ConversationItem]],
+)
+async def list_ops_conversations(
+    target_type: str,
+    target_id: int,
+    service: ChatService = Depends(get_service),
+) -> APIResponse[ListResponse[ConversationItem]]:
+    """某个运维目标的全部历史问答会话（最近活跃的在前）：面板的历史下拉用。"""
+    try:
+        rows = service.list_ops_conversations(target_type, target_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    items = [_conversation_item(row, count) for row, count in rows]
+    return APIResponse(data=ListResponse(items=items, total=len(items)))
+
+
+@router.post("/ops-conversations", response_model=APIResponse[ConversationItem])
+async def create_ops_conversation(
     payload: OpsConversationRequest,
     service: ChatService = Depends(get_service),
 ) -> APIResponse[ConversationItem]:
-    """运维页面嵌入面板的入口：每个目标一个会话，找到复用、没有就建。"""
+    """运维嵌入面板开新会话的入口：每个新窗口一个会话，旧会话走列表翻回去。"""
     try:
-        row = service.find_or_create_ops_conversation(payload.target_type, payload.target_id)
+        row = service.create_ops_conversation(
+            payload.target_type, payload.target_id, payload.title
+        )
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    return APIResponse(
-        data=ConversationItem(
-            id=row.id,
-            title=row.title,
-            agent_id=row.agent_id,
-            project_id=row.project_id,
-            type_ids=row.type_ids,
-            model_config_id=row.model_config_id,
-            message_count=service.count_messages(row.id),
-            created_at=row.created_at,
-            updated_at=row.updated_at,
-        )
-    )
+    return APIResponse(data=_conversation_item(row))
 
 
 @router.post("/actions/{action_id}/reject", response_model=APIResponse[OpsActionItem])

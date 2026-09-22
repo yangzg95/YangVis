@@ -297,12 +297,13 @@ class CompletionRequest(BaseModel):
 
 
 class OpsConversationRequest(BaseModel):
-    """找到（或创建）绑定某个运维目标的问答会话。"""
+    """为某个运维目标新开一个问答会话。title 缺省时用「目标名 + 运维问答」兜底。"""
 
     model_config = _ALLOW_MODEL_PREFIX
 
     target_type: str = Field(..., pattern="^(server|database)$")
     target_id: int
+    title: Optional[str] = None
 
 
 class OpsActionItem(BaseModel):

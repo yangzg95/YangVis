@@ -1,5 +1,49 @@
 <template>
   <div :class="['ops-chat', { dark }]">
+    <!-- 工具条：历史会话下拉 + 新会话。面板每次打开都是全新窗口，旧排查从这里翻回去。 -->
+    <div class="chat-toolbar">
+      <a-dropdown
+        :trigger="['click']"
+        :overlay-class-name="dark ? 'ops-history-overlay dark' : 'ops-history-overlay'"
+        @open-change="onHistoryOpen"
+      >
+        <button type="button" class="tool-btn" :disabled="!targetId">
+          <HistoryOutlined /> 历史
+        </button>
+        <template #overlay>
+          <a-menu :selected-keys="conversationId ? [conversationId] : []">
+            <a-menu-item v-for="conv in history" :key="conv.id" @click="openConversation(conv.id)">
+              <div class="history-item">
+                <div class="history-line">
+                  <span class="history-title">{{ conv.title }}</span>
+                  <!-- stop：不触发菜单项的「打开会话」，也不让下拉收起来。 -->
+                  <a-tooltip title="删除这段会话">
+                    <DeleteOutlined class="history-del" @click.stop="removeConversation(conv)" />
+                  </a-tooltip>
+                </div>
+                <span class="history-meta">
+                  {{ formatTime(conv.updated_at) }} · {{ conv.message_count }} 条
+                </span>
+              </div>
+            </a-menu-item>
+            <a-menu-item v-if="!history.length" key="empty" disabled>
+              还没有历史会话
+            </a-menu-item>
+          </a-menu>
+        </template>
+      </a-dropdown>
+      <a-tooltip title="清空当前窗口，另起一段排查">
+        <button
+          type="button"
+          class="tool-btn"
+          :disabled="!targetId || isFresh || thinking"
+          @click="newChat"
+        >
+          <PlusOutlined /> 新会话
+        </button>
+      </a-tooltip>
+    </div>
+
     <div ref="scrollEl" class="chat-body" @click="onBodyClick">
       <div v-if="!targetId" class="chat-empty">
         {{ emptyHint }}
@@ -100,8 +144,15 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { message as toast } from 'ant-design-vue'
-import { RobotOutlined, ArrowUpOutlined, CopyOutlined } from '@ant-design/icons-vue'
+import { message as toast, Modal } from 'ant-design-vue'
+import {
+  RobotOutlined,
+  ArrowUpOutlined,
+  CopyOutlined,
+  DeleteOutlined,
+  HistoryOutlined,
+  PlusOutlined,
+} from '@ant-design/icons-vue'
 import ConfirmCard from '@/components/ConfirmCard.vue'
 import { useAuthStore } from '@/stores/auth'
 import { createMarkdown } from '@/utils/markdown'
@@ -112,6 +163,7 @@ import { storageKeys } from '@/utils/storage'
 import {
   chatApi,
   settingsApi,
+  type Conversation,
   type ModelConfig,
   type OpsAction,
   type StreamHandlers,
@@ -294,16 +346,20 @@ function currentAnswer(): TalkItem {
   return created
 }
 
-// ---- 会话加载 ---------------------------------------------------------------
-// 换目标就是换会话：找到（或创建）该目标的运维会话，消息与待确认项一起回放。
-// loadSeq 管竞态：快速切换目标时，慢响应不得覆盖新选择。
+// ---- 会话与历史 ---------------------------------------------------------------
+// 面板每次打开（或点「新会话」）都是全新窗口：会话懒创建，第一条提问发出去
+// 时才落库，免得历史列表堆满一句话都没说的空会话。旧排查从历史下拉翻回去，
+// 消息与待确认项一起回放。loadSeq 管竞态：快速切换目标/会话时，慢响应不得
+// 覆盖新选择。
+const history = ref<Conversation[]>([])
+
 let loadSeq = 0
 let abort: (() => void) | null = null
 
-async function loadConversation() {
-  const mine = ++loadSeq
-  abort?.()
-  abort = null
+/** 当前是不是一段还没开口的新窗口（此时「新会话」按钮没有意义）。 */
+const isFresh = computed(() => conversationId.value === null && !items.value.length)
+
+function resetView() {
   conversationId.value = null
   convAgentId.value = null
   items.value = []
@@ -314,24 +370,53 @@ async function loadConversation() {
   streamingAnswerKey.value = null
   endStream()
   clearCache()
-  if (!props.targetId) return
+}
 
-  let conv
-  try {
-    conv = await chatApi.findOpsConversation(props.target, props.targetId)
-  } catch {
-    return // 拦截器已提示
+/** 拉目标的历史会话列表。mine 是调用方手里的 loadSeq 快照。 */
+async function refreshHistory(mine: number) {
+  if (!props.targetId) {
+    history.value = []
+    return
   }
-  if (mine !== loadSeq) return
-  conversationId.value = conv.id
-  convAgentId.value = conv.agent_id
+  try {
+    const data = await chatApi.listOpsConversations(props.target, props.targetId)
+    if (mine !== loadSeq) return
+    history.value = data.items
+  } catch {
+    // 拦截器已提示；历史拉不到不挡着聊天。
+  }
+}
 
+/** 换目标：窗口回到全新状态，只把该目标的历史列表装进来。 */
+async function loadTarget() {
+  const mine = ++loadSeq
+  abort?.()
+  abort = null
+  resetView()
+  history.value = []
+  await refreshHistory(mine)
+}
+
+/** 从历史里翻回一段旧排查：消息与待确认项一起回放。 */
+async function openConversation(id: number) {
+  if (thinking.value) {
+    // 回答流还挂着气泡机制，切走会把流式状态搞乱。
+    toast.warning('请等当前回答结束后再切换会话')
+    return
+  }
+  if (id === conversationId.value) return
+  const mine = ++loadSeq
+  abort?.()
+  abort = null
+  resetView()
   try {
     const [msgs, acts] = await Promise.all([
-      chatApi.listMessages(conv.id),
-      chatApi.listActions(conv.id),
+      chatApi.listMessages(id),
+      chatApi.listActions(id),
     ])
     if (mine !== loadSeq) return
+    conversationId.value = id
+    convAgentId.value = history.value.find((c) => c.id === id)?.agent_id ?? null
     items.value = msgs.items.map((m) => ({
       key: `m${m.id}`,
       id: m.id,
@@ -342,8 +427,70 @@ async function loadConversation() {
     actions.value = acts.items
     scrollToBottom()
   } catch {
-    // 拦截器已提示；会话 id 已记住，接着提问不受影响。
+    // 拦截器已提示；窗口保持全新状态，接着提问不受影响。
   }
+}
+
+/** 清空窗口另起一段：会话本身不删，它留在历史列表里。 */
+function newChat() {
+  if (isFresh.value || thinking.value) return
+  loadSeq += 1
+  abort?.()
+  abort = null
+  resetView()
+}
+
+/**
+ * 删掉一段历史会话。用 Modal 而不是 popconfirm：下拉菜单里的确认气泡会
+ * 被下拉的「点击外部收起」一起带走，Modal 独立于这层 DOM，没这个问题。
+ */
+function removeConversation(conv: Conversation) {
+  if (thinking.value && conversationId.value === conv.id) {
+    toast.warning('这段会话正在生成回答，结束后再删')
+    return
+  }
+  Modal.confirm({
+    title: '删除这段会话？',
+    content: `「${conv.title}」的 ${conv.message_count} 条消息会一起删掉，不可恢复。`,
+    okText: '删除',
+    okButtonProps: { danger: true },
+    cancelText: '取消',
+    onOk: async () => {
+      try {
+        await chatApi.deleteConversation(conv.id)
+      } catch {
+        return // 拦截器已提示
+      }
+      if (conversationId.value === conv.id) {
+        // 删的正是打开的这段：窗口回到全新状态。
+        loadSeq += 1
+        abort?.()
+        abort = null
+        resetView()
+      }
+      toast.success('已删除')
+      await refreshHistory(loadSeq)
+    },
+  })
+}
+
+/** 下拉展开时刷新一次历史：别的标签页聊过的也能看到。 */
+function onHistoryOpen(open: boolean) {
+  if (open) void refreshHistory(loadSeq)
+}
+
+/** 会话标题与主对话同一规则：第一个问题，压平空白后截 40 字。 */
+function deriveTitle(question: string): string {
+  const title = question.split(/\s+/).join(' ')
+  return title.length <= 40 ? title : `${title.slice(0, 40)}…`
+}
+
+/** 历史下拉里的一行时间：MM-DD HH:mm，够认就行。 */
+function formatTime(value: string): string {
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 // ---- SSE 事件处理 -------------------------------------------------------------
@@ -399,6 +546,8 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
       if (item && item.kind === 'assistant') item.id = message_id
       for (const a of streamActions) a.message_id = message_id
       finishStream()
+      // 本轮问答落库了：历史列表里这条会话的条数/活跃时间变了，顺手刷新。
+      void refreshHistory(loadSeq)
     },
     onError: ({ message }) => {
       toast.error(message)
@@ -448,11 +597,21 @@ async function send() {
 /** 发一条提问。暴露给外部（工作台「询问 AI」）直接带问题进来。 */
 async function ask(question: string) {
   if (!question.trim() || !props.targetId || thinking.value) return
-  const convId = conversationId.value
+  let convId = conversationId.value
   if (!convId) {
-    // 目标刚选中、会话还在建立：比静默吞掉更该说清楚。
-    toast.warning('会话还在准备，请稍候再发')
-    return
+    // 懒创建：面板打开是全新窗口，第一条提问发出去时才会话才落库。
+    try {
+      const conv = await chatApi.createOpsConversation(
+        props.target,
+        props.targetId,
+        deriveTitle(question),
+      )
+      conversationId.value = conv.id
+      convAgentId.value = conv.agent_id
+      convId = conv.id
+    } catch {
+      return // 拦截器已提示（目标被删、模型不可用等）
+    }
   }
 
   items.value.push({ key: nextKey(), kind: 'user', text: question, steps: [] })
@@ -495,10 +654,10 @@ function stop() {
   finishStream()
 }
 
-// 换了目标就是另一台机器/另一个库，会话整个换掉（含历史与待确认项）。
+// 换了目标就是另一台机器/另一个库：窗口回到全新状态，历史列表整个换掉。
 watch(
   () => [props.target, props.targetId],
-  () => void loadConversation(),
+  () => void loadTarget(),
   { immediate: true },
 )
 
@@ -521,6 +680,40 @@ defineExpose({
      height:100% 会拿整个 body 的高度，把底部的输入框挤出可视区。 */
   flex: 1;
   min-height: 0;
+}
+
+/* 工具条（历史 / 新会话）：发丝线以下才是消息区。 */
+.chat-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.tool-btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--signal-text);
+}
+
+.tool-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .chat-body {
@@ -754,6 +947,19 @@ defineExpose({
   color: #3ad6de;
 }
 
+.ops-chat.dark .chat-toolbar {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.ops-chat.dark .tool-btn {
+  color: #8b98a5;
+}
+
+.ops-chat.dark .tool-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: #3ad6de;
+}
+
 .ops-chat.dark .chat-composer {
   border-top-color: rgba(255, 255, 255, 0.08);
 }
@@ -787,5 +993,95 @@ defineExpose({
 .ops-chat.dark .chat-composer :deep(textarea:focus) {
   border-color: rgba(58, 214, 222, 0.45);
   box-shadow: none;
+}
+</style>
+
+<!-- 历史下拉渲染在 body（scoped 够不到），样式只能全局：一律用
+     ops-history 前缀避免撞名。 -->
+<style>
+.ops-history-overlay .ant-dropdown-menu {
+  max-width: 300px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.ops-history-overlay .history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+}
+
+.ops-history-overlay .history-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ops-history-overlay .history-title {
+  flex: 1;
+  min-width: 0;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+/* 删除图标平时藏着，悬停该条才出现：列表主要还是用来「打开」的。 */
+.ops-history-overlay .history-del {
+  flex-shrink: 0;
+  padding: 2px;
+  border-radius: 4px;
+  color: rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+  opacity: 0;
+  transition: all 0.15s;
+}
+
+.ops-history-overlay .ant-dropdown-menu-item:hover .history-del {
+  opacity: 1;
+}
+
+.ops-history-overlay .history-del:hover {
+  background: rgba(255, 77, 79, 0.12);
+  color: #ff4d4f;
+}
+
+.ops-history-overlay .history-meta {
+  color: rgba(0, 0, 0, 0.45);
+  font-size: 11px;
+}
+
+/* 深色变体（全屏终端页的 AI 面板）：菜单底色/文字与面板同族。 */
+.ops-history-overlay.dark .ant-dropdown-menu {
+  background: #1b2530;
+}
+
+.ops-history-overlay.dark .ant-dropdown-menu-item {
+  color: #d8dee4;
+}
+
+.ops-history-overlay.dark .ant-dropdown-menu-item:hover,
+.ops-history-overlay.dark .ant-dropdown-menu-item-selected {
+  background: rgba(58, 214, 222, 0.12) !important;
+  color: #3ad6de;
+}
+
+.ops-history-overlay.dark .ant-dropdown-menu-item-disabled {
+  color: #5f6b78 !important;
+}
+
+.ops-history-overlay.dark .history-meta {
+  color: #8b98a5;
+}
+
+.ops-history-overlay.dark .history-del {
+  color: #8b98a5;
+}
+
+.ops-history-overlay.dark .history-del:hover {
+  background: rgba(255, 77, 79, 0.18);
+  color: #ff7875;
 }
 </style>

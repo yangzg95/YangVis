@@ -45,8 +45,11 @@
         <span class="rail-text">AI 问答</span>
       </div>
 
+      <!-- 藏在缝隙里的拖拽条：负边距叠在 gap 上，不改变布局（与工作台页同款）。 -->
+      <div v-if="showAi" class="col-resizer" @mousedown="startAiDrag" />
+
       <!-- v-show 而不是 v-if：折叠只是藏起来，会话和 WebSocket 都保住。 -->
-      <aside v-show="showAi" class="ai-panel">
+      <aside v-show="showAi" class="ai-panel" :style="{ width: `${aiWidth}px` }">
         <div class="ai-head">
           <span>AI 问答</span>
           <a-tooltip title="收起">
@@ -88,7 +91,10 @@ import {
 } from '@ant-design/icons-vue'
 import OpsChat from '@/components/OpsChat.vue'
 import DbQueryTab from '@/components/ops/DbQueryTab.vue'
+import { clampSize, readSize, saveSize, startDragResize } from '@/components/ops/resizer'
+import '@/components/ops/resizer.css'
 import { opsApi, type OpsDatabase } from '@/api'
+import { storageKeys } from '@/utils/storage'
 
 const CHAT_SAMPLES = [
   '这个库里最大的几张表是什么',
@@ -105,6 +111,22 @@ const conn = ref<OpsDatabase | null>(null)
 const loadError = ref('')
 const showAi = ref(true)
 const queryRef = ref<InstanceType<typeof DbQueryTab> | null>(null)
+
+// ---- AI 面板拖拽调宽 -----------------------------------------------------------
+// 默认 460px，比初版 400 宽一档；宽度偏好记 localStorage，与工作台页两侧面板
+// 同一套机制。
+const aiWidth = ref(readSize(storageKeys.opsDbAiWidth, 460))
+
+function startAiDrag(event: MouseEvent) {
+  const startWidth = aiWidth.value
+  startDragResize(
+    event,
+    'x',
+    // 面板在右侧：往左拖变宽，位移取反。
+    (delta) => { aiWidth.value = clampSize(startWidth - delta, 320, 760) },
+    () => saveSize(storageKeys.opsDbAiWidth, aiWidth.value),
+  )
+}
 
 const address = computed(() => {
   const item = conn.value
@@ -248,10 +270,35 @@ function onAskAi(payload: { connId: number; sql: string; error?: string; schema?
 
 /* AI 面板收起后的展开入口用全局 .rail / .rail-text（style.css）。 */
 
+/* 拖拽条：12px 热区用负边距叠在 flex gap 上，视觉上不占位；
+   悬停 / 拖拽（body.dragging-col）时中间亮出一条 2px 的线。 */
+.col-resizer {
+  flex-shrink: 0;
+  width: 12px;
+  margin: 0 -12px;
+  display: flex;
+  justify-content: center;
+  cursor: col-resize;
+  z-index: 5;
+}
+
+.col-resizer::after {
+  content: '';
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.col-resizer:hover::after,
+body.dragging-col .col-resizer::after {
+  background: var(--signal-border, #91caff);
+}
+
+/* 宽度由模板里的内联样式给（可拖拽），这里只定布局。 */
 .ai-panel {
   display: flex;
   flex-direction: column;
-  width: 400px;
   flex-shrink: 0;
   min-height: 0;
   border: 1px solid var(--hairline);
@@ -274,10 +321,14 @@ function onAskAi(payload: { connId: number; sql: string; error?: string; schema?
     flex: none;
     height: 60vh;
   }
+  /* 内联宽度优先级高于样式表，窄屏堆叠时必须 !important 压掉它。 */
   .ai-panel {
     flex: none;
-    width: auto;
+    width: auto !important;
     height: 60vh;
+  }
+  .col-resizer {
+    display: none;
   }
   .rail {
     flex-direction: row;

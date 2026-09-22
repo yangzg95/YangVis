@@ -114,7 +114,9 @@
       </div>
 
       <!-- v-show 而不是 v-if：折叠只是藏起来，会话和 WebSocket 都保住。 -->
-      <aside v-show="showAi" class="term-ai">
+      <aside v-show="showAi" class="term-ai" :style="{ width: `${aiWidth}px` }">
+        <!-- 左缘拖拽把柄：绝对定位叠在面板与终端的缝隙上，不参与布局。 -->
+        <div class="ai-resizer" @mousedown="startAiDrag" />
         <div class="ai-head">
           <span>AI 助手</span>
           <a-tooltip title="收起">
@@ -165,9 +167,12 @@ import OpsChat from '@/components/OpsChat.vue'
 import ServerFilePanel from '@/components/ServerFilePanel.vue'
 import ServerTerminal from '@/components/ServerTerminal.vue'
 import TransferPanel from '@/components/TransferPanel.vue'
+import { clampSize, readSize, saveSize, startDragResize } from '@/components/ops/resizer'
+import '@/components/ops/resizer.css'
 import { opsApi, type OpsServer } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { useTransfersStore } from '@/stores/transfers'
+import { storageKeys } from '@/utils/storage'
 
 const CHAT_SAMPLES = [
   '磁盘占用最高的几个目录是什么',
@@ -229,6 +234,27 @@ function reconnect() {
 
 function toggleAi() {
   showAi.value = !showAi.value
+}
+
+// ---- AI 面板拖拽调宽 -----------------------------------------------------------
+// 默认 440px，比初版 360 宽一档（AI 回答里的命令与表格多了）；宽度偏好记
+// localStorage，与数据库工作台两侧面板同一套机制。
+const aiWidth = ref(readSize(storageKeys.opsTermAiWidth, 440))
+
+function startAiDrag(event: MouseEvent) {
+  const startWidth = aiWidth.value
+  startDragResize(
+    event,
+    'x',
+    // 面板在右侧：往左拖变宽，位移取反。
+    (delta) => { aiWidth.value = clampSize(startWidth - delta, 320, 760) },
+    () => {
+      saveSize(storageKeys.opsTermAiWidth, aiWidth.value)
+      // 宽度落定后 fit 一次校正 PTY 列数；拖拽途中不 fit，免得鼠标每动
+      // 一格就给后端发一次 resize。
+      terminalRef.value?.fit()
+    },
+  )
 }
 
 function toggleFiles() {
@@ -584,17 +610,45 @@ function onTerminalStatus(value: 'connecting' | 'connected' | 'closed', code?: n
   font-size: 12px;
 }
 
-/* AI 面板与终端同底 (#11181f)，靠一道发丝线和终端区分开。 */
+/* AI 面板与终端同底 (#11181f)，靠一道发丝线和终端区分开。
+   宽度由模板里的内联样式给（可拖拽），这里只定布局。 */
 .term-ai {
+  position: relative;
   display: flex;
   flex-direction: column;
-  width: 360px;
   flex-shrink: 0;
   margin: 10px 12px 10px 0;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 6px;
   background: #11181f;
   overflow: hidden;
+}
+
+/* 左缘拖拽把柄：12px 热区贴面板左缘内侧（面板 overflow:hidden，不能探出去），
+   悬停/拖拽（body.dragging-col，全局规则在 resizer.css）时亮出一条青色细线。 */
+.ai-resizer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 12px;
+  display: flex;
+  justify-content: center;
+  cursor: col-resize;
+  z-index: 6;
+}
+
+.ai-resizer::after {
+  content: '';
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.ai-resizer:hover::after,
+body.dragging-col .ai-resizer::after {
+  background: rgba(58, 214, 222, 0.6);
 }
 
 .ai-head {

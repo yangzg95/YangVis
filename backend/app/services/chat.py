@@ -359,38 +359,30 @@ class ChatService:
 
     # -- 运维问答会话 ----------------------------------------------------------
 
-    def find_or_create_ops_conversation(
-        self, target_type: str, target_id: int
-    ) -> ChatConversation:
-        """找到（或创建）绑定某个运维目标的问答会话，每个目标一个。
-
-        运维页面的嵌入面板每次都走这里：目标是哪台机器/哪个库决定了会话用
-        哪个人设（内置的 server-ops / db-ops）、挂哪种形态的工具箱。
-        """
+    def _ops_persona(self, target_type: str, target_id: int) -> Tuple[str, str]:
+        """校验运维目标归属并给出内置人设 slug 与目标名（标题兜底用）。"""
         if target_type == TARGET_SERVER:
             target = server_ops.OpsServerService(self._db, self._owner_id).get(target_id)
-            slug = "server-ops"
-        elif target_type == "database":
+            return "server-ops", target.name
+        if target_type == "database":
             target = db_ops.OpsDatabaseService(self._db, self._owner_id).get(target_id)
-            slug = "db-ops"
-        else:
-            raise LookupError("运维目标类型不支持")
+            return "db-ops", target.name
+        raise LookupError("运维目标类型不支持")
 
-        row = self._db.scalar(
-            self._scope(select(ChatConversation), ChatConversation.owner_id)
-            .where(
-                ChatConversation.ops_target_type == target_type,
-                ChatConversation.ops_target_id == target_id,
-            )
-            .order_by(ChatConversation.id.desc())
-        )
-        if row is not None:
-            return row
+    def create_ops_conversation(
+        self, target_type: str, target_id: int, title: Optional[str] = None
+    ) -> ChatConversation:
+        """为某个运维目标新开一个问答会话。
 
+        嵌入面板每开一个新窗口就建一个（旧会话从历史列表里翻回去），目标是
+        哪台机器/哪个库决定了会话用哪个人设（内置的 server-ops / db-ops）、
+        挂哪种形态的工具箱。
+        """
+        slug, target_name = self._ops_persona(target_type, target_id)
         agent = self._agents.require_by_slug(slug)
         row = ChatConversation(
             owner_id=self._owner_id,
-            title=f"{target.name} 运维问答",
+            title=(title or f"{target_name} 运维问答")[:255],
             agent_id=agent.id,
             ops_target_type=target_type,
             ops_target_id=target_id,
@@ -400,16 +392,30 @@ class ChatService:
         self._db.refresh(row)
         return row
 
-    def count_messages(self, conversation_id: int) -> int:
-        return int(
-            self._db.scalar(
-                select(func.count(ChatMessage.id)).where(
-                    ChatMessage.owner_id == self._owner_id,
-                    ChatMessage.conversation_id == conversation_id,
-                )
+    def list_ops_conversations(
+        self, target_type: str, target_id: int
+    ) -> List[Tuple[ChatConversation, int]]:
+        """一个运维目标的全部问答会话（最近活跃的在前），连带各自的消息条数。
+
+        面板的历史下拉一趟拿全：标题、时间、条数都在，免得逐行 count。
+        会话是「发出第一条提问时才落库」的懒创建，正常不会出现空会话。
+        """
+        if target_type not in (TARGET_SERVER, "database"):
+            raise LookupError("运维目标类型不支持")
+        stmt = (
+            select(ChatConversation, func.count(ChatMessage.id))
+            .outerjoin(
+                ChatMessage, ChatMessage.conversation_id == ChatConversation.id
             )
-            or 0
+            .where(
+                ChatConversation.owner_id == self._owner_id,
+                ChatConversation.ops_target_type == target_type,
+                ChatConversation.ops_target_id == target_id,
+            )
+            .group_by(ChatConversation.id)
+            .order_by(ChatConversation.updated_at.desc())
         )
+        return [(row, int(count)) for row, count in self._db.execute(stmt).all()]
 
     # -- 消息 ---------------------------------------------------------------
 
