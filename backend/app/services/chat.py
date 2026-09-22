@@ -36,6 +36,12 @@ from app.services import ops_actions
 from app.services.agents import AgentService
 from app.services.chat_ops import TARGET_SERVER, Auditor, ChatOpsToolbox, OpsTarget
 from app.services.knowledge import KnowledgeService
+from app.services.memory import (
+    MEMORY_RULES,
+    MemoryService,
+    after_answer_task,
+    fire_and_forget,
+)
 from app.services import ops_database as db_ops
 from app.services import ops_server as server_ops
 from app.services.providers import build_chat_model
@@ -55,6 +61,11 @@ RETRIEVAL_TOP_K = 8
 # 打转。8 步约等于最多 3 轮「检索 → 再想」。
 MAX_REACT_STEPS = 8
 
+# 挂了运维工具箱时的步数上限。运维诊断动辄「列目标 → 逐条命令采集 → 汇总」
+# 六七轮起步（每轮模型+工具各占一步），沿用检索的 8 步上限会在排查中途被
+# GraphRecursionError 掐断——用户看到的就是 AI 说到一半突然停了。
+OPS_REACT_STEPS = 25
+
 ROLE_USER = "user"
 ROLE_ASSISTANT = "assistant"
 
@@ -70,6 +81,11 @@ NO_CONTEXT_REPLY = "知识库中未找到相关内容，无法回答这个问题
 # 就像是模型自己说到一半没声了。
 ABORTED_SUFFIX = "\n\n（已停止生成）"
 ABORTED_EMPTY = "（已停止生成）"
+
+# ReAct 循环撞步数上限时追加的标记。运维排查里模型常常刚说完「现在实际
+# 执行」就被掐断；不补这句话，用户看到的就像 AI 说到一半没声了，也不
+# 知道发个「继续」就能接着排查。
+STEP_LIMIT_SUFFIX = "\n\n（本轮排查步数已达上限，暂停在此；回复「继续」可接着排查）"
 
 # 附加到每个使用了知识库的 agent prompt 尾部。放在智能体定义外面，是为了
 # 即使用户自己写了个智能体，引用标注机制也能保持一致。
@@ -95,6 +111,9 @@ _OPS_RULES = """
 4. 数据库查询只读是硬约束，没有「确认后可写」的通道：需要写入时把 SQL 写给用户，
    让他到「运维」页面执行。
 5. 先采集事实再下结论，回答中引用你实际看到的输出。
+6. 工具还没真正返回结果之前，不要输出任何结论、指标或「命令输出」，绝不凭经验
+   编造执行结果。中间轮次至多写一句你正在查什么；结论只出现在收集完事实的
+   最终回答里。
 """.strip()
 
 
@@ -158,6 +177,7 @@ class ChatService:
         self._owner_id = owner_id
         self._agents = AgentService(db, owner_id)
         self._knowledge = KnowledgeService(db, owner_id)
+        self._memory = MemoryService(db, owner_id)
 
     # -- 作用域 -------------------------------------------------------------
 
@@ -332,6 +352,8 @@ class ChatService:
                 OpsPendingAction.conversation_id == row.id,
             )
         )
+        # 摘要属于会话本身，跟着会话走；长期记忆属于用户，不随会话删除。
+        self._memory.delete_summary(row.id)
         self._db.delete(row)
         self._db.commit()
 
@@ -769,6 +791,19 @@ class ChatService:
         tools: list = [self._datetime_tool()]
         system = agent.system_prompt
 
+        # 长期记忆与会话摘要注入在规则后缀之前：硬约束（引用、写确认）要留在
+        # prompt 的最末尾，背景信息放在人设和各套规则之间。
+        if agent.use_memory:
+            memories = self._memory.prompt_section()
+            if memories:
+                system = f"{system}\n\n{MEMORY_RULES}\n{memories}"
+        summary = self._memory.summary_for(conversation_id)
+        if summary:
+            system = (
+                f"{system}\n\n以下是本次会话更早部分的摘要"
+                f"（最近几轮对话在下文完整给出）：\n{summary}"
+            )
+
         # 挂运维工具箱的两个入口：智能体自己开了 use_ops（自由模式），或者
         # 会话本身绑定了一个运维目标（嵌入问答的绑定模式——内置的
         # server-ops/db-ops 人设 use_ops=False，工具箱是靠会话目标挂上的）。
@@ -811,6 +846,7 @@ class ChatService:
 
         parts: List[str] = []
         aborted = False
+        step_limited = False
         sent_proposals = 0
         sent_execs = 0
 
@@ -820,7 +856,9 @@ class ChatService:
                     conversation_id, question, question_persisted=question_persisted
                 )
             },
-            config={"recursion_limit": MAX_REACT_STEPS},
+            config={
+                "recursion_limit": OPS_REACT_STEPS if toolbox is not None else MAX_REACT_STEPS
+            },
             version="v2",
         )
         try:
@@ -874,8 +912,10 @@ class ChatService:
                         parts.append(text)
                         yield "token", text
         except GraphRecursionError:
-            # 模型一直在检索却不肯收尾。已经流出去的内容照常保存下来，不当成
-            # 错误抛给用户——他看到的那半截回答总比一条报错有用。
+            # 模型一直在调用工具却不肯收尾。已经流出去的内容照常保存下来，不当成
+            # 错误抛给用户——他看到的那半截回答总比一条报错有用；但要打上标记，
+            # 否则运维排查被掐断时看起来就像 AI 说到一半没声了。
+            step_limited = True
             logger.warning(
                 "react loop hit the step limit for conversation %s", conversation_id
             )
@@ -899,6 +939,11 @@ class ChatService:
             # 把这段残缺的回答存下来，并打上标记。要是存完整文本，那么落库
             # 的会话内容就和用户当时看到的对不上了。
             answer = f"{answer}{ABORTED_SUFFIX}" if answer else ABORTED_EMPTY
+        elif step_limited:
+            # 标记同样先补流出去再落库：用户屏幕上看到的和存下来的保持一致，
+            # 他也知道发条「继续」就能让模型接着排查。
+            yield "token", STEP_LIMIT_SUFFIX
+            answer = f"{answer}{STEP_LIMIT_SUFFIX}" if answer else STEP_LIMIT_SUFFIX.strip()
         elif not answer:
             answer = NO_CONTEXT_REPLY
 
@@ -915,6 +960,11 @@ class ChatService:
             for action in toolbox.pending_proposals:
                 action.message_id = row.id
             self._db.commit()
+
+        # 一轮问答落库后的收尾（重算会话摘要、提取长期记忆）放到请求之外跑：
+        # SSE 流一结束请求级 session 就关了，后台任务自己开 session。它失败
+        # 静默，且摘要全量重算——这一次错过的，下一次回答会补回来。
+        fire_and_forget(after_answer_task(self._owner_id, conversation_id, HISTORY_TURNS))
 
         logger.debug(
             "answer for conversation %s saved as message %s (%d chars, %d citation(s), aborted=%s)",

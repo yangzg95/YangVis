@@ -428,6 +428,7 @@ class AgentCreate(BaseModel):
     system_prompt: str = Field(..., min_length=1, max_length=8000)
     use_knowledge: bool = True
     use_ops: bool = False
+    use_memory: bool = False
     chat_visible: bool = True
     temperature: int = Field(default=30, ge=0, le=100)
     sort_order: int = Field(default=100, ge=0, le=9999)
@@ -439,6 +440,7 @@ class AgentUpdate(BaseModel):
     system_prompt: Optional[str] = Field(default=None, max_length=8000)
     use_knowledge: Optional[bool] = None
     use_ops: Optional[bool] = None
+    use_memory: Optional[bool] = None
     chat_visible: Optional[bool] = None
     temperature: Optional[int] = Field(default=None, ge=0, le=100)
     enabled: Optional[bool] = None
@@ -455,6 +457,7 @@ class AgentItem(BaseModel):
     system_prompt: str
     use_knowledge: bool
     use_ops: bool
+    use_memory: bool
     chat_visible: bool
     temperature: int
     is_builtin: bool
@@ -462,6 +465,26 @@ class AgentItem(BaseModel):
     sort_order: int
     created_at: datetime
     updated_at: datetime
+
+
+# ---- 长期记忆 ---------------------------------------------------------------
+
+class MemoryItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    content: str
+    source_conversation_id: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MemoryCreate(BaseModel):
+    content: str = Field(..., min_length=1, max_length=512)
+
+
+class MemoryUpdate(BaseModel):
+    content: str = Field(..., min_length=1, max_length=512)
 
 class ListResponse(BaseModel, Generic[T]):
     """分页接口返回的列表包装。"""

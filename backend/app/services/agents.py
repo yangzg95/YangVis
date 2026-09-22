@@ -40,6 +40,9 @@ class BuiltinAgent:
     chat_visible: bool
     temperature: int
     sort_order: int
+    # 默认关：大多数内置人设是「就事论事」的问答/生成型，注入用户记忆
+    # 反而引入与当前问题无关的偏见。只有长期陪伴型的人设显式打开。
+    use_memory: bool = False
 
 
 BUILTIN_AGENTS: tuple[BuiltinAgent, ...] = (
@@ -135,6 +138,7 @@ BUILTIN_AGENTS: tuple[BuiltinAgent, ...] = (
         chat_visible=True,
         temperature=70,
         sort_order=40,
+        use_memory=True,
     ),
     BuiltinAgent(
         slug="code-assistant",
@@ -180,6 +184,7 @@ BUILTIN_AGENTS: tuple[BuiltinAgent, ...] = (
         chat_visible=True,
         temperature=40,
         sort_order=46,
+        use_memory=True,
     ),
     BuiltinAgent(
         slug="server-ops",
@@ -455,6 +460,7 @@ def seed_builtin_agents(db: Session) -> None:
                     system_prompt=builtin.system_prompt,
                     use_knowledge=builtin.use_knowledge,
                     use_ops=builtin.use_ops,
+                    use_memory=builtin.use_memory,
                     chat_visible=builtin.chat_visible,
                     temperature=builtin.temperature,
                     is_builtin=True,
@@ -471,6 +477,7 @@ def seed_builtin_agents(db: Session) -> None:
             current.system_prompt = builtin.system_prompt
             current.use_knowledge = builtin.use_knowledge
             current.use_ops = builtin.use_ops
+            current.use_memory = builtin.use_memory
             current.chat_visible = builtin.chat_visible
             current.sort_order = builtin.sort_order
             current.is_builtin = True
@@ -543,6 +550,7 @@ class AgentService:
             system_prompt=payload.system_prompt,
             use_knowledge=payload.use_knowledge,
             use_ops=payload.use_ops,
+            use_memory=payload.use_memory,
             chat_visible=payload.chat_visible,
             temperature=payload.temperature,
             is_builtin=False,
@@ -595,6 +603,7 @@ class AgentService:
             system_prompt=source.system_prompt,
             use_knowledge=source.use_knowledge,
             use_ops=source.use_ops,
+            use_memory=source.use_memory,
             chat_visible=source.chat_visible,
             temperature=source.temperature,
             is_builtin=False,

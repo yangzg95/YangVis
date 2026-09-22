@@ -128,6 +128,10 @@ class Agent(Base):
     # 所以这里只读是硬约束（见 services/chat_ops.py）。
     use_ops: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
+    # 是否在回答时注入该用户的长期记忆（user_memory），并在回答后从对话里
+    # 提取新记忆。记忆属于用户而不属于智能体，这里只是「这个人设要不要用」。
+    use_memory: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
     # 是否出现在主对话的智能体选择器里。功能自带的人设（运维专家、简历分析这类
     # 由对应模块在后台调用的）不在对话里展示，但停用它们不影响后台调用。
     chat_visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -365,6 +369,59 @@ class ChatMessage(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<ChatMessage id={self.id} conv={self.conversation_id} role={self.role!r}>"
+
+
+class ChatSummary(Base):
+    """一个会话「最近几轮之前」那部分历史的滚动摘要。
+
+    回放窗口（services/chat.py 的 HISTORY_TURNS）之外的消息对模型不可见，
+    摘要就是它们留在上下文里的唯一形式。摘要是*全量重算*出来的——不存
+    「摘要到第几条消息」的 checkpoint，这样历史消息被手动改写后，下一次
+    重算自然吸收，任何 worker 也都能随时重算，无需跨进程状态。
+    """
+
+    __tablename__ = "chat_summary"
+
+    # 一个会话至多一行摘要，主键即 conversation_id。
+    conversation_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<ChatSummary conv={self.conversation_id} chars={len(self.summary)}>"
+
+
+class UserMemory(Base):
+    """一条关于用户的长期记忆，跨会话生效。
+
+    由后台任务从对话里提取（用户也可在设置页手动增删改），回答时注入到
+    开了 ``use_memory`` 的智能体的 system prompt 里。一条记忆就是一句话，
+    刻意不做结构化分类：分类体系的维护成本远超它对注入效果的贡献。
+    """
+
+    __tablename__ = "user_memory"
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    content: Mapped[str] = mapped_column(String(512), nullable=False)
+
+    # 提取出这条记忆的会话，仅用于溯源；会话删除后置空语义靠不删记忆体现——
+    # 记忆属于用户，不随产生它的会话一起消失。
+    source_conversation_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<UserMemory id={self.id} owner={self.owner_id}>"
 
 
 class OpsServer(Base):

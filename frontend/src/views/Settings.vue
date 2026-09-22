@@ -134,7 +134,72 @@
           未启用：请在后端 .env 配置 BAIDU_NETDISK_APP_KEY / SECRET_KEY / APP_NAME。
         </div>
       </a-tab-pane>
+
+      <!-- ================= 长期记忆 ================= -->
+      <a-tab-pane key="memory" tab="长期记忆">
+        <a-alert
+          type="info"
+          show-icon
+          class="gate-alert"
+          message="长期记忆是 AI 在对话中自动沉淀的、关于你的持久事实（职业背景、偏好、长期目标等）。"
+          description="只有开了「长期记忆」开关的智能体会使用并积累记忆；你可以在这里查看、修改或删除任何一条。"
+        />
+
+        <div class="toolbar">
+          <a-button type="primary" @click="openMemoryCreate">
+            <PlusOutlined /> 手动添加
+          </a-button>
+          <a-popconfirm
+            title="确认清空全部记忆？此操作不可恢复。"
+            ok-text="清空"
+            cancel-text="取消"
+            @confirm="onMemoryClear"
+          >
+            <a-button danger :disabled="!memories.length">清空全部</a-button>
+          </a-popconfirm>
+        </div>
+
+        <a-list :data-source="memories" :loading="memoryLoading" item-layout="horizontal">
+          <template #renderItem="{ item }">
+            <a-list-item>
+              <a-list-item-meta :description="`更新于 ${new Date(item.updated_at).toLocaleString()}`">
+                <template #title>{{ item.content }}</template>
+              </a-list-item-meta>
+              <template #actions>
+                <a-button size="small" @click="openMemoryEdit(item)">编辑</a-button>
+                <a-popconfirm title="删除这条记忆？" @confirm="onMemoryDelete(item.id)">
+                  <a-button size="small" danger>删除</a-button>
+                </a-popconfirm>
+              </template>
+            </a-list-item>
+          </template>
+          <template #empty>
+            <a-empty description="还没有记忆。与开了「长期记忆」的智能体对话后会自动积累。" />
+          </template>
+        </a-list>
+      </a-tab-pane>
     </a-tabs>
+
+    <!-- ================= 记忆编辑弹窗 ================= -->
+    <a-modal
+      v-model:open="memoryModal.open"
+      :title="memoryModal.editing ? '编辑记忆' : '添加记忆'"
+      :confirm-loading="memoryModal.loading"
+      ok-text="保存"
+      cancel-text="取消"
+      @ok="submitMemory"
+    >
+      <a-form layout="vertical">
+        <a-form-item label="内容" required>
+          <a-textarea
+            v-model:value="memoryModal.content"
+            :rows="3"
+            :maxlength="512"
+            placeholder="一句自包含的话，例如：用户是有 5 年经验的 Go 后端工程师"
+          />
+        </a-form-item>
+      </a-form>
+    </a-modal>
 
     <!-- ================= 网盘绑定弹窗 ================= -->
     <a-modal
@@ -220,8 +285,10 @@ import { onMounted, reactive, ref, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { CloudOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import {
+  memoryApi,
   netdiskApi,
   settingsApi,
+  type MemoryItem,
   type ModelConfig,
   type ModelPurpose,
   type NetdiskStatus,
@@ -408,7 +475,83 @@ watch(activeTab, (key) => {
   if (key === 'netdisk' && !netdiskLoaded) {
     loadNetdiskStatus()
   }
+  if (key === 'memory' && !memoryLoaded) {
+    loadMemories()
+  }
 })
+
+// ---- 长期记忆 ---------------------------------------------------------------
+// 记忆主要由后台任务自动提取，这里提供查看与手动管理入口。
+
+const memories = ref<MemoryItem[]>([])
+const memoryLoading = ref(false)
+let memoryLoaded = false
+
+const memoryModal = reactive({
+  open: false,
+  editing: false,
+  loading: false,
+  id: 0,
+  content: '',
+})
+
+async function loadMemories() {
+  memoryLoading.value = true
+  try {
+    const data = await memoryApi.list()
+    memories.value = data.items
+    memoryLoaded = true
+  } finally {
+    memoryLoading.value = false
+  }
+}
+
+function openMemoryCreate() {
+  memoryModal.editing = false
+  memoryModal.id = 0
+  memoryModal.content = ''
+  memoryModal.open = true
+}
+
+function openMemoryEdit(item: MemoryItem) {
+  memoryModal.editing = true
+  memoryModal.id = item.id
+  memoryModal.content = item.content
+  memoryModal.open = true
+}
+
+async function submitMemory() {
+  if (!memoryModal.content.trim()) {
+    message.warning('请填写记忆内容')
+    return
+  }
+  memoryModal.loading = true
+  try {
+    if (memoryModal.editing) {
+      await memoryApi.update(memoryModal.id, memoryModal.content.trim())
+      message.success('已更新')
+    } else {
+      await memoryApi.create(memoryModal.content.trim())
+      message.success('已添加')
+    }
+    memoryModal.open = false
+    await loadMemories()
+  } finally {
+    memoryModal.loading = false
+  }
+}
+
+async function onMemoryDelete(id: number) {
+  await memoryApi.remove(id)
+  message.success('已删除')
+  await loadMemories()
+}
+
+async function onMemoryClear() {
+  await memoryApi.clear()
+  message.success('已清空全部记忆')
+  await loadMemories()
+}
 
 function openBindNetdisk() {
   bindModal.code = ''

@@ -172,6 +172,7 @@ def migrate_schema() -> None:
         for column, ddl in (
             ("use_ops", "ADD COLUMN use_ops TINYINT(1) NOT NULL DEFAULT 0"),
             ("chat_visible", "ADD COLUMN chat_visible TINYINT(1) NOT NULL DEFAULT 1"),
+            ("use_memory", "ADD COLUMN use_memory TINYINT(1) NOT NULL DEFAULT 0"),
         ):
             if column in agent_columns:
                 continue

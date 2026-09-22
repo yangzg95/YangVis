@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS agent (
   system_prompt TEXT          NOT NULL,
   use_knowledge TINYINT(1)    NOT NULL DEFAULT 1 COMMENT '是否检索知识库',
   use_ops       TINYINT(1)    NOT NULL DEFAULT 0 COMMENT '是否挂运维只读工具（服务器命令/数据库查询）',
+  use_memory    TINYINT(1)    NOT NULL DEFAULT 0 COMMENT '是否注入长期记忆并参与记忆提取',
   chat_visible  TINYINT(1)    NOT NULL DEFAULT 1 COMMENT '是否出现在主对话的智能体选择器',
   temperature   INT           NOT NULL DEFAULT 30 COMMENT '0-100，除以 100 后传给模型',
   is_builtin    TINYINT(1)    NOT NULL DEFAULT 0,
@@ -151,6 +152,24 @@ CREATE TABLE IF NOT EXISTS chat_message (
   KEY idx_conv (conversation_id, id),
   KEY idx_owner (owner_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='对话消息';
+
+CREATE TABLE IF NOT EXISTS chat_summary (
+  conversation_id BIGINT PRIMARY KEY COMMENT 'chat_conversation.id，一个会话至多一行',
+  owner_id        BIGINT       NOT NULL,
+  summary         TEXT         NOT NULL COMMENT '回放窗口之外历史的滚动摘要（全量重算）',
+  updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话摘要';
+
+CREATE TABLE IF NOT EXISTS user_memory (
+  id                     BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id               BIGINT       NOT NULL,
+  content                VARCHAR(512) NOT NULL COMMENT '一条记忆一句话',
+  source_conversation_id BIGINT       NULL COMMENT '提取出这条记忆的会话，仅溯源用',
+  created_at             DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at             DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户长期记忆';
 
 
 -- ---------------------------------------------------------------------------
@@ -285,6 +304,11 @@ CREATE TABLE IF NOT EXISTS ops_sql_favorite (
 -- ALTER TABLE ops_audit_log
 --   ADD COLUMN pending_action_id BIGINT NULL COMMENT 'ops_pending_action.id';
 --
+-- 长期记忆与会话摘要：
+-- ALTER TABLE agent
+--   ADD COLUMN use_memory TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否注入长期记忆并参与记忆提取';
+-- （chat_summary / user_memory 两张新表由 create_all 自动创建，DDL 见上文。）
+
 -- 进程重启遗留的待确认项物化为 expired（启动时自动执行）：
 -- UPDATE ops_pending_action
 --    SET status = 'expired', resolved_at = NOW()

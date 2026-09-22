@@ -104,6 +104,14 @@
           </div>
         </a-form-item>
 
+        <a-form-item label="长期记忆">
+          <a-switch v-model:checked="modal.form.use_memory" :disabled="modal.readonly" />
+          <div class="hint">
+            开启后，该智能体回答时会带上对你的长期记忆（跨会话生效），
+            对话中值得记住的事实也会自动沉淀。记忆内容可在「设置 → 长期记忆」查看与删除。
+          </div>
+        </a-form-item>
+
         <a-form-item label="在对话中可选">
           <a-switch v-model:checked="modal.form.chat_visible" :disabled="modal.readonly" />
           <div class="hint">
@@ -148,6 +156,7 @@ const emptyForm = () => ({
   system_prompt: '',
   use_knowledge: true,
   use_ops: false,
+  use_memory: false,
   chat_visible: true,
   temperature: 30,
 })
@@ -184,6 +193,7 @@ function fillForm(agent: Agent) {
     system_prompt: agent.system_prompt,
     use_knowledge: agent.use_knowledge,
     use_ops: agent.use_ops,
+    use_memory: agent.use_memory,
     chat_visible: agent.chat_visible,
     temperature: agent.temperature,
   }
@@ -232,6 +242,7 @@ async function submit() {
       system_prompt: modal.form.system_prompt.trim(),
       use_knowledge: modal.form.use_knowledge,
       use_ops: modal.form.use_ops,
+      use_memory: modal.form.use_memory,
       chat_visible: modal.form.chat_visible,
       temperature: modal.form.temperature,
     }

@@ -421,6 +421,7 @@ export interface Agent {
   system_prompt: string
   use_knowledge: boolean
   use_ops: boolean
+  use_memory: boolean
   chat_visible: boolean
   temperature: number
   is_builtin: boolean
@@ -437,6 +438,7 @@ export interface AgentPayload {
   system_prompt: string
   use_knowledge?: boolean
   use_ops?: boolean
+  use_memory?: boolean
   chat_visible?: boolean
   temperature?: number
   sort_order?: number
@@ -455,6 +457,26 @@ export const agentsApi = {
   remove: (id: number) => request<null>({ url: `/agents/${id}`, method: 'DELETE' }),
   duplicate: (id: number) =>
     request<Agent>({ url: `/agents/${id}/duplicate`, method: 'POST' }),
+}
+
+// ---- 长期记忆 ----------------------------------------------------------------
+
+export interface MemoryItem {
+  id: number
+  content: string
+  source_conversation_id: number | null
+  created_at: string
+  updated_at: string
+}
+
+export const memoryApi = {
+  list: () => request<{ items: MemoryItem[]; total: number }>({ url: '/memory' }),
+  create: (content: string) =>
+    request<MemoryItem>({ url: '/memory', method: 'POST', data: { content } }),
+  update: (id: number, content: string) =>
+    request<MemoryItem>({ url: `/memory/${id}`, method: 'PUT', data: { content } }),
+  remove: (id: number) => request<null>({ url: `/memory/${id}`, method: 'DELETE' }),
+  clear: () => request<null>({ url: '/memory', method: 'DELETE' }),
 }
 
 // ---- 对话 ------------------------------------------------------------------
