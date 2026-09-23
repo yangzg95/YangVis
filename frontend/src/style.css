@@ -435,7 +435,8 @@ input {
 .captcha-row {
   display: flex;
   gap: 10px;
-  align-items: stretch;
+  /* center 而不是 stretch：两侧元素各自定高，避免相互拉伸。 */
+  align-items: center;
 }
 
 .captcha-row .ant-input-affix-wrapper {
@@ -444,10 +445,12 @@ input {
 }
 
 .captcha-img {
-  /* 高度与同 size="large" 的输入框对齐（44px），宽度按 132:48 等比缩放。 */
+  /* 页面没有全局 border-box 重置，必须显式声明：否则 44px + 2px 边框
+     会比输入框高出一截。高度与同 size="large" 的输入框对齐（44px），
+     宽度按 132:48 等比缩放。 */
+  box-sizing: border-box;
   width: 121px;
   height: 44px;
-  align-self: center;
   flex-shrink: 0;
   border: 1px solid var(--hairline);
   border-radius: var(--radius-md);

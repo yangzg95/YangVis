@@ -4,7 +4,9 @@
   <a-config-provider :locale="zhCN" :auto-insert-space-in-button="false" :theme="theme">
     <router-view v-if="isBare" />
     <a-layout v-else class="dashboard-layout">
+      <!-- 手机端（<768px）导航轨整根拔掉，换成顶栏汉堡钮唤出的抽屉。 -->
       <a-layout-sider
+        v-if="!isMobile"
         :collapsed="effectiveCollapsed"
         collapsible
         :width="200"
@@ -15,58 +17,27 @@
         @collapse="onManualCollapse"
         @breakpoint="onSiderBreakpoint"
       >
-        <div class="sidebar-brand">
-          <img class="sidebar-logo-w" :src="yangvisLogo" alt="杨维斯控制台" />
-        </div>
-        <div class="sidebar-menu-shell">
-          <div v-if="!effectiveCollapsed" class="sidebar-menu-search">
-            <a-input
-              ref="menuSearchRef"
-              v-model:value="menuKeyword"
-              allow-clear
-              class="sidebar-menu-search-input"
-              placeholder="快捷搜索菜单（Ctrl+K）"
-            >
-              <template #prefix><SearchOutlined /></template>
-            </a-input>
-          </div>
-          <a-menu
-            v-if="filteredMenu.length"
-            mode="inline"
-            theme="dark"
-            class="sidebar-menu"
-            :inline-collapsed="effectiveCollapsed"
-            :selected-keys="[route.path]"
-            :open-keys="effectiveOpenKeys"
-            @click="onMenuClick"
-            @openChange="onOpenChange"
-          >
-            <template v-for="node in filteredMenu" :key="node.path">
-              <a-sub-menu v-if="isGroup(node)" :key="node.path">
-                <template #icon><component :is="node.icon" /></template>
-                <template #title>
-                  <span class="sidebar-menu-label">{{ node.title }}</span>
-                </template>
-                <a-menu-item v-for="child in node.children" :key="child.path">
-                  <span class="sidebar-menu-label">{{ child.title }}</span>
-                </a-menu-item>
-              </a-sub-menu>
-              <a-menu-item v-else :key="node.path">
-                <template #icon><component :is="node.icon" /></template>
-                <span class="sidebar-menu-label">{{ node.title }}</span>
-              </a-menu-item>
-            </template>
-          </a-menu>
-          <div v-else class="sidebar-menu-empty">
-            <a-empty :image="Empty.PRESENTED_IMAGE_SIMPLE" description="没有匹配的菜单" />
-          </div>
-        </div>
+        <SidebarNav
+          ref="sidebarNavRef"
+          :collapsed="effectiveCollapsed"
+          :menu="MENU"
+          @select="onMenuSelect"
+        />
       </a-layout-sider>
       <a-layout class="dashboard-content-shell">
         <!-- 顶栏单行：标签页 + 用户区。不设面包屑——它和激活标签表达同一件事，
              属于重复信息；标签多了靠 tabs 自带的滚动箭头翻页。 -->
         <div class="global-tabbar">
           <div class="topbar-main">
+            <button
+              v-if="isMobile"
+              type="button"
+              class="icon-btn nav-drawer-trigger"
+              aria-label="打开导航菜单"
+              @click="drawerOpen = true"
+            >
+              <MenuOutlined />
+            </button>
             <a-tabs
               :active-key="activeTabKey"
               hide-add
@@ -123,6 +94,30 @@
           </router-view>
         </a-layout-content>
       </a-layout>
+      <!-- 手机端导航抽屉：和导航轨同一套菜单（SidebarNav），永远展开态。
+           点菜单、点遮罩、点右上角关闭钮都能收。 -->
+      <a-drawer
+        v-model:open="drawerOpen"
+        placement="left"
+        :width="240"
+        :closable="false"
+        class="mobile-nav-drawer"
+      >
+        <button
+          type="button"
+          class="icon-btn mobile-nav-close"
+          aria-label="关闭导航菜单"
+          @click="drawerOpen = false"
+        >
+          <CloseOutlined />
+        </button>
+        <SidebarNav
+          ref="drawerNavRef"
+          :menu="MENU"
+          search-placeholder="搜索菜单"
+          @select="onMenuSelect"
+        />
+      </a-drawer>
     </a-layout>
   </a-config-provider>
 </template>
@@ -133,38 +128,22 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   AppstoreOutlined,
   BookOutlined,
+  CloseOutlined,
   CloudServerOutlined,
   DatabaseOutlined,
   LogoutOutlined,
+  MenuOutlined,
   MessageOutlined,
   ProfileOutlined,
   RobotOutlined,
-  SearchOutlined,
   SettingOutlined,
   TeamOutlined,
   UserOutlined,
 } from '@ant-design/icons-vue'
-import { Empty } from 'ant-design-vue'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
+import SidebarNav, { type MenuNode } from '@/components/SidebarNav.vue'
 import { useAuthStore } from '@/stores/auth'
 import { storageKeys } from '@/utils/storage'
-import yangvisLogo from '@/assets/yangvis-logo.svg'
-
-interface MenuChild {
-  path: string
-  title: string
-  /** 可选；缺省时标签页会回退用父级的图标。 */
-  icon?: unknown
-  /** 只对管理员显示。真正的权限判定在后端。 */
-  adminOnly?: boolean
-}
-
-interface MenuNode {
-  path: string
-  title: string
-  icon: unknown
-  children?: MenuChild[]
-}
 
 /** 一个可跳转的页面：MENU 里所有叶子节点摊平后的结果。 */
 interface MenuLeaf {
@@ -241,8 +220,6 @@ const theme = {
   },
 }
 
-const isGroup = (node: MenuNode): boolean => Boolean(node.children?.length)
-
 // 子菜单没配图标时回退用父级的，标签页和左侧菜单的图标就保持一致了。
 const LEAVES: MenuLeaf[] = MENU.flatMap((node) =>
   node.children?.length
@@ -262,7 +239,13 @@ const auth = useAuthStore()
 // 登录页是独立渲染的，不带侧边栏和顶栏这些外壳。
 const isBare = computed(() => Boolean(route.meta?.bare))
 
-const menuKeyword = ref('')
+// 手机端（<768px，与登录页断点一致）：导航轨换成抽屉。初始化直接读
+// matchMedia，避免手机上先渲染一帧导航轨再拔掉。
+const MOBILE_QUERY = '(max-width: 768px)'
+const isMobile = ref(window.matchMedia(MOBILE_QUERY).matches)
+const drawerOpen = ref(false)
+const sidebarNavRef = ref()
+const drawerNavRef = ref()
 
 // 导航轨收起状态：记住用户的选择，刷新后保持。
 const SIDER_COLLAPSED_KEY = storageKeys.siderCollapsed
@@ -292,53 +275,6 @@ const onManualCollapse = (value: boolean) => {
 const onSiderBreakpoint = (broken: boolean) => {
   siderNarrow.value = broken
 }
-
-// 先按权限裁剪，再按关键字过滤：搜索不应该把管理员专属的菜单搜出来。
-const visibleMenu = computed<MenuNode[]>(() =>
-  MENU.reduce<MenuNode[]>((acc, node) => {
-    if (!node.children?.length) {
-      acc.push(node)
-      return acc
-    }
-    const children = node.children.filter((child) => !child.adminOnly || auth.isAdmin)
-    if (children.length) acc.push({ ...node, children })
-    return acc
-  }, []),
-)
-
-const filteredMenu = computed<MenuNode[]>(() => {
-  const keyword = menuKeyword.value.trim().toLowerCase()
-  if (!keyword) {
-    return visibleMenu.value
-  }
-  const matches = (text: string) => text.toLowerCase().includes(keyword)
-  return visibleMenu.value.reduce<MenuNode[]>((acc, node) => {
-    if (!node.children?.length) {
-      if (matches(node.title)) acc.push(node)
-      return acc
-    }
-    // 分组自身命中时保留它的全部子项；否则只保留命中的那些子项。
-    if (matches(node.title)) {
-      acc.push(node)
-      return acc
-    }
-    const children = node.children.filter((child) => matches(child.title))
-    if (children.length) acc.push({ ...node, children })
-    return acc
-  }, [])
-})
-
-const openKeys = ref<string[]>([])
-// 收起态的悬停弹层也吃 openKeys：单独存一份，和展开态的分组展开状态隔开，
-// 否则路由联动往 openKeys 里加分组时会把弹层顶出来（切 tab 菜单自己弹出）。
-const collapsedHoverKeys = ref<string[]>([])
-// 搜索过程中强制展开所有留下来的分组，保证命中项一直可见。
-const effectiveOpenKeys = computed(() => {
-  if (effectiveCollapsed.value) return collapsedHoverKeys.value
-  return menuKeyword.value.trim()
-    ? filteredMenu.value.filter(isGroup).map((node) => node.path)
-    : openKeys.value
-})
 
 // 标签页照搬参考控制台的做法：默认标签页固定常开，之后每访问一个页面就
 // 往后追加一个。打开的标签页持久化到 localStorage，刷新后原样恢复；
@@ -389,12 +325,6 @@ watch(
     if (LEAVES.some((leaf) => leaf.path === path) && !openTabPaths.value.includes(path)) {
       openTabPaths.value = [...openTabPaths.value, path]
     }
-    // 展开当前页面所属的那个分组（手风琴：同时只展开一个一级菜单）。
-    // 收起态不动 openKeys：弹层只跟 hover 走，否则切 tab 会把子菜单弹层顶出来。
-    const parent = MENU.find((node) => node.children?.some((child) => child.path === path))
-    if (parent && !effectiveCollapsed.value && !openKeys.value.includes(parent.path)) {
-      openKeys.value = [parent.path]
-    }
   },
   { immediate: true },
 )
@@ -405,22 +335,12 @@ onMounted(() => {
   }
 })
 
-const onMenuClick = ({ key }: { key: string | number }) => {
-  if (key !== route.path) {
-    router.push(String(key))
+const onMenuSelect = (path: string) => {
+  // 手机端点完菜单顺手收抽屉；桌面端 drawerOpen 本来就是 false，无害。
+  drawerOpen.value = false
+  if (path !== route.path) {
+    router.push(path)
   }
-}
-
-const onOpenChange = (keys: (string | number)[]) => {
-  // 收起态的 openChange 来自弹层 hover，展开态的来自分组开合，分开记账。
-  if (effectiveCollapsed.value) {
-    collapsedHoverKeys.value = keys.map(String)
-    return
-  }
-  // 手风琴：新展开一个分组时收起其余分组；只是收起分组则照常记账。
-  const next = keys.map(String)
-  const added = next.find((key) => !openKeys.value.includes(key))
-  openKeys.value = added ? [added] : next
 }
 
 const onTabChange = (key: string | number) => {
@@ -453,8 +373,6 @@ const onTabEdit = (targetKey: string | number | MouseEvent | KeyboardEvent, acti
 // ---- 全局快捷键 --------------------------------------------------------------
 // Ctrl+W / Ctrl+Tab / Ctrl+PageUp 都被浏览器保留（拦不住，硬拦只会表现不一致），
 // 标签页操作因此用 Alt+W 关闭、Ctrl+Shift+[/] 前后切换——和常见 IDE 的键位一致。
-const menuSearchRef = ref()
-
 const isEditableTarget = (el: EventTarget | null): boolean =>
   el instanceof HTMLElement &&
   (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
@@ -463,8 +381,14 @@ const onGlobalKeydown = (e: KeyboardEvent) => {
   // Ctrl/Cmd+K：聚焦菜单搜索（收起态先展开，框才存在）。输入框里也可用。
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
     e.preventDefault()
+    // 手机端搜索框在抽屉里：先拉开抽屉再聚焦。
+    if (isMobile.value) {
+      drawerOpen.value = true
+      void nextTick(() => drawerNavRef.value?.focusSearch())
+      return
+    }
     if (effectiveCollapsed.value) collapsed.value = false
-    void nextTick(() => menuSearchRef.value?.focus())
+    void nextTick(() => sidebarNavRef.value?.focusSearch())
     return
   }
   // 在输入框里打字时不响应标签页操作键。
@@ -491,6 +415,15 @@ const onGlobalKeydown = (e: KeyboardEvent) => {
 onMounted(() => window.addEventListener('keydown', onGlobalKeydown))
 onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
 
+// 跟踪手机断点：跨断点变化时收抽屉（桌面没有抽屉，手机没有导航轨）。
+const mobileMql = window.matchMedia(MOBILE_QUERY)
+const onMobileChange = () => {
+  isMobile.value = mobileMql.matches
+  drawerOpen.value = false
+}
+onMounted(() => mobileMql.addEventListener('change', onMobileChange))
+onBeforeUnmount(() => mobileMql.removeEventListener('change', onMobileChange))
+
 const onUserMenuClick = async ({ key }: { key: string | number }) => {
   if (key === 'logout') {
     try {
@@ -512,5 +445,45 @@ const onUserMenuClick = async ({ key }: { key: string | number }) => {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+/* ---- 手机端抽屉导航 -----------------------------------------------------
+   抽屉 teleport 到 body，这里的全局样式才够得着。内容复用 style.css 里
+   的 sidebar-* 全局类，只补抽屉壳本身的差异：ink 底、去掉 body 内边距、
+   关闭钮用浅色。 */
+.nav-drawer-trigger {
+  flex-shrink: 0;
+}
+
+.mobile-nav-drawer .ant-drawer-content {
+  background: var(--ink);
+}
+
+.mobile-nav-drawer .ant-drawer-body {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+}
+
+.mobile-nav-close {
+  position: absolute;
+  top: 16px;
+  right: 12px;
+  z-index: 2;
+  color: rgba(255, 255, 255, 0.68);
+}
+
+.mobile-nav-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+/* 窄屏顶栏：用户名让位给标签页，只留头像（退出登录还在下拉里）。 */
+@media (max-width: 480px) {
+  .user-name {
+    display: none;
+  }
 }
 </style>

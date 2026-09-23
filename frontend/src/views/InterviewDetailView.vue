@@ -31,7 +31,9 @@
     </div>
 
     <main v-else-if="record" class="interview-content">
-      <a-descriptions :column="2" size="small" bordered>
+      <!-- 窄屏单列：手机（<576px）上两列描述表每项只剩一百多像素，公司/岗位
+           名称稍微长点就挤换行。 -->
+      <a-descriptions :column="{ xs: 1, sm: 2 }" size="small" bordered>
         <a-descriptions-item label="公司">{{ record.company }}</a-descriptions-item>
         <a-descriptions-item label="岗位">{{ record.position }}</a-descriptions-item>
         <a-descriptions-item label="面试日期">{{ record.interview_date || '—' }}</a-descriptions-item>
@@ -150,25 +152,38 @@
             :message="q.ref_error || '生成失败，可重试'"
           />
           <div
-            v-if="q.ref_status === 'ready' && q.ref_answer"
+            v-if="q.ref_status === 'ready' && q.ref_answer && !isRefCollapsed(q.qid)"
             class="markdown ref-answer"
             v-html="renderMarkdown(q.ref_answer)"
           />
-          <a-button
-            size="small"
-            :loading="q.ref_status === 'analyzing'"
-            :disabled="!chatReady"
-            @click="onGenerate(q)"
-          >
-            <RobotOutlined />
-            {{
-              q.ref_status === 'analyzing'
-                ? '正在生成…'
-                : q.ref_status === 'ready'
-                  ? '重新生成参考答案'
-                  : '生成参考答案'
-            }}
-          </a-button>
+          <div class="ref-actions">
+            <a-button
+              size="small"
+              :loading="q.ref_status === 'analyzing'"
+              :disabled="!chatReady"
+              @click="onGenerate(q)"
+            >
+              <RobotOutlined />
+              {{
+                q.ref_status === 'analyzing'
+                  ? '正在生成…'
+                  : q.ref_status === 'ready'
+                    ? '重新生成参考答案'
+                    : '生成参考答案'
+              }}
+            </a-button>
+            <a-button
+              v-if="q.ref_status === 'ready' && q.ref_answer"
+              type="text"
+              size="small"
+              class="ref-toggle"
+              @click="toggleRefCollapsed(q.qid)"
+            >
+              {{ isRefCollapsed(q.qid) ? '展开' : '收起' }}
+              <DownOutlined v-if="isRefCollapsed(q.qid)" />
+              <UpOutlined v-else />
+            </a-button>
+          </div>
         </div>
       </div>
     </main>
@@ -221,7 +236,13 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { Empty, message } from 'ant-design-vue'
-import { DeleteOutlined, EditOutlined, RobotOutlined } from '@ant-design/icons-vue'
+import {
+  DeleteOutlined,
+  DownOutlined,
+  EditOutlined,
+  RobotOutlined,
+  UpOutlined,
+} from '@ant-design/icons-vue'
 import {
   interviewApi,
   settingsApi,
@@ -431,6 +452,18 @@ function syncPolling() {
   }
 }
 
+// 参考答案收起状态：按 qid 单独记账——生成中的轮询会整换 record，
+// 状态挂在题目对象上的话每轮刷新都会被冲掉。
+const refCollapsed = reactive<Record<string, boolean>>({})
+
+function isRefCollapsed(qid: string): boolean {
+  return Boolean(refCollapsed[qid])
+}
+
+function toggleRefCollapsed(qid: string) {
+  refCollapsed[qid] = !refCollapsed[qid]
+}
+
 // ---- 展示辅助 -----------------------------------------------------------------
 
 function resultMeta(result: InterviewResult): { text: string; color: string } {
@@ -564,6 +597,16 @@ onUnmounted(() => {
   margin-bottom: 12px;
   font-size: 13px;
 }
+.ref-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* 收起/展开钮贴右，弱化处理——它是浏览辅助，不是主操作。 */
+.ref-toggle {
+  margin-left: auto;
+  color: var(--text-3);
+}
 .full-width {
   width: 100%;
 }
@@ -578,5 +621,19 @@ onUnmounted(() => {
 .edit-form :deep(textarea) {
   resize: vertical;
   min-height: 72px;
+}
+
+/* 手机端有限适配：收紧页边距和标题，内容本身（卡片、表单）本来就是单列
+   流式布局，不用动。 */
+@media (max-width: 768px) {
+  .interview-page {
+    padding: 12px 12px 48px;
+  }
+  .interview-title {
+    font-size: 16px;
+  }
+  .question-card {
+    padding: 10px 12px;
+  }
 }
 </style>
