@@ -1,8 +1,8 @@
-# syntax=docker/dockerfile:1.6
+# syntax=docker.m.daocloud.io/docker/dockerfile:1.6
 # ============================================================
 #  Stage 1: build the Vue 3 frontend
 # ============================================================
-FROM node:20-alpine AS frontend-builder
+FROM docker.1ms.run/library/node:20-alpine AS frontend-builder
 
 WORKDIR /web
 
@@ -19,7 +19,7 @@ RUN npm run build
 # ============================================================
 #  Stage 2: backend runtime image (FastAPI + static frontend)
 # ============================================================
-FROM python:3.11-slim AS backend
+FROM docker.m.daocloud.io/library/python:3.11-slim AS backend
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -31,7 +31,9 @@ WORKDIR /app
 
 # Install Python dependencies.
 COPY backend/requirements.txt ./requirements.txt
-RUN apt-get update \
+# Use a China mirror for apt as well; deb.debian.org is painfully slow from CN.
+RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
+ && apt-get update \
  && apt-get install -y --no-install-recommends curl \
  && rm -rf /var/lib/apt/lists/* \
  && pip install --upgrade pip \
