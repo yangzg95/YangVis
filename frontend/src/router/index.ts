@@ -41,6 +41,13 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '报告', bare: true},
     },
     {
+        // 面试详情整页展示：列表「详情」新开标签页进这里，与报告页同一模式。
+        path: '/office/interview/:id(\\d+)',
+        name: 'InterviewDetail',
+        component: () => import('@/views/InterviewDetailView.vue'),
+        meta: {title: '面试详情', bare: true},
+    },
+    {
         path: '/ops',
         redirect: '/ops/server',
     },

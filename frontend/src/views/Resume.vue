@@ -264,7 +264,7 @@
 
       <!-- ================= 面试记录 ================= -->
       <a-tab-pane key="interviews" tab="面试记录">
-        <InterviewRecords :chat-ready="chatReady" />
+        <InterviewRecords />
       </a-tab-pane>
     </a-tabs>
 

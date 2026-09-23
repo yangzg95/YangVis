@@ -444,8 +444,10 @@ input {
 }
 
 .captcha-img {
-  width: 132px;
-  height: 48px;
+  /* 高度与同 size="large" 的输入框对齐（44px），宽度按 132:48 等比缩放。 */
+  width: 121px;
+  height: 44px;
+  align-self: center;
   flex-shrink: 0;
   border: 1px solid var(--hairline);
   border-radius: var(--radius-md);
