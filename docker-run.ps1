@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     裸 docker 方式构建并启动 yangvis（不含 MySQL / Qdrant，需自行准备）。
 
@@ -19,6 +19,10 @@ param(
     [string]$ImageName = "docker.cnb.cool/luke.yang/docker/yangvis:latest",
     [string]$ContainerName = "yangvis",
     [int]$Port = 18099,
+    # 容器内存硬限制（MB）。1G 小内存服务器建议 640-768，并配少量 worker。
+    [int]$MemoryMB = 768,
+    # gunicorn worker 数。langchain 较重，单个 worker 常驻 200MB+，1G 机器用 1-2。
+    [int]$Workers = 2,
     [switch]$SkipBuild
 )
 
@@ -57,9 +61,14 @@ if ($existing) {
 
 # 4. 启动新容器
 Write-Host "==> 启动容器 $ContainerName (端口 ${Port}:18099) ..." -ForegroundColor Cyan
+# --memory-swap 与 --memory 相同 = 禁用 swap，超内存直接 OOM kill（由 restart 策略拉起），
+# 避免在小内存机器上因 swap 拖垮整机。
 docker run -d `
     --name $ContainerName `
     --restart unless-stopped `
+    --memory "${MemoryMB}m" `
+    --memory-swap "${MemoryMB}m" `
+    -e GUNICORN_WORKERS=$Workers `
     --env-file $EnvFile `
     -p "${Port}:18099" `
     $ImageName
