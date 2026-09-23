@@ -51,6 +51,17 @@ class Settings(BaseSettings):
     AUTH_JWT_ALGORITHM: str = "HS256"
     AUTH_TOKEN_TTL: int = 43200  # 秒，12 小时
 
+    # 登录安全：图形验证码 + 防爆破锁定。验证码是用 ENCRYPTION_KEY 加密的
+    # 无状态令牌（services/captcha.py），失败计数在进程内存
+    # （services/login_guard.py 有多 worker 下额度放大的说明），都不落库。
+    AUTH_CAPTCHA_TTL: int = 300  # 验证码有效秒数
+    AUTH_CAPTCHA_LENGTH: int = 4
+    # 同一「账号 + IP」在该时间窗内失败达到上限即锁定相同时长。
+    AUTH_LOGIN_MAX_FAILURES: int = 5
+    AUTH_LOGIN_LOCK_SECONDS: int = 600
+    # 同一 IP 在一个窗口内的失败总上限：挡「锁了一个账号就换下一个」的喷洒。
+    AUTH_LOGIN_IP_MAX_FAILURES: int = 30
+
     # 可选的初始管理员，仅在 sys_user 表为空时使用。
     BOOTSTRAP_ADMIN_USERNAME: str = ""
     BOOTSTRAP_ADMIN_PASSWORD: str = ""

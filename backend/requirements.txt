@@ -23,3 +23,5 @@ redis==5.2.1
 # 智能办公：简历文本抽取。两者都是纯 Python 依赖，不引入系统级库。
 pypdf==5.9.0
 python-docx==1.2.0
+# 登录图形验证码绘制。wheel 自带 FreeType，不需要系统级字体库。
+pillow==11.3.0

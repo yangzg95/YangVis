@@ -18,8 +18,18 @@ export const useAuthStore = defineStore('auth', () => {
   // can_ops_write 同义——管理员是天然超集；真正的闸门在后端四处强制。
   const canOpsWrite = computed(() => isAdmin.value || Boolean(userInfo.value?.ops_write))
 
-  const login = async (username: string, password: string) => {
-    const result = await authApi.login({ username, password })
+  const login = async (
+    username: string,
+    password: string,
+    captchaId: string,
+    captchaCode: string,
+  ) => {
+    const result = await authApi.login({
+      username,
+      password,
+      captcha_id: captchaId,
+      captcha_code: captchaCode,
+    })
     accessToken.value = result.access_token
     setAccessToken(result.access_token)
     userInfo.value = result.user_info ?? null

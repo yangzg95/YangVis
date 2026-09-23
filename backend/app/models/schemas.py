@@ -26,10 +26,20 @@ class APIResponse(BaseModel, Generic[T]):
 # ---- 认证 -------------------------------------------------------------------
 
 class LoginRequest(BaseModel):
-    """SPA 提交的用户名 / 密码登录 payload。"""
+    """SPA 提交的用户名 / 密码 / 图形验证码登录 payload。"""
 
     username: str = Field(..., min_length=1, max_length=128)
     password: str = Field(..., min_length=1, max_length=128)
+    # Fernet 令牌，几位的 payload 加密后约 100+ 字符。
+    captcha_id: str = Field(..., min_length=1, max_length=512)
+    captcha_code: str = Field(..., min_length=1, max_length=8)
+
+
+class CaptchaResult(BaseModel):
+    """一张新签发的图形验证码；image 是 data URI，可直接喂给 <img>。"""
+
+    captcha_id: str
+    image: str
 
 
 class UserInfo(BaseModel):

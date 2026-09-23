@@ -431,6 +431,37 @@ input {
   font-size: 13px;
 }
 
+/* 验证码行：输入框 + 可点击刷新的图片。 */
+.captcha-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.captcha-row .ant-input-affix-wrapper {
+  flex: 1;
+  min-width: 0;
+}
+
+.captcha-img {
+  width: 132px;
+  height: 48px;
+  flex-shrink: 0;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  user-select: none;
+  background: #f5f7fa;
+}
+
+.captcha-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
 /* 登录密码框下的大写锁定提示：告警橙，比错误轻一级。 */
 .caps-hint {
   display: flex;

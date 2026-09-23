@@ -6,10 +6,12 @@ base row — is a value we can vouch for ourselves.
 """
 from __future__ import annotations
 
+import base64
 import logging
+import math
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,6 +21,7 @@ from app.deps import require_user
 from app.models.entities import SysUser
 from app.models.schemas import (
     APIResponse,
+    CaptchaResult,
     CurrentUser,
     LoginRequest,
     LoginResult,
@@ -26,6 +29,8 @@ from app.models.schemas import (
     UserInfo,
 )
 from app.security import create_access_token, hash_password, verify_password
+from app.services.captcha import issue_captcha, verify_captcha
+from app.services.login_guard import locked_seconds, record_failure, reset_failures
 
 logger = logging.getLogger("yangvis.auth")
 settings = get_settings()
@@ -47,9 +52,35 @@ def _to_user_info(user: SysUser) -> UserInfo:
 
 # ---- Endpoints -------------------------------------------------------------
 
+@router.get("/captcha", response_model=APIResponse[CaptchaResult])
+async def get_captcha() -> APIResponse[CaptchaResult]:
+    """签发一张图形验证码。captcha_id 是加密令牌，答案不出现在明文里。"""
+    captcha_id, png = issue_captcha()
+    image = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+    return APIResponse(data=CaptchaResult(captcha_id=captcha_id, image=image))
+
+
 @router.post("/login", response_model=APIResponse[LoginResult])
-async def login(payload: LoginRequest, db: Session = Depends(get_db)) -> APIResponse[LoginResult]:
+async def login(
+    payload: LoginRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> APIResponse[LoginResult]:
     """Verify credentials against ``sys_user`` and issue an access token."""
+    ip = request.client.host if request.client else "unknown"
+    # 计数键统一小写：MySQL 默认排序规则下用户名大小写不敏感，不收敛的话
+    # 每换一种大小写组合就能多拿一轮尝试额度。
+    username_key = payload.username.strip().lower()
+
+    wait = locked_seconds(username_key, ip)
+    if wait > 0:
+        minutes = max(1, math.ceil(wait / 60))
+        return APIResponse(code=429, message=f"登录失败次数过多，请约 {minutes} 分钟后再试")
+
+    # 验证码先于密码校验；验证码错误不计入密码失败次数。
+    if not verify_captcha(payload.captcha_id, payload.captcha_code):
+        return APIResponse(code=-1, message="验证码错误或已过期，请重新输入")
+
     user = db.scalar(select(SysUser).where(SysUser.username == payload.username))
 
     # Same response for "no such user", "wrong password" and "disabled": a
@@ -58,10 +89,14 @@ async def login(payload: LoginRequest, db: Session = Depends(get_db)) -> APIResp
     # failed login does not reveal whether the account exists.
     if user is None:
         verify_password(payload.password, hash_password("placeholder"))
+        record_failure(username_key, ip)
         return APIResponse(code=401, message="用户名或密码错误")
 
     if not user.status or not verify_password(payload.password, user.password_hash):
+        record_failure(username_key, ip)
         return APIResponse(code=401, message="用户名或密码错误")
+
+    reset_failures(username_key, ip)
 
     user.last_login_at = datetime.now(timezone.utc)
     db.commit()

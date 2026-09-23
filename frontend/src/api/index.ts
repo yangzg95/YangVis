@@ -99,8 +99,25 @@ export interface LoginResult {
   user_info: UserInfo | null
 }
 
+export interface CaptchaResult {
+  captcha_id: string
+  /** data URI，可直接喂给 <img>。 */
+  image: string
+}
+
 export const authApi = {
-  login: (payload: { username: string; password: string }) =>
+  captcha: () =>
+    request<CaptchaResult>({
+      url: '/auth/captcha',
+      // 登录页自己处理加载失败（点击图片重试），跳过全局提示。
+      skipErrorToast: true,
+    }),
+  login: (payload: {
+    username: string
+    password: string
+    captcha_id: string
+    captcha_code: string
+  }) =>
     request<LoginResult>({
       url: '/auth/login',
       method: 'POST',

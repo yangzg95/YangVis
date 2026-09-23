@@ -48,6 +48,29 @@
         <div v-if="capsLockOn" class="caps-hint">
           <WarningOutlined /> 大写锁定（Caps Lock）已开启
         </div>
+        <div class="captcha-row">
+          <a-input
+            v-model:value="captchaCode"
+            size="large"
+            placeholder="请输入验证码"
+            autocomplete="off"
+            :maxlength="8"
+          >
+            <template #prefix><SafetyOutlined /></template>
+          </a-input>
+          <!-- 看不清可以随时点击图片换新。 -->
+          <img
+            v-if="captchaImage"
+            class="captcha-img"
+            :src="captchaImage"
+            alt="验证码"
+            title="看不清？点击刷新"
+            @click="refreshCaptcha"
+          />
+          <div v-else class="captcha-img captcha-placeholder" @click="refreshCaptcha">
+            点击加载
+          </div>
+        </div>
       </div>
 
       <div v-if="errorMessage" class="form-error">{{ errorMessage }}</div>
@@ -69,9 +92,10 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { LockOutlined, UserOutlined, WarningOutlined } from '@ant-design/icons-vue'
+import { LockOutlined, SafetyOutlined, UserOutlined, WarningOutlined } from '@ant-design/icons-vue'
 import yangvisLoginLogo from '@/assets/yangvis-logo-login.svg'
 import yangvisMark from '@/assets/yangvis-mark.svg'
+import { authApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { isAuthenticated } from '@/utils/auth'
 
@@ -81,6 +105,9 @@ const auth = useAuthStore()
 
 const account = ref('')
 const password = ref('')
+const captchaId = ref('')
+const captchaCode = ref('')
+const captchaImage = ref('')
 const errorMessage = ref('')
 const submitting = ref(false)
 const capsLockOn = ref(false)
@@ -90,10 +117,24 @@ const syncCapsLock = (e: KeyboardEvent) => {
   capsLockOn.value = e.getModifierState?.('CapsLock') ?? false
 }
 
+const refreshCaptcha = async () => {
+  captchaCode.value = ''
+  captchaImage.value = ''
+  try {
+    const result = await authApi.captcha()
+    captchaId.value = result.captcha_id
+    captchaImage.value = result.image
+  } catch {
+    errorMessage.value = '验证码加载失败，请点击右侧区域重试'
+  }
+}
+
 onMounted(() => {
   if (isAuthenticated()) {
     router.replace('/')
+    return
   }
+  refreshCaptcha()
 })
 
 const handleSubmit = async () => {
@@ -102,16 +143,27 @@ const handleSubmit = async () => {
     errorMessage.value = '请输入用户名和密码'
     return
   }
+  if (!captchaCode.value.trim()) {
+    errorMessage.value = '请输入验证码'
+    return
+  }
 
   submitting.value = true
   errorMessage.value = ''
   try {
-    await auth.login(account.value.trim(), password.value.trim())
+    await auth.login(
+      account.value.trim(),
+      password.value.trim(),
+      captchaId.value,
+      captchaCode.value.trim(),
+    )
     await auth.fetchCurrentUser()
     const redirect = route.query.redirect
     router.replace(typeof redirect === 'string' && redirect ? redirect : '/')
   } catch (error) {
     errorMessage.value = (error as { message?: string })?.message || '登录失败，请稍后再试'
+    // 失败后换新验证码：避免用户对着一张已经盯花眼的图反复试错。
+    refreshCaptcha()
   } finally {
     submitting.value = false
   }
