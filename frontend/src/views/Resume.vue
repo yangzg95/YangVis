@@ -261,6 +261,11 @@
           </template>
         </a-table>
       </a-tab-pane>
+
+      <!-- ================= 面试记录 ================= -->
+      <a-tab-pane key="interviews" tab="面试记录">
+        <InterviewRecords :chat-ready="chatReady" />
+      </a-tab-pane>
     </a-tabs>
 
     <!-- ================= 上传弹窗 ================= -->
@@ -475,6 +480,7 @@ import {
 } from '@/api'
 import { saveBlobResponse } from '@/utils/download'
 import { fmtSize } from '@/utils/format'
+import InterviewRecords from '@/components/InterviewRecords.vue'
 
 const simpleEmpty = Empty.PRESENTED_IMAGE_SIMPLE
 const router = useRouter()

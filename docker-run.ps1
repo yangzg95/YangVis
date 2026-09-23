@@ -13,6 +13,14 @@
 .EXAMPLE
     # 跳过构建，只用已有镜像重启容器
     .\docker-run.ps1 -SkipBuild
+
+.EXAMPLE
+    # 只构建镜像，不启动容器
+    .\docker-run.ps1 -BuildOnly
+
+.EXAMPLE
+    # 构建并推送到镜像仓库（需先 docker login）
+    .\docker-run.ps1 -BuildOnly -Push
 #>
 param(
     [string]$EnvFile = "backend\.env",
@@ -23,7 +31,11 @@ param(
     [int]$MemoryMB = 768,
     # gunicorn worker 数。langchain 较重，单个 worker 常驻 200MB+，1G 机器用 1-2。
     [int]$Workers = 2,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    # 只构建（可选推送），不启动容器。
+    [switch]$BuildOnly,
+    # 构建成功后 docker push 到 ImageName 指定的仓库（需先 docker login）。
+    [switch]$Push
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,7 +43,26 @@ $ErrorActionPreference = "Stop"
 # 切到脚本所在目录（项目根）
 Set-Location $PSScriptRoot
 
-# 1. 检查 env 文件
+# 1. 构建镜像（BuildOnly 模式下不检查 env 文件——构建不需要它）
+if (-not $SkipBuild) {
+    Write-Host "==> 构建镜像 $ImageName ..." -ForegroundColor Cyan
+    docker build -t $ImageName .
+    if ($LASTEXITCODE -ne 0) { Write-Error "docker build 失败"; exit $LASTEXITCODE }
+}
+
+# 2. 推送镜像（可选）
+if ($Push) {
+    Write-Host "==> 推送镜像 $ImageName ..." -ForegroundColor Cyan
+    docker push $ImageName
+    if ($LASTEXITCODE -ne 0) { Write-Error "docker push 失败（先 docker login？）"; exit $LASTEXITCODE }
+}
+
+if ($BuildOnly) {
+    Write-Host "==> 完成（BuildOnly，未启动容器）" -ForegroundColor Green
+    exit 0
+}
+
+# 3. 检查 env 文件
 if (-not (Test-Path $EnvFile)) {
     Write-Error "env 文件不存在: $EnvFile"
     exit 1
@@ -45,21 +76,14 @@ if ($envContent -match "(?m)^(DB_HOST|QDRANT_HOST)\s*=\s*(localhost|127\.0\.0\.1
     Write-Warning "如 MySQL/Qdrant 跑在宿主机，请改为 host.docker.internal（Windows Docker Desktop 可用）。"
 }
 
-# 2. 构建镜像
-if (-not $SkipBuild) {
-    Write-Host "==> 构建镜像 $ImageName ..." -ForegroundColor Cyan
-    docker build -t $ImageName .
-    if ($LASTEXITCODE -ne 0) { Write-Error "docker build 失败"; exit $LASTEXITCODE }
-}
-
-# 3. 停掉并删除旧容器（存在才删）
+# 4. 停掉并删除旧容器（存在才删）
 $existing = docker ps -aq -f "name=^$ContainerName$"
 if ($existing) {
     Write-Host "==> 移除旧容器 $ContainerName ..." -ForegroundColor Cyan
     docker rm -f $ContainerName | Out-Null
 }
 
-# 4. 启动新容器
+# 5. 启动新容器
 Write-Host "==> 启动容器 $ContainerName (端口 ${Port}:18099) ..." -ForegroundColor Cyan
 # --memory-swap 与 --memory 相同 = 禁用 swap，超内存直接 OOM kill（由 restart 策略拉起），
 # 避免在小内存机器上因 swap 拖垮整机。
@@ -74,7 +98,7 @@ docker run -d `
     $ImageName
 if ($LASTEXITCODE -ne 0) { Write-Error "docker run 失败"; exit $LASTEXITCODE }
 
-# 5. 健康检查（最多等 60 秒）
+# 6. 健康检查（最多等 60 秒）
 Write-Host "==> 等待健康检查 ..." -ForegroundColor Cyan
 $ok = $false
 foreach ($i in 1..12) {
@@ -86,7 +110,7 @@ foreach ($i in 1..12) {
 }
 
 if ($ok) {
-    Write-Host "==> 启动成功: http://localhost:$Port$((Select-String -Path $EnvFile -Pattern '^CONTEXT_PATH=(.+)$' | ForEach-Object { $_.Matches[0].Groups[1].Value }))" -ForegroundColor Green
+    Write-Host "==> 启动成功: http://localhost:$Port" -ForegroundColor Green
 } else {
     Write-Warning "健康检查未通过，查看日志: docker logs -f $ContainerName"
 }

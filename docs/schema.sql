@@ -270,6 +270,21 @@ CREATE TABLE IF NOT EXISTS ops_sql_favorite (
   KEY idx_owner (owner_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='SQL 收藏';
 
+CREATE TABLE IF NOT EXISTS interview_record (
+  id             BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id       BIGINT       NOT NULL,
+  company        VARCHAR(128) NOT NULL,
+  position       VARCHAR(128) NOT NULL,
+  interview_date DATE         NULL,
+  round          VARCHAR(32)  NULL COMMENT '一面/二面/HR面 等，自由文本',
+  result         VARCHAR(16)  NOT NULL DEFAULT 'pending' COMMENT 'pending | passed | failed | offer',
+  notes          MEDIUMTEXT   NULL COMMENT '整场面试的复盘备注',
+  questions      JSON         NOT NULL COMMENT '[{qid, question, my_answer, note, ref_answer, ref_status, ref_error}]',
+  created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='面试场次记录（含问题清单与 AI 参考答案）';
+
 
 -- ---------------------------------------------------------------------------
 -- 升级已有库：新增「项目」维度

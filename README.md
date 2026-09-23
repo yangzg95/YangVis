@@ -135,7 +135,7 @@ npm run dev                   # http://localhost:5173，/api 已代理到 18099
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `APP_NAME` / `PORT` / `CONTEXT_PATH` | yangvis / 18099 / `/tool` | 应用基础信息 |
+| `APP_NAME` / `PORT` | yangvis / 18099 | 应用基础信息 |
 | `DB_HOST` `DB_PORT` `DB_USER` `DB_PASSWORD` `DB_NAME` | localhost… | MySQL 连接 |
 | `QDRANT_HOST` `QDRANT_PORT` `QDRANT_TIMEOUT` | localhost / 6333 | 向量库 |
 | `AUTH_JWT_SECRET` | **必填** | JWT 签名密钥，<32 字节拒绝启动 |

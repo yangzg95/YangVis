@@ -5,11 +5,12 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Index,
     Integer,
@@ -745,6 +746,48 @@ class ResumeToolkitTask(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<ResumeToolkitTask id={self.id} owner={self.owner_id} kind={self.kind!r} status={self.status!r}>"
+
+
+class InterviewRecord(Base):
+    """一场面试的记录及其问题清单。
+
+    ``questions`` 是整个 JSON 子列表而不是子表：一场面试的题目量级是几十条，
+    没有跨记录检索题目的需求，独立子表只会带来 join 和级联的复杂度。每题带一
+    个服务端生成的 ``qid``，题目级的增删改和 AI 参考答案回写都按 qid 寻址，
+    不依赖数组下标——下标在「删题的同时另一题正在生成答案」时会发生漂移。
+
+    每题的 ``ref_status``：none（未生成）| analyzing（生成中）| ready（已生成）
+    | error（生成失败，原因在 ref_error）。
+    """
+
+    __tablename__ = "interview_record"
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    company: Mapped[str] = mapped_column(String(128), nullable=False)
+    position: Mapped[str] = mapped_column(String(128), nullable=False)
+    interview_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # 一面/二面/HR面 之类，自由文本：各公司的轮次叫法没有标准可枚举。
+    round: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    # pending（待定）| passed（通过）| failed（未通过）| offer（已 offer）
+    result: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    # 整场面试的复盘备注。
+    notes: Mapped[str | None] = mapped_column(_LONG_TEXT, nullable=True)
+
+    # [{qid, question, my_answer, note, ref_answer, ref_status, ref_error}]
+    questions: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<InterviewRecord id={self.id} owner={self.owner_id} company={self.company!r}>"
 
 
 class NetdiskAccount(Base):

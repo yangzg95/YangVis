@@ -20,7 +20,6 @@ class Settings(BaseSettings):
     # 应用
     APP_NAME: str = "yangvis"
     PORT: int = 18099
-    CONTEXT_PATH: str = "/tool"
     # yangvis.* 日志级别。排障时改 DEBUG 重启即可，不用动代码。
     LOG_LEVEL: str = "INFO"
 

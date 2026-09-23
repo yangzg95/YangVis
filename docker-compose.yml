@@ -13,7 +13,6 @@ services:
     environment:
       APP_NAME: yangvis
       PORT: "18099"
-      CONTEXT_PATH: /tool
       DB_HOST: mysql
       DB_PORT: "3306"
       DB_USER: root

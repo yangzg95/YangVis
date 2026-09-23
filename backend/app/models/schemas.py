@@ -1,7 +1,7 @@
 """Pydantic 请求 / 响应模式定义。"""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar
 
@@ -1072,6 +1072,78 @@ class ResumeToolkitItem(BaseModel):
 class ResumeToolkitDetail(ResumeToolkitItem):
     inputs: Dict[str, Any] = {}
     report: Optional[str] = None
+
+
+# ---- 智能办公 · 面试记录 -------------------------------------------------------
+
+# 面试结果；裸字符串存储，与现有状态字段同一约定（不用 Enum）。
+InterviewResult = Literal[
+    "pending",  # 待定
+    "passed",   # 通过
+    "failed",   # 未通过
+    "offer",    # 已 offer
+]
+
+
+class InterviewQuestionIn(BaseModel):
+    """新增 / 修改一条面试问题。ref_*（AI 参考答案）只允许走生成接口，
+    不在这个入口里出现——三条写路径各自管各自的字段，才不会互相踩掉。"""
+
+    question: str = Field(..., min_length=1, max_length=4000)
+    my_answer: Optional[str] = Field(default=None, max_length=20000)
+    note: Optional[str] = Field(default=None, max_length=20000)
+
+
+class InterviewQuestion(InterviewQuestionIn):
+    """落库后的一条问题：多了服务端发的 qid 和 AI 参考答案三件套。"""
+
+    qid: str
+    ref_answer: Optional[str] = None
+    # none | analyzing | ready | error
+    ref_status: str = "none"
+    ref_error: Optional[str] = None
+
+
+class InterviewCreate(BaseModel):
+    company: str = Field(..., min_length=1, max_length=128)
+    position: str = Field(..., min_length=1, max_length=128)
+    interview_date: Optional[date] = None
+    round: Optional[str] = Field(default=None, max_length=32)
+    result: InterviewResult = "pending"
+    notes: Optional[str] = Field(default=None, max_length=20000)
+    # 允许建场次时顺手带上第一批问题。
+    questions: List[InterviewQuestionIn] = []
+
+
+class InterviewUpdate(BaseModel):
+    """面试场次的元数据修改；questions 有专门的题目级端点，不走这里——
+    整体替换问题列表会和后台生成任务回写的 ref_* 互相覆盖。"""
+
+    company: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    position: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    interview_date: Optional[date] = None
+    round: Optional[str] = Field(default=None, max_length=32)
+    result: Optional[InterviewResult] = None
+    notes: Optional[str] = Field(default=None, max_length=20000)
+
+
+class InterviewItem(BaseModel):
+    """列表里的一行面试记录。不带 questions，只给计数。"""
+
+    id: int
+    company: str
+    position: str
+    interview_date: Optional[date] = None
+    round: Optional[str] = None
+    result: str = "pending"
+    notes: Optional[str] = None
+    question_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class InterviewDetail(InterviewItem):
+    questions: List[InterviewQuestion] = []
 
 
 class NetdiskStatus(BaseModel):

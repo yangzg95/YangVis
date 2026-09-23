@@ -25,6 +25,7 @@ from app.routers import (
     agents,
     auth,
     chat,
+    interview,
     knowledge,
     memory,
     netdisk,
@@ -77,6 +78,7 @@ app.include_router(memory.router, prefix=API_PREFIX)
 app.include_router(ops.router, prefix=API_PREFIX)
 app.include_router(ops_files.router, prefix=API_PREFIX)
 app.include_router(resume.router, prefix=API_PREFIX)
+app.include_router(interview.router, prefix=API_PREFIX)
 app.include_router(netdisk.router, prefix=API_PREFIX)
 
 
@@ -208,6 +210,11 @@ async def spa_fallback(full_path: str) -> FileResponse:
     if full_path.startswith("api/") or full_path.startswith("assets/") or full_path.startswith("static/"):
         # FastAPI 的路由优先级应该能处理好，这里只是防御性检查。
         return FileResponse(str(_placeholder()), media_type="text/html")
+    # 顶层静态文件（favicon.svg、robots.txt 等）原样返回，其余路径回退到 SPA。
+    # resolve + is_relative_to 防 '..' 路径穿越出 STATIC_DIR。
+    candidate = (STATIC_DIR / full_path).resolve()
+    if candidate.is_file() and candidate.is_relative_to(STATIC_DIR.resolve()):
+        return FileResponse(str(candidate))
     if INDEX_FILE.exists():
         return FileResponse(str(INDEX_FILE))
     return FileResponse(str(_placeholder()), media_type="text/html")

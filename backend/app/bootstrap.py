@@ -10,6 +10,7 @@ from app.config import Settings
 from app.database import Base, SessionLocal, engine
 from app.models.entities import KbProject, KnowledgeType, SysUser
 from app.services.agents import seed_builtin_agents
+from app.services.interview import reset_stale_answers
 from app.services.knowledge import reset_stale_indexing
 from app.services.ops_actions import reset_stale_ops_actions
 from app.services.resume import reset_stale_analysis
@@ -251,6 +252,8 @@ def reset_stale_jobs() -> None:
     with SessionLocal() as db:
         reset_stale_indexing(db)
         reset_stale_analysis(db)
+        # 面试题的「生成中」标记同样活在 worker 内存里，进程重启后统一转 error。
+        reset_stale_answers(db)
         # 进程重启同样会丢下「等用户确认」的运维写命令——发起它们的 SSE 流
         # 已经断了，统一物化为 expired。
         reset_stale_ops_actions(db)
