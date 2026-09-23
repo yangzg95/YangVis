@@ -32,7 +32,8 @@ WORKDIR /app
 # Install Python dependencies.
 COPY backend/requirements.txt ./requirements.txt
 # Use a China mirror for apt as well; deb.debian.org is painfully slow from CN.
-RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
+# (tuna 403s on trixie pool files, so use USTC.)
+RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
  && apt-get update \
  && apt-get install -y --no-install-recommends curl \
  && rm -rf /var/lib/apt/lists/* \
@@ -46,9 +47,9 @@ COPY backend/app ./app
 COPY --from=frontend-builder /web/dist /app/static
 
 # Create a non-root user and hand over the app dir.
-RUN useradd --create-home --shell /bin/bash noetix \
- && chown -R noetix:noetix /app
-USER noetix
+RUN useradd --create-home --shell /bin/bash yangvis \
+ && chown -R yangvis:yangvis /app
+USER yangvis
 
 EXPOSE 18099
 

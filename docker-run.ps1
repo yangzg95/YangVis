@@ -3,7 +3,7 @@
     裸 docker 方式构建并启动 yangvis（不含 MySQL / Qdrant，需自行准备）。
 
 .EXAMPLE
-    # 默认：使用 backend\.env，镜像 yangvis:latest，容器名 yangvis
+    # 默认：使用 backend\.env，镜像 luke.yang/docker/yangvis:latest，容器名 yangvis
     .\docker-run.ps1
 
 .EXAMPLE
@@ -16,7 +16,7 @@
 #>
 param(
     [string]$EnvFile = "backend\.env",
-    [string]$ImageName = "yangvis:latest",
+    [string]$ImageName = "docker.cnb.cool/luke.yang/docker/yangvis:latest",
     [string]$ContainerName = "yangvis",
     [int]$Port = 18099,
     [switch]$SkipBuild
