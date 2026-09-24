@@ -431,9 +431,11 @@
     </a-modal>
 
     <!-- ================= 预览抽屉 ================= -->
+    <!-- 手机上抽屉占满屏：antd-vue 4 的 Drawer 没有 max-width 上限，固定 720
+         会超出视口。 -->
     <a-drawer
       v-model:open="previewDrawer.open"
-      :width="720"
+      :width="isMobile ? '100%' : 720"
       :title="previewDrawer.title || '简历预览'"
     >
       <div v-if="previewDrawer.loading" class="preview-loading">
@@ -483,10 +485,12 @@ import {
 } from '@/api'
 import { saveBlobResponse } from '@/utils/download'
 import { fmtSize } from '@/utils/format'
+import { useIsMobile } from '@/utils/useIsMobile'
 import InterviewRecords from '@/components/InterviewRecords.vue'
 
 const simpleEmpty = Empty.PRESENTED_IMAGE_SIMPLE
 const router = useRouter()
+const isMobile = useIsMobile()
 
 // ---- 求职助手工具定义 ----------------------------------------------------------
 // 声明式配置：新增工具只动这张表与后端 TOOLKIT_KINDS，弹窗表单按字段自动渲染。

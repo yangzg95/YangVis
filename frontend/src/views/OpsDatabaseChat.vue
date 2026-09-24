@@ -182,6 +182,7 @@ function onAskAi(payload: { connId: number; sql: string; error?: string; schema?
   display: flex;
   flex-direction: column;
   height: 100vh;
+  height: 100dvh;
   background: #f5f6f8;
 }
 

@@ -32,39 +32,42 @@
         <!-- string：原文展示 -->
         <pre v-if="detail.key_type === 'string'" class="string-value">{{ detail.value }}</pre>
 
-        <!-- list / set：单列，带序号 -->
-        <a-table
-          v-else-if="detail.key_type === 'list' || detail.key_type === 'set'"
-          class="db-grid"
-          size="small"
-          :data-source="listRows"
-          :columns="listColumns"
-          :pagination="false"
-          :scroll="{ x: 'max-content', y: 440 }"
-          row-key="__i"
-        />
+        <div v-else ref="gridWrapRef" class="grid-wrap">
+          <!-- list / set：单列，带序号 -->
+          <a-table
+            v-if="detail.key_type === 'list' || detail.key_type === 'set'"
+            class="db-grid"
+            size="small"
+            :data-source="listRows"
+            :columns="listColumns"
+            :pagination="false"
+            :scroll="{ x: 'max-content', y: scrollY }"
+            row-key="__i"
+          />
 
-        <!-- hash / zset / stream：两列 -->
-        <a-table
-          v-else
-          class="db-grid"
-          size="small"
-          :data-source="pairRows"
-          :columns="pairColumns"
-          :pagination="false"
-          :scroll="{ x: 'max-content', y: 440 }"
-          row-key="__i"
-        />
+          <!-- hash / zset / stream：两列 -->
+          <a-table
+            v-else
+            class="db-grid"
+            size="small"
+            :data-source="pairRows"
+            :columns="pairColumns"
+            :pagination="false"
+            :scroll="{ x: 'max-content', y: scrollY }"
+            row-key="__i"
+          />
+        </div>
       </template>
     </a-spin>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { KeyOutlined, ReloadOutlined } from '@ant-design/icons-vue'
 import { message as toast } from 'ant-design-vue'
 import { opsApi, type RedisKeyDetail } from '@/api'
+import { useGridScrollY } from './useGridScrollY'
 import './grid.css'
 
 const props = defineProps<{
@@ -90,6 +93,10 @@ const PAIR_HEADERS: Record<string, [string, string]> = {
 
 const detail = ref<RedisKeyDetail | null>(null)
 const loading = ref(false)
+
+// scroll.y 实测容器剩余空间（无分页），写死像素会在窗口变矮时顶出容器。
+const gridWrapRef = ref<HTMLElement | null>(null)
+const { scrollY, measureScrollY } = useGridScrollY(gridWrapRef, { pagination: false })
 
 const ttlText = computed(() => {
   const ttl = detail.value?.ttl
@@ -125,6 +132,9 @@ async function load() {
   loading.value = true
   try {
     detail.value = await opsApi.redisKeyDetail(props.connId, props.db, props.rkey)
+    // 表格随 detail 渲染出来后才占高度，等量一下再重算表格体高度。
+    await nextTick()
+    measureScrollY()
   } catch (err: any) {
     toast.error(err?.message || '加载失败')
   } finally {
@@ -180,6 +190,17 @@ onMounted(load)
   flex: 1;
   min-height: 0;
   overflow: auto;
+}
+
+/* 高度一路传到表格容器，useGridScrollY 实测到的才是 .body 的剩余空间，
+   而不是随内容膨胀的高度。string/empty 内容超出时仍由 .body 滚动兜底。 */
+.body :deep(.ant-spin-container) {
+  height: 100%;
+}
+
+.grid-wrap {
+  height: 100%;
+  overflow: hidden;
 }
 
 .string-value {

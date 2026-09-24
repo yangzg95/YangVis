@@ -180,6 +180,7 @@ onMounted(() => {
 <style scoped>
 .report-page {
   min-height: 100vh;
+  min-height: 100dvh;
   background: #f5f5f5;
 }
 .report-header {
@@ -211,6 +212,7 @@ onMounted(() => {
   padding: 24px 32px 64px;
   background: #fff;
   min-height: calc(100vh - 54px);
+  min-height: calc(100dvh - 54px);
 }
 .report-empty {
   padding-top: 96px;

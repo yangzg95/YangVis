@@ -1351,4 +1351,16 @@ onUnmounted(() => abort?.())
   align-items: center;
   gap: 8px;
 }
+
+@media (max-width: 768px) {
+  /* 触屏没有 hover：操作入口常显，不然手机上找不到重命名/删除/复制。 */
+  .conv-actions,
+  .bubble-actions {
+    opacity: 1;
+  }
+  /* 小屏放宽气泡：78% 在手机上白白浪费一截宽度。 */
+  .bubble {
+    max-width: 92%;
+  }
+}
 </style>

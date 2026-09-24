@@ -13,16 +13,17 @@
       </a-tooltip>
     </div>
 
-    <a-table
-      class="grid db-grid"
-      size="small"
-      :data-source="columns"
-      :columns="GRID_COLUMNS"
-      :loading="loading"
-      :pagination="false"
-      :scroll="{ x: 'max-content', y: 480 }"
-      row-key="name"
-    >
+    <div ref="gridWrapRef" class="grid-wrap">
+      <a-table
+        class="grid db-grid"
+        size="small"
+        :data-source="columns"
+        :columns="GRID_COLUMNS"
+        :loading="loading"
+        :pagination="false"
+        :scroll="{ x: 'max-content', y: scrollY }"
+        row-key="name"
+      >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'name'">
           <span class="col-name">{{ record.name }}</span>
@@ -38,15 +39,17 @@
           </span>
         </template>
       </template>
-    </a-table>
+      </a-table>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { nextTick, onMounted, ref } from 'vue'
 import { FolderOutlined, ReloadOutlined, TableOutlined } from '@ant-design/icons-vue'
 import { message as toast } from 'ant-design-vue'
 import { opsApi, type DbColumnItem } from '@/api'
+import { useGridScrollY } from './useGridScrollY'
 import './grid.css'
 
 const props = defineProps<{
@@ -67,11 +70,18 @@ const GRID_COLUMNS = [
 const columns = ref<DbColumnItem[]>([])
 const loading = ref(false)
 
+// scroll.y 实测容器剩余空间（无分页），写死像素会在窗口变矮时顶出容器。
+const gridWrapRef = ref<HTMLElement | null>(null)
+const { scrollY, measureScrollY } = useGridScrollY(gridWrapRef, { pagination: false })
+
 async function load() {
   loading.value = true
   try {
     const res = await opsApi.dbColumns(props.connId, props.schema, props.table)
     columns.value = res.items
+    // 表头随数据渲染出来后才占高度，等量一下再重算表格体高度。
+    await nextTick()
+    measureScrollY()
   } catch (err: any) {
     toast.error(err?.message || '加载失败')
   } finally {
@@ -111,10 +121,11 @@ onMounted(load)
   flex: 1;
 }
 
-.grid {
+.grid-wrap {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  /* 纵向滚动由表格自身（scroll.y）负责，外层不再滚，避免出现双滚动条。 */
+  overflow: hidden;
 }
 
 .col-name {

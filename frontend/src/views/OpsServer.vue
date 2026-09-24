@@ -633,9 +633,10 @@ onMounted(() => {
    信息卡片自带边框和内容层次，稀疏时也撑得住。用 auto-fit + 1fr 而不是
    auto-fill + 固定上限：空轨道塌缩，卡片均分整行宽度，几台就撑满几列，
    不会在右侧留一截用不上的空白。 */
+/* min(340px, 100%)：容器比 340px 还窄时（手机）轨道贴满容器，不再横向溢出。 */
 .server-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr));
   gap: 12px;
   align-content: start;
   height: 100%;

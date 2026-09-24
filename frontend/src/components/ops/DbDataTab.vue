@@ -198,7 +198,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import {
   CopyOutlined,
   DownOutlined,
@@ -223,6 +223,7 @@ import CellViewer from './CellViewer.vue'
 import CellEditor from './CellEditor.vue'
 import { copyText, csvLine, downloadText, isLongValue, recordValues, toColumns, toRows } from './grid'
 import { useColumnResize } from './useColumnResize'
+import { useGridScrollY } from './useGridScrollY'
 import './grid.css'
 
 const props = defineProps<{
@@ -261,27 +262,9 @@ const { columns, startResize } = useColumnResize(
 )
 
 // scroll.y 必须给具体像素表头才能固定，但容器高度随窗口/面板变化，
-// 所以实测容器剩余空间 = 容器高 − 表头 − 分页栏，尺寸一变就重算。
+// 实测逻辑在 useGridScrollY（与 DbStructureTab / RedisKeyTab 共用）。
 const gridWrapRef = ref<HTMLElement | null>(null)
-const scrollY = ref(480)
-
-/** 元素自身高度加上下外边距（分页栏的 margin 也要让出来）。 */
-function outerHeight(el: HTMLElement): number {
-  const style = getComputedStyle(el)
-  return el.offsetHeight + parseFloat(style.marginTop) + parseFloat(style.marginBottom)
-}
-
-function measureScrollY() {
-  const wrap = gridWrapRef.value
-  if (!wrap) return
-  const thead = wrap.querySelector<HTMLElement>('.ant-table-thead')
-  const pager = wrap.querySelector<HTMLElement>('.ant-pagination')
-  // 数据还没回来、分页栏尚未渲染时用经验值兜底，避免把表格压成一褶。
-  const occupied = (thead ? thead.offsetHeight : 40) + (pager ? outerHeight(pager) : 48)
-  scrollY.value = Math.max(160, wrap.clientHeight - occupied)
-}
-
-const gridObserver = new ResizeObserver(() => measureScrollY())
+const { scrollY, measureScrollY } = useGridScrollY(gridWrapRef)
 
 const pagination = computed(() => ({
   current: page.value,
@@ -329,14 +312,7 @@ function onChange(pag: { current?: number; pageSize?: number }) {
   load(target, size)
 }
 
-onMounted(async () => {
-  if (gridWrapRef.value) gridObserver.observe(gridWrapRef.value)
-  await nextTick()
-  measureScrollY()
-  load(1, pageSize.value)
-})
-
-onBeforeUnmount(() => gridObserver.disconnect())
+onMounted(() => load(1, pageSize.value))
 
 // ---- 筛选 & 排序 ---------------------------------------------------------------
 

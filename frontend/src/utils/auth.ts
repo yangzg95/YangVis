@@ -2,9 +2,6 @@
 
 import { storageKeys } from './storage'
 
-// 前缀统一前的旧 key（产品更名前的 jarvis 时代遗留），读一次搬家后即可删除这段迁移（2026-09 引入）。
-const LEGACY_ACCESS_TOKEN_KEY = 'jarvis-access-token'
-
 // 隐私模式 / 存储被禁用时 localStorage 访问会直接抛 SecurityError。这里在
 // axios 请求拦截器的同步路径上，一次抛错就是所有 API 请求全挂——读写全部
 // 降级为「没存到 / 读不到」，让流程走到正常的 401 分支。
@@ -37,19 +34,11 @@ export function setAccessToken(accessToken: string) {
 }
 
 export function getAccessToken(): string | null {
-  const token = safeGet(storageKeys.accessToken)
-  if (token) return token
-  const legacy = safeGet(LEGACY_ACCESS_TOKEN_KEY)
-  if (legacy) {
-    safeSet(storageKeys.accessToken, legacy)
-    safeRemove(LEGACY_ACCESS_TOKEN_KEY)
-  }
-  return legacy
+  return safeGet(storageKeys.accessToken)
 }
 
 export function clearAccessToken() {
   safeRemove(storageKeys.accessToken)
-  safeRemove(LEGACY_ACCESS_TOKEN_KEY)
 }
 
 export function isAuthenticated(): boolean {

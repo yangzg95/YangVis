@@ -366,6 +366,7 @@ onBeforeUnmount(cancelAutoReconnect)
   display: flex;
   flex-direction: column;
   height: 100vh;
+  height: 100dvh;
   background: #0d141b;
   color: #d8dee4;
 }

@@ -220,9 +220,12 @@ input {
    同色、logo 同位——登录成功的瞬间，品牌栏无缝长成工作台导航轨。
    栏内标语用中文竖排，既是窄栏的解法，也是入口的唯一高光时刻。 */
 
+/* dvh 统一跟在 vh 后面声明：不支持的浏览器吃掉后一条，支持的用动态视口高
+   （移动端地址栏收起/展开时 100vh 不会变，底部会被裁一截）。 */
 .page-shell {
   position: relative;
   min-height: 100vh;
+  min-height: 100dvh;
   background: var(--paper);
 }
 
@@ -230,6 +233,7 @@ input {
   display: grid;
   grid-template-columns: 200px minmax(0, 1fr);
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .login-brand {
@@ -501,6 +505,7 @@ input {
 
 .dashboard-layout {
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
 
@@ -508,6 +513,7 @@ input {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   background: var(--ink);
   border-right: 1px solid rgba(255, 255, 255, 0.06);
@@ -761,6 +767,7 @@ input {
   background: transparent;
   min-width: 0;
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
 

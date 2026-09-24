@@ -296,7 +296,8 @@ onMounted(load)
 }
 .agent-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  /* min(280px, 100%)：超小屏（320px 级）容器不足 280px 时不再横向溢出。 */
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
   gap: 16px;
 }
 .section-toggle {
