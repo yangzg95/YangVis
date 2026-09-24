@@ -1114,7 +1114,8 @@ onUnmounted(() => abort?.())
   flex: 1;
   min-height: 0;
 }
-/* 窄屏上下堆叠：会话列表限高可滚，消息区吃剩余高度。 */
+/* 桌面窄窗（非手机断点，见 style.css 头注约定）：上下堆叠，会话列表
+   限高可滚，消息区吃剩余高度。 */
 @media (max-width: 900px) {
   .chat-body {
     grid-template-columns: 1fr;

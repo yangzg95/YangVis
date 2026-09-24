@@ -604,7 +604,8 @@ onMounted(() => {
   overflow: hidden;
 }
 
-/* 窄屏上下堆叠：面板各自定高、内部滚动，整页不再依赖左右并排。 */
+/* 桌面窄窗（非手机断点，见 style.css 头注约定）：上下堆叠，面板各自
+   定高、内部滚动，整页不再依赖左右并排。 */
 @media (max-width: 1100px) {
   .stats-row {
     grid-template-columns: repeat(2, 1fr);

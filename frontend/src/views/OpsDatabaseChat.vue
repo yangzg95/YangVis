@@ -307,7 +307,8 @@ body.dragging-col .col-resizer::after {
   overflow: hidden;
 }
 
-/* 窄屏：查询台与 AI 面板上下堆叠、各自定高，整页滚动；顶栏地址让位给名称。
+/* 桌面窄窗（非手机断点，见 style.css 头注约定）：查询台与 AI 面板上下
+   堆叠、各自定高，整页滚动；顶栏地址让位给名称。
    展开竖条转成横条（scoped 特异性高于全局 .rail）。 */
 @media (max-width: 900px) {
   .conn-addr {
