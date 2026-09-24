@@ -654,8 +654,11 @@ class ChatService:
         if agent_id is not None:
             return self._agents.get(agent_id)
 
+        # 默认人选只从「对对话页开放」的智能体里挑：运维、简历这类后台人设
+        # （chat_visible=False）即使用户全部禁用前台人设，也不能顶上来答对话。
         for agent in self._agents.list(enabled_only=True):
-            return agent
+            if agent.chat_visible:
+                return agent
         raise BusinessError(CODE_CHAT_NOT_READY, "没有可用的智能体")
 
     # -- 主流程 -------------------------------------------------------------

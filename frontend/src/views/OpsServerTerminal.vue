@@ -347,6 +347,9 @@ function onTerminalStatus(value: 'connecting' | 'connected' | 'closed', code?: n
     pendingInput = ''
   }
 }
+
+// 退避倒计时期间离开页面，挂起的定时器不能对已卸载的组件触发重连。
+onBeforeUnmount(cancelAutoReconnect)
 </script>
 
 <style scoped>

@@ -165,11 +165,18 @@ class OpsDatabaseService:
             item.color = data["color"] or None
 
         password = data.get("password")
-        if password and not is_masked(password):
+        password_changed = bool(password and not is_masked(password))
+        if password_changed:
             item.password_enc = encrypt(password)
 
-        item.last_check_ok = False
-        item.last_check_error = None
+        # 只有连接信息（地址/凭据/库名/类型）变化才让上次探测结果作废——
+        # 改备注、颜色、写开关不影响连通性，与 ops_server.update 保持一致。
+        endpoint_changed = any(
+            data.get(f) is not None for f in ("host", "port", "username", "db_name", "db_type")
+        )
+        if endpoint_changed or password_changed:
+            item.last_check_ok = False
+            item.last_check_error = None
 
         self._commit_unique(f"数据库名称「{item.name}」已存在")
         self._db.refresh(item)
@@ -178,7 +185,7 @@ class OpsDatabaseService:
             self._owner_id,
             item.id,
             data.get("writable") is not None,
-            bool(password and not is_masked(password)),
+            password_changed,
         )
         return item
 

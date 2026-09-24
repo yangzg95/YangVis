@@ -390,8 +390,12 @@ async function onTest(item: OpsServer) {
 }
 
 async function onDelete(item: OpsServer) {
-  await opsApi.removeServer(item.id)
-  toast.success('已删除')
+  try {
+    await opsApi.removeServer(item.id)
+    toast.success('已删除')
+  } catch {
+    return // 拦截器已弹 toast。
+  }
   await load()
 }
 

@@ -54,6 +54,11 @@
   </div>
 </template>
 
+<script lang="ts">
+// 模块级计数器：mermaid.render 的 id 全局唯一，跨卡片实例也不能撞。
+let mermaidRenderSeq = 0
+</script>
+
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { message as toast } from 'ant-design-vue'
@@ -96,14 +101,15 @@ const rendering = ref(false)
 
 // mermaid.render 需要一个全局唯一的元素 id；渲染失败时它会把一个同 id 的
 // 错误节点挂到 body 上，得顺手清掉，否则页面上会凭空多出一坨红字。
-let renderSeq = 0
+// 计数器必须在模块级（见上方 <script> 块）：script setup 顶层是实例级的，
+// 两张图卡片并发渲染会生成相同的 id，错误节点清理互相串扰。
 
 async function render(source: string) {
   rendering.value = true
   error.value = ''
   try {
     const mermaid = await loadMermaid()
-    const id = `mermaid-card-${++renderSeq}`
+    const id = `mermaid-card-${++mermaidRenderSeq}`
     try {
       const { svg } = await mermaid.render(id, source)
       svgHtml.value = svg

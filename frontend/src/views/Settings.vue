@@ -431,14 +431,22 @@ async function onTest(record: ModelConfig) {
 }
 
 async function onSetDefault(record: ModelConfig) {
-  await settingsApi.setDefault(record.id)
-  message.success('已设为默认')
+  try {
+    await settingsApi.setDefault(record.id)
+    message.success('已设为默认')
+  } catch {
+    return // 拦截器已弹 toast。
+  }
   await load()
 }
 
 async function onDelete(id: number) {
-  await settingsApi.deleteModel(id)
-  message.success('已删除')
+  try {
+    await settingsApi.deleteModel(id)
+    message.success('已删除')
+  } catch {
+    return // 拦截器已弹 toast。
+  }
   await load()
 }
 
@@ -543,14 +551,22 @@ async function submitMemory() {
 }
 
 async function onMemoryDelete(id: number) {
-  await memoryApi.remove(id)
-  message.success('已删除')
+  try {
+    await memoryApi.remove(id)
+    message.success('已删除')
+  } catch {
+    return // 拦截器已弹 toast。
+  }
   await loadMemories()
 }
 
 async function onMemoryClear() {
-  await memoryApi.clear()
-  message.success('已清空全部记忆')
+  try {
+    await memoryApi.clear()
+    message.success('已清空全部记忆')
+  } catch {
+    return // 拦截器已弹 toast。
+  }
   await loadMemories()
 }
 
@@ -563,7 +579,7 @@ async function openAuthPage() {
   bindModal.authLoading = true
   try {
     const { url } = await netdiskApi.authUrl()
-    window.open(url, '_blank')
+    window.open(url, '_blank', 'noopener')
   } catch (err) {
     message.error(errorText(err, '获取授权地址失败'))
   } finally {

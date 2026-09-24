@@ -261,14 +261,22 @@ async function submit() {
 }
 
 async function onDuplicate(agent: Agent) {
-  const copy = await agentsApi.duplicate(agent.id)
-  message.success(`已复制为「${copy.name}」`)
+  try {
+    const copy = await agentsApi.duplicate(agent.id)
+    message.success(`已复制为「${copy.name}」`)
+  } catch {
+    return // 拦截器已弹 toast。
+  }
   await load()
 }
 
 async function onDelete(id: number) {
-  await agentsApi.remove(id)
-  message.success('已删除')
+  try {
+    await agentsApi.remove(id)
+    message.success('已删除')
+  } catch {
+    return // 拦截器已弹 toast。
+  }
   await load()
 }
 

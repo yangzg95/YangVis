@@ -69,8 +69,10 @@ async def login(
     """Verify credentials against ``sys_user`` and issue an access token."""
     ip = request.client.host if request.client else "unknown"
     # 计数键统一小写：MySQL 默认排序规则下用户名大小写不敏感，不收敛的话
-    # 每换一种大小写组合就能多拿一轮尝试额度。
-    username_key = payload.username.strip().lower()
+    # 每换一种大小写组合就能多拿一轮尝试额度。查库的用户名做同样的 strip
+    # 归一化，避免「 alice」这类输入计数记到 alice 头上、查询却查不到人。
+    username = payload.username.strip()
+    username_key = username.lower()
 
     wait = locked_seconds(username_key, ip)
     if wait > 0:
@@ -81,7 +83,7 @@ async def login(
     if not verify_captcha(payload.captcha_id, payload.captcha_code):
         return APIResponse(code=-1, message="验证码错误或已过期，请重新输入")
 
-    user = db.scalar(select(SysUser).where(SysUser.username == payload.username))
+    user = db.scalar(select(SysUser).where(SysUser.username == username))
 
     # Same response for "no such user", "wrong password" and "disabled": a
     # distinct message would turn this endpoint into a username oracle. The

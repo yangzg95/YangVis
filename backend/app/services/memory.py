@@ -348,7 +348,6 @@ class MemoryService:
         # 规范化后的内容集合：去重既针对已有记忆，也针对本批刚加进去的——
         # 模型在同一批里给出两条一样的 add 是常有的事。
         contents = {row.content.casefold() for row in known.values()}
-        added = 0
         for op in operations:
             action = op.get("action")
             content = str(op.get("content") or "").strip()
@@ -361,7 +360,8 @@ class MemoryService:
                 normalized = content.casefold()
                 if normalized in contents:
                     continue
-                if len(known) + added >= MEMORY_MAX_ITEMS:
+                # 新项已 append 进 known，len(known) 本身就含本批新增。
+                if len(known) >= MEMORY_MAX_ITEMS:
                     logger.info(
                         "memory cap (%d) reached for owner %s, dropping extracted item",
                         MEMORY_MAX_ITEMS,
@@ -371,7 +371,6 @@ class MemoryService:
                 row = self.create(content, source_conversation_id=conversation.id)
                 known[row.id] = row
                 contents.add(normalized)
-                added += 1
             elif action == "update" and op_id in known and content:
                 self.update(op_id, content)
             elif action == "delete" and op_id in known:

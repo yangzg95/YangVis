@@ -13,6 +13,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Request,
     UploadFile,
     status,
 )
@@ -40,6 +41,11 @@ from app.models.schemas import (
 from app.services.chunking import UnsupportedFileType
 from app.services.netdisk import NetdiskService
 from app.services.resume import ResumeService, extract_resume_text
+from app.services.uploads import (
+    content_length_exceeds,
+    oversize_message,
+    read_upload_limited,
+)
 
 logger = logging.getLogger("yangvis.resume")
 
@@ -80,6 +86,7 @@ async def list_resumes(
 
 @router.post("/resumes", response_model=APIResponse[ResumeItem])
 async def upload_resume(
+    request: Request,
     file: UploadFile = File(...),
     title: Optional[str] = Form(default=None),
     description: Optional[str] = Form(default=None),
@@ -91,10 +98,14 @@ async def upload_resume(
 
     用户已绑定网盘时，原文件顺带同步一份过去。同步失败不阻塞保存——
     行里的网盘两列留 NULL 就是「未同步」的标记，之后也下载不了原件。"""
-    raw = await file.read()
-    if len(raw) > settings.KB_MAX_UPLOAD_BYTES:
-        limit_mb = settings.KB_MAX_UPLOAD_BYTES / 1024 / 1024
-        return APIResponse(code=-1, message=f"文件过大，上限 {limit_mb:.0f} MB")
+    # 先按 Content-Length 提前拒绝，再有界读取——read() 不设上限，会把
+    # 整个上传体物化进内存。
+    limit = settings.KB_MAX_UPLOAD_BYTES
+    if content_length_exceeds(request.headers.get("content-length"), limit):
+        return APIResponse(code=-1, message=oversize_message(limit))
+    raw = await read_upload_limited(file, limit)
+    if raw is None:
+        return APIResponse(code=-1, message=oversize_message(limit))
 
     filename = file.filename or "untitled.pdf"
     try:

@@ -577,11 +577,13 @@ class ChatOpsToolbox:
         async def list_tables() -> str:
             """列出当前库里的表及其大致行数，用来摸清结构。"""
             if database is not None and database.db_name:
+                # 会话的默认库就是台账里的 db_name（见 _connect_mysql），
+                # 用 DATABASE() 取值，避免把库名拼进 SQL 文本。
                 return await _run(
                     "SELECT table_name, engine, table_rows, "
                     "ROUND((data_length+index_length)/1024/1024, 2) AS size_mb "
                     "FROM information_schema.tables "
-                    f"WHERE table_schema = '{database.db_name}' "
+                    "WHERE table_schema = DATABASE() "
                     "ORDER BY (data_length+index_length) DESC"
                 )
             return await _run("SHOW DATABASES")

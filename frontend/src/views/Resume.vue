@@ -752,7 +752,13 @@ function needsPolling(): boolean {
 function syncPolling() {
   if (needsPolling() && pollTimer === undefined) {
     pollTimer = window.setInterval(async () => {
-      await Promise.all([loadResumes(), loadComparisons(), loadToolkit()])
+      try {
+        await Promise.all([loadResumes(), loadComparisons(), loadToolkit()])
+      } catch {
+        // 本轮失败不致命（拦截器已弹 toast）：不停表也不让 rejection 裸奔，
+        // 一次网络抖动不该让「分析中」的进度永远卡住。
+        return
+      }
       if (!needsPolling()) {
         window.clearInterval(pollTimer)
         pollTimer = undefined

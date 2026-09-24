@@ -470,7 +470,11 @@ async function submitRename() {
   renamingId.value = null
   // 空标题或没改动都不打扰后端。
   if (!title || !conv || title === conv.title) return
-  await chatApi.updateConversation(id, { title })
+  try {
+    await chatApi.updateConversation(id, { title })
+  } catch {
+    return // 拦截器已弹 toast；本地标题维持原样，下次刷新自然对齐。
+  }
   conv.title = title
 }
 
@@ -698,7 +702,11 @@ function startNew() {
 }
 
 async function removeConversation(id: number) {
-  await chatApi.deleteConversation(id)
+  try {
+    await chatApi.deleteConversation(id)
+  } catch {
+    return // 拦截器已弹 toast。
+  }
   toast.success('已删除')
   if (activeId.value === id) startNew()
   await loadConversations()

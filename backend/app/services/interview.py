@@ -23,7 +23,9 @@ import time
 from typing import List, Optional
 
 from sqlalchemy import Select, select
+from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import ObjectDeletedError
 
 from app.errors import BusinessError, CODE_CHAT_NOT_READY
 from app.models.entities import InterviewRecord, ModelConfig
@@ -335,7 +337,9 @@ class InterviewService:
                 raise RuntimeError("模型返回了空回答")
 
             # 生成期间用户可能改过别的题或元数据：先 refresh 合并，再只动 ref_*。
-            self._db.refresh(record)
+            # 记录也可能已被整条删除——删了就到此为止，状态没有地方可写。
+            if not self._refresh_alive(record, record_id, qid):
+                return
             record.questions = _merge_ref_fields(
                 record.questions or [], qid, status=REF_READY, answer=answer, error=None
             )
@@ -355,7 +359,8 @@ class InterviewService:
                 exc,
                 exc_info=True,
             )
-            self._db.refresh(record)
+            if not self._refresh_alive(record, record_id, qid):
+                return
             record.questions = _merge_ref_fields(
                 record.questions or [],
                 qid,
@@ -364,6 +369,19 @@ class InterviewService:
                 error=_task_error_text(exc),
             )
         self._db.commit()
+
+    def _refresh_alive(self, record: InterviewRecord, record_id: int, qid: str) -> bool:
+        """refresh 合并并发改动；记录在生成期间被删除时返回 False，调用方直接收工。"""
+        try:
+            self._db.refresh(record)
+        except (InvalidRequestError, ObjectDeletedError):
+            logger.info(
+                "interview answer dropped: record=%s qid=%s record deleted during generation",
+                record_id,
+                qid,
+            )
+            return False
+        return True
 
     # -- 序列化 ---------------------------------------------------------------
 

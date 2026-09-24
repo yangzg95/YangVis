@@ -12,6 +12,7 @@ from fastapi import (
     Form,
     HTTPException,
     Query,
+    Request,
     UploadFile,
     status,
 )
@@ -41,6 +42,11 @@ from app.models.schemas import (
 )
 from app.services.chunking import UnsupportedFileType, extract_text
 from app.services.knowledge import KnowledgeService, index_document_task
+from app.services.uploads import (
+    content_length_exceeds,
+    oversize_message,
+    read_upload_limited,
+)
 
 logger = logging.getLogger("yangvis.knowledge")
 
@@ -267,6 +273,7 @@ async def list_all_documents(
 async def upload_document(
     type_id: int,
     background: BackgroundTasks,
+    request: Request,
     file: UploadFile = File(...),
     name: Optional[str] = Form(default=None),
     service: KnowledgeService = Depends(require_embedding_ready),
@@ -282,10 +289,14 @@ async def upload_document(
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    raw = await file.read()
-    if len(raw) > settings.KB_MAX_UPLOAD_BYTES:
-        limit_mb = settings.KB_MAX_UPLOAD_BYTES / 1024 / 1024
-        return APIResponse(code=-1, message=f"文件过大，上限 {limit_mb:.0f} MB")
+    # 先按 Content-Length 提前拒绝，再有界读取——read() 不设上限，会把
+    # 整个上传体物化进内存。
+    limit = settings.KB_MAX_UPLOAD_BYTES
+    if content_length_exceeds(request.headers.get("content-length"), limit):
+        return APIResponse(code=-1, message=oversize_message(limit))
+    raw = await read_upload_limited(file, limit)
+    if raw is None:
+        return APIResponse(code=-1, message=oversize_message(limit))
 
     filename = name or file.filename or "untitled.txt"
     try:

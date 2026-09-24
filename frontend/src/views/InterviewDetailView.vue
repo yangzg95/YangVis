@@ -360,7 +360,11 @@ async function submitEdit() {
 }
 
 async function onRemove() {
-  await interviewApi.remove(recordId)
+  try {
+    await interviewApi.remove(recordId)
+  } catch {
+    return // 拦截器已弹 toast。
+  }
   deleted.value = true
 }
 
@@ -415,8 +419,12 @@ async function submitEditQuestion() {
 }
 
 async function onRemoveQuestion(q: InterviewQuestion) {
-  record.value = await interviewApi.removeQuestion(recordId, q.qid)
-  message.success('已删除')
+  try {
+    record.value = await interviewApi.removeQuestion(recordId, q.qid)
+    message.success('已删除')
+  } catch {
+    // 拦截器已弹 toast。
+  }
 }
 
 // ---- AI 参考答案与轮询 -----------------------------------------------------------
@@ -440,7 +448,12 @@ async function refreshDetail() {
   // 用户正在内联编辑某题时跳过这次刷新：整换会把没保存的草稿冲掉，
   // 定时器还在走，保存完下一轮自然补上。
   if (editing.qid) return
-  record.value = await interviewApi.detail(recordId)
+  try {
+    record.value = await interviewApi.detail(recordId)
+  } catch {
+    // 轮询路径：失败下轮再来（拦截器已弹 toast），别让 rejection 裸奔。
+    return
+  }
   syncPolling()
 }
 

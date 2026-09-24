@@ -307,8 +307,12 @@ async function submit() {
 }
 
 async function onToggleStatus(user: UserItem) {
-  await usersApi.setStatus(user.id, !user.status)
-  message.success(user.status ? '已禁用' : '已启用')
+  try {
+    await usersApi.setStatus(user.id, !user.status)
+    message.success(user.status ? '已禁用' : '已启用')
+  } catch {
+    return // 拦截器已弹 toast。
+  }
   await load()
 }
 

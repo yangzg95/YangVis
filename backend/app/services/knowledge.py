@@ -6,10 +6,11 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timezone
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import Select, delete, func, select
 from sqlalchemy.orm import Session
@@ -49,6 +50,14 @@ from app.services.providers import build_embeddings
 logger = logging.getLogger("yangvis.knowledge")
 
 settings = get_settings()
+
+# 同一篇文档的索引互斥：上传排队、手动重建、全量重建可能撞在一起，并发执行
+# 会互相覆盖切分结果与状态。进程内锁——多 worker 下的边界与 login_guard 相同。
+_doc_index_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
+
+
+def _doc_index_lock(owner_id: int, doc_id: int) -> asyncio.Lock:
+    return _doc_index_locks.setdefault((owner_id, doc_id), asyncio.Lock())
 
 
 class IndexStatus:
@@ -614,16 +623,28 @@ class KnowledgeService:
         docs = self.pending_documents()
         indexed_docs = 0
         indexed_chunks = 0
+        done_ids: set[int] = set()
         started = time.monotonic()
 
         try:
             await vectorstore.ensure_collection(self._collection, vector_size, recreate=True)
             for doc in docs:
-                count = await self.index_document(doc, config)
+                async with _doc_index_lock(self._owner_id, doc.id):
+                    count = await self.index_document(doc, config)
+                done_ids.add(doc.id)
                 indexed_docs += 1
                 indexed_chunks += count
         except Exception as exc:  # noqa: BLE001 - 任何失败都要落成状态暴露出来
             logger.exception("rebuild failed for owner %s", self._owner_id)
+            # collection 已被清空重建：没走完的文档虽然 MySQL 里还是 READY，
+            # 向量其实已经没了。标成 ERROR，避免「就绪但检索不到」的假象。
+            interrupted = "索引重建中断，请重新执行重建"
+            for doc in docs:
+                if doc.id not in done_ids:
+                    try:
+                        self.set_document_status(doc, DocumentStatus.ERROR, error=interrupted)
+                    except Exception:  # noqa: BLE001 - 清理动作不能盖住原始异常
+                        logger.warning("failed to mark document %s as interrupted", doc.id)
             self.set_index_status(IndexStatus.ERROR, error=str(exc))
             raise
 
@@ -762,7 +783,8 @@ async def index_document_task(owner_id: int, doc_id: int) -> None:
         started = time.monotonic()
         try:
             config = service.require_embedding_config()
-            chunks = await service.index_document(doc, config)
+            async with _doc_index_lock(owner_id, doc_id):
+                chunks = await service.index_document(doc, config)
             logger.info(
                 "indexed document %s (%s): %d chunk(s), %.1fs",
                 doc_id,

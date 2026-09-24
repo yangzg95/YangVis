@@ -257,8 +257,12 @@ async function submitEdit() {
 }
 
 async function onRemove(record: InterviewItem) {
-  await interviewApi.remove(record.id)
-  message.success('已删除')
+  try {
+    await interviewApi.remove(record.id)
+    message.success('已删除')
+  } catch {
+    return // 拦截器已弹 toast。
+  }
   await loadRecords()
 }
 
