@@ -208,6 +208,7 @@
                 row-key="id"
                 size="small"
                 :pagination="docPagination"
+                :scroll="{ x: 'max-content' }"
                 @change="onDocPageChange"
               >
               <template #bodyCell="{ column, record }">

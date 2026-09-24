@@ -42,6 +42,7 @@
           row-key="id"
           size="middle"
           :pagination="false"
+          :scroll="{ x: 'max-content' }"
         >
           <template #bodyCell="{ column, record }">
             <template v-if="column.key === 'title'">
@@ -134,6 +135,7 @@
           row-key="id"
           size="middle"
           :pagination="false"
+          :scroll="{ x: 'max-content' }"
         >
           <template #bodyCell="{ column, record }">
             <template v-if="column.key === 'title'">
@@ -209,6 +211,7 @@
           row-key="id"
           size="middle"
           :pagination="false"
+          :scroll="{ x: 'max-content' }"
         >
           <template #bodyCell="{ column, record }">
             <template v-if="column.key === 'kind'">

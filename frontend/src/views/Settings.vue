@@ -51,6 +51,7 @@
           :loading="loading"
           size="middle"
           :pagination="{ pageSize: 8 }"
+          :scroll="{ x: 'max-content' }"
         >
           <template #bodyCell="{ column, record }">
             <template v-if="column.key === 'purpose'">
