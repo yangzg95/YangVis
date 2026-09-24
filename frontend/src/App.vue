@@ -96,12 +96,14 @@
       </a-layout>
       <!-- 手机端导航抽屉：和导航轨同一套菜单（SidebarNav），永远展开态。
            点菜单、点遮罩、点右上角关闭钮都能收。 -->
+      <!-- 自定义类名必须走 rootClassName：antd-vue 的 Drawer 是 inheritAttrs:false
+           且根节点是 Teleport，普通 class 会被丢弃，抽屉的 ink 底色会失效。 -->
       <a-drawer
         v-model:open="drawerOpen"
         placement="left"
         :width="240"
         :closable="false"
-        class="mobile-nav-drawer"
+        root-class-name="mobile-nav-drawer"
       >
         <button
           type="button"
@@ -144,6 +146,7 @@ import zhCN from 'ant-design-vue/es/locale/zh_CN'
 import SidebarNav, { type MenuNode } from '@/components/SidebarNav.vue'
 import { useAuthStore } from '@/stores/auth'
 import { storageKeys } from '@/utils/storage'
+import { useIsMobile } from '@/utils/useIsMobile'
 
 /** 一个可跳转的页面：MENU 里所有叶子节点摊平后的结果。 */
 interface MenuLeaf {
@@ -239,10 +242,8 @@ const auth = useAuthStore()
 // 登录页是独立渲染的，不带侧边栏和顶栏这些外壳。
 const isBare = computed(() => Boolean(route.meta?.bare))
 
-// 手机端（<768px，与登录页断点一致）：导航轨换成抽屉。初始化直接读
-// matchMedia，避免手机上先渲染一帧导航轨再拔掉。
-const MOBILE_QUERY = '(max-width: 768px)'
-const isMobile = ref(window.matchMedia(MOBILE_QUERY).matches)
+// 手机端（<768px，与登录页断点一致）：导航轨换成抽屉。
+const isMobile = useIsMobile()
 const drawerOpen = ref(false)
 const sidebarNavRef = ref()
 const drawerNavRef = ref()
@@ -415,14 +416,10 @@ const onGlobalKeydown = (e: KeyboardEvent) => {
 onMounted(() => window.addEventListener('keydown', onGlobalKeydown))
 onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
 
-// 跟踪手机断点：跨断点变化时收抽屉（桌面没有抽屉，手机没有导航轨）。
-const mobileMql = window.matchMedia(MOBILE_QUERY)
-const onMobileChange = () => {
-  isMobile.value = mobileMql.matches
+// 跨手机断点变化时收抽屉（桌面没有抽屉，手机没有导航轨）。
+watch(isMobile, () => {
   drawerOpen.value = false
-}
-onMounted(() => mobileMql.addEventListener('change', onMobileChange))
-onBeforeUnmount(() => mobileMql.removeEventListener('change', onMobileChange))
+})
 
 const onUserMenuClick = async ({ key }: { key: string | number }) => {
   if (key === 'logout') {

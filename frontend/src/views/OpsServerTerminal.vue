@@ -32,7 +32,10 @@
       </div>
     </header>
 
-    <div class="term-main">
+    <!-- 手机端不开终端：v-if 拿掉整个 term-main，ServerTerminal/OpsChat 不挂载，
+         WebSocket 根本不会建立；顶栏（返回按钮）和状态栏保留。连接中途缩到
+         手机宽度，ServerTerminal 的 onBeforeUnmount 会干净断开，拉宽自动重连。 -->
+    <div v-if="!isMobile" class="term-main">
       <nav class="term-rail">
         <a-tooltip :title="showFiles ? '收起文件面板' : '文件管理'" placement="right">
           <button
@@ -139,6 +142,11 @@
         </div>
       </aside>
     </div>
+    <DesktopNotice
+      v-else
+      class="term-notice"
+      sub-title="服务器终端是桌面端专用的全屏交互，请在电脑上打开这个页面。"
+    />
 
     <footer class="term-statusbar">
       <span :class="['conn-dot', terminalStatus]" />
@@ -164,12 +172,14 @@ import {
   WarningOutlined,
 } from '@ant-design/icons-vue'
 import OpsChat from '@/components/OpsChat.vue'
+import DesktopNotice from '@/components/DesktopNotice.vue'
 import ServerFilePanel from '@/components/ServerFilePanel.vue'
 import ServerTerminal from '@/components/ServerTerminal.vue'
 import TransferPanel from '@/components/TransferPanel.vue'
 import { clampSize, readSize, saveSize, startDragResize } from '@/components/ops/resizer'
 import '@/components/ops/resizer.css'
 import { opsApi, type OpsServer } from '@/api'
+import { useIsMobile } from '@/utils/useIsMobile'
 import { useAuthStore } from '@/stores/auth'
 import { useTransfersStore } from '@/stores/transfers'
 import { storageKeys } from '@/utils/storage'
@@ -189,6 +199,7 @@ const STATUS_TEXT: Record<string, string> = {
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const isMobile = useIsMobile()
 // 路由有 \d+ 约束，到这里一定是数字。
 const serverId = Number(route.params.id)
 
@@ -579,6 +590,18 @@ function onTerminalStatus(value: 'connecting' | 'connected' | 'closed', code?: n
 
 .term-error-text {
   font-size: 13px;
+}
+
+/* 深色页上的桌面端提示：DesktopNotice 默认是浅色 a-result 配色，
+   换成终端页的深色族。 */
+.term-notice :deep(.ant-result-icon) {
+  color: rgba(255, 255, 255, 0.2);
+}
+.term-notice :deep(.ant-result-title) {
+  color: #d8dee4;
+}
+.term-notice :deep(.ant-result-subtitle) {
+  color: #8b98a5;
 }
 
 /* AI 面板收起后的展开入口：右缘一根竖条，悬停时用强调青提示可点。 */

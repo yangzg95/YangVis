@@ -1,6 +1,9 @@
 <template>
   <div class="ops-page">
-    <div class="ops-body">
+    <!-- 手机端整个工作台不可用（SQL 编辑器、数据网格都是桌面交互），
+         换成桌面端提示；v-if 直接卸载，不留重组件 DOM。 -->
+    <DesktopNotice v-if="isMobile" sub-title="数据库工作台包含 SQL 编辑器、数据网格等桌面端交互，请在电脑或平板上使用。" />
+    <div v-else class="ops-body">
       <!-- 收起后原位留一条竖条，否则面板消失了没有任何回来的入口。 -->
       <div v-if="!showList" class="rail" @click="showList = true">
         <RightOutlined />
@@ -272,6 +275,7 @@ import {
   TableOutlined,
 } from '@ant-design/icons-vue'
 import OpsChat from '@/components/OpsChat.vue'
+import DesktopNotice from '@/components/DesktopNotice.vue'
 import DbConnectionTree from '@/components/ops/DbConnectionTree.vue'
 import DbDataTab from '@/components/ops/DbDataTab.vue'
 import DbQueryTab from '@/components/ops/DbQueryTab.vue'
@@ -281,6 +285,7 @@ import { clampSize, readSize, saveSize, startDragResize } from '@/components/ops
 import '@/components/ops/resizer.css'
 import type { TabRequest, TreeMenuEvent, TreeNode } from '@/components/ops/tabs'
 import { storageKeys } from '@/utils/storage'
+import { useIsMobile } from '@/utils/useIsMobile'
 import {
   opsApi,
   type DatabaseType,
@@ -840,7 +845,15 @@ async function submit() {
   }
 }
 
-onMounted(load)
+// 手机端不拉连接列表（工作台整个被桌面提示换掉）；窗口从手机拉宽回桌面时
+// keep-alive 不会重跑 onMounted，靠 watch 补一次加载。
+const isMobile = useIsMobile()
+onMounted(() => {
+  if (!isMobile.value) load()
+})
+watch(isMobile, (mobile) => {
+  if (!mobile && !databases.value.length) load()
+})
 </script>
 
 <style scoped>
