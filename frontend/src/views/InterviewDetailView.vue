@@ -151,39 +151,38 @@
             class="ref-error"
             :message="q.ref_error || '生成失败，可重试'"
           />
-          <div
-            v-if="q.ref_status === 'ready' && q.ref_answer && !isRefCollapsed(q.qid)"
-            class="markdown ref-answer"
-            v-html="renderMarkdown(q.ref_answer)"
-          />
-          <div class="ref-actions">
-            <a-button
-              size="small"
-              :loading="q.ref_status === 'analyzing'"
-              :disabled="!chatReady"
-              @click="onGenerate(q)"
-            >
-              <RobotOutlined />
-              {{
-                q.ref_status === 'analyzing'
-                  ? '正在生成…'
-                  : q.ref_status === 'ready'
-                    ? '重新生成参考答案'
-                    : '生成参考答案'
-              }}
-            </a-button>
-            <a-button
-              v-if="q.ref_status === 'ready' && q.ref_answer"
-              type="text"
-              size="small"
-              class="ref-toggle"
-              @click="toggleRefCollapsed(q.qid)"
-            >
-              {{ isRefCollapsed(q.qid) ? '展开' : '收起' }}
-              <DownOutlined v-if="isRefCollapsed(q.qid)" />
-              <UpOutlined v-else />
-            </a-button>
+          <!-- 参考答案盒子：signal 色块和题卡正文拉开层级。头部整行是可点的
+               收起开关——收起后也留着一条色条，和「还没生成」一眼区分。 -->
+          <div v-if="q.ref_status === 'ready' && q.ref_answer" class="ref-answer-box">
+            <button type="button" class="ref-answer-head" @click="toggleRefCollapsed(q.qid)">
+              <span class="ref-answer-title"><RobotOutlined /> AI 参考答案</span>
+              <span class="ref-answer-switch">
+                {{ isRefCollapsed(q.qid) ? '展开' : '收起' }}
+                <DownOutlined v-if="isRefCollapsed(q.qid)" />
+                <UpOutlined v-else />
+              </span>
+            </button>
+            <div
+              v-if="!isRefCollapsed(q.qid)"
+              class="markdown ref-answer"
+              v-html="renderMarkdown(q.ref_answer)"
+            />
           </div>
+          <a-button
+            size="small"
+            :loading="q.ref_status === 'analyzing'"
+            :disabled="!chatReady"
+            @click="onGenerate(q)"
+          >
+            <RobotOutlined />
+            {{
+              q.ref_status === 'analyzing'
+                ? '正在生成…'
+                : q.ref_status === 'ready'
+                  ? '重新生成参考答案'
+                  : '生成参考答案'
+            }}
+          </a-button>
         </div>
       </div>
     </main>
@@ -427,6 +426,8 @@ async function onRemoveQuestion(q: InterviewQuestion) {
 let pollTimer: number | undefined
 
 async function onGenerate(q: InterviewQuestion) {
+  // 默认收起的例外：用户刚点了生成，生成完要让他直接看到结果。
+  refExpanded[q.qid] = true
   record.value = await interviewApi.generateAnswer(recordId, q.qid)
   syncPolling()
 }
@@ -452,16 +453,16 @@ function syncPolling() {
   }
 }
 
-// 参考答案收起状态：按 qid 单独记账——生成中的轮询会整换 record，
-// 状态挂在题目对象上的话每轮刷新都会被冲掉。
-const refCollapsed = reactive<Record<string, boolean>>({})
+// 参考答案默认收起：记的是「被展开」的 qid。按 qid 单独记账——生成中的
+// 轮询会整换 record，状态挂在题目对象上的话每轮刷新都会被冲掉。
+const refExpanded = reactive<Record<string, boolean>>({})
 
 function isRefCollapsed(qid: string): boolean {
-  return Boolean(refCollapsed[qid])
+  return !refExpanded[qid]
 }
 
 function toggleRefCollapsed(qid: string) {
-  refCollapsed[qid] = !refCollapsed[qid]
+  refExpanded[qid] = !refExpanded[qid]
 }
 
 // ---- 展示辅助 -----------------------------------------------------------------
@@ -593,19 +594,52 @@ onUnmounted(() => {
 .ref-error {
   margin-bottom: 8px;
 }
-.ref-answer {
-  margin-bottom: 12px;
-  font-size: 13px;
+/* 参考答案盒子：signal tint 底色 + 同色发丝边框，从白底题卡上跳出来；
+   收起时只剩头部一条色条，存在感仍然明确。 */
+.ref-answer-box {
+  margin-bottom: 8px;
+  border: 1px solid var(--signal-border);
+  border-radius: var(--radius-md);
+  background: var(--signal-bg);
+  overflow: hidden;
 }
-.ref-actions {
+/* 头部整行是收起开关：比小文字钮大得多的点击面，手机上也好点。 */
+.ref-answer-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
 }
-/* 收起/展开钮贴右，弱化处理——它是浏览辅助，不是主操作。 */
-.ref-toggle {
-  margin-left: auto;
+.ref-answer-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--signal-text);
+}
+.ref-answer-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
   color: var(--text-3);
+  transition: color 0.15s;
+}
+.ref-answer-head:hover .ref-answer-switch {
+  color: var(--signal-text);
+}
+/* 展开时头部和正文之间一条虚线，和 ref-section 顶部分隔同一语言。 */
+.ref-answer {
+  padding: 10px 12px;
+  border-top: 1px dashed var(--signal-border);
+  font-size: 13px;
 }
 .full-width {
   width: 100%;
