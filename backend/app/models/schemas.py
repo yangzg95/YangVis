@@ -1190,3 +1190,211 @@ class NetdiskSaveTextResult(BaseModel):
     """保存成功后网盘里的完整路径，给前端展示用。"""
 
     path: str
+
+
+# ---- AI 网关 -----------------------------------------------------------------
+
+class AiChannelCreate(BaseModel):
+    model_config = _ALLOW_MODEL_PREFIX
+
+    name: str = Field(..., min_length=1, max_length=128)
+    base_url: str = Field(..., min_length=1, max_length=512)
+    api_key: Optional[str] = Field(default=None, max_length=512)
+    models: Optional[List[str]] = None
+    remark: Optional[str] = Field(default=None, max_length=512)
+
+
+class AiChannelUpdate(BaseModel):
+    model_config = _ALLOW_MODEL_PREFIX
+
+    name: Optional[str] = Field(default=None, max_length=128)
+    base_url: Optional[str] = Field(default=None, max_length=512)
+    # 留空或回传掩码都表示「保持原样」，同 ModelConfigUpdate。
+    api_key: Optional[str] = Field(default=None, max_length=512)
+    models: Optional[List[str]] = None
+    enabled: Optional[bool] = None
+    remark: Optional[str] = Field(default=None, max_length=512)
+
+
+class AiChannelItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    base_url: str
+    api_key: str = ""
+    api_key_error: Optional[str] = None
+    protocol: str = "openai"
+    models: Optional[List[str]] = None
+    enabled: bool = True
+    remark: Optional[str] = None
+    last_tested_at: Optional[datetime] = None
+    last_test_ok: bool = False
+    last_test_error: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AiChannelTestRequest(BaseModel):
+    """连通性测试用的模型名；留空则取通道 models 列表的第一个。"""
+
+    model: Optional[str] = Field(default=None, max_length=128)
+
+
+class AiApiKeyCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    remark: Optional[str] = Field(default=None, max_length=512)
+
+
+class AiApiKeyUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=128)
+    enabled: Optional[bool] = None
+    remark: Optional[str] = Field(default=None, max_length=512)
+
+
+class AiApiKeyItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    # 明文只在创建那一次返回；列表里永远是这个前缀 + 掩码。
+    key_prefix: str = ""
+    enabled: bool = True
+    remark: Optional[str] = None
+    call_count: int = 0
+    last_used_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AiApiKeyCreated(BaseModel):
+    """创建密钥的返回：多带一次性的明文，之后再也取不到。"""
+
+    item: AiApiKeyItem
+    api_key: str
+
+
+class AiModelRouteCreate(BaseModel):
+    model_config = _ALLOW_MODEL_PREFIX
+
+    model_name: str = Field(..., min_length=1, max_length=128)
+    channel_id: int
+    upstream_model: Optional[str] = Field(default=None, max_length=128)
+    priority: int = Field(default=100, ge=0, le=9999)
+    enabled: bool = True
+    remark: Optional[str] = Field(default=None, max_length=512)
+
+
+class AiModelRouteUpdate(BaseModel):
+    model_config = _ALLOW_MODEL_PREFIX
+
+    model_name: Optional[str] = Field(default=None, max_length=128)
+    channel_id: Optional[int] = None
+    upstream_model: Optional[str] = Field(default=None, max_length=128)
+    priority: Optional[int] = Field(default=None, ge=0, le=9999)
+    enabled: Optional[bool] = None
+    remark: Optional[str] = Field(default=None, max_length=512)
+
+
+class AiModelRouteItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
+
+    id: int
+    model_name: str
+    channel_id: int
+    channel_name: Optional[str] = None
+    upstream_model: Optional[str] = None
+    priority: int = 100
+    enabled: bool = True
+    remark: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AiCallLogItem(BaseModel):
+    """调用日志列表里的一行，不带正文大字段。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    request_id: str
+    key_id: Optional[int] = None
+    key_name: Optional[str] = None
+    endpoint: str
+    model: Optional[str] = None
+    stream: bool = False
+    channel_id: Optional[int] = None
+    channel_name: Optional[str] = None
+    upstream_model: Optional[str] = None
+    status_code: int = 0
+    success: bool = False
+    error: Optional[str] = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    latency_ms: int = 0
+    first_token_ms: Optional[int] = None
+    client_ip: Optional[str] = None
+    created_at: datetime
+
+
+class AiCallLogDetail(AiCallLogItem):
+    """单条日志的完整视图，含截断后的请求 / 响应正文与故障转移轨迹。"""
+
+    attempts: Optional[List[Dict[str, Any]]] = None
+    request_body: Optional[str] = None
+    response_body: Optional[str] = None
+
+
+class AiStatsTotals(BaseModel):
+    calls: int = 0
+    success: int = 0
+    failed: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    avg_latency_ms: int = 0
+    max_latency_ms: int = 0
+
+
+class AiStatsBucket(BaseModel):
+    """按天 / 按通道 / 按模型 / 按密钥聚合出的一行。"""
+
+    name: str
+    calls: int = 0
+    failed: int = 0
+    total_tokens: int = 0
+    avg_latency_ms: int = 0
+
+
+class AiStats(BaseModel):
+    totals: AiStatsTotals = AiStatsTotals()
+    daily: List[AiStatsBucket] = Field(default_factory=list)
+    by_channel: List[AiStatsBucket] = Field(default_factory=list)
+    by_model: List[AiStatsBucket] = Field(default_factory=list)
+    by_key: List[AiStatsBucket] = Field(default_factory=list)
+
+
+class AiGatewayOverview(BaseModel):
+    """网关首页的概览：接入信息 + 各类资源的数量。"""
+
+    # 对外 base_url（相对路径），前端拼上当前 origin 就能直接复制去用。
+    base_path: str = "/v1"
+    channel_count: int = 0
+    channel_enabled: int = 0
+    route_count: int = 0
+    route_enabled: int = 0
+    key_count: int = 0
+    key_enabled: int = 0
+    log_count: int = 0
+    payload_logging: bool = True
+
+
+class AiLogPurgeRequest(BaseModel):
+    """清理多少天之前的日志。"""
+
+    before_days: int = Field(..., ge=1, le=3650)
+
+
+class AiLogPurgeResult(BaseModel):
+    deleted: int = 0

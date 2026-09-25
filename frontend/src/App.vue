@@ -128,6 +128,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
+  ApiOutlined,
   AppstoreOutlined,
   BookOutlined,
   CloseOutlined,
@@ -182,6 +183,7 @@ const MENU: MenuNode[] = [
     children: [
       { path: '/settings', title: '通用设置' },
       { path: '/agents', title: '智能体', icon: RobotOutlined },
+      { path: '/system/ai-gateway', title: 'AI 网关', icon: ApiOutlined, adminOnly: true },
       { path: '/system/users', title: '用户管理', icon: TeamOutlined, adminOnly: true },
     ],
   },

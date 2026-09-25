@@ -287,6 +287,86 @@ CREATE TABLE IF NOT EXISTS interview_record (
 
 
 -- ---------------------------------------------------------------------------
+-- AI 网关：对外一把统一密钥，后面挂多个 OpenAI 兼容的上游厂商
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS ai_channel (
+  id              BIGINT PRIMARY KEY AUTO_INCREMENT,
+  name            VARCHAR(128)  NOT NULL COMMENT '通道名，全局唯一',
+  base_url        VARCHAR(512)  NOT NULL COMMENT 'OpenAI 兼容根地址，含 /v1',
+  api_key_enc     VARBINARY(1024) NULL COMMENT '上游 key 的 Fernet 密文，绝不明文返回',
+  protocol        VARCHAR(16)   NOT NULL DEFAULT 'openai',
+  models          JSON          NULL COMMENT '该通道能提供的上游模型名，仅作配置候选提示',
+  enabled         TINYINT(1)    NOT NULL DEFAULT 1,
+  remark          VARCHAR(512)  NULL,
+  last_tested_at  DATETIME      NULL,
+  last_test_ok    TINYINT(1)    NOT NULL DEFAULT 0,
+  last_test_error VARCHAR(512)  NULL,
+  created_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_channel_name (name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI 网关上游通道';
+
+CREATE TABLE IF NOT EXISTS ai_model_route (
+  id             BIGINT PRIMARY KEY AUTO_INCREMENT,
+  model_name     VARCHAR(128)  NOT NULL COMMENT '调用方请求里写的对外模型名',
+  channel_id     BIGINT        NOT NULL COMMENT 'ai_channel.id',
+  upstream_model VARCHAR(128)  NULL COMMENT '实际发给上游的模型名，NULL 表示同名',
+  priority       INT           NOT NULL DEFAULT 100 COMMENT '同名多通道时按升序尝试，失败转移',
+  enabled        TINYINT(1)    NOT NULL DEFAULT 1,
+  remark         VARCHAR(512)  NULL,
+  created_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_route_model_channel (model_name, channel_id),
+  KEY idx_route_model (model_name, priority)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='对外模型名到上游通道的映射';
+
+CREATE TABLE IF NOT EXISTS ai_api_key (
+  id           BIGINT PRIMARY KEY AUTO_INCREMENT,
+  name         VARCHAR(128) NOT NULL,
+  key_hash     VARCHAR(64)  NOT NULL COMMENT '明文的 SHA-256，明文不落库',
+  key_prefix   VARCHAR(32)  NOT NULL DEFAULT '' COMMENT '明文前若干位，仅用于列表里辨认',
+  enabled      TINYINT(1)   NOT NULL DEFAULT 1,
+  remark       VARCHAR(512) NULL,
+  call_count   BIGINT       NOT NULL DEFAULT 0,
+  last_used_at DATETIME     NULL,
+  created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_key_hash (key_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='对外签发的统一网关密钥';
+
+CREATE TABLE IF NOT EXISTS ai_call_log (
+  id                BIGINT PRIMARY KEY AUTO_INCREMENT,
+  request_id        VARCHAR(64)  NOT NULL COMMENT '一次客户端调用一个 id，换通道重试不变',
+  key_id            BIGINT       NULL COMMENT 'ai_api_key.id',
+  key_name          VARCHAR(128) NULL COMMENT '写入时快照，密钥删了历史仍可读',
+  endpoint          VARCHAR(32)  NOT NULL COMMENT 'chat/completions | embeddings | models',
+  model             VARCHAR(128) NULL COMMENT '对外模型名',
+  stream            TINYINT(1)   NOT NULL DEFAULT 0,
+  channel_id        BIGINT       NULL COMMENT '最终应答的上游通道',
+  channel_name      VARCHAR(128) NULL,
+  upstream_model    VARCHAR(128) NULL,
+  attempts          JSON         NULL COMMENT '[{channel_id, channel_name, status_code, error, latency_ms}] 转移轨迹',
+  status_code       INT          NOT NULL DEFAULT 0,
+  success           TINYINT(1)   NOT NULL DEFAULT 0,
+  error             VARCHAR(512) NULL,
+  prompt_tokens     INT          NOT NULL DEFAULT 0,
+  completion_tokens INT          NOT NULL DEFAULT 0,
+  total_tokens      INT          NOT NULL DEFAULT 0,
+  latency_ms        INT          NOT NULL DEFAULT 0,
+  first_token_ms    INT          NULL COMMENT '流式首字延迟；非流式为 NULL',
+  client_ip         VARCHAR(64)  NULL,
+  request_body      MEDIUMTEXT   NULL COMMENT '按 AI_GATEWAY_LOG_MAX_CHARS 截断',
+  response_body     MEDIUMTEXT   NULL COMMENT '流式是拼接后的完整回答',
+  created_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_call_created (created_at),
+  KEY idx_call_key_created (key_id, created_at),
+  KEY idx_call_channel_created (channel_id, created_at),
+  KEY idx_call_request (request_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI 网关调用监控与审计';
+
+
+-- ---------------------------------------------------------------------------
 -- 升级已有库：新增「项目」维度
 --
 -- app/bootstrap.py 的 migrate_schema() 在启动时会自动执行等价操作（含回填），

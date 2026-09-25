@@ -819,3 +819,179 @@ class NetdiskAccount(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<NetdiskAccount owner={self.owner_id} baidu={self.baidu_name!r}>"
+
+
+class AiChannel(Base):
+    """AI 网关的一个上游厂商通道。
+
+    与 :class:`ModelConfig` 的区别在于归属：模型配置是「某个用户自己的助手用哪
+    家」，通道是平台级的共享资产，由管理员维护，对外通过统一密钥暴露。
+    """
+
+    __tablename__ = "ai_channel"
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    base_url: Mapped[str] = mapped_column(String(512), nullable=False)
+
+    # Fernet 密文，与 model_config.api_key_enc 同一约定：接口只回掩码。
+    api_key_enc: Mapped[bytes | None] = mapped_column(LargeBinary(1024), nullable=True)
+
+    # 目前只有 openai（OpenAI 兼容 HTTP 协议）。留一列而不是写死，是为了让
+    # 「同一个网关后面挂不同协议的上游」这件事将来只需要加分支，不需要改表。
+    protocol: Mapped[str] = mapped_column(String(16), nullable=False, default="openai")
+
+    # 该通道能提供的上游模型名，仅用于路由配置时的候选提示，不参与转发判定
+    # （判定只看 ai_model_route）。
+    models: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    remark: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_test_ok: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    last_test_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<AiChannel id={self.id} name={self.name!r} enabled={self.enabled}>"
+
+
+class AiModelRoute(Base):
+    """一条「对外模型名 → 某通道上的某上游模型」映射。
+
+    同一个对外模型名可以有多条映射：按 ``priority`` 升序依次尝试，上游连不上或
+    明确拒绝时自动转移到下一条，这就是网关的故障转移能力。
+    """
+
+    __tablename__ = "ai_model_route"
+    __table_args__ = (
+        UniqueConstraint("model_name", "channel_id", name="uk_route_model_channel"),
+        Index("idx_route_model", "model_name", "priority"),
+    )
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+
+    # 调用方在请求里写的 model。
+    model_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # 实际发给上游的 model；留空表示与对外名一致。
+    upstream_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    remark: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<AiModelRoute model={self.model_name!r} channel={self.channel_id}>"
+
+
+class AiApiKey(Base):
+    """对外签发的一把统一密钥。
+
+    只存 SHA-256 摘要：网关密钥是给外部系统用的长期凭据，落库明文等于把数据库
+    泄露升级成对外接口泄露。``key_prefix`` 是明文的前若干位，仅用于在列表里认
+    出是哪把钥匙，明文本身只在创建那一刻返回一次。
+    """
+
+    __tablename__ = "ai_api_key"
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    key_prefix: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    remark: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # 调用次数与最近一次调用时间，由代理写日志时顺带回填。
+    call_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<AiApiKey id={self.id} name={self.name!r} enabled={self.enabled}>"
+
+
+class AiCallLog(Base):
+    """一次网关调用的监控与审计记录。
+
+    一张表同时承担两件事：监控要的指标（token、耗时、首字延迟、状态码）和审计
+    要的内容（谁用哪把钥匙、打了什么、上游答了什么）。后者按
+    ``AI_GATEWAY_LOG_MAX_CHARS`` 截断，正文里可能是调用方的业务数据，能不能存
+    由 ``AI_GATEWAY_LOG_PAYLOAD`` 决定。
+
+    名字类字段（``key_name`` / ``channel_name``）是写入时的快照：密钥和通道都
+    会被删，历史必须还能读懂。
+    """
+
+    __tablename__ = "ai_call_log"
+    __table_args__ = (
+        Index("idx_call_created", "created_at"),
+        Index("idx_call_key_created", "key_id", "created_at"),
+        Index("idx_call_channel_created", "channel_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+
+    # 一次客户端调用一个 id；故障转移换通道时 id 不变，尝试轨迹进 attempts。
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+    key_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    key_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    # chat/completions | embeddings | models
+    endpoint: Mapped[str] = mapped_column(String(32), nullable=False)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    stream: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    channel_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    upstream_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    # 转移失败的尝试：[{channel_id, channel_name, status_code, error, latency_ms}]
+    attempts: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    # 回给调用方的 HTTP 状态码；上游全部不可用时是 502/503。
+    status_code: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 流式首字延迟；非流式为 null。
+    first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    client_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    request_body: Mapped[str | None] = mapped_column(_LONG_TEXT, nullable=True)
+    response_body: Mapped[str | None] = mapped_column(_LONG_TEXT, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<AiCallLog id={self.id} model={self.model!r} status={self.status_code}>"

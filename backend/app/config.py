@@ -73,6 +73,20 @@ class Settings(BaseSettings):
     # 调用用户自行配置的模型服务商时的出站请求设置。
     MODEL_HTTP_TIMEOUT: float = 30.0
 
+    # AI 网关（对外统一密钥 → 多个上游厂商的 OpenAI 兼容转发）。
+    #
+    # 读超时给得很宽：流式回答的总时长取决于上游模型，几十秒很正常，而 httpx 的
+    # read timeout 是「两个字节之间」的间隔上限，不是整条流的总时长。
+    AI_GATEWAY_CONNECT_TIMEOUT: float = 10.0
+    AI_GATEWAY_READ_TIMEOUT: float = 300.0
+    # 是否把请求/响应正文写进 ai_call_log。关掉后只剩 token、耗时、状态码这些
+    # 元数据——正文里可能包含调用方的业务数据，部署者按需取舍。
+    AI_GATEWAY_LOG_PAYLOAD: bool = True
+    # 单个正文字段的入库字符上限，超出截断并打上标记。
+    AI_GATEWAY_LOG_MAX_CHARS: int = 8000
+    # 同一次调用最多尝试几个上游通道（优先级故障转移）。1 表示不转移。
+    AI_GATEWAY_MAX_ATTEMPTS: int = 3
+
     # 智能运维
     OPS_SSH_TIMEOUT: float = 15.0
     OPS_CMD_TIMEOUT: float = 20.0

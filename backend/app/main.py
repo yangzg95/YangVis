@@ -23,6 +23,8 @@ from app.errors import BusinessError
 from app.models.schemas import APIResponse
 from app.routers import (
     agents,
+    ai_gateway,
+    ai_gateway_openai,
     auth,
     chat,
     interview,
@@ -80,6 +82,10 @@ app.include_router(ops_files.router, prefix=API_PREFIX)
 app.include_router(resume.router, prefix=API_PREFIX)
 app.include_router(interview.router, prefix=API_PREFIX)
 app.include_router(netdisk.router, prefix=API_PREFIX)
+app.include_router(ai_gateway.router, prefix=API_PREFIX)
+# 对外的 OpenAI 兼容端点挂在站点根的 /v1 下（不带 /api 前缀），调用方填的
+# base_url 就是 http://<host>:<port>/v1，与各家 SDK 的默认约定一致。
+app.include_router(ai_gateway_openai.router)
 
 
 # ---- 错误处理 --------------------------------------------------------

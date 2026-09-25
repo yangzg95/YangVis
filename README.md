@@ -30,6 +30,13 @@
 - 简历分析：PDF/DOCX 文本抽取 → LLM 评估 → 关键信息提取与多份对比（prompt 走智能体体系，可自行调整）
 - 百度网盘：xpan 开放平台绑定（oob 授权码模式，无需公网回调），简历文件可备份至网盘应用目录
 
+### 🔌 AI 网关
+- 对外一个统一密钥（`sk-yv-*`），背后可挂多个 OpenAI 兼容的上游厂商通道，平台级共享、仅管理员可管
+- 模型名映射 + 优先级故障转移：同一个对外模型名可绑多条通道，按 `priority` 升序尝试，上游不可达/限流/鉴权失败时自动换下一条（仅在首字节发出前切换）
+- 端点：`POST /v1/chat/completions`（SSE 流式与非流式）、`POST /v1/embeddings`、`GET /v1/models`，错误体沿用 OpenAI 结构，标准 SDK 改 `base_url` 即可直连
+- 监控与审计：每次调用记录通道、模型、token 数、耗时/首字节耗时、客户端 IP、重试轨迹，正文按 `AI_GATEWAY_LOG_MAX_CHARS` 截断入库（可用 `AI_GATEWAY_LOG_PAYLOAD` 整体关闭）；日志写失败绝不影响调用本身
+- 概览页提供调用量、成功率、token 总量、延迟与按天趋势，以及按通道/模型/密钥的分布
+
 ### 👥 账号与权限
 - 自建账号体系：`sys_user` 表 + PBKDF2 密码散列 + 本地签发 JWT，不依赖任何外部认证服务
 - 管理员在「账号管理」里建号、禁用、授予运维写权限；首次启动可用环境变量引导初始管理员
@@ -62,7 +69,7 @@ noetix-tool/
 │   │   ├── crypto.py          # api_key Fernet 加解密
 │   │   ├── deps.py            # require_user / require_admin 依赖
 │   │   ├── routers/           # auth users agents chat knowledge settings
-│   │   │                      # ops ops_files resume netdisk
+│   │   │                      # ops ops_files resume netdisk ai_gateway(_openai)
 │   │   ├── services/          # 业务层：RAG、对话、运维安全闸门、SFTP、简历…
 │   │   └── models/            # SQLAlchemy 实体 + Pydantic schema
 │   ├── requirements.txt
@@ -71,7 +78,7 @@ noetix-tool/
 │   └── src/
 │       ├── views/             # Login / 对话(客服) / Knowledge / Agents
 │       │                      # OpsServer(Terminal) / OpsDatabase(Chat) / Resume
-│       │                      # Users / Settings
+│       │                      # Users / Settings / AiGateway
 │       ├── components/        # 终端、SFTP 面板、确认卡片、Mermaid 卡片…
 │       ├── api/ router/ stores/
 ├── docs/                      # 设计方案、schema.sql（DDL 对照稿）
@@ -124,7 +131,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 18099 --reload
 # 前端（Node 20+）
 cd frontend
 npm install
-npm run dev                   # http://localhost:5173，/api 已代理到 18099
+npm run dev                   # http://localhost:5173，/api 与网关的 /v1 已代理到 18099
 ```
 
 也可以使用根目录的 `dev.sh / dev.bat` 同时拉起两端。MySQL 与 Qdrant 可用 `docker-compose up -d mysql qdrant` 单独启动。
@@ -149,6 +156,9 @@ npm run dev                   # http://localhost:5173，/api 已代理到 18099
 | `OPS_SFTP_MAX_UPLOAD_BYTES` `OPS_SFTP_LIST_LIMIT` | 50MB / 2000 | SFTP 面板限制 |
 | `BAIDU_NETDISK_APP_KEY/SECRET_KEY/APP_NAME` | 空 | 任一为空则网盘功能整体隐藏 |
 | `MODEL_HTTP_TIMEOUT` | 30 | 调用户模型服务的出站超时 |
+| `AI_GATEWAY_CONNECT_TIMEOUT` `AI_GATEWAY_READ_TIMEOUT` | 10 / 300 | 网关转发上游的连接/读取超时（秒） |
+| `AI_GATEWAY_LOG_PAYLOAD` `AI_GATEWAY_LOG_MAX_CHARS` | true / 8000 | 是否把请求响应正文写进审计日志、单条正文截断字符数 |
+| `AI_GATEWAY_MAX_ATTEMPTS` | 3 | 单次调用最多尝试几条上游通道 |
 
 ## API 概览
 
@@ -166,6 +176,51 @@ npm run dev                   # http://localhost:5173，/api 已代理到 18099
 | `/api/ops/servers/{id}/files` | SFTP 列目录/上传/下载/新建/删除 |
 | `/api/office` | 简历上传/分析/对比/下载 |
 | `/api/office/netdisk` | 网盘绑定状态、授权链接、绑定/解绑 |
+| `/api/ai-gateway` | 网关概览、上游通道、模型路由、统一密钥、调用日志与统计（仅管理员） |
+
+例外：对外的 OpenAI 兼容端点挂在站点根的 `/v1` 下（不带 `/api` 前缀、不套统一返回结构、不用 JWT，而是用网关自己签发的 `sk-yv-*` 密钥），这样调用方的 `base_url` 直接填 `https://<站点>/v1` 就能被各家 SDK 识别。
+
+| 对外端点 | 说明 |
+| --- | --- |
+| `POST /v1/chat/completions` | 对话补全，支持 `stream: true` 的 SSE 透传 |
+| `POST /v1/embeddings` | 向量化 |
+| `GET /v1/models` | 列出网关已映射的对外模型名（不计入审计日志） |
+
+## AI 网关接入
+
+网关和控制台同源，不是独立服务：`base_url` 就是站点根下的 `/v1`。
+
+| 部署形态 | base_url |
+| --- | --- |
+| compose 直连（默认映射 18099） | `http://<服务器IP>:18099/v1` |
+| 反向代理 + 域名 | `https://<你的域名>/v1` |
+| 本地开发（Vite 5173） | `http://localhost:5173/v1`，已代理到 18099 |
+
+控制台「系统设置 → AI 网关 → 概览」里的「接入地址」按当前站点 origin 拼好，可直接复制，不用手拼。
+
+凭据与模型：`api_key` 用「统一密钥」页签签发的 `sk-yv-*`（明文只在创建那一次显示，库里只存 SHA-256 摘要），与控制台登录的 JWT 互不通用；请求里的 `model` 写「模型路由」页签配置的对外模型名，同一个名字可按 `priority` 绑多条上游做故障转移。
+
+```bash
+curl https://<你的域名>/v1/chat/completions \
+  -H "Authorization: Bearer sk-yv-xxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "你好"}], "stream": true}'
+```
+
+走 nginx 反代时 `/v1` 要单独转发，并为 SSE 关掉缓冲、放宽读超时：
+
+```nginx
+location /v1/ {
+    proxy_pass http://127.0.0.1:18099;
+    proxy_http_version 1.1;
+    proxy_set_header Authorization $http_authorization;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 300s;   # 对齐 AI_GATEWAY_READ_TIMEOUT，nginx 默认 60s 会掐断长回答
+}
+```
+
+转发类调用（`chat/completions`、`embeddings`）的响应都带 `X-Yangvis-Request-Id`，报障时提供它可以直接定位到「调用日志」里那一行。认证阶段就被拒的请求和 `GET /v1/models` 没有这个头——它们本来就不产生日志行。
 
 ## 安全设计与部署注意
 
@@ -175,12 +230,14 @@ npm run dev                   # http://localhost:5173，/api 已代理到 18099
 - 模型 api_key Fernet 加密落库，接口只回掩码；密码 PBKDF2 散列
 - 运维写操作两阶段确认 + 超时自动作废；`ops_write` 权限位闸门；全量命令/SQL 审计
 - WebSocket 终端使用一次性入场票（60s 过期），不在 URL 里带 token
+- AI 网关密钥只存 SHA-256 摘要（明文仅在创建那一次返回），上游厂商 api_key 用 Fernet 加密、接口只回掩码；转发时只会带上游自己的密钥，调用方的网关密钥不会外泄
 
 部署者需要自行负责的：
 
 - **这个工具的本质是把服务器 shell 和数据库查询能力开放给登录用户**，务必放在内网或反向代理 + HTTPS 之后，并只对可信人员建号
 - 生产部署建议删掉 compose 里 MySQL / Qdrant 的端口映射（两者均无鉴权），只保留 app 的 18099
 - `ENCRYPTION_KEY` 一经设定不要轮换，否则已存的 api_key 全部作废
+- `/v1` 网关等于把上游模型额度开放给持有密钥的调用方：按需签发、随时停用，并注意调用日志正文可能含敏感内容（可用 `AI_GATEWAY_LOG_PAYLOAD=false` 关闭留档，或定期在日志页清理历史）
 
 ## License
 

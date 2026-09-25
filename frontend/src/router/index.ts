@@ -101,6 +101,12 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '用户管理'},
     },
     {
+        path: '/system/ai-gateway',
+        name: 'AiGateway',
+        component: () => import('@/views/AiGateway.vue'),
+        meta: {title: 'AI 网关'},
+    },
+    {
         path: '/knowledge',
         name: 'Knowledge',
         component: () => import('@/views/Knowledge.vue'),
