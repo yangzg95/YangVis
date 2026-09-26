@@ -9,9 +9,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import secrets
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from sqlalchemy import Select, case, delete, func, or_, select
 from sqlalchemy.orm import Session
@@ -98,6 +100,34 @@ def truncate_text(text: Optional[str], max_chars: Optional[int] = None) -> Optio
     return text[:limit] + TRUNCATE_MARK
 
 
+# ---- 上游地址校验 -----------------------------------------------------------
+
+# 通道的 base_url 指回网关自己就会无限递归：请求打到 /v1，转发出去又回到 /v1，
+# 一圈圈套下去直到超时，还会把调用日志刷满。能认出的「自己」有三类：管理请求
+# 自己的 Host（概览页显示给管理员复制的正是这个地址，粘回来是最容易犯的错）、
+# 回环地址、本机主机名。走内网别名（如 compose 服务名）指回来的认不出来，那种
+# 配置只有部署者自己写得出来。
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+
+
+def normalize_base_url(base_url: str, own_host: Optional[str] = None) -> str:
+    """校验并规范化通道的 base_url，指向本站时抛 ``ValueError``。
+
+    ``own_host`` 传管理请求的 Host 头即可（nginx 会透传成对外域名），带不带
+    端口都行。
+    """
+    url = base_url.strip().rstrip("/")
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in ("http", "https") or not host:
+        raise ValueError("base_url 必须形如 http(s)://主机名[:端口][/路径]")
+
+    own = (own_host or "").split(":")[0].strip().lower()
+    if host in _LOOPBACK_HOSTS or host == socket.gethostname().lower() or (own and host == own):
+        raise ValueError("base_url 不能指向网关自己，请求会在网关里无限循环")
+    return url
+
+
 # ---- 路由解析 ---------------------------------------------------------------
 
 
@@ -180,10 +210,12 @@ class AiGatewayService:
             raise LookupError("通道不存在")
         return channel
 
-    def create_channel(self, payload: AiChannelCreate) -> AiChannel:
+    def create_channel(
+        self, payload: AiChannelCreate, own_host: Optional[str] = None
+    ) -> AiChannel:
         channel = AiChannel(
             name=payload.name.strip(),
-            base_url=payload.base_url.strip().rstrip("/"),
+            base_url=normalize_base_url(payload.base_url, own_host),
             api_key_enc=encrypt(payload.api_key or ""),
             models=[name.strip() for name in (payload.models or []) if name.strip()] or None,
             remark=payload.remark,
@@ -194,7 +226,9 @@ class AiGatewayService:
         logger.info("created ai channel %s (%s)", channel.id, channel.name)
         return channel
 
-    def update_channel(self, channel_id: int, payload: AiChannelUpdate) -> AiChannel:
+    def update_channel(
+        self, channel_id: int, payload: AiChannelUpdate, own_host: Optional[str] = None
+    ) -> AiChannel:
         channel = self.get_channel(channel_id)
         data = payload.model_dump(exclude_unset=True)
 
@@ -203,7 +237,7 @@ class AiGatewayService:
                 setattr(channel, field, data[field].strip() if isinstance(data[field], str) else data[field])
 
         if data.get("base_url"):
-            channel.base_url = data["base_url"].strip().rstrip("/")
+            channel.base_url = normalize_base_url(data["base_url"], own_host)
 
         if "models" in data:
             models = data["models"]

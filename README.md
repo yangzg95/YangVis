@@ -33,6 +33,7 @@
 ### 🔌 AI 网关
 - 对外一个统一密钥（`sk-yv-*`），背后可挂多个 OpenAI 兼容的上游厂商通道，平台级共享、仅管理员可管
 - 模型名映射 + 优先级故障转移：同一个对外模型名可绑多条通道，按 `priority` 升序尝试，上游不可达/限流/鉴权失败时自动换下一条（仅在首字节发出前切换）
+- 两层防自环：通道 `base_url` 保存时校验（本站域名 / localhost / 回环地址一律拒绝），转发出去的请求再盖一个 `X-Yangvis-Gateway` 标记头，入站看到它就回 508 `gateway_loop_detected`——内网别名之类保存时认不出来的情况靠这层兜底，否则请求会在网关里无限递归
 - 端点：`POST /v1/chat/completions`（SSE 流式与非流式）、`POST /v1/embeddings`、`GET /v1/models`，错误体沿用 OpenAI 结构，标准 SDK 改 `base_url` 即可直连
 - 监控与审计：每次调用记录通道、模型、token 数、耗时/首字节耗时、客户端 IP、重试轨迹，正文按 `AI_GATEWAY_LOG_MAX_CHARS` 截断入库（可用 `AI_GATEWAY_LOG_PAYLOAD` 整体关闭）；日志写失败绝不影响调用本身
 - 概览页提供调用量、成功率、token 总量、延迟与按天趋势，以及按通道/模型/密钥的分布

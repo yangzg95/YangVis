@@ -31,6 +31,7 @@ from app.services.ai_gateway import (
     generate_api_key,
     hash_api_key,
     list_public_models,
+    normalize_base_url,
     resolve_candidates,
     truncate_text,
     write_call_log,
@@ -89,6 +90,33 @@ def test_truncate_text():
 
     # 上限为 0 表示「不截断」，而不是「全部丢掉」。
     assert truncate_text(long_text, max_chars=0) == long_text
+
+
+# ---- 上游地址校验 -----------------------------------------------------------
+
+
+def test_normalize_base_url_rejects_pointing_at_itself():
+    # 概览页显示给管理员复制的就是本站地址，粘回通道里是最容易犯的错。
+    with pytest.raises(ValueError):
+        normalize_base_url("https://yangvis.nanwa.xyz/v1", own_host="yangvis.nanwa.xyz")
+    # Host 头带端口时也要认出来。
+    with pytest.raises(ValueError):
+        normalize_base_url("https://yangvis.nanwa.xyz/v1/", own_host="yangvis.nanwa.xyz:443")
+    for url in ("http://localhost:18099/v1", "http://127.0.0.1/v1", "http://[::1]:8000/v1"):
+        with pytest.raises(ValueError):
+            normalize_base_url(url, own_host="yangvis.nanwa.xyz")
+
+
+def test_normalize_base_url_accepts_real_upstreams():
+    assert (
+        normalize_base_url("  https://api.deepseek.com/v1/ ", own_host="yangvis.nanwa.xyz")
+        == "https://api.deepseek.com/v1"
+    )
+    # 同主域下的另一个子域不是「自己」，那可能真是另一台服务。
+    assert normalize_base_url("https://other.nanwa.xyz/v1", own_host="yangvis.nanwa.xyz")
+    for bad in ("", "ftp://api.example.com/v1", "api.example.com/v1"):
+        with pytest.raises(ValueError):
+            normalize_base_url(bad, own_host="yangvis.nanwa.xyz")
 
 
 # ---- 响应解析 ---------------------------------------------------------------
@@ -201,6 +229,26 @@ def test_channel_api_key_never_leaks_and_masked_update_keeps_it(db):
 
     service.update_channel(channel.id, AiChannelUpdate(api_key="brand-new-key"))
     assert service.get_channel(channel.id).last_test_ok is False, "换凭据后旧测试结论必须失效"
+
+
+def test_channel_base_url_cannot_point_at_the_gateway_itself(db):
+    service = AiGatewayService(db)
+
+    with pytest.raises(ValueError):
+        service.create_channel(
+            AiChannelCreate(name="loop", base_url="https://yangvis.nanwa.xyz/v1"),
+            own_host="yangvis.nanwa.xyz",
+        )
+
+    channel = _channel(db)
+    with pytest.raises(ValueError):
+        service.update_channel(
+            channel.id,
+            AiChannelUpdate(base_url="http://127.0.0.1:18099/v1"),
+            own_host="yangvis.nanwa.xyz",
+        )
+    # 被拒绝时不能顺手把原来的地址改掉。
+    assert service.get_channel(channel.id).base_url == "https://api.example.com/v1"
 
 
 def test_route_requires_an_existing_channel(db):

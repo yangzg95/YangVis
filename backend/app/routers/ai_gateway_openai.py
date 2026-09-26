@@ -50,6 +50,24 @@ def _upstream_error(status_code: int, content: bytes, request_id: str) -> Respon
     )
 
 
+def _reject_loop(request: Request) -> None:
+    """入站请求带着网关自己的戳，说明某个通道的 base_url 指回了本站。
+
+    放它进去就是无限递归：一圈圈套下去把 worker 占满，还会把调用日志刷爆。
+    这一圈不留日志行也没关系——触发它的那次外层调用会把这个错误原样记下。
+    """
+    hop = request.headers.get(proxy.GATEWAY_HOP_HEADER)
+    if not hop:
+        return
+    logger.warning("refusing a looped gateway request (marker %s)", hop)
+    raise proxy.GatewayError(
+        proxy.LOOP_STATUS,
+        "检测到网关回环：某个上游通道的 base_url 指向了网关自己，请改成真实的上游地址",
+        error_type="server_error",
+        code="gateway_loop_detected",
+    )
+
+
 async def _authenticate(db: Session, authorization: Optional[str]) -> AiApiKey:
     plain = extract_bearer_key(authorization)
     if plain is None:
@@ -113,6 +131,7 @@ async def chat_completions(
     db: Session = Depends(get_db),
 ) -> Response:
     try:
+        _reject_loop(request)
         key = await _authenticate(db, authorization)
         body = await _read_body(request)
     except proxy.GatewayError as exc:
@@ -195,6 +214,7 @@ async def embeddings(
     db: Session = Depends(get_db),
 ) -> Response:
     try:
+        _reject_loop(request)
         key = await _authenticate(db, authorization)
         body = await _read_body(request)
     except proxy.GatewayError as exc:
@@ -248,6 +268,7 @@ async def embeddings(
 
 @router.get("/models")
 async def models(
+    request: Request,
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ) -> Response:
@@ -257,6 +278,7 @@ async def models(
     遍模型列表，记下来只会把真正需要审计的调用淹掉。
     """
     try:
+        _reject_loop(request)
         await _authenticate(db, authorization)
     except proxy.GatewayError as exc:
         return _error(exc)

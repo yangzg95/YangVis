@@ -128,6 +128,8 @@ def test_chat_completion_is_forwarded_and_logged(env):
     # 调用方的网关密钥绝不能透传给上游，换上去的必须是通道自己的 key。
     assert seen[0].headers["authorization"] == "Bearer upstream-primary"
     assert plain not in seen[0].headers["authorization"]
+    # 出站请求盖了网关戳，万一绕回本站才认得出来（见 test_looped_request_is_refused）。
+    assert seen[0].headers[proxy.GATEWAY_HOP_HEADER] == response.headers["X-Yangvis-Request-Id"]
 
     with Session() as db:
         log = db.scalar(select(AiCallLog))
@@ -387,6 +389,29 @@ def test_disabled_key_is_rejected(env):
     )
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "key_disabled"
+
+
+def test_looped_request_is_refused(env):
+    """通道 base_url 指回本站时，绕回来的请求必须在打出去之前就被掐断。"""
+    client, Session, plain, install = env
+    seen = install(lambda request: _ok_json("x"))
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {plain}",
+            proxy.GATEWAY_HOP_HEADER: "outer-request-id",
+        },
+        json={"model": "gpt-4o", "messages": []},
+    )
+    assert response.status_code == proxy.LOOP_STATUS == 508
+    assert response.json()["error"]["code"] == "gateway_loop_detected"
+    # 508 不在 FAILOVER_STATUS 里：换一条通道照样绕回来，重试只是拖长失败时间。
+    assert seen == []
+
+    with Session() as db:
+        # 这一圈不留日志行，触发它的外层调用会把错误原样记下。
+        assert db.scalar(select(AiCallLog)) is None
 
 
 def test_unreachable_upstream_reports_502(env):

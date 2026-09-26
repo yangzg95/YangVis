@@ -1,12 +1,15 @@
 """AI 网关的对外转发：OpenAI 兼容协议 → 多个上游厂商。
 
-设计上的三条硬约束：
+设计上的四条硬约束：
 
 1. **绝不把调用方的 Authorization 透传给上游**。网关密钥和上游密钥是两套凭据，
    透传等于把对外密钥泄露给每一个上游厂商。
 2. **故障转移只能发生在「还没往客户端写第一个字节」之前**。SSE 一旦开始就
    没法回头，因此转移判定全部基于上游的响应状态码。
 3. **留痕失败不影响调用**。日志写库异常只记 error，不让业务请求变成 5xx。
+4. **绝不与自己对打**。出站请求一律盖 :data:`GATEWAY_HOP_HEADER` 戳，入站再
+   看到它就按 :data:`LOOP_STATUS` 拒绝——通道 base_url 指回本站时会无限递归，
+   而内网别名是保存时的 host 校验认不出来的。
 """
 from __future__ import annotations
 
@@ -43,6 +46,12 @@ MODELS_ENDPOINT = "models"
 # 这些状态码说明「这条通道现在不行」而不是「请求本身有问题」，换一条通道再试
 # 是有意义的。400 不在其中：参数非法换谁都一样，重试只是拖长失败时间。
 FAILOVER_STATUS = frozenset({401, 403, 404, 408, 429, 500, 502, 503, 504})
+
+# 转发出去的每个上游请求都盖这个戳。它再出现在入站请求里，就说明某个通道的
+# base_url 指回了本站——保存时按 host 校验认不出内网别名（compose 服务名、
+# 公网 IP），只能靠这个戳在打出去之前掐断，否则请求会在网关里一圈圈套下去。
+GATEWAY_HOP_HEADER = "X-Yangvis-Gateway"
+LOOP_STATUS = 508  # RFC 658 Loop Detected；不在 FAILOVER_STATUS 里，换通道也没用
 
 
 class GatewayError(Exception):
@@ -160,10 +169,12 @@ def _timeout() -> httpx.Timeout:
     )
 
 
-def _upstream_headers(candidate: RouteCandidate) -> Dict[str, str]:
+def _upstream_headers(candidate: RouteCandidate, record: CallRecord) -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {candidate.upstream_key}",
         "Content-Type": "application/json",
+        # 带上本次调用的 request_id：万一真的绕回来了，两端日志能对上。
+        GATEWAY_HOP_HEADER: record.request_id,
     }
 
 
@@ -308,7 +319,7 @@ async def forward_json(
                 response = await client.post(
                     _upstream_url(candidate, path),
                     json=upstream_body,
-                    headers=_upstream_headers(candidate),
+                    headers=_upstream_headers(candidate, record),
                 )
             except httpx.HTTPError as exc:
                 elapsed = int((time.perf_counter() - started) * 1000)
@@ -391,7 +402,7 @@ async def open_stream(
                 "POST",
                 _upstream_url(candidate, path),
                 json=upstream_body,
-                headers=_upstream_headers(candidate),
+                headers=_upstream_headers(candidate, record),
             )
             response = await client.send(request, stream=True)
         except httpx.HTTPError as exc:
@@ -528,7 +539,7 @@ async def test_channel(
         ],
         "stream": False,
     }
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", GATEWAY_HOP_HEADER: "channel-test"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 

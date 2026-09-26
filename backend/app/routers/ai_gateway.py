@@ -9,7 +9,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.crypto import DecryptionError, decrypt
@@ -57,6 +57,10 @@ def _not_found(exc: LookupError) -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
 
 
+def _bad_request(exc: ValueError) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
 # ---- 概览 -------------------------------------------------------------------
 
 
@@ -80,23 +84,32 @@ async def list_channels(
 
 @router.post("/channels", response_model=APIResponse[AiChannelItem])
 async def create_channel(
+    request: Request,
     payload: AiChannelCreate,
     service: AiGatewayService = Depends(get_service),
 ) -> APIResponse[AiChannelItem]:
-    channel = service.create_channel(payload)
+    try:
+        channel = service.create_channel(payload, own_host=request.headers.get("host"))
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
     return APIResponse(data=service.channel_item(channel))
 
 
 @router.put("/channels/{channel_id}", response_model=APIResponse[AiChannelItem])
 async def update_channel(
+    request: Request,
     channel_id: int,
     payload: AiChannelUpdate,
     service: AiGatewayService = Depends(get_service),
 ) -> APIResponse[AiChannelItem]:
     try:
-        channel = service.update_channel(channel_id, payload)
+        channel = service.update_channel(
+            channel_id, payload, own_host=request.headers.get("host")
+        )
     except LookupError as exc:
         raise _not_found(exc) from exc
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
     return APIResponse(data=service.channel_item(channel))
 
 
