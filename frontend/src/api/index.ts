@@ -1704,7 +1704,8 @@ export interface AiStats {
 }
 
 export interface AiGatewayOverview {
-  base_path: string
+  /** 完整接入地址（含 /v1），直接复制去填 SDK 的 base_url。 */
+  base_url: string
   channel_count: number
   channel_enabled: number
   route_count: number

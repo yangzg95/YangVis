@@ -160,6 +160,7 @@ npm run dev                   # http://localhost:5173，/api 与网关的 /v1 �
 | `AI_GATEWAY_CONNECT_TIMEOUT` `AI_GATEWAY_READ_TIMEOUT` | 10 / 300 | 网关转发上游的连接/读取超时（秒） |
 | `AI_GATEWAY_LOG_PAYLOAD` `AI_GATEWAY_LOG_MAX_CHARS` | true / 8000 | 是否把请求响应正文写进审计日志、单条正文截断字符数 |
 | `AI_GATEWAY_MAX_ATTEMPTS` | 3 | 单次调用最多尝试几条上游通道 |
+| `AI_GATEWAY_PUBLIC_ORIGIN` | 空 | 对外公布的站点 origin（如 `https://ai.nanwa.xyz`），概览页据此显示接入地址；留空则按打开控制台时的 origin 推导。`/v1` 由程序拼接 |
 
 ## API 概览
 
@@ -189,15 +190,16 @@ npm run dev                   # http://localhost:5173，/api 与网关的 /v1 �
 
 ## AI 网关接入
 
-网关和控制台同源，不是独立服务：`base_url` 就是站点根下的 `/v1`。
+网关不是独立服务，它就跑在应用里，只是挂在站点根的 `/v1` 下（不带 `/api` 前缀），所以 `base_url` = 站点 origin + `/v1`。
 
 | 部署形态 | base_url |
 | --- | --- |
 | compose 直连（默认映射 18099） | `http://<服务器IP>:18099/v1` |
 | 反向代理 + 域名 | `https://<你的域名>/v1` |
+| 反向代理，网关单独一个子域 | `https://ai.<你的域名>/v1` |
 | 本地开发（Vite 5173） | `http://localhost:5173/v1`，已代理到 18099 |
 
-控制台「系统设置 → AI 网关 → 概览」里的「接入地址」按当前站点 origin 拼好，可直接复制，不用手拼。
+控制台「系统设置 → AI 网关 → 概览」里的「接入地址」是后端算好直接给的，可复制。默认按打开控制台时的 origin 推导；**如果网关走的是另一个域名**，设 `AI_GATEWAY_PUBLIC_ORIGIN=https://ai.<你的域名>`，概览页就会显示那个地址——否则管理员从控制台域名打开页面，看到的会是一个「也能用、但不是对外公布的」地址。
 
 凭据与模型：`api_key` 用「统一密钥」页签签发的 `sk-yv-*`（明文只在创建那一次显示，库里只存 SHA-256 摘要），与控制台登录的 JWT 互不通用；请求里的 `model` 写「模型路由」页签配置的对外模型名，同一个名字可按 `priority` 绑多条上游做故障转移。
 

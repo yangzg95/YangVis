@@ -1378,8 +1378,8 @@ class AiStats(BaseModel):
 class AiGatewayOverview(BaseModel):
     """网关首页的概览：接入信息 + 各类资源的数量。"""
 
-    # 对外 base_url（相对路径），前端拼上当前 origin 就能直接复制去用。
-    base_path: str = "/v1"
+    # 完整接入地址（含 /v1），管理员直接复制去填 SDK 的 base_url。
+    base_url: str = ""
     channel_count: int = 0
     channel_enabled: int = 0
     route_count: int = 0

@@ -38,7 +38,7 @@ from app.models.schemas import (
     TestResult,
 )
 from app.services import ai_gateway_proxy as proxy
-from app.services.ai_gateway import AiGatewayService
+from app.services.ai_gateway import AiGatewayService, public_base_url
 
 logger = logging.getLogger("yangvis.ai_gateway.admin")
 
@@ -61,14 +61,23 @@ def _bad_request(exc: ValueError) -> HTTPException:
     return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
 
+def _base_url(request: Request) -> str:
+    # 反代后面的 scheme 要看 X-Forwarded-For 那套头（nginx snippet 里有透传），
+    # uvicorn 自己看到的永远是 http。
+    scheme = (request.headers.get("x-forwarded-proto") or request.url.scheme).split(",")[0].strip()
+    host = request.headers.get("host") or request.url.netloc
+    return public_base_url(scheme, host)
+
+
 # ---- 概览 -------------------------------------------------------------------
 
 
 @router.get("/overview", response_model=APIResponse[AiGatewayOverview])
 async def overview(
+    request: Request,
     service: AiGatewayService = Depends(get_service),
 ) -> APIResponse[AiGatewayOverview]:
-    return APIResponse(data=service.overview())
+    return APIResponse(data=service.overview(_base_url(request)))
 
 
 # ---- 上游通道 ---------------------------------------------------------------

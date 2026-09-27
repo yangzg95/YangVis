@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     AI_GATEWAY_LOG_MAX_CHARS: int = 8000
     # 同一次调用最多尝试几个上游通道（优先级故障转移）。1 表示不转移。
     AI_GATEWAY_MAX_ATTEMPTS: int = 3
+    # 对外公布的站点 origin，例如 https://ai.nanwa.xyz——网关单独挂一个域名时，
+    # 管理页显示的接入地址要以它为准，而不是管理员当前访问控制台用的那个域名。
+    # 留空则按管理请求自己的 origin 推导（前后端同源部署时的默认情况）。
+    AI_GATEWAY_PUBLIC_ORIGIN: str = ""
 
     # 智能运维
     OPS_SSH_TIMEOUT: float = 15.0

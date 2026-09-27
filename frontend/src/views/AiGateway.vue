@@ -24,8 +24,7 @@
           </div>
           <div class="hint">
             对外走 OpenAI 兼容协议：把 base_url 填成上面的地址、api_key 填成「统一密钥」页签里签发的钥匙即可，
-            请求里的 model 用「模型路由」页签配置的对外模型名。
-            开发环境下这个地址由 Vite 代理转发到后端 18099，生产环境前后端同源、直接就是它。
+            请求里的 model 用「模型路由」页签配置的对外模型名。开发环境下这个地址由 Vite 代理转发到后端 18099。
             <template v-if="overview && !overview.payload_logging">
               当前已关闭正文留存（AI_GATEWAY_LOG_PAYLOAD=false），调用日志只记指标不记内容。
             </template>
@@ -567,11 +566,15 @@ const channels = ref<AiChannelItem[]>([])
 const routes = ref<AiModelRouteItem[]>([])
 const keys = ref<AiApiKeyItem[]>([])
 
-const baseUrl = `${window.location.origin}/v1`
-const curlSample = `curl ${baseUrl}/chat/completions \\
+// 以后端给的为准：网关可能挂在另一个域名上（AI_GATEWAY_PUBLIC_ORIGIN），
+// 那时当前页面的 origin 就不是对外公布的接入地址。概览还没回来时先用同源兜底。
+const baseUrl = computed(() => overview.value?.base_url || `${window.location.origin}/v1`)
+const curlSample = computed(
+  () => `curl ${baseUrl.value}/chat/completions \\
   -H "Authorization: Bearer <你的网关密钥>" \\
   -H "Content-Type: application/json" \\
-  -d '{"model": "<对外模型名>", "messages": [{"role": "user", "content": "你好"}]}'`
+  -d '{"model": "<对外模型名>", "messages": [{"role": "user", "content": "你好"}]}'`,
+)
 
 async function copy(text: string) {
   message.success((await copyText(text)) ? '已复制' : '复制失败，请手动选择')

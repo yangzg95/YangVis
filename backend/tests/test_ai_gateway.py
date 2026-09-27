@@ -19,6 +19,7 @@ from app.models.schemas import (
     AiChannelUpdate,
     AiModelRouteCreate,
 )
+from app.services import ai_gateway as gateway
 from app.services import ai_gateway_proxy as proxy
 from app.services.ai_gateway import (
     DISPLAY_PREFIX_LENGTH,
@@ -32,6 +33,7 @@ from app.services.ai_gateway import (
     hash_api_key,
     list_public_models,
     normalize_base_url,
+    public_base_url,
     resolve_candidates,
     truncate_text,
     write_call_log,
@@ -394,12 +396,22 @@ def test_overview_counts(db):
     service.create_route(AiModelRouteCreate(model_name="gpt-4o", channel_id=channel.id))
     service.create_key("k1", None)
 
-    overview = service.overview()
+    overview = service.overview("https://ai.example.com/v1")
     assert (overview.channel_count, overview.channel_enabled) == (1, 1)
     assert (overview.route_count, overview.route_enabled) == (1, 1)
     assert (overview.key_count, overview.key_enabled) == (1, 1)
     assert overview.log_count == 0
-    assert overview.base_path == "/v1"
+    assert overview.base_url == "https://ai.example.com/v1"
+
+
+def test_public_base_url_prefers_the_configured_origin(monkeypatch):
+    # 前后端同源部署时按请求推导就够了。
+    monkeypatch.setattr(gateway.settings, "AI_GATEWAY_PUBLIC_ORIGIN", "")
+    assert public_base_url("https", "yangvis.nanwa.xyz") == "https://yangvis.nanwa.xyz/v1"
+
+    # 网关单独挂一个域名时，管理员是从控制台域名打开页面的，必须显示配好的那个。
+    monkeypatch.setattr(gateway.settings, "AI_GATEWAY_PUBLIC_ORIGIN", "https://ai.nanwa.xyz/")
+    assert public_base_url("https", "yangvis.nanwa.xyz") == "https://ai.nanwa.xyz/v1"
 
 
 def test_call_record_truncates_payloads(db, monkeypatch):

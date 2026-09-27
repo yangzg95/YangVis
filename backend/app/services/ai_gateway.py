@@ -128,6 +128,19 @@ def normalize_base_url(base_url: str, own_host: Optional[str] = None) -> str:
     return url
 
 
+def public_base_url(scheme: str, host: str) -> str:
+    """概览页显示、供调用方复制的接入地址（含 ``/v1``）。
+
+    配了 ``AI_GATEWAY_PUBLIC_ORIGIN`` 就以它为准：网关单独挂一个域名（例如
+    ``ai.nanwa.xyz``）时，管理员是从控制台域名打开这个页面的，按请求 origin
+    推导会给出一个「也能用、但不是对外公布的那个」的地址。
+    """
+    origin = settings.AI_GATEWAY_PUBLIC_ORIGIN.strip().rstrip("/")
+    if not origin:
+        origin = f"{scheme}://{host}"
+    return f"{origin}/v1"
+
+
 # ---- 路由解析 ---------------------------------------------------------------
 
 
@@ -572,12 +585,12 @@ class AiGatewayService:
 
     # -- 概览 ---------------------------------------------------------------
 
-    def overview(self) -> AiGatewayOverview:
+    def overview(self, base_url: str) -> AiGatewayOverview:
         def count(model: Any, *where: Any) -> int:
             return int(self._db.scalar(select(func.count(model.id)).where(*where)) or 0)
 
         return AiGatewayOverview(
-            base_path="/v1",
+            base_url=base_url,
             channel_count=count(AiChannel),
             channel_enabled=count(AiChannel, AiChannel.enabled.is_(True)),
             route_count=count(AiModelRoute),
