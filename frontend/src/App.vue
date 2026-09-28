@@ -134,6 +134,7 @@ import {
   CloseOutlined,
   CloudServerOutlined,
   DatabaseOutlined,
+  FundProjectionScreenOutlined,
   LogoutOutlined,
   MenuOutlined,
   MessageOutlined,
@@ -165,6 +166,7 @@ const MENU: MenuNode[] = [
       { path: '/customer-service', title: '对话', icon: MessageOutlined },
       { path: '/knowledge', title: '知识库', icon: BookOutlined },
       { path: '/office/resume', title: '简历', icon: ProfileOutlined },
+      { path: '/office/slides', title: '幻灯片', icon: FundProjectionScreenOutlined },
     ],
   },
   {

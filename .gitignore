@@ -1,6 +1,8 @@
 # Backend
 backend/src/main/resources/static/
 backend/static/
+# 用户上传的图片（幻灯片配图）——运行时资产，不进版本库
+backend/uploads/
 backend/**/__pycache__/
 __pycache__/
 *.pyc

@@ -33,6 +33,27 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '简历'},
     },
     {
+        path: '/office/slides',
+        name: 'Slides',
+        component: () => import('@/views/Slides.vue'),
+        meta: {title: '幻灯片'},
+    },
+    {
+        // 幻灯片工作台：整页编辑（页面列表 + 表单 + 源码 + 实时预览）。
+        // 与数据库问答页同一模式——bare 跳过主布局外壳，从列表页新开标签页进来。
+        path: '/office/slides/:id(\\d+)/workbench',
+        name: 'SlideWorkbench',
+        component: () => import('@/views/SlideWorkbench.vue'),
+        meta: {title: '幻灯片工作台', bare: true},
+    },
+    {
+        // 放映页：满屏播放 + 键盘翻页 + 全屏 + 就地改内容。
+        path: '/office/slides/:id(\\d+)/show',
+        name: 'SlideShow',
+        component: () => import('@/views/SlideShow.vue'),
+        meta: {title: '幻灯片放映', bare: true},
+    },
+    {
         // 报告整页展示：列表页「查看报告」新开标签页进这里，bare 跳过主布局外壳，
         // 与全屏终端页同一模式。不加 public，未登录照样被守卫拦下。
         path: '/office/report/:kind(resume|comparison|toolkit)/:id(\\d+)',

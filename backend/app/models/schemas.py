@@ -1333,6 +1333,113 @@ class ResumeToolkitDetail(ResumeToolkitItem):
     report: Optional[str] = None
 
 
+# ---- 智能办公 · 幻灯片 ---------------------------------------------------------
+
+# 页面版式。裸字符串存储，与现有状态字段同一约定（不用 Enum）；每个版式对应
+# services/slides_html.py 里的一个渲染分支，加版式要同时改这两处。
+SlideLayout = Literal[
+    "cover",     # 封面：大标题 + 副标题
+    "section",   # 章节过渡页
+    "bullets",   # 标题 + 要点列表
+    "image",     # 标题 + 要点 + 配图
+    "quote",     # 金句 / 结论页
+    "closing",   # 结尾页
+]
+# 外观预设与画布比例，同样由渲染器的白名单把关。
+SlidePreset = Literal["ink", "teal", "paper", "violet"]
+SlideRatio = Literal["16x9", "4x3"]
+
+
+class SlideTheme(BaseModel):
+    """一套外观。``accent`` 是可选的强调色覆盖，只收 ``#rgb`` / ``#rrggbb``，
+    其余值在渲染器里回落预设色——样式串是直接拼进 CSS 的，必须验白名单。"""
+
+    preset: SlidePreset = "teal"
+    ratio: SlideRatio = "16x9"
+    accent: Optional[str] = Field(default=None, max_length=9)
+
+
+class SlidePageIn(BaseModel):
+    """新增 / 修改一页幻灯片。``sid`` 由服务端发放，前端不填（与面试题的 qid 同）。"""
+
+    layout: SlideLayout = "bullets"
+    title: Optional[str] = Field(default=None, max_length=200)
+    subtitle: Optional[str] = Field(default=None, max_length=400)
+    # 每条 300 字符的上限在 service 里裁剪：Pydantic 管不了 list 元素内部的长度。
+    bullets: List[str] = Field(default_factory=list, max_length=12)
+    asset_id: Optional[str] = Field(default=None, max_length=32)
+    notes: Optional[str] = Field(default=None, max_length=4000)
+
+
+class SlidePage(SlidePageIn):
+    """落库后的一页：多了服务端发的 sid。"""
+
+    sid: str
+
+
+class SlidePageSave(SlidePageIn):
+    """整包保存时的一页。``sid`` 可选：新加的页还没有，由服务端发放。
+
+    这里若收成必填的 :class:`SlidePage`，工作台「加一页 → 保存」会直接被 422
+    拦下——前端手上不可能有还没发出去的 sid。
+    """
+
+    sid: Optional[str] = Field(default=None, max_length=32)
+
+
+class SlideAsset(BaseModel):
+    """一张已落盘的配图。``url`` 浏览器可直接访问，``rel_path`` 只用于删除时定位文件。"""
+
+    id: str
+    name: str
+    mime: str = "image/png"
+    size: int = 0
+    rel_path: str = ""
+    url: str = ""
+
+
+class SlideDeckItem(BaseModel):
+    """列表里的一行幻灯片。不带 slides / source_text / html 这类大字段。"""
+
+    id: int
+    title: str
+    description: Optional[str] = None
+    status: str = "analyzing"
+    error_msg: Optional[str] = None
+    page_count: int = 0
+    asset_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class SlideDeckDetail(SlideDeckItem):
+    """工作台要的完整数据。``html`` 不在这里——预览走独立接口。"""
+
+    requirement: Optional[str] = None
+    source_text: str = ""
+    theme: SlideTheme = Field(default_factory=SlideTheme)
+    slides: List[SlidePage] = Field(default_factory=list)
+    assets: List[SlideAsset] = Field(default_factory=list)
+
+
+class SlideDeckSave(BaseModel):
+    """工作台的整包保存：标题 + 主题 + 整组页面。
+
+    刻意不收 HTML：``html`` 列是 slides 的派生物，每次写入都在服务端重渲染，
+    否则「看到的」和「导出的」迟早漂移。"""
+
+    title: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    description: Optional[str] = Field(default=None, max_length=512)
+    theme: Optional[SlideTheme] = None
+    slides: Optional[List[SlidePageSave]] = Field(default=None, max_length=80)
+
+
+class SlideDeckRegenerate(BaseModel):
+    """重新生成。材料仍用创建时的快照，这里只能补一句要求。"""
+
+    requirement: Optional[str] = Field(default=None, max_length=512)
+
+
 # ---- 智能办公 · 面试记录 -------------------------------------------------------
 
 # 面试结果；裸字符串存储，与现有状态字段同一约定（不用 Enum）。

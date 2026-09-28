@@ -14,6 +14,7 @@ from app.services.interview import reset_stale_answers
 from app.services.knowledge import reset_stale_indexing
 from app.services.ops_actions import reset_stale_ops_actions
 from app.services.resume import reset_stale_analysis
+from app.services.slides import reset_stale_slides
 from app.security import hash_password
 
 logger = logging.getLogger("yangvis.bootstrap")
@@ -257,6 +258,8 @@ def reset_stale_jobs() -> None:
         # 进程重启同样会丢下「等用户确认」的运维写命令——发起它们的 SSE 流
         # 已经断了，统一物化为 expired。
         reset_stale_ops_actions(db)
+        # 幻灯片的整份生成同样是 worker 里的一次非流式模型调用，重启即丢。
+        reset_stale_slides(db)
 
 
 def bootstrap_admin(settings: Settings) -> None:

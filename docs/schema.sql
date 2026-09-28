@@ -285,6 +285,24 @@ CREATE TABLE IF NOT EXISTS interview_record (
   KEY idx_owner (owner_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='面试场次记录（含问题清单与 AI 参考答案）';
 
+CREATE TABLE IF NOT EXISTS slide_deck (
+  id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id    BIGINT       NOT NULL,
+  title       VARCHAR(128) NOT NULL COMMENT '演示主题',
+  description VARCHAR(512) NULL     COMMENT '对这份幻灯片的补充说明，进 prompt',
+  requirement VARCHAR(512) NULL     COMMENT '用户当次提出的要求（受众/页数/风格），重新生成时可覆盖',
+  source_text MEDIUMTEXT   NOT NULL COMMENT '创建时的材料快照：粘贴文案 + 上传文档解析出的文本',
+  assets      JSON         NOT NULL COMMENT '[{id, name, mime, size, rel_path, url}]，图片文件在服务器本地磁盘',
+  theme       JSON         NOT NULL COMMENT '{preset, ratio, accent}，合法值由 services/slides_html.py 白名单把关',
+  slides      JSON         NOT NULL COMMENT '[{sid, layout, title, subtitle, bullets, asset_id, notes}]，唯一事实源',
+  html        MEDIUMTEXT   NULL     COMMENT '派生物：每次写 slides/theme/assets 时由服务端重渲染，预览/放映/导出共用',
+  status      VARCHAR(16)  NOT NULL DEFAULT 'analyzing' COMMENT 'analyzing | ready | error',
+  error_msg   VARCHAR(512) NULL,
+  created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='智能应用 · 幻灯片（AI 生成的结构化页面 + 渲染出的 HTML）';
+
 
 -- ---------------------------------------------------------------------------
 -- AI 网关：对外一把统一密钥，后面挂多个 OpenAI 兼容的上游厂商

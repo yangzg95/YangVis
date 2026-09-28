@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from urllib.parse import quote_plus
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -131,6 +132,20 @@ class Settings(BaseSettings):
     # oob = 用户在授权页手动复制授权码回来粘贴，不需要公网回调地址。
     BAIDU_NETDISK_REDIRECT_URI: str = "oob"
 
+    # 智能办公 · 幻灯片
+    # 用户上传媒体的本地磁盘目录，留空则用 <backend>/uploads。Docker 部署必须
+    # 把它挂成卷——镜像里的 /app 是构建产物，重建即丢。
+    UPLOAD_MEDIA_DIR: str = ""
+    # 对外暴露的路径前缀，实际静态挂载在 main.py 里注册。图片 URL 不带鉴权：
+    # 放映文档里的 <img> 是浏览器自己发的请求，带不上 Authorization 头。文件名
+    # 用随机 id，靠「猜不到」而不是「拦得住」，不放心的部署应把它挂在自己的
+    # 反向鉴权层后面，或改走数据库存 data URI 的路子。
+    UPLOAD_MEDIA_URL: str = "/uploads"
+    SLIDE_MAX_IMAGE_BYTES: int = 5 * 1024 * 1024
+    SLIDE_MAX_IMAGES_PER_DECK: int = 24
+    # 喂给模型的材料全文上限。幻灯片只要骨架，比简历留得少。
+    SLIDE_MAX_SOURCE_CHARS: int = 16000
+
     @property
     def database_url(self) -> str:
         # 凭据做 percent-encode：密码里若包含 '@'、'/' 或 ':'，否则会被解析成
@@ -141,6 +156,18 @@ class Settings(BaseSettings):
             f"mysql+pymysql://{user}:{password}"
             f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}?charset=utf8mb4"
         )
+
+    @property
+    def upload_media_path(self) -> Path:
+        """用户上传媒体的落盘目录（绝对路径，可能不存在，由写入方 mkdir）。
+
+        默认按代码位置而不是 cwd 解析：Gunicorn 与本地脚本的工作目录并不一致，
+        按 cwd 会把同一批图片写成两个互不可见的目录。
+        """
+        configured = self.UPLOAD_MEDIA_DIR.strip()
+        if configured:
+            return Path(configured).expanduser().resolve()
+        return Path(__file__).resolve().parent.parent / "uploads"
 
 
 @lru_cache

@@ -35,6 +35,7 @@ from app.routers import (
     ops_files,
     resume,
     settings as settings_router,
+    slides,
     users,
 )
 
@@ -81,6 +82,7 @@ app.include_router(ops.router, prefix=API_PREFIX)
 app.include_router(ops_files.router, prefix=API_PREFIX)
 app.include_router(resume.router, prefix=API_PREFIX)
 app.include_router(interview.router, prefix=API_PREFIX)
+app.include_router(slides.router, prefix=API_PREFIX)
 app.include_router(netdisk.router, prefix=API_PREFIX)
 app.include_router(ai_gateway.router, prefix=API_PREFIX)
 # 对外的 OpenAI 兼容端点挂在站点根的 /v1 下（不带 /api 前缀），调用方填的
@@ -196,6 +198,22 @@ if STATIC_DIR.exists():
         StaticFiles(directory=str(STATIC_DIR), check_dir=False),
         name="static",
     )
+
+# ---- 用户上传的图片 ----------------------------------------------------
+#
+# 幻灯片配图落在服务器本地磁盘，并由这一条挂载对外提供 —— 放映文档里的
+# <img> 是浏览器自己发的请求，带不上 Authorization 头，所以这里必须是直连的
+# 静态路径。文件名是随机 id（见 services/slides_store.py），不可猜即不可得。
+#
+# 目录单独于 STATIC_DIR：后者是前端构建产物，重建镜像即覆盖，用户资产不能
+# 活在那里面。Docker 部署要把这个目录挂成卷。
+UPLOAD_DIR = settings.upload_media_path
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+app.mount(
+    settings.UPLOAD_MEDIA_URL,
+    StaticFiles(directory=str(UPLOAD_DIR), check_dir=False),
+    name="uploads",
+)
 
 
 # ---- SPA 回退路由 ----------------------------------------------------------
