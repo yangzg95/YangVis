@@ -139,6 +139,20 @@ function sqlLiteral(value: unknown): string {
   return `'${text}'`
 }
 
+/**
+ * 筛选条件里用的字面量：这份文本会跟着 WHERE 真的交给后端执行，所以转义口径
+ * 和只用于展示的 ``sqlLiteral`` 不同——单引号翻倍（默认 sql_mode 与
+ * NO_BACKSLASH_ESCAPES 下都成立），反斜杠也翻倍，免得值以反斜杠收尾时
+ * 把收尾引号吃掉。
+ */
+export function whereLiteral(value: unknown): string {
+  if (value === null || value === undefined) return 'NULL'
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'NULL'
+  if (typeof value === 'boolean') return value ? '1' : '0'
+  const text = String(value).replace(/\\/g, '\\\\').replace(/'/g, "''")
+  return `'${text}'`
+}
+
 /** Markdown 单元格：竖线转义、换行折成 <br>，否则一行表格会被内容劈开。 */
 function mdCell(value: unknown): string {
   const text = value == null ? '' : String(value)

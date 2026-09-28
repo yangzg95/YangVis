@@ -287,26 +287,11 @@ onMounted(load)
   min-height: 0;
 }
 
-.toolbar {
-  gap: 8px;
-  margin-bottom: 0;
-  padding-bottom: 8px;
-  flex-wrap: wrap;
-}
-
-.crumb {
-  font-size: 13px;
-  color: rgba(0, 0, 0, 0.65);
-  white-space: nowrap;
-}
+/* 纵向节奏与 .crumb/.spacer 走全局 .tab-page 规则（style.css）。 */
 
 .table-filter {
   min-width: 220px;
   max-width: 420px;
-  flex: 1;
-}
-
-.spacer {
   flex: 1;
 }
 
@@ -315,16 +300,12 @@ onMounted(load)
   font-variant-numeric: tabular-nums;
 }
 
-.note {
-  margin-bottom: 8px;
-}
-
 .canvas {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  border: 1px solid var(--hairline, #f0f0f0);
-  border-radius: 8px;
+  border: 1px solid var(--grid-line);
+  border-radius: var(--tool-radius);
   background: #fff;
 }
 
@@ -372,7 +353,6 @@ onMounted(load)
   flex-wrap: wrap;
   gap: 4px;
   flex-shrink: 0;
-  padding-top: 8px;
   max-height: 88px;
   overflow: auto;
 }

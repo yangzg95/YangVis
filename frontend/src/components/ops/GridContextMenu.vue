@@ -94,8 +94,9 @@ function onPick(entry: GridMenuEntry) {
   position: fixed;
   min-width: 168px;
   padding: 4px;
-  background: #fff;
-  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--tool-radius);
   box-shadow:
     0 6px 16px 0 rgba(0, 0, 0, 0.08),
     0 3px 6px -4px rgba(0, 0, 0, 0.12),
@@ -106,9 +107,9 @@ function onPick(entry: GridMenuEntry) {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 12px;
-  border-radius: 4px;
+  gap: var(--tool-gap);
+  padding: 5px var(--grid-pad-inline);
+  border-radius: var(--radius-sm);
   font-size: 13px;
   color: rgba(0, 0, 0, 0.88);
   cursor: pointer;
@@ -116,7 +117,7 @@ function onPick(entry: GridMenuEntry) {
 }
 
 .gmenu-item:hover {
-  background: #f5f5f5;
+  background: var(--grid-hover);
 }
 
 .gmenu-item.disabled {

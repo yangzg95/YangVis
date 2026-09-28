@@ -39,6 +39,20 @@
   --radius-md: 8px;
   --radius-lg: 10px;
 
+  /* -- 工作台密度（智能运维三件套）：DBX 那套「中性底 + 紧凑行」的量纲。
+     间距/圆角走 token，页面 scoped 样式引用同一组值，调密度只改这里。
+     悬停一律用中性灰底（--grid-hover），强调色只留给选中态——彩色悬停
+     在密表里会满屏泛青，扫读时找不到焦点。 ------------------------------ */
+  --tool-gap: 6px;
+  --tool-radius: 6px;
+  --grid-pad-block: 4px;        /* 网格单元格上下内边距：一行约 24px */
+  --grid-pad-inline: 8px;
+  --chrome: #f5f5f5;            /* 表头/工具条底色 */
+  --grid-line: rgba(17, 24, 31, 0.1);      /* 竖向网格线 */
+  --grid-line-soft: rgba(17, 24, 31, 0.055); /* 横向网格线 */
+  --grid-stripe: rgba(17, 24, 31, 0.028);
+  --grid-hover: rgba(17, 24, 31, 0.045);
+
   /* -- 阴影只给浮层（下拉/弹窗/菜单）；静态卡片一律用发丝线 ------------ */
   --shadow-overlay: 0 8px 24px rgba(17, 24, 31, 0.12);
 
@@ -104,6 +118,43 @@ input {
   flex-wrap: wrap;
 }
 
+/* 运维工作台页签（数据/查询/结构/设计/ER/Redis 六件套，根元素都挂 .tab-page）
+   的纵向节奏：DBX 的密度是「工具条—内容」之间一条窄缝，不是 12px 的段落间距。
+   gap 交给 .tab-page 统一给，工具条自己不再补 padding-bottom，组件里那份
+   重复的 .toolbar 覆盖随之删掉——调密度只动 --tool-gap 一处。 */
+.tab-page {
+  gap: var(--tool-gap);
+}
+
+.tab-page .toolbar {
+  gap: var(--tool-gap);
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+/* 工具条里的三件公共件：撑开用的 .spacer、面包屑 .crumb、右侧计数 .meta。
+   原先七个页签各写一份，且面包屑用的是 0.65/0.25 的裸灰（对比度不达 AA），
+   统一收进 token；组件里只留宽度这类真正的差异。 */
+.tab-page .spacer {
+  flex: 1;
+}
+
+.tab-page .crumb {
+  color: var(--text-2);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.tab-page .crumb .sep {
+  margin: 0 4px;
+  color: var(--text-3);
+}
+
+.tab-page .meta {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
 .mono {
   font-family: var(--font-mono);
 }
@@ -118,6 +169,56 @@ input {
 }
 .list-row.active {
   background: var(--signal-bg-strong);
+}
+
+/* 工作台滚动区统一收窄：DBX 的滚动条是贴边细条，只在需要时看得见。这些类
+   只出现在运维工作台的页签里（.tab-page 那一族），写在这里等于只影响那几页，
+   省得每个组件各写一份 webkit + firefox 双写。 */
+.conn-tree,
+.pane-scroll,
+.string-wrap,
+.fav-panel,
+.his-panel,
+.canvas,
+.form-wrap,
+.tab-page .body,
+.grid-wrap .ant-table-body,
+.grid-wrap .ant-table-content {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(17, 24, 31, 0.22) transparent;
+}
+
+.conn-tree::-webkit-scrollbar,
+.pane-scroll::-webkit-scrollbar,
+.string-wrap::-webkit-scrollbar,
+.fav-panel::-webkit-scrollbar,
+.his-panel::-webkit-scrollbar,
+.canvas::-webkit-scrollbar,
+.form-wrap::-webkit-scrollbar,
+.tab-page .body::-webkit-scrollbar,
+.grid-wrap .ant-table-body::-webkit-scrollbar,
+.grid-wrap .ant-table-content::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.conn-tree::-webkit-scrollbar-thumb,
+.pane-scroll::-webkit-scrollbar-thumb,
+.string-wrap::-webkit-scrollbar-thumb,
+.fav-panel::-webkit-scrollbar-thumb,
+.his-panel::-webkit-scrollbar-thumb,
+.canvas::-webkit-scrollbar-thumb,
+.form-wrap::-webkit-scrollbar-thumb,
+.tab-page .body::-webkit-scrollbar-thumb,
+.grid-wrap .ant-table-body::-webkit-scrollbar-thumb,
+.grid-wrap .ant-table-content::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(17, 24, 31, 0.2);
+}
+
+.conn-tree::-webkit-scrollbar-thumb:hover,
+.grid-wrap .ant-table-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(17, 24, 31, 0.32);
 }
 
 /* 辅助说明文字：曾经每个页面各定义一份 .muted/.hint 且色值不一（0.45/0.55

@@ -391,12 +391,42 @@ function onRightClick(info: { event: MouseEvent; node: { dataRef: TreeNode } }) 
 .conn-tree {
   height: 100%;
   overflow: auto;
-  padding: 4px;
+  padding: 2px;
+}
+
+/* 密度对齐 DBX 侧栏：一行 24px、行间距 1px，一屏能多看四五层。 */
+.conn-tree .ant-tree-treenode {
+  padding: 0 0 1px 0;
 }
 
 .conn-tree .ant-tree-node-content-wrapper {
   display: flex;
   min-width: 0;
+  min-height: 24px;
+  padding: 1px 4px;
+  border-radius: var(--tool-radius);
+}
+
+/* 悬停给中性灰、选中才上信号色——和网格、右键菜单同一层次。antd 默认的
+   hover 是 controlItemBgHover（蓝调），在密树里整片泛蓝会盖掉真正的选中态。 */
+.conn-tree .ant-tree-node-content-wrapper:hover {
+  background: var(--grid-hover);
+}
+
+.conn-tree .ant-tree-node-content-wrapper.ant-tree-node-selected {
+  background: var(--signal-bg);
+  color: var(--signal-text);
+}
+
+.conn-tree .ant-tree-switcher {
+  width: 16px;
+  line-height: 24px;
+}
+
+/* 缩进单位跟着 switcher 一起收窄，否则层级照样按 24px 让位，深树的
+   key 列表会白吃一半宽度。 */
+.conn-tree .ant-tree-indent-unit {
+  width: 16px;
 }
 </style>
 

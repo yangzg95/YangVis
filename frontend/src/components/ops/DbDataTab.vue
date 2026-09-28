@@ -38,14 +38,16 @@
       </a-tooltip>
     </div>
 
-    <!-- 手输条件栏：回车/点应用生效，文本保留在框里表示它正在生效。
-         右键菜单「显示/隐藏筛选 & 排序」可以把整条栏收起来腾空间。 -->
-    <div v-if="condBarVisible" class="where-bar">
+    <!-- 一条 WHERE 栏装下所有筛选条件：右键加上的条件直接写进这个框，框里的
+         文本就是正在生效的条件（右键加完立即生效，加的条件后面手动改也行）。
+         排序不并进来了——它进不了 WHERE，表头上的 ↑/↓ 就是排序的显示位置。
+         右键菜单「显示/隐藏筛选 & 排序」收的是整条栏。 -->
+    <div v-if="condBarVisible" class="cond-bar">
       <a-input
         v-model:value="whereInput"
         size="small"
         allow-clear
-        placeholder="手动输入筛选条件，回车生效，如：status = 1 AND name LIKE '%张%'"
+        placeholder="筛选条件（WHERE），回车生效，如：status = 1 AND name LIKE '%张%'"
         @keydown.enter="applyWhere"
       >
         <template #prefix><FilterOutlined class="where-icon" /></template>
@@ -53,40 +55,9 @@
       <a-button size="small" :disabled="whereInput.trim() === appliedWhere" @click="applyWhere">
         应用
       </a-button>
-    </div>
-
-    <!-- 右键菜单加上去的筛选/排序，以可关闭的标签平铺在表格上方。 -->
-    <div v-if="condBarVisible && (filters.length || sorts.length || appliedWhere)" class="active-bar">
-      <a-tag
-        v-if="appliedWhere"
-        class="cond-tag"
-        color="orange"
-        closable
-        @close="clearWhere"
-      >
-        {{ appliedWhere }}
-      </a-tag>
-      <a-tag
-        v-for="(f, i) in filters"
-        :key="`f${i}`"
-        class="cond-tag"
-        color="blue"
-        closable
-        @close="removeFilter(i)"
-      >
-        {{ filterLabel(f) }}
-      </a-tag>
-      <a-tag
-        v-for="(s, i) in sorts"
-        :key="`s${i}`"
-        class="cond-tag"
-        color="green"
-        closable
-        @close="removeSort(i)"
-      >
-        {{ s.column }} {{ s.direction === 'asc' ? '↑' : '↓' }}
-      </a-tag>
-      <a-button size="small" type="link" danger @click="clearConditions">清除全部</a-button>
+      <a-button v-if="hasConditions" size="small" type="link" danger @click="clearConditions">
+        清除全部
+      </a-button>
     </div>
 
     <!-- 量高容器：scrollY 由它的剩余空间实时算出，窗口/面板怎么变表格都填满。 -->
@@ -99,6 +70,7 @@
         :loading="loading"
         :pagination="pagination"
         :scroll="{ x: 'max-content', y: scrollY }"
+        :row-class-name="rowClass"
         row-key="__i"
         @change="onChange"
       >
@@ -234,7 +206,6 @@ import {
 import { message as toast, Modal } from 'ant-design-vue'
 import {
   opsApi,
-  type DbRowFilter,
   type DbRowFilterOp,
   type DbRowKey,
   type DbRowSort,
@@ -255,10 +226,12 @@ import {
   EXPORT_SUFFIX,
   exportText,
   isLongValue,
+  quoteIdent,
   quoteTarget,
   recordValues,
   toColumns,
   toRows,
+  whereLiteral,
   type ExportFormat,
 } from './grid'
 import { useColumnResize } from './useColumnResize'
@@ -284,12 +257,16 @@ const page = ref(1)
 const pageSize = ref(100)
 const error = ref('')
 
-const filters = ref<DbRowFilter[]>([])
 const sorts = ref<DbRowSort[]>([])
 
-/** 手输条件：whereInput 是框里的草稿，appliedWhere 是真正生效的那一份。 */
+/** 生效条件只有这一份文本：手输的和右键加的都在里面，appliedWhere 是已生效的那一版。 */
 const whereInput = ref('')
 const appliedWhere = ref('')
+
+/** 栏里/表头是否已挂上生效条件（WHERE 文本 + 排序），决定「清除全部」和菜单项置灰。 */
+const hasConditions = computed(
+  () => appliedWhere.value !== '' || sorts.value.length > 0,
+)
 
 const rows = computed(() => (result.value ? toRows(result.value) : []))
 // toColumns 给初始宽，列头拖拽的覆盖值由 useColumnResize 叠上去；
@@ -326,7 +303,9 @@ async function load(targetPage = page.value, targetSize = pageSize.value) {
       props.table,
       targetPage,
       targetSize,
-      filters.value,
+      // 筛选条件全走 where 文本（右键加的也并进同一个框），结构化的 filters
+      // 前端已经不用了，服务端那条参数化路径留着给别的调用方。
+      undefined,
       sorts.value,
       appliedWhere.value,
     )
@@ -375,20 +354,23 @@ const CUSTOM_OP_OPTIONS = (Object.keys(OP_TEXT) as DbRowFilterOp[]).map((op) => 
   label: OP_TEXT[op],
 }))
 
-function filterLabel(f: DbRowFilter): string {
-  if (NO_VALUE_OPS.has(f.op)) return `${f.column} ${OP_TEXT[f.op]}`
-  const value = f.op === 'like' || f.op === 'not_like' ? `%${f.value ?? ''}%` : (f.value ?? '')
-  return `${f.column} ${OP_TEXT[f.op]} ${value}`
+/** 条件 → WHERE 片段文本：右键加的条件要落进输入框并真的执行，所以生成的是
+ *  SQL 文本（列名加反引号、值按 ``whereLiteral`` 转义），不是给标签看的缩写。 */
+function conditionSql(column: string, op: DbRowFilterOp, value: unknown): string {
+  const ident = quoteIdent(column)
+  if (NO_VALUE_OPS.has(op)) return `${ident} ${OP_TEXT[op]}`
+  const text = value == null ? '' : String(value)
+  const operand = op === 'like' || op === 'not_like' ? `%${text}%` : value
+  return `${ident} ${OP_TEXT[op]} ${whereLiteral(operand)}`
 }
 
-/** 条件一变就回第一页：旧页码在新结果集里多半没意义。 */
-function addFilter(filter: DbRowFilter) {
-  filters.value = [...filters.value, filter]
-  load(1, pageSize.value)
-}
-
-function removeFilter(index: number) {
-  filters.value = filters.value.filter((_, i) => i !== index)
+/** 右键菜单 / 自定义筛选弹窗加条件都走这里：拼成文本并进已生效的 WHERE，立刻生效、
+ *  回第一页（旧页码在新结果集里多半没意义）。框里的文本从此归用户自己编辑。 */
+function addFilter(column: string, op: DbRowFilterOp, value: unknown) {
+  const fragment = conditionSql(column, op, value)
+  const next = appliedWhere.value ? `${appliedWhere.value} AND ${fragment}` : fragment
+  whereInput.value = next
+  appliedWhere.value = next
   load(1, pageSize.value)
 }
 
@@ -398,18 +380,12 @@ function setSort(column: string, direction: 'asc' | 'desc') {
   load(1, pageSize.value)
 }
 
-function removeSort(index: number) {
-  sorts.value = sorts.value.filter((_, i) => i !== index)
-  load(1, pageSize.value)
-}
-
 const sortOf = (column: string) => sorts.value.find((s) => s.column === column)?.direction
 
 /** 多列排序时在表头标注第几键（1 起），单列排序不标。 */
 const sortIndex = (column: string) => sorts.value.findIndex((s) => s.column === column) + 1
 
 function clearConditions() {
-  filters.value = []
   sorts.value = []
   whereInput.value = ''
   appliedWhere.value = ''
@@ -419,12 +395,6 @@ function clearConditions() {
 /** 手输条件：回车/应用时生效并回第一页；校验失败（只读网关或语法错）由 load 弹错。 */
 function applyWhere() {
   appliedWhere.value = whereInput.value.trim()
-  load(1, pageSize.value)
-}
-
-function clearWhere() {
-  whereInput.value = ''
-  appliedWhere.value = ''
   load(1, pageSize.value)
 }
 
@@ -543,7 +513,7 @@ const menuEntries = computed<GridMenuEntry[]>(() => {
     {
       key: 'clear-all',
       label: '移除所有筛选 & 排序',
-      disabled: !filters.value.length && !sorts.value.length && !appliedWhere.value,
+      disabled: !hasConditions.value,
     },
     { key: 'refresh', label: '刷新' },
   ]
@@ -591,6 +561,13 @@ const selected = reactive({
 function selectCell(record: Record<string, unknown>, column: string) {
   selected.record = record
   selected.column = column
+}
+
+/** DBX 式的当前行：选中格／正在编辑的格所在整行淡彩，比格描边轻一档。 */
+function rowClass(record: Record<string, unknown>) {
+  if (selected.record === record) return 'row-active'
+  if (editing.open && editing.record === record) return 'row-active'
+  return ''
 }
 
 /** 只读时双击单元格 = 复制全文（右键菜单那套复制仍然保留）。 */
@@ -730,7 +707,6 @@ async function exportAll(format: ExportFormat) {
   })
   try {
     const res = await opsApi.dbRowsExport(props.connId, props.schema, props.table, format, {
-      filters: filters.value,
       sorts: sorts.value,
       where: appliedWhere.value,
     })
@@ -867,9 +843,9 @@ function onMenuPick(key: string) {
   }
   if (key.startsWith('filter:')) {
     const op = key.slice(7) as DbRowFilterOp
-    if (isNull && op === 'eq') return addFilter({ column: col, op: 'is_null' })
-    if (isNull && op === 'ne') return addFilter({ column: col, op: 'is_not_null' })
-    return addFilter({ column: col, op, value: text })
+    if (isNull && op === 'eq') return addFilter(col, 'is_null', null)
+    if (isNull && op === 'ne') return addFilter(col, 'is_not_null', null)
+    return addFilter(col, op, value)
   }
 
   if (key === 'sort:asc') return setSort(col, 'asc')
@@ -889,11 +865,7 @@ function onMenuPick(key: string) {
 
 function submitCustomFilter() {
   const op = customFilter.op
-  addFilter({
-    column: menu.column,
-    op,
-    value: NO_VALUE_OPS.has(op) ? null : customFilter.value,
-  })
+  addFilter(menu.column, op, NO_VALUE_OPS.has(op) ? null : customFilter.value)
   customFilter.open = false
 }
 </script>
@@ -906,59 +878,29 @@ function submitCustomFilter() {
   min-height: 0;
 }
 
-/* flex 基底用全局 .toolbar（style.css），ops 面板内保持更紧凑的间距。 */
-.toolbar {
-  gap: 8px;
-  margin-bottom: 0;
-  padding-bottom: 8px;
-}
+/* 纵向节奏、.crumb/.sep/.spacer/.meta 这些工具条公共件全部走全局
+   .tab-page 规则（style.css），组件里只留本页差异。 */
 
-.crumb {
-  font-size: 13px;
-  color: rgba(0, 0, 0, 0.65);
-}
-
-.sep {
-  margin: 0 4px;
-  color: rgba(0, 0, 0, 0.25);
-}
-
-.spacer {
-  flex: 1;
-}
-
-.meta {
-  color: var(--text-3);
-  font-size: 12px;
-}
-
-.where-bar {
+/* 条件栏就是那一个 WHERE 框：输入框吃掉剩余宽度（最少 240px），应用/清除跟在后面。
+   框里显示的文本就是生效的条件，右键加的条件也是往这里追加，不再另挂标签。 */
+.cond-bar {
   display: flex;
-  gap: 8px;
-  padding-bottom: 8px;
+  align-items: center;
+  gap: var(--tool-gap);
 }
 
-.where-bar :deep(input) {
+.cond-bar :deep(.ant-input-affix-wrapper) {
+  flex: 1;
+  min-width: 240px;
+}
+
+.cond-bar :deep(input) {
   font-family: var(--font-mono);
   font-size: 12px;
 }
 
 .where-icon {
   color: var(--text-3);
-}
-
-.active-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  padding-bottom: 8px;
-}
-
-.cond-tag {
-  margin-inline-end: 0;
-  font-family: var(--font-mono);
-  font-size: 12px;
 }
 
 .grid-wrap {
@@ -968,40 +910,8 @@ function submitCustomFilter() {
   overflow: hidden;
 }
 
-/* 占满整个单元格，右键点在空白处也能命中；菜单打开时高亮目标格。
-   左键是选中（Navicat 式），光标统一用表格十字。 */
-.cell {
-  display: block;
-  margin: -5px -12px;
-  padding: 5px 12px;
-  cursor: cell;
-}
-
-/* 选中格：信号色描边 + 浅底，比悬停重一档，一眼定位当前格。 */
-.cell.selected {
-  background: var(--signal-bg, #e6f4ff);
-  outline: 2px solid var(--signal-border, #91caff);
-  outline-offset: -2px;
-}
-
-/* 行内编辑框：与 .cell 同样的负边距手法撑满整个单元格。 */
-.cell-input {
-  display: block;
-  margin: -5px -12px;
-  width: calc(100% + 24px);
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
-.cell.targeting {
-  background: var(--signal-bg, #e6f4ff);
-  outline: 1px solid var(--signal-border, #91caff);
-}
-
-.null {
-  color: rgba(0, 0, 0, 0.3);
-  font-style: italic;
-}
+/* 单元格的点击层、选中/右键目标态、行内编辑框的撑满手法全部在 grid.css
+   里（.db-grid .cell / .cell-input），数据页签和查询结果页签共用一套。 */
 
 /* 列头：字段名 + 排序态标记 + 操作按钮，按钮平时收起、悬停露出。 */
 .col-head {

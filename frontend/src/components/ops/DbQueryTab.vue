@@ -825,16 +825,12 @@ defineExpose({
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  gap: 8px;
 }
 
-/* Navicat 式横向工具栏：窄屏允许换行，执行类按钮始终在最前。 */
+/* Navicat 式横向工具栏：窄屏允许换行（全局 .toolbar 已 wrap），执行类按钮
+   始终在最前。间距走全局 .tab-page .toolbar（style.css）的 --tool-gap。 */
 .toolbar {
   flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
 }
 
 .schema-select {
@@ -864,13 +860,14 @@ defineExpose({
   flex: 1;
 }
 
-/* 编辑器 / 底部面板之间的拖拽条：热区用负边距叠进 flex gap，视觉上不占位。 */
+/* 编辑器 / 底部面板之间的拖拽条：热区用负边距叠进 flex gap（--tool-gap），
+   视觉上不占位；gap 一改这里必须跟着改，否则热区会压到邻居身上。 */
 .row-resizer {
   position: relative;
   z-index: 5;
   flex-shrink: 0;
-  height: 8px;
-  margin: -8px 0;
+  height: var(--tool-gap);
+  margin: calc(-1 * var(--tool-gap)) 0;
   display: flex;
   align-items: center;
   cursor: row-resize;
@@ -911,7 +908,7 @@ body.dragging-row .row-resizer::after {
 }
 
 .bottom-tabs :deep(.ant-tabs-nav) {
-  margin-bottom: 8px;
+  margin-bottom: var(--tool-gap);
 }
 
 .bottom-tabs :deep(.ant-tabs-content-holder) {
@@ -978,10 +975,10 @@ body.dragging-row .row-resizer::after {
 
 /* 例子点一下只是填进编辑器，不直接执行——让用户先看清要跑什么。 */
 .sample {
-  padding: 5px 10px;
+  padding: 4px 10px;
   border: 1px solid #d9d9d9;
-  border-radius: 6px;
-  background: #fafafa;
+  border-radius: var(--tool-radius);
+  background: var(--chrome);
   color: var(--signal-text);
   font-family: var(--font-mono);
   font-size: 12px;
@@ -1009,13 +1006,13 @@ body.dragging-row .row-resizer::after {
   display: flex;
   align-items: flex-start;
   gap: 4px;
-  padding: 6px 8px;
-  border-radius: 6px;
+  padding: var(--tool-gap) var(--grid-pad-inline);
+  border-radius: var(--tool-radius);
   transition: background 0.15s;
 }
 
 .fav-item:hover {
-  background: #f5f5f5;
+  background: var(--grid-hover);
 }
 
 .fav-main {
@@ -1069,15 +1066,15 @@ body.dragging-row .row-resizer::after {
 .his-item {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
+  gap: var(--tool-gap);
+  padding: var(--tool-gap) var(--grid-pad-inline);
+  border-radius: var(--tool-radius);
   cursor: pointer;
   transition: background 0.15s;
 }
 
 .his-item:hover {
-  background: #f5f5f5;
+  background: var(--grid-hover);
 }
 
 .his-dot {

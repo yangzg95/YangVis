@@ -1004,10 +1004,15 @@ body.dragging-col .col-resizer::after {
   gap: 8px;
 }
 
+/* 连接面板的内边距比通用卡片紧一档，和右侧工作台同一份密度。 */
+.list-panel :deep(.ant-card-body) {
+  padding: var(--tool-gap) var(--grid-pad-inline);
+}
+
 .filters {
   display: flex;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: var(--tool-gap);
+  margin-bottom: var(--tool-gap);
 }
 
 .filters :deep(.ant-select) {
@@ -1077,7 +1082,8 @@ body.dragging-col .col-resizer::after {
 
 .main-panel :deep(.ant-card-body) {
   position: relative;
-  padding-top: 8px;
+  /* 工作台卡片内边距贴住内容：DBX 的页签栏离面板边缘只有一条窄缝。 */
+  padding: var(--tool-gap) var(--grid-pad-inline);
 }
 
 .tab-label {
@@ -1090,18 +1096,52 @@ body.dragging-col .col-resizer::after {
   white-space: nowrap;
 }
 
-/* 页签压矮：上下 padding 8px→3px，页签栏与内容区的间距 16px→8px。 */
+/* 工作台页签对齐 DBX 的 app-tab-bar：等高的小胶囊（28px）、4~6px 圆角、
+   非激活不带灰底，悬停是中性灰，只有激活那一枚拿信号色淡底 + 描边。
+   上下 padding 归零、高度固定，页签栏和内容的间距收到 --tool-gap。 */
 .main-panel :deep(.ant-tabs-card > .ant-tabs-nav .ant-tabs-tab) {
-  padding: 3px 16px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  height: 28px;
+  margin: 0 4px 0 0 !important;
+  border: 1px solid transparent !important;
+  border-radius: var(--tool-radius) !important;
+  background: transparent;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease;
+}
+
+.main-panel :deep(.ant-tabs-card > .ant-tabs-nav .ant-tabs-tab:hover) {
+  background: var(--grid-hover);
+}
+
+.main-panel :deep(.ant-tabs-card > .ant-tabs-nav .ant-tabs-tab-active) {
+  border-color: var(--signal-border) !important;
+  background: var(--signal-bg);
 }
 
 .main-panel :deep(.ant-tabs-top > .ant-tabs-nav) {
-  margin-bottom: 8px;
+  margin-bottom: var(--tool-gap);
+}
+
+/* 关闭钮平时收着，悬停／激活页签上才露出来（DBX 同款），省掉一整列灰叉。 */
+.main-panel :deep(.ant-tabs-nav .ant-tabs-tab .ant-tabs-tab-remove) {
+  margin-inline-start: 2px;
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.main-panel :deep(.ant-tabs-nav .ant-tabs-tab:hover .ant-tabs-tab-remove),
+.main-panel :deep(.ant-tabs-nav .ant-tabs-tab-active .ant-tabs-tab-remove) {
+  opacity: 1;
 }
 
 /* 页签整格染色：::before 以 .ant-tabs-tab 为定位盒铺满整格（inset:0 不受
    tab 内边距影响），label 里的图标 / 文案和关闭钮提到染色层之上；
-   pointer-events 关掉，点关闭钮不会被这层挡住。 */
+   pointer-events 关掉，点关闭钮不会被这层挡住。染色层跟着胶囊圆角。 */
 .main-panel :deep(.ant-tabs-tab) {
   position: relative;
 }
@@ -1110,7 +1150,7 @@ body.dragging-col .col-resizer::after {
   content: '';
   position: absolute;
   inset: 0;
-  border-radius: 8px 8px 0 0;
+  border-radius: var(--tool-radius);
   background: var(--tab-tint);
   pointer-events: none;
 }
@@ -1175,24 +1215,26 @@ body.dragging-col .col-resizer::after {
 
 .menu {
   position: fixed;
-  min-width: 120px;
+  min-width: 148px;
   padding: 4px;
   border: 1px solid var(--hairline);
-  border-radius: var(--radius-md);
+  border-radius: var(--tool-radius);
   background: var(--surface);
   box-shadow: var(--shadow-overlay);
 }
 
+/* 菜单项的尺度和右键菜单（GridContextMenu 的 .gmenu-item）对齐：一行约 28px、
+   悬停中性灰，两处菜单看起来是同一族控件。 */
 .menu-item {
-  padding: 6px 12px;
-  border-radius: 4px;
+  padding: 5px var(--grid-pad-inline);
+  border-radius: var(--radius-sm);
   font-size: 13px;
   cursor: pointer;
   transition: background 0.15s;
 }
 
 .menu-item:hover {
-  background: #f5f5f5;
+  background: var(--grid-hover);
 }
 
 .menu-item.danger {

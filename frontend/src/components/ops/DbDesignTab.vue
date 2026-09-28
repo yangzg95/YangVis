@@ -654,34 +654,11 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   min-height: 0;
 }
 
-.toolbar {
-  gap: 8px;
-  margin-bottom: 0;
-  padding-bottom: 8px;
-}
-
-.crumb {
-  font-size: 13px;
-  color: rgba(0, 0, 0, 0.65);
-}
-
-.sep {
-  margin: 0 4px;
-  color: rgba(0, 0, 0, 0.25);
-}
-
+/* 纵向节奏与 .crumb/.sep/.spacer 走全局 .tab-page 规则（style.css）。 */
 .engine {
   margin-left: 8px;
   color: var(--text-3);
   font-size: 12px;
-}
-
-.spacer {
-  flex: 1;
-}
-
-.gate-alert {
-  margin-bottom: 8px;
 }
 
 .form-wrap {
@@ -703,9 +680,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   color: rgba(0, 0, 0, 0.6);
 }
 
-.design-grid :deep(.ant-table-cell) {
-  padding: 4px 6px !important;
-}
+/* 表单表格的单元格内边距跟其他网格同一组 token（grid.css），不再单独压一档。 */
 
 .default-cell {
   display: flex;
@@ -764,11 +739,11 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 }
 
 .stmt-list li {
-  margin-bottom: 8px;
-  padding: 8px 10px;
-  border: 1px solid var(--hairline, #f0f0f0);
-  border-radius: 6px;
-  background: var(--paper, #fafafa);
+  margin-bottom: var(--tool-gap);
+  padding: var(--grid-pad-block) var(--grid-pad-inline);
+  border: 1px solid var(--grid-line);
+  border-radius: var(--tool-radius);
+  background: var(--chrome);
 }
 
 .stmt-list li.destructive {

@@ -338,26 +338,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   min-height: 0;
 }
 
-/* flex 基底用全局 .toolbar（style.css），ops 面板内保持更紧凑的间距。 */
-.toolbar {
-  gap: 8px;
-  margin-bottom: 0;
-  padding-bottom: 8px;
-}
-
-.crumb {
-  font-size: 13px;
-  color: rgba(0, 0, 0, 0.65);
-}
-
-.sep {
-  margin: 0 4px;
-  color: rgba(0, 0, 0, 0.25);
-}
-
-.spacer {
-  flex: 1;
-}
+/* 纵向节奏与 .crumb/.sep/.spacer 走全局 .tab-page 规则（style.css）。 */
 
 .grid-wrap {
   flex: 1;
@@ -407,8 +388,8 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 .ddl-toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 8px;
+  gap: var(--tool-gap);
+  margin-bottom: var(--tool-gap);
 }
 
 .ddl-hint {
@@ -419,10 +400,10 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 
 .ddl-text {
   margin: 0;
-  padding: 10px;
-  border: 1px solid var(--hairline, #f0f0f0);
-  border-radius: 6px;
-  background: var(--paper, #fafafa);
+  padding: var(--grid-pad-inline);
+  border: 1px solid var(--grid-line);
+  border-radius: var(--tool-radius);
+  background: var(--chrome);
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.6;

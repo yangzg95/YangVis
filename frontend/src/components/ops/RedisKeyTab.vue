@@ -482,12 +482,7 @@ onMounted(load)
   min-height: 0;
 }
 
-/* flex 基底用全局 .toolbar（style.css），ops 面板内保持更紧凑的间距。 */
-.toolbar {
-  gap: 8px;
-  margin-bottom: 0;
-  padding-bottom: 8px;
-}
+/* 纵向节奏、.spacer 走全局 .tab-page 规则（style.css）。 */
 
 .icon {
   color: var(--text-3);
@@ -505,14 +500,6 @@ onMounted(load)
 .ttl {
   color: var(--text-3);
   font-size: 12px;
-}
-
-.spacer {
-  flex: 1;
-}
-
-.note {
-  margin-bottom: 8px;
 }
 
 .body {
@@ -545,9 +532,9 @@ onMounted(load)
 
 .string-value {
   margin: 0;
-  padding: 8px;
-  border-radius: 6px;
-  background: #fafafa;
+  padding: var(--grid-pad-inline);
+  border-radius: var(--tool-radius);
+  background: var(--chrome);
   font-family: var(--font-mono);
   font-size: 12px;
   white-space: pre-wrap;
@@ -557,7 +544,7 @@ onMounted(load)
 .string-edit {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--tool-gap);
 }
 
 .string-input {
@@ -569,8 +556,8 @@ onMounted(load)
 .row-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 8px;
+  gap: var(--tool-gap);
+  margin-top: var(--tool-gap);
 }
 
 .hint {
@@ -581,8 +568,8 @@ onMounted(load)
 .add-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 8px;
+  gap: var(--tool-gap);
+  margin-bottom: var(--tool-gap);
 }
 
 .add-field {
@@ -609,13 +596,13 @@ onMounted(load)
 .ttl-pop {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--tool-gap);
   width: 210px;
 }
 
 .pop-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--tool-gap);
 }
 
 .pop-hint {

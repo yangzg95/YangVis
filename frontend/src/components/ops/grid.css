@@ -1,36 +1,52 @@
 /* 数据库网格的统一外观：ops 下所有结果表（查询结果 / 数据浏览 / 表结构 /
-   Redis 值）都挂 .db-grid。值用等宽字体便于对齐扫描，斑马纹和竖向分隔线
-   都压到刚好看得见的程度，重音交给悬停的信号色。 */
+   Redis 值）都挂 .db-grid。密度对齐 DBX：单元格内边距收到 4×8（一行约
+   24px），网格线双向画满，值用等宽字体便于对齐扫描。悬停是中性灰，
+   强调色只留给选中态——满屏泛青的悬停在高密度表里会让人找不到焦点。
+   量纲全部走 style.css 的 --tool-* / --grid-* token。 */
 
 .db-grid .ant-table-thead > tr > th {
-  background: rgba(17, 24, 31, 0.03);
-  border-bottom: 1px solid var(--hairline);
-  color: rgba(0, 0, 0, 0.6);
-  font-size: 12px;
-  font-weight: 500;
+  padding: var(--grid-pad-block) var(--grid-pad-inline);
+  background: var(--chrome);
+  border-bottom: 1px solid var(--grid-line);
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .db-grid .ant-table-tbody > tr > td {
-  border-bottom: 1px solid rgba(17, 24, 31, 0.05);
+  padding: var(--grid-pad-block) var(--grid-pad-inline);
+  border-bottom: 1px solid var(--grid-line-soft);
   color: rgba(0, 0, 0, 0.8);
   font-family: var(--font-mono);
   font-size: 12px;
+  line-height: 18px;
   font-variant-numeric: tabular-nums;
 }
 
-/* 竖向细分隔线：列跟着视线走，宽表不串列。 */
+/* 竖向网格线比横向重半档：列跟着视线走，宽表不串列。 */
 .db-grid .ant-table-thead > tr > th + th,
 .db-grid .ant-table-tbody > tr > td + td {
-  border-left: 1px solid rgba(17, 24, 31, 0.04);
+  border-left: 1px solid var(--grid-line);
 }
 
 /* 斑马纹极淡；与悬停同优先级，悬停写在后面盖住斑马。 */
 .db-grid .ant-table-tbody > tr:nth-child(even) > td {
-  background: rgba(17, 24, 31, 0.02);
+  background: var(--grid-stripe);
 }
 
 .db-grid .ant-table-tbody > tr:hover > td {
+  background: var(--grid-hover);
+}
+
+/* 整行选中（数据浏览里点格后当前行）：底色比悬停重一档，行首加信号条，
+   DBX 的 current-row 也是这个层次：中性悬停 → 淡彩行 → 实色格。 */
+.db-grid .ant-table-tbody > tr.row-active > td {
   background: var(--signal-bg);
+}
+
+.db-grid .ant-table-tbody > tr.row-active > td:first-child {
+  box-shadow: inset 2px 0 0 var(--signal-border);
 }
 
 /* 空表占位行不参与悬停高亮：留白区就保持空白（Navicat 式）。 */
@@ -49,22 +65,54 @@
   text-align: right;
 }
 
+/* 空值占位：灰斜体，和真实内容一眼分开。 */
+.db-grid .cell .null {
+  color: rgba(0, 0, 0, 0.3);
+  font-style: italic;
+}
+
+/* 单元格点击层：负边距把内容撑满整格，单击/右键落在文字周围的空白处也能
+   命中；边距与 td 内边距同一组 token，改密度只动 style.css 一处。 */
+.db-grid .cell {
+  position: relative;
+  display: block;
+  max-width: 100%;
+  margin: calc(-1 * var(--grid-pad-block)) calc(-1 * var(--grid-pad-inline));
+  padding: var(--grid-pad-block) var(--grid-pad-inline);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: cell;
+}
+
+/* 选中格：实心信号描边 + 浅底，比行高亮再重一档。行级淡彩由 .row-active
+   给，层次和 DBX 一致：中性悬停 → 淡彩当前行 → 描边当前格。 */
+.db-grid .cell.selected {
+  background: var(--signal-bg);
+  outline: 2px solid var(--signal-border);
+  outline-offset: -2px;
+}
+
+.db-grid .cell.targeting {
+  background: var(--signal-bg);
+  outline: 1px solid var(--signal-border);
+}
+
+/* 行内编辑框：与 .cell 同样的负边距手法撑满整个单元格。 */
+.db-grid .cell-input {
+  display: block;
+  margin: calc(-1 * var(--grid-pad-block)) calc(-1 * var(--grid-pad-inline));
+  width: calc(100% + 2 * var(--grid-pad-inline));
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
 /* 列宽硬上限：scroll.x 用 max-content 时 antd 走 table-layout: auto，列的
    width 只是下限，长内容（JSON、注释、Redis 值）会把列撑到和内容一样宽。
    给单元格夹 max-width，超出的省略号截断；完整值仍可右键复制。 */
 .db-grid .ant-table-thead > tr > th,
 .db-grid .ant-table-tbody > tr > td {
   max-width: 320px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 数据/查询页签的单元格内容包了一层 .cell（负边距占满整格），td 上的
-   text-overflow 管不到子块里的文本，省略号得落在它自己身上。 */
-.db-grid .cell {
-  position: relative;
-  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -95,11 +143,11 @@
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px 8px;
+  gap: var(--tool-gap);
+  padding: 3px var(--grid-pad-inline);
   border: 1px solid var(--hairline, #f0f0f0);
-  border-radius: 6px;
-  background: #fafafa;
+  border-radius: var(--tool-radius);
+  background: var(--chrome);
 }
 
 .sql-bar-label {

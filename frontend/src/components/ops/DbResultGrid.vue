@@ -9,6 +9,7 @@
       :columns="columns"
       :pagination="false"
       :scroll="{ x: 'max-content', y: scrollY }"
+      :row-class-name="rowClass"
       row-key="__i"
     >
       <!-- Navicat 式空表：0 行时只留表头 + 空白区，不渲染「暂无数据」占位图。 -->
@@ -245,6 +246,11 @@ function selectCell(record: Record<string, unknown>, column: string) {
   selected.column = column
 }
 
+/** 当前行淡彩（DBX 式）：和选中格的描边分层，行轻、格重。 */
+function rowClass(record: Record<string, unknown>) {
+  return selected.record === record ? 'row-active' : ''
+}
+
 /** 双击单元格 = 复制全文（右键菜单那套复制仍然保留）。 */
 function copyCell(value: unknown) {
   if (value === null || value === undefined) return
@@ -299,39 +305,16 @@ function onMenuPick(key: string) {
   overflow: hidden;
 }
 
-/* 占满整个单元格，右键点在空白处也能命中；菜单打开时高亮目标格。
-   左键是选中（Navicat 式），光标用表格十字。 */
-.cell {
-  display: block;
-  margin: -5px -12px;
-  padding: 5px 12px;
-  cursor: cell;
-}
-
-/* 选中格：信号色描边 + 浅底，比悬停重一档，一眼定位当前格。 */
-.cell.selected {
-  background: var(--signal-bg, #e6f4ff);
-  outline: 2px solid var(--signal-border, #91caff);
-  outline-offset: -2px;
-}
-
-.cell.targeting {
-  background: var(--signal-bg, #e6f4ff);
-  outline: 1px solid var(--signal-border, #91caff);
-}
-
-.null {
-  color: rgba(0, 0, 0, 0.3);
-  font-style: italic;
-}
+/* 单元格点击层与选中/目标态、(Null) 占位都由 grid.css 的 .db-grid 规则统一
+   给（和数据页签同一套），这里只留本组件的私有块。 */
 
 .text {
   flex: 1;
   min-height: 0;
   margin: 0;
-  padding: 8px;
-  border-radius: 6px;
-  background: #fafafa;
+  padding: var(--grid-pad-inline);
+  border-radius: var(--tool-radius);
+  background: var(--chrome);
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-all;

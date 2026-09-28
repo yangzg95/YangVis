@@ -373,11 +373,7 @@ onMounted(() => load(true))
   min-height: 0;
 }
 
-.toolbar {
-  gap: 8px;
-  margin-bottom: 0;
-  padding-bottom: 8px;
-}
+/* 纵向节奏、.toolbar/.spacer/.meta 走全局 .tab-page 规则（style.css）。 */
 
 .icon {
   color: var(--text-3);
@@ -392,22 +388,10 @@ onMounted(() => load(true))
   width: 240px;
 }
 
-.spacer {
-  flex: 1;
-}
-
-.meta,
-.count {
-  color: var(--text-3);
-  font-size: 12px;
-}
-
 .count {
   margin-left: 4px;
-}
-
-.note {
-  margin-bottom: 8px;
+  color: var(--text-3);
+  font-size: 12px;
 }
 
 .grid-wrap {
@@ -419,7 +403,7 @@ onMounted(() => load(true))
 .more-bar {
   display: flex;
   justify-content: center;
-  padding: 6px 0 2px;
+  padding: 2px 0 0;
 }
 
 .create-form :deep(.ant-form-item) {
