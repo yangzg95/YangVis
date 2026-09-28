@@ -68,5 +68,15 @@ export function useColumnResize(
     )
   }
 
-  return { columns, startResize }
+  /**
+   * 「自适应列宽」：丢掉手动拖出来的覆盖值，回到 toColumns 按内容算出的那一档。
+   * 不传 key 就是把这张表的所有列一起还原。
+   */
+  function autoFit(key?: string) {
+    if (key) delete overrides[key]
+    else for (const col of base.value) delete overrides[col.key]
+    persist()
+  }
+
+  return { columns, startResize, autoFit }
 }

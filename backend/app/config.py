@@ -101,6 +101,9 @@ class Settings(BaseSettings):
     # 上下文既烧钱又会把有用的信息挤掉。
     OPS_OUTPUT_LIMIT: int = 8192
     OPS_SQL_ROW_LIMIT: int = 200
+    # 「导出全部」的单次行数上限。导出本身是分批取的，内存按一批计，这个上限
+    # 守的是耗时和落盘大小；超了直接拒，让用户先加筛选条件而不是悄悄给个半截文件。
+    OPS_EXPORT_MAX_ROWS: int = 200000
     # WebSocket 入场票的有效期。它只需要活到握手完成，给 60 秒已经很宽裕。
     OPS_WS_TICKET_TTL: int = 60
     # AI 提议写操作后等待用户点确认的时间。超时按「未批准」处理。

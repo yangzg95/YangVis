@@ -52,9 +52,9 @@
 
         <div class="toolbar">
           <a-radio-group v-model:value="statsDays" button-style="solid" size="small" @change="loadStats">
-            <a-radio-button :value="1">今天</a-radio-button>
-            <a-radio-button :value="7">近 7 天</a-radio-button>
-            <a-radio-button :value="30">近 30 天</a-radio-button>
+            <a-radio-button :value="1">1 天</a-radio-button>
+            <a-radio-button :value="7">7 天</a-radio-button>
+            <a-radio-button :value="30">30 天</a-radio-button>
           </a-radio-group>
           <a-button size="small" :loading="statsLoading" @click="loadStats">刷新</a-button>
         </div>

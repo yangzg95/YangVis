@@ -714,8 +714,10 @@ function onHisOpenChange(open: boolean) {
 async function loadHistory() {
   hisLoading.value = true
   try {
-    const res = await opsApi.audit({ target_type: 'database', target_id: props.connId, limit: 50 })
-    historyItems.value = res.items
+    const res = await opsApi.audit({ target_type: 'database', target_id: props.connId, limit: 100 })
+    // 审计里混着服务端生成的动作记录（[导出 csv] …、[设计表] …、[行内改值] …），
+    // 那些不是能回编辑器跑的语句，历史列表只留真 SQL。
+    historyItems.value = res.items.filter((item) => !item.command.startsWith('['))
   } finally {
     hisLoading.value = false
   }

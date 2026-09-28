@@ -966,6 +966,132 @@ export interface DbColumnItem {
   default?: string | null
   extra: string
   comment: string
+  /** 建表顺序（ORDINAL_POSITION），设计表页签算列位置用；结构页签忽略。 */
+  position?: number
+}
+
+export interface DbIndexItem {
+  name: string
+  primary: boolean
+  unique: boolean
+  /** BTREE | FULLTEXT | HASH | SPATIAL。 */
+  index_type: string
+  /** 联合索引的列顺序即其可用前缀顺序，不能重排。 */
+  columns: string[]
+  cardinality?: number | null
+  comment: string
+}
+
+export interface DbForeignKeyItem {
+  name: string
+  columns: string[]
+  ref_schema: string
+  ref_table: string
+  /** 与 columns 等长且按位置一一对应（联合外键）。 */
+  ref_columns: string[]
+  on_update: string
+  on_delete: string
+}
+
+export interface DbTableDdl {
+  schema: string
+  table: string
+  /** SHOW CREATE TABLE 原文，服务端拼好的建表语句，前端不做二次拼装。 */
+  ddl: string
+}
+
+/** 设计表里的一列期望定义。Extra 只有两种合法取值，所以收成两个布尔位。 */
+export interface DbColumnDef {
+  name: string
+  /** 改名前的列名；留空表示没改名。缺了它改名就只能是「删一列 + 加一列」。 */
+  origin_name?: string | null
+  column_type: string
+  nullable: boolean
+  auto_increment: boolean
+  on_update_current_timestamp: boolean
+  /** 「没写 DEFAULT」与「DEFAULT NULL」在 MySQL 里不是一回事，必须分开表达。 */
+  has_default: boolean
+  default?: string | null
+  comment: string
+}
+
+export interface DbIndexDef {
+  name: string
+  unique: boolean
+  columns: string[]
+}
+
+/** 一张表的当前定义（设计表页签的初值）。外键只读，不在这里编辑。 */
+export interface DbTableDef {
+  schema: string
+  table: string
+  engine?: string | null
+  collation?: string | null
+  comment: string
+  columns: DbColumnItem[]
+  primary_key: string[]
+  /** 不含主键本身，与 primary_key 分工一致。 */
+  indexes: DbIndexItem[]
+}
+
+/** 整张表的期望定义：顺序即列顺序，服务端按它算 FIRST/AFTER。 */
+export interface DbTableDefUpdate {
+  columns: DbColumnDef[]
+  primary_key: string[]
+  indexes: DbIndexDef[]
+  comment: string
+}
+
+export type DbAlterKind =
+  | 'column-add'
+  | 'column-drop'
+  | 'column-modify'
+  | 'column-rename'
+  | 'primary'
+  | 'index-add'
+  | 'index-drop'
+  | 'comment'
+
+/** 一条将要执行的 ALTER 动作。 */
+export interface DbAlterAction {
+  kind: DbAlterKind
+  sql: string
+  note: string
+  /** 会丢数据的动作（删列），界面标红并单独确认。 */
+  destructive: boolean
+}
+
+export interface DbAlterPreview {
+  actions: DbAlterAction[]
+  warnings: string[]
+}
+
+export interface DbErdColumn {
+  name: string
+  column_type: string
+  key: string
+}
+
+export interface DbErdTable {
+  name: string
+  table_type: string
+  columns: DbErdColumn[]
+}
+
+export interface DbErdRelation {
+  name: string
+  from_table: string
+  from_columns: string[]
+  to_table: string
+  to_columns: string[]
+}
+
+/** 一个库的实体关系数据。表数超上限时 truncated=true，前端如实提示。 */
+export interface DbErd {
+  schema: string
+  tables: DbErdTable[]
+  relations: DbErdRelation[]
+  truncated: boolean
 }
 
 export interface DbCompletionColumn {
@@ -1021,6 +1147,9 @@ export interface DbRowSort {
   direction: 'asc' | 'desc'
 }
 
+/** 全量导出的格式，取值与后端 ``/rows/export`` 的 format 参数一致。 */
+export type DbExportFormat = 'csv' | 'json' | 'markdown' | 'insert'
+
 export interface RedisKeyItem {
   key: string
   key_type: string
@@ -1040,6 +1169,57 @@ export interface RedisKeyDetail {
   /** string→字符串；list/set→string[]；hash/zset/stream→两列数组。 */
   value: unknown
   truncated: boolean
+}
+
+export type RedisKeyType = 'string' | 'list' | 'set' | 'zset' | 'hash' | 'stream'
+
+/** 集合类的新建载荷里能出现的类型（stream 的 id 由服务端生成，不手工建）。 */
+export type RedisWritableKeyType = Exclude<RedisKeyType, 'stream'>
+
+/**
+ * 一次结构化写的回执。``command`` 是服务端拼出来的命令文本（与审计同源），
+ * 提示语直接引用它，用户事后对得上自己到底改了什么。
+ */
+export interface RedisWriteResult {
+  command: string
+  elapsed_ms: number
+  /** 受影响的个数：删除类是删掉的条数，其余为 0/1。 */
+  deleted: number
+}
+
+export interface RedisKeyCreatePayload {
+  db: number
+  key: string
+  key_type: Exclude<RedisKeyType, 'stream'>
+  /** string→文本；list/set→string[]；hash/zset→[[值, 值], …]。 */
+  value: unknown
+  ttl?: number | null
+}
+
+export interface RedisElementAddPayload {
+  db: number
+  key: string
+  key_type: 'list' | 'set' | 'zset' | 'hash'
+  /** 列表/集合/有序集合的元素值；hash 是 value。 */
+  value?: string | null
+  field?: string | null
+  score?: number | null
+  position?: 'head' | 'tail'
+}
+
+export interface RedisElementDeletePayload {
+  db: number
+  key: string
+  key_type: RedisKeyType
+  /** hash=field，set/zset=member，stream=条目 id，list=元素下标。 */
+  target: string
+}
+
+export interface RedisTtlPayload {
+  db: number
+  key: string
+  action: 'expire' | 'persist'
+  seconds?: number | null
 }
 
 export interface OpsAuditItem {
@@ -1223,6 +1403,54 @@ export const opsApi = {
       timeout: 60000,
       skipErrorToast: true,
     }),
+  dbTableDdl: (id: number, schema: string, table: string) =>
+    request<DbTableDdl>({
+      url: `/ops/databases/${id}/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/ddl`,
+      timeout: 60000,
+      skipErrorToast: true,
+    }),
+  dbIndexes: (id: number, schema: string, table: string) =>
+    request<{ items: DbIndexItem[]; total: number }>({
+      url: `/ops/databases/${id}/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/indexes`,
+      timeout: 60000,
+      skipErrorToast: true,
+    }),
+  dbForeignKeys: (id: number, schema: string, table: string) =>
+    request<{ items: DbForeignKeyItem[]; total: number }>({
+      url: `/ops/databases/${id}/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/foreign-keys`,
+      timeout: 60000,
+      skipErrorToast: true,
+    }),
+  dbErd: (id: number, schema: string) =>
+    request<DbErd>({
+      url: `/ops/databases/${id}/schemas/${encodeURIComponent(schema)}/erd`,
+      timeout: 60000,
+      skipErrorToast: true,
+    }),
+  dbTableDef: (id: number, schema: string, table: string) =>
+    request<DbTableDef>({
+      url: `/ops/databases/${id}/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/table-def`,
+      timeout: 60000,
+      skipErrorToast: true,
+    }),
+  /** 期望定义 → 将要执行的 ALTER 语句。它自己不写数据，但和设计表执行同一个闸门。 */
+  dbTableDefPreview: (id: number, schema: string, table: string, payload: DbTableDefUpdate) =>
+    request<DbAlterPreview>({
+      url: `/ops/databases/${id}/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/table-def/preview`,
+      method: 'POST',
+      data: payload,
+      timeout: 60000,
+      skipErrorToast: true,
+    }),
+  /** 执行预览原样回传的语句；服务端逐句重过网关，一句失败不中断其余。 */
+  dbTableDefApply: (id: number, schema: string, table: string, statements: string[]) =>
+    request<DbBatchResult>({
+      url: `/ops/databases/${id}/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/table-def/apply`,
+      method: 'POST',
+      data: { statements },
+      timeout: 600000,
+      skipErrorToast: true,
+    }),
   dbRows: (
     id: number,
     schema: string,
@@ -1245,6 +1473,33 @@ export const opsApi = {
       timeout: 60000,
       skipErrorToast: true,
     }),
+  /**
+   * 「导出全部」：满足这套筛选/排序条件的每一行，服务端分批取、流式写。
+   *
+   * 条件参数与 dbRows 完全一致，导的就是屏幕上这套条件命中的全集。响应体是文件
+   * 而不是 JSON 信封，所以按 blob 收（拦截器对 blob 原样放行），失败时后端给的
+   * 是 200 + 信封，由 saveBlobResponse 识别成错误。
+   */
+  dbRowsExport: (
+    id: number,
+    schema: string,
+    table: string,
+    format: DbExportFormat,
+    opts?: { filters?: DbRowFilter[]; sorts?: DbRowSort[]; where?: string },
+  ) =>
+    request<AxiosResponse<Blob>>({
+      url: `/ops/databases/${id}/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/rows/export`,
+      params: {
+        format,
+        ...(opts?.filters?.length ? { filters: JSON.stringify(opts.filters) } : {}),
+        ...(opts?.sorts?.length ? { order_by: JSON.stringify(opts.sorts) } : {}),
+        ...(opts?.where?.trim() ? { where: opts.where.trim() } : {}),
+      },
+      responseType: 'blob',
+      // 几十万行在服务端要跑几分钟，全局 30 秒超时会把它误杀。
+      timeout: 0,
+      skipErrorToast: true,
+    }),
   // 行级写：改值 / 删除记录。SQL 由服务端按主键生成，前端只回传原值与新值。
   updateRow: (id: number, schema: string, table: string, key: DbRowKey, sets: DbRowKey) =>
     request<DbRowWriteResult>({
@@ -1262,10 +1517,10 @@ export const opsApi = {
       timeout: 60000,
       skipErrorToast: true,
     }),
-  redisKeys: (id: number, db: number, cursor = '0', count = 100) =>
+  redisKeys: (id: number, db: number, cursor = '0', count = 100, pattern?: string) =>
     request<RedisScanResult>({
       url: `/ops/databases/${id}/keys`,
-      params: { db, cursor, count },
+      params: { db, cursor, count, ...(pattern ? { pattern } : {}) },
       timeout: 60000,
       skipErrorToast: true,
     }),
@@ -1273,6 +1528,57 @@ export const opsApi = {
     request<RedisKeyDetail>({
       url: `/ops/databases/${id}/key`,
       params: { db, key },
+      timeout: 60000,
+      skipErrorToast: true,
+    }),
+  // 结构化写：前端只交坐标（key / field / member / 下标），命令文本由服务端生成，
+  // 值不参与命令拼接。闸门与服务端一致：连接 writable × 用户 ops_write。
+  redisKeyCreate: (id: number, payload: RedisKeyCreatePayload) =>
+    request<RedisWriteResult>({
+      url: `/ops/databases/${id}/redis/keys`,
+      method: 'POST',
+      data: payload,
+      timeout: 60000,
+      skipErrorToast: true,
+    }),
+  redisStringUpdate: (id: number, db: number, key: string, value: string) =>
+    request<RedisWriteResult>({
+      url: `/ops/databases/${id}/redis/key`,
+      method: 'PUT',
+      data: { db, key, value },
+      timeout: 60000,
+      skipErrorToast: true,
+    }),
+  redisElementAdd: (id: number, payload: RedisElementAddPayload) =>
+    request<RedisWriteResult>({
+      url: `/ops/databases/${id}/redis/key/elements`,
+      method: 'POST',
+      data: payload,
+      timeout: 60000,
+      skipErrorToast: true,
+    }),
+  redisElementDelete: (id: number, payload: RedisElementDeletePayload) =>
+    request<RedisWriteResult>({
+      url: `/ops/databases/${id}/redis/key/elements`,
+      method: 'DELETE',
+      data: payload,
+      timeout: 60000,
+      skipErrorToast: true,
+    }),
+  redisTtl: (id: number, payload: RedisTtlPayload) =>
+    request<RedisWriteResult>({
+      url: `/ops/databases/${id}/redis/key/ttl`,
+      method: 'POST',
+      data: payload,
+      timeout: 60000,
+      skipErrorToast: true,
+    }),
+  /** 批量删除：选中什么删什么，不按模式扫。返回真正删掉的个数。 */
+  redisKeysDelete: (id: number, db: number, keys: string[]) =>
+    request<RedisWriteResult>({
+      url: `/ops/databases/${id}/redis/keys/delete`,
+      method: 'POST',
+      data: { db, keys },
       timeout: 60000,
       skipErrorToast: true,
     }),

@@ -833,6 +833,173 @@ class DbColumnItem(BaseModel):
     default: Optional[str] = None
     extra: str = ""
     comment: str = ""
+    # 建表顺序（ORDINAL_POSITION），设计表页签算列位置时用；结构页签忽略它。
+    position: int = 0
+
+
+class DbIndexItem(BaseModel):
+    """一张表上的一个索引。``columns`` 按 ``SEQ_IN_INDEX`` 排序，
+    联合索引的列顺序就是它的可用前缀顺序，不能乱。"""
+
+    name: str
+    primary: bool = False
+    unique: bool = False
+    index_type: str = ""  # BTREE | FULLTEXT | HASH | SPATIAL
+    columns: List[str] = Field(default_factory=list)
+    cardinality: Optional[int] = None
+    comment: str = ""  # STATISTICS.COMMENT，MySQL 在这里写 "generate from page..." 之类
+
+
+class DbForeignKeyItem(BaseModel):
+    """一个外键约束。``columns``/``ref_columns`` 等长且按位置一一对应（联合外键）。"""
+
+    name: str
+    columns: List[str] = Field(default_factory=list)
+    ref_schema: str
+    ref_table: str
+    ref_columns: List[str] = Field(default_factory=list)
+    on_update: str = ""
+    on_delete: str = ""
+
+
+class DbTableDdl(BaseModel):
+    """``SHOW CREATE TABLE`` 的原文。"""
+
+    schema_name: str = Field(..., serialization_alias="schema")
+    table: str
+    ddl: str
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+# ---- 设计表（表定义编辑：期望定义 → ALTER 预览 → 确认执行） ----------------------
+
+
+class DbTableDef(BaseModel):
+    """一张表的当前定义，设计表页签的初值。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    schema_name: str = Field(..., serialization_alias="schema")
+    table: str
+    engine: Optional[str] = None
+    collation: Optional[str] = None
+    comment: str = ""
+    columns: List[DbColumnItem] = Field(default_factory=list)
+    primary_key: List[str] = Field(default_factory=list)
+    # 不含主键本身（主键在 primary_key 里），与 DbIndexItem 的 primary 字段一致。
+    indexes: List[DbIndexItem] = Field(default_factory=list)
+
+
+class DbColumnDef(BaseModel):
+    """设计表里的一列期望定义。
+
+    ``auto_increment`` / ``on_update_current_timestamp`` 是只允许这两种取值的
+    Extra：把它们收成布尔位，前端就交不进任意 SQL 片段。生成列
+    （``GENERATED ALWAYS AS``）不在可编辑范围内，服务端识别到就拒绝改它。
+    """
+
+    name: str = Field(min_length=1, max_length=64)
+    # 改名前的列名，没改名时留空。缺了它，改名就只能拆成「删一列 + 加一列」，
+    # 那是把整列数据丢掉。
+    origin_name: Optional[str] = Field(default=None, max_length=64)
+    column_type: str = Field(min_length=1, max_length=128)
+    nullable: bool = True
+    auto_increment: bool = False
+    on_update_current_timestamp: bool = False
+    # DEFAULT 有两层含义：没写（走类型默认）与写成 NULL，必须分开表达。
+    has_default: bool = False
+    default: Optional[str] = Field(default=None, max_length=1024)
+    comment: str = Field(default="", max_length=1024)
+
+
+class DbIndexDef(BaseModel):
+    """设计表里的一个期望索引（不含主键）。"""
+
+    name: str = Field(min_length=1, max_length=64)
+    unique: bool = False
+    columns: List[str] = Field(min_length=1, max_length=32)
+
+
+class DbTableDefUpdate(BaseModel):
+    """整张表的期望定义。顺序即列顺序，服务端按它算 FIRST/AFTER。"""
+
+    columns: List[DbColumnDef] = Field(min_length=1, max_length=512)
+    primary_key: List[str] = Field(default_factory=list, max_length=32)
+    indexes: List[DbIndexDef] = Field(default_factory=list, max_length=64)
+    comment: str = Field(default="", max_length=2048)
+
+
+class DbAlterAction(BaseModel):
+    """一条将要执行的 ALTER 动作。``note`` 说清它为什么在列表里。"""
+
+    kind: Literal[
+        "column-add",
+        "column-drop",
+        "column-modify",
+        "column-rename",
+        "primary",
+        "index-add",
+        "index-drop",
+        "comment",
+    ]
+    sql: str
+    note: str = ""
+    # 会丢数据的动作（删列），前端标红并要求额外确认。
+    destructive: bool = False
+
+
+class DbAlterPreview(BaseModel):
+    """设计表预览：将要执行的语句 + 需要提前告知的风险。"""
+
+    actions: List[DbAlterAction] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+
+
+class DbTableAlterRequest(BaseModel):
+    """执行设计表预览产出的语句。
+
+    服务端不重新算 diff：来什么语句就重过一遍可写网关、逐句执行。语句与预览
+    之间表结构被别人改过导致的失败，会原样出现在该句的错误里——这与手敲
+    控制台的批量执行是同一套语义。
+    """
+
+    statements: List[str] = Field(min_length=1, max_length=200)
+
+
+class DbErdColumn(BaseModel):
+    """ER 图里一个实体的一条属性。"""
+    name: str
+    column_type: str
+    key: str = ""
+
+
+class DbErdTable(BaseModel):
+    name: str
+    table_type: str = "BASE TABLE"
+    columns: List[DbErdColumn] = Field(default_factory=list)
+
+
+class DbErdRelation(BaseModel):
+    """一条外键关系：``from_table.from_columns`` → ``to_table.to_columns``。"""
+
+    name: str
+    from_table: str
+    from_columns: List[str] = Field(default_factory=list)
+    to_table: str
+    to_columns: List[str] = Field(default_factory=list)
+
+
+class DbErd(BaseModel):
+    """一个 schema 的实体关系图数据。属性只挑主键/唯一/索引（多为外键）列，
+    否则一张宽表就能把画布撑爆；``truncated`` 表示表数量超上限被裁过。"""
+
+    schema_name: str = Field(..., serialization_alias="schema")
+    tables: List[DbErdTable] = Field(default_factory=list)
+    relations: List[DbErdRelation] = Field(default_factory=list)
+    truncated: bool = False
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class DbCompletionColumn(BaseModel):
@@ -928,6 +1095,88 @@ class RedisKeyDetail(BaseModel):
     ttl: int = -1  # -1 永不过期，-2 不存在
     value: Any = None
     truncated: bool = False
+
+
+# ---- Redis 结构化写操作 ---------------------------------------------------------
+#
+# 这些请求体里没有「命令」字段：用户给的是坐标（key / field / member / 下标），
+# 命令由服务端用 redis-py 的类型化方法拼出来，值永远进不了命令解析器，
+# 因此不存在拼接注入。被拦的只有 WRONGTYPE、越界下标这类真实语义错误。
+
+RedisKeyType = Literal["string", "list", "set", "zset", "hash", "stream"]
+
+
+class RedisWriteResult(BaseModel):
+    """一次结构化写的回执。
+
+    ``command`` 是服务端生成的命令文本（值过长会截断），既给前端提示用，也是
+    审计里那条记录——用户能事后核对到底改了什么。
+    """
+
+    command: str = ""
+    elapsed_ms: int = 0
+    deleted: int = 0
+
+
+class RedisKeyCreateRequest(BaseModel):
+    """新建 key。``value`` 的形态按 ``key_type`` 解释：
+
+    string → 文本；list / set → 成员数组；hash / zset → 两列数组
+    （hash 为 [field, value]，zset 为 [member, score]）。
+    """
+
+    db: int = Field(default=0, ge=0, le=15)
+    key: str = Field(min_length=1, max_length=4096)
+    key_type: Literal["string", "list", "set", "zset", "hash"]
+    value: Any = None
+    ttl: Optional[int] = Field(default=None, ge=1, le=3153600000)
+
+
+class RedisStringUpdateRequest(BaseModel):
+    """改 string 的值。TTL 由服务端读取后原样续上（不静默清掉过期时间）。"""
+
+    db: int = Field(default=0, ge=0, le=15)
+    key: str = Field(min_length=1, max_length=4096)
+    value: str = Field(max_length=1024 * 1024)
+
+
+class RedisElementAddRequest(BaseModel):
+    """给集合加一个元素。``value`` 是成员/列表元素/value，``field`` 只用于 hash，
+    ``score`` 只用于 zset，``position`` 只用于 list。"""
+
+    db: int = Field(default=0, ge=0, le=15)
+    key: str = Field(min_length=1, max_length=4096)
+    key_type: Literal["list", "set", "zset", "hash"]
+    value: Optional[str] = Field(default=None, max_length=1024 * 1024)
+    field: Optional[str] = Field(default=None, max_length=4096)
+    score: Optional[float] = None
+    position: Literal["head", "tail"] = "tail"
+
+
+class RedisElementDeleteRequest(BaseModel):
+    """删掉一个元素。``target`` 按类型解释：hash=field，set/zset=member，
+    stream=条目 id，list=元素下标（字符串形式的非负整数）。"""
+
+    db: int = Field(default=0, ge=0, le=15)
+    key: str = Field(min_length=1, max_length=4096)
+    key_type: RedisKeyType
+    target: str = Field(min_length=1, max_length=4096)
+
+
+class RedisTtlRequest(BaseModel):
+    """TTL 操作：``expire`` 设过期秒数，``persist`` 取消过期。"""
+
+    db: int = Field(default=0, ge=0, le=15)
+    key: str = Field(min_length=1, max_length=4096)
+    action: Literal["expire", "persist"]
+    seconds: Optional[int] = Field(default=None, ge=1, le=3153600000)
+
+
+class RedisKeyDeleteRequest(BaseModel):
+    """批量删除 key（服务端用 UNLINK 异步回收，不阻塞主线程）。"""
+
+    db: int = Field(default=0, ge=0, le=15)
+    keys: List[str] = Field(min_length=1, max_length=200)
 
 
 class WsTicket(BaseModel):

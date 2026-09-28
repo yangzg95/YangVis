@@ -17,9 +17,11 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -34,10 +36,14 @@ from app.models.schemas import (
     DatabaseType,
     DbColumnItem,
     DbCompletionTable,
+    DbAlterPreview,
     DbBatchRequest,
     DbBatchResult,
+    DbErd,
     DbExecuteRequest,
     DbExecuteResult,
+    DbForeignKeyItem,
+    DbIndexItem,
     DbRowDeleteRequest,
     DbRowFilter,
     DbRowSort,
@@ -45,6 +51,10 @@ from app.models.schemas import (
     DbRowUpdateRequest,
     DbRowWriteResult,
     DbSchemaItem,
+    DbTableAlterRequest,
+    DbTableDef,
+    DbTableDefUpdate,
+    DbTableDdl,
     DbTableItem,
     ListResponse,
     OpsAuditItem,
@@ -54,8 +64,15 @@ from app.models.schemas import (
     OpsServerCreate,
     OpsServerItem,
     OpsServerUpdate,
+    RedisElementAddRequest,
+    RedisElementDeleteRequest,
+    RedisKeyCreateRequest,
+    RedisKeyDeleteRequest,
     RedisKeyDetail,
     RedisScanResult,
+    RedisStringUpdateRequest,
+    RedisTtlRequest,
+    RedisWriteResult,
     SqlFavoriteCreate,
     SqlFavoriteItem,
     SqlFavoriteUpdate,
@@ -511,6 +528,103 @@ async def list_database_columns(
 
 
 @router.get(
+    "/databases/{database_id}/schemas/{schema}/tables/{table}/ddl",
+    response_model=APIResponse[DbTableDdl],
+)
+async def read_database_table_ddl(
+    database_id: int,
+    schema: str,
+    table: str,
+    service: db_ops.OpsDatabaseService = Depends(get_database_service),
+) -> APIResponse[DbTableDdl]:
+    """``SHOW CREATE TABLE`` 原文。改结构不在这里做——那是「设计表」页签的活。"""
+    row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
+    try:
+        ddl = await db_ops.table_ddl(row, schema, table)
+    except db_ops.OpsDbError as exc:
+        raise _browse_error(exc) from exc
+    _note_browse_success(service, row)
+    return APIResponse(data=ddl)
+
+
+@router.get(
+    "/databases/{database_id}/schemas/{schema}/tables/{table}/indexes",
+    response_model=APIResponse[ListResponse[DbIndexItem]],
+)
+async def list_database_table_indexes(
+    database_id: int,
+    schema: str,
+    table: str,
+    service: db_ops.OpsDatabaseService = Depends(get_database_service),
+) -> APIResponse[ListResponse[DbIndexItem]]:
+    row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
+    try:
+        items = await db_ops.list_indexes(row, schema, table)
+    except db_ops.OpsDbError as exc:
+        raise _browse_error(exc) from exc
+    _note_browse_success(service, row)
+    return APIResponse(data=ListResponse(items=items, total=len(items)))
+
+
+@router.get(
+    "/databases/{database_id}/schemas/{schema}/tables/{table}/foreign-keys",
+    response_model=APIResponse[ListResponse[DbForeignKeyItem]],
+)
+async def list_database_table_foreign_keys(
+    database_id: int,
+    schema: str,
+    table: str,
+    service: db_ops.OpsDatabaseService = Depends(get_database_service),
+) -> APIResponse[ListResponse[DbForeignKeyItem]]:
+    row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
+    try:
+        items = await db_ops.list_foreign_keys(row, schema, table)
+    except db_ops.OpsDbError as exc:
+        raise _browse_error(exc) from exc
+    _note_browse_success(service, row)
+    return APIResponse(data=ListResponse(items=items, total=len(items)))
+
+
+@router.get(
+    "/databases/{database_id}/schemas/{schema}/tables/{table}/table-def",
+    response_model=APIResponse[DbTableDef],
+)
+async def read_database_table_def(
+    database_id: int,
+    schema: str,
+    table: str,
+    service: db_ops.OpsDatabaseService = Depends(get_database_service),
+) -> APIResponse[DbTableDef]:
+    """设计表页签的初值：列 + 主键 + 索引（外键只读，不在这里编辑）。"""
+    row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
+    try:
+        definition = await db_ops.table_def(row, schema, table)
+    except db_ops.OpsDbError as exc:
+        raise _browse_error(exc) from exc
+    _note_browse_success(service, row)
+    return APIResponse(data=definition)
+
+
+@router.get(
+    "/databases/{database_id}/schemas/{schema}/erd",
+    response_model=APIResponse[DbErd],
+)
+async def read_database_erd(
+    database_id: int,
+    schema: str,
+    service: db_ops.OpsDatabaseService = Depends(get_database_service),
+) -> APIResponse[DbErd]:
+    """一个库的实体关系数据（外键连线 + 关键列），前端渲染成 Mermaid erDiagram。"""
+    row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
+    try:
+        data = await db_ops.erd(row, schema)
+    except db_ops.OpsDbError as exc:
+        raise _browse_error(exc) from exc
+    _note_browse_success(service, row)
+    return APIResponse(data=data)
+
+
+@router.get(
     "/databases/{database_id}/schemas/{schema}/completion",
     response_model=APIResponse[ListResponse[DbCompletionTable]],
 )
@@ -562,6 +676,69 @@ async def browse_database_rows(
         raise _browse_error(exc) from exc
     _note_browse_success(service, row)
     return APIResponse(data=result)
+
+
+# 「导出全部」的格式 → (media type, 文件后缀)。键与 db_ops._EXPORT_STREAMERS 一致。
+_EXPORT_MEDIA: Dict[str, tuple] = {
+    "csv": ("text/csv", "csv"),
+    "json": ("application/json", "json"),
+    "markdown": ("text/markdown", "md"),
+    "insert": ("application/sql", "sql"),
+}
+
+
+def _attachment(filename: str) -> str:
+    """下载文件名。表名可能是中文，ASCII 那份只作兜底，正主走 RFC 5987。"""
+    fallback = filename.encode("ascii", errors="replace").decode().replace('"', "_")
+    return f'attachment; filename="{fallback}"; filename*=UTF-8\'\'{quote(filename)}'
+
+
+@router.get("/databases/{database_id}/schemas/{schema}/tables/{table}/rows/export")
+async def export_database_rows(
+    database_id: int,
+    schema: str,
+    table: str,
+    fmt: str = Query(default="csv", alias="format", pattern="^(csv|json|markdown|insert)$"),
+    filters: Optional[str] = Query(default=None),
+    order_by: Optional[str] = Query(default=None),
+    where: Optional[str] = Query(default=None, max_length=1024),
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    """「导出全部」：满足当前筛选/排序条件的每一行，服务端分批取、流式吐。
+
+    条件参数与浏览端点完全一致——导出的是屏幕上这套条件命中的全集。响应体是
+    文件本身而不是 APIResponse 信封，前端因此按 blob 收（带 Authorization 头），
+    错误只可能发生在第一批之前，那时还是正常的业务错误。
+    """
+    service = db_ops.OpsDatabaseService(db, user.user_id)
+    row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
+    try:
+        filter_list = _parse_json_list(filters, DbRowFilter, "filters")
+        sort_list = _parse_json_list(order_by, DbRowSort, "order_by")
+    except ValueError as exc:
+        raise BusinessError(CODE_OPS_EXEC_FAILED, str(exc)) from exc
+
+    command = f"[导出 {fmt}] {schema}.{table}"
+    try:
+        session = await db_ops.open_export(
+            row, schema, table, filter_list, sort_list, where or ""
+        )
+    except db_ops.OpsDbError as exc:
+        _audit(db, user.user_id, row, command, "readonly", False, str(exc))
+        raise _browse_error(exc) from exc
+
+    _audit(db, user.user_id, row, f"{command} 共 {session.total} 行", "readonly", True)
+    _note_browse_success(service, row)
+    media_type, suffix = _EXPORT_MEDIA[fmt]
+    return StreamingResponse(
+        db_ops.stream_export(session, fmt),
+        media_type=f'{media_type}; charset="utf-8"',
+        headers={
+            "Content-Disposition": _attachment(f"{schema}.{table}.{suffix}"),
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 def _row_write_fallback(verb: str, schema: str, table: str) -> str:
@@ -649,6 +826,91 @@ async def delete_database_row(
     return APIResponse(data=result)
 
 
+def _require_table_design(
+    db: Session, user: CurrentUser, row: Any, schema: str, table: str
+) -> None:
+    """设计表的闸门：与行级写同一条口径（连接 writable × 用户 ops_write）。
+
+    预览和执行共用它——能算出改表语句却按不下执行按钮，比反过来好解释。
+    """
+    if row.writable and user.can_ops_write:
+        return
+    _audit(
+        db, user.user_id, row, f"[设计表] {schema}.{table}", "forbidden", False,
+        "连接未开启写入或用户无写权限",
+    )
+    raise BusinessError(CODE_OPS_FORBIDDEN, "该连接未开启写入，或当前账号没有写权限")
+
+
+@router.post(
+    "/databases/{database_id}/schemas/{schema}/tables/{table}/table-def/preview",
+    response_model=APIResponse[DbAlterPreview],
+)
+async def preview_database_table_alter(
+    database_id: int,
+    schema: str,
+    table: str,
+    payload: DbTableDefUpdate,
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> APIResponse[DbAlterPreview]:
+    """设计表的预览：期望定义与当前结构做 diff，返回将要执行的 ALTER 语句。
+
+    它自己不写任何东西，但设计表整体是写功能，所以闸门与执行同一个。
+    """
+    service = db_ops.OpsDatabaseService(db, user.user_id)
+    row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
+    _require_table_design(db, user, row, schema, table)
+    try:
+        preview = await db_ops.preview_alter(row, schema, table, payload)
+    except db_ops.OpsDbError as exc:
+        raise _browse_error(exc) from exc
+    _note_browse_success(service, row)
+    return APIResponse(data=preview)
+
+
+@router.post(
+    "/databases/{database_id}/schemas/{schema}/tables/{table}/table-def/apply",
+    response_model=APIResponse[DbBatchResult],
+)
+async def apply_database_table_alter(
+    database_id: int,
+    schema: str,
+    table: str,
+    payload: DbTableAlterRequest,
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> APIResponse[DbBatchResult]:
+    """执行预览产出的语句：不重算 diff，逐句重过网关 + 逐句校验目标表。
+
+    预览与执行之间表结构被别人改过，失败原样落在那一句的错误里——与手敲控制台
+    的批量执行同一套语义。审计按「次」留一条，每句一条会把历史刷成噪音。
+    """
+    service = db_ops.OpsDatabaseService(db, user.user_id)
+    row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
+    _require_table_design(db, user, row, schema, table)
+
+    command = "\n".join(payload.statements)
+    try:
+        result, any_forbidden = await db_ops.apply_alter(
+            row, schema, table, payload.statements
+        )
+    except db_ops.OpsDbError as exc:
+        _audit(db, user.user_id, row, command, "write", False, str(exc))
+        raise _browse_error(exc) from exc
+
+    first_error = next((s.message for s in result.statements if s.status == "error"), None)
+    _audit(
+        db, user.user_id, row, command,
+        "forbidden" if any_forbidden else "write",
+        result.failed == 0,
+        first_error,
+    )
+    if result.succeeded:
+        _note_browse_success(service, row)
+    return APIResponse(data=result)
+
+
 @router.get("/databases/{database_id}/keys", response_model=APIResponse[RedisScanResult])
 async def scan_database_keys(
     database_id: int,
@@ -681,6 +943,151 @@ async def read_database_key(
         raise _browse_error(exc) from exc
     _note_browse_success(service, row)
     return APIResponse(data=result)
+
+
+# ---- Redis 结构化写（值 / 元素 / TTL / 批量删除） --------------------------------
+#
+# 与 MySQL 的行内改值、设计表共用一套口径：界面上给的是坐标，命令由服务层用
+# redis-py 的类型化方法拼出来，值从不参与命令文本的构造。闸门仍是「连接
+# writable × 用户 ops_write」两道叠加，审计记的是服务层生成的命令文本。
+
+
+def _redis_intent(action: str, key: str) -> str:
+    """命令还没生成出来就失败时的审计文本（生成器本身只会因语义错误而失败）。"""
+    return f"[{action}] {key}"
+
+
+async def _run_redis_write(
+    db: Session,
+    user: CurrentUser,
+    database_id: int,
+    intent: str,
+    runner: Callable[[Any], Awaitable[RedisWriteResult]],
+) -> APIResponse[RedisWriteResult]:
+    """Redis 写端点的公共骨架：取连接 → 过闸门 → 执行 → 审计。
+
+    成功记生成出来的命令，失败只记得了「想干什么」——两条都能对上人的动作，
+    而不是留下一句看不懂的半成品。
+    """
+    service = db_ops.OpsDatabaseService(db, user.user_id)
+    row = _get_typed_database(database_id, DatabaseType.REDIS, service)
+    if not (row.writable and user.can_ops_write):
+        _audit(
+            db, user.user_id, row, intent, "forbidden", False,
+            "连接未开启写入或用户无写权限",
+        )
+        raise BusinessError(CODE_OPS_FORBIDDEN, "该连接未开启写入，或当前账号没有写权限")
+
+    try:
+        result = await runner(row)
+    except db_ops.OpsDbError as exc:
+        _audit(db, user.user_id, row, intent, "write", False, str(exc))
+        raise _browse_error(exc) from exc
+
+    _audit(db, user.user_id, row, result.command, "write", True)
+    _note_browse_success(service, row)
+    return APIResponse(data=result)
+
+
+@router.post(
+    "/databases/{database_id}/redis/keys", response_model=APIResponse[RedisWriteResult]
+)
+async def create_database_redis_key(
+    database_id: int,
+    payload: RedisKeyCreateRequest,
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> APIResponse[RedisWriteResult]:
+    """新建 key。已存在的 key 由服务层直接拒绝，界面上的「新建」不会覆盖数据。"""
+    return await _run_redis_write(
+        db, user, database_id,
+        _redis_intent("新建 key", payload.key),
+        lambda row: db_ops.create_key(row, payload),
+    )
+
+
+@router.put("/databases/{database_id}/redis/key", response_model=APIResponse[RedisWriteResult])
+async def update_database_redis_string(
+    database_id: int,
+    payload: RedisStringUpdateRequest,
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> APIResponse[RedisWriteResult]:
+    """改 string 的值；原有 TTL 由服务层读回后补上，不会因为一次编辑就丢。"""
+    return await _run_redis_write(
+        db, user, database_id,
+        _redis_intent("改值", payload.key),
+        lambda row: db_ops.set_string(row, payload),
+    )
+
+
+@router.post(
+    "/databases/{database_id}/redis/key/elements", response_model=APIResponse[RedisWriteResult]
+)
+async def add_database_redis_element(
+    database_id: int,
+    payload: RedisElementAddRequest,
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> APIResponse[RedisWriteResult]:
+    """加一个元素：HSET / LPUSH / RPUSH / SADD / ZADD。"""
+    return await _run_redis_write(
+        db, user, database_id,
+        _redis_intent("加元素", payload.key),
+        lambda row: db_ops.add_element(row, payload),
+    )
+
+
+@router.delete(
+    "/databases/{database_id}/redis/key/elements", response_model=APIResponse[RedisWriteResult]
+)
+async def remove_database_redis_element(
+    database_id: int,
+    payload: RedisElementDeleteRequest,
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> APIResponse[RedisWriteResult]:
+    """删一个元素：HDEL / LREM / SREM / ZREM / XDEL。列表按下标定位。"""
+    return await _run_redis_write(
+        db, user, database_id,
+        _redis_intent("删元素", payload.key),
+        lambda row: db_ops.remove_element(row, payload),
+    )
+
+
+@router.post(
+    "/databases/{database_id}/redis/key/ttl", response_model=APIResponse[RedisWriteResult]
+)
+async def set_database_redis_ttl(
+    database_id: int,
+    payload: RedisTtlRequest,
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> APIResponse[RedisWriteResult]:
+    """EXPIRE / PERSIST。key 不存在时 EXPIRE 会报错，而不是默默返回 0。"""
+    action = "设置过期" if payload.action == "expire" else "取消过期"
+    return await _run_redis_write(
+        db, user, database_id,
+        _redis_intent(action, payload.key),
+        lambda row: db_ops.set_ttl(row, payload),
+    )
+
+
+@router.post(
+    "/databases/{database_id}/redis/keys/delete", response_model=APIResponse[RedisWriteResult]
+)
+async def delete_database_redis_keys(
+    database_id: int,
+    payload: RedisKeyDeleteRequest,
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> APIResponse[RedisWriteResult]:
+    """批量删除 key（UNLINK）。一次最多 200 个，选中什么删什么，不按模式扫。"""
+    return await _run_redis_write(
+        db, user, database_id,
+        _redis_intent("批量删除", f"{len(payload.keys)} 个 key"),
+        lambda row: db_ops.delete_keys(row, payload),
+    )
 
 
 def _audit(

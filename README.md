@@ -21,7 +21,8 @@
 - 服务器台账：SSH 连接管理、连通性测试
 - Web 终端：xterm.js + WebSocket + PTY，断线自动重连、内容搜索、可点链接，手敲命令也进审计
 - SFTP 文件面板：目录浏览、拖拽上传、下载、新建/删除
-- 数据库工作台：MySQL 多页签查询（Navicat 式批量执行、消息/摘要面板）、SQL 收藏、Redis 只读浏览（scan/key 详情）
+- 数据库工作台（MySQL）：多页签查询（Navicat 式批量执行、消息/摘要面板）、SQL 收藏、查询历史、结果网格导出（CSV/JSON/Markdown/INSERT；当前页在前端序列化，全量走服务端分批流式并受 `OPS_EXPORT_MAX_ROWS` 约束）、表结构查看（DDL / 索引 / 外键）、设计表（表单编辑 → ALTER 预览确认 → 执行）、ER 图、数据浏览的行内改值与删除记录
+- Redis 控制台：scan 浏览 + key 详情；连接开启写入后可新建 key、改 string 值（保留原 TTL）、五种类型的元素增删（list 按下标删、hash 覆盖 field、stream 删条目）、EXPIRE/PERSIST、key 列表勾选批量 UNLINK
 - AI 运维助手：自然语言 → 命令/SQL；只读直接执行，写操作必须人工确认后才放行
 - 权限闸门：`ops_write` 权限位控制一切写操作，台账全员共用、只读用户也能查
 - 全量审计：AI 执行的、终端手敲的、SQL 执行的，统一留痕可翻查
@@ -153,6 +154,7 @@ npm run dev                   # http://localhost:5173，/api 与网关的 /v1 �
 | `KB_MAX_UPLOAD_BYTES` `KB_EMBED_BATCH_SIZE` `KB_SCORE_THRESHOLD` | 10MB / 16 / 0.3 | 知识库入库与检索 |
 | `OPS_SSH_TIMEOUT` `OPS_CMD_TIMEOUT` `OPS_AGENT_CMD_TIMEOUT` | 15 / 20 / 120 | 运维通道超时（秒） |
 | `OPS_OUTPUT_LIMIT` `OPS_SQL_ROW_LIMIT` | 8192 / 200 | 回传模型的输出/行数上限 |
+| `OPS_EXPORT_MAX_ROWS` | 200000 | 数据页「导出全部」的单次行数上限，超了直接拒 |
 | `OPS_CONFIRM_TIMEOUT` | 180 | 写操作确认等待时长（秒） |
 | `OPS_SFTP_MAX_UPLOAD_BYTES` `OPS_SFTP_LIST_LIMIT` | 50MB / 2000 | SFTP 面板限制 |
 | `BAIDU_NETDISK_APP_KEY/SECRET_KEY/APP_NAME` | 空 | 任一为空则网盘功能整体隐藏 |
@@ -174,7 +176,7 @@ npm run dev                   # http://localhost:5173，/api 与网关的 /v1 �
 | `/api/chat` | 会话与消息、SSE completions、运维写操作 confirm/reject |
 | `/api/knowledge` | 知识类型与文档、检索测试、索引重建 |
 | `/api/settings` | 模型配置 CRUD + 连通性测试 |
-| `/api/ops` | 服务器/数据库台账、SQL 执行与收藏、Redis 浏览、审计、WS 终端 |
+| `/api/ops` | 服务器/数据库台账、SQL 执行与收藏、表结构与设计表、数据浏览与行级写、全量导出、Redis 浏览与结构化写、审计、WS 终端 |
 | `/api/ops/servers/{id}/files` | SFTP 列目录/上传/下载/新建/删除 |
 | `/api/office` | 简历上传/分析/对比/下载 |
 | `/api/office/netdisk` | 网盘绑定状态、授权链接、绑定/解绑 |

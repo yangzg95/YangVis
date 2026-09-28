@@ -73,7 +73,21 @@ import { message as toast } from 'ant-design-vue'
 import { ExpandOutlined } from '@ant-design/icons-vue'
 import GridContextMenu, { type GridMenuEntry } from './GridContextMenu.vue'
 import CellViewer from './CellViewer.vue'
-import { copyText, csvLine, downloadText, isLongValue, recordValues, toColumns, toRows } from './grid'
+import {
+  copyText,
+  csvLine,
+  downloadText,
+  EXPORT_LABEL,
+  EXPORT_MIME,
+  EXPORT_ORDER,
+  EXPORT_SUFFIX,
+  exportText,
+  isLongValue,
+  recordValues,
+  toColumns,
+  toRows,
+  type ExportFormat,
+} from './grid'
 import { useColumnResize } from './useColumnResize'
 import './grid.css'
 
@@ -95,7 +109,7 @@ const rows = computed(() => toRows(props.result))
 // toColumns 给初始宽，列头拖拽的覆盖值由 useColumnResize 叠上去；
 // 结果集没有稳定来源，按列名签名持久化（同一条查询重跑宽度还在）。
 const baseColumns = computed(() => toColumns(props.result))
-const { columns, startResize } = useColumnResize(
+const { columns, startResize, autoFit } = useColumnResize(
   baseColumns,
   () => `q:${props.result.columns.join('|')}`,
 )
@@ -195,11 +209,14 @@ const menuEntries = computed<GridMenuEntry[]>(() => [
   {
     key: 'export',
     label: '保存数据为…',
-    children: [
-      { key: 'export:csv', label: 'CSV（整个结果集）' },
-      { key: 'export:json', label: 'JSON（整个结果集）' },
-    ],
+    // 查询结果没有可靠的落点表名，INSERT 只在数据页签提供。
+    children: EXPORT_ORDER.filter((fmt) => fmt !== 'insert').map((fmt) => ({
+      key: `export:${fmt}`,
+      label: `${EXPORT_LABEL[fmt]}（整个结果集）`,
+    })),
   },
+  { key: 'd1', divider: true },
+  { key: 'fit:all', label: '自适应列宽' },
 ])
 
 function onCellMenu(event: MouseEvent, column: string, value: unknown, record: Record<string, unknown>) {
@@ -247,17 +264,12 @@ function openViewer(column: string, value: unknown) {
  * 「保存数据为…」：导的是整个结果集（服务端已按上限截断，
  * 与数据页导「当前页」不同——这里没有分页）。
  */
-function exportCsv() {
-  const lines = [csvLine(props.result.columns), ...props.result.rows.map((r) => csvLine(r))]
-  downloadText('query-result.csv', lines.join('\r\n'), 'text/csv')
-}
-
-function exportJson() {
-  const cols = props.result.columns
-  const data = props.result.rows.map((row) =>
-    Object.fromEntries(cols.map((name, i) => [name, row[i] ?? null])),
+function exportAs(format: ExportFormat) {
+  downloadText(
+    `query-result.${EXPORT_SUFFIX[format]}`,
+    exportText(format, props.result),
+    EXPORT_MIME[format],
   )
-  downloadText('query-result.json', JSON.stringify(data, null, 2), 'application/json')
 }
 
 function onMenuPick(key: string) {
@@ -271,8 +283,9 @@ function onMenuPick(key: string) {
     const obj = Object.fromEntries(cols.map((name, i) => [name, values[i] ?? null]))
     return void copyOrToast(JSON.stringify(obj, null, 2), 'JSON ')
   }
-  if (key === 'export:csv') return exportCsv()
-  if (key === 'export:json') return exportJson()
+  if (key.startsWith('export:')) return exportAs(key.slice(7) as ExportFormat)
+  if (key === 'fit:all') return autoFit()
+  if (key === 'fit:all') return autoFit()
 }
 </script>
 

@@ -79,3 +79,107 @@ export function toColumns(source: GridSource) {
     }
   })
 }
+
+// ---- 「保存数据为…」的四种文本格式 ------------------------------------------------
+
+/**
+ * 客户端序列化用的格式。键与后端全量导出的 ``format`` 参数一致，
+ * 所以「当前页」和「全部行」两条路共享同一套菜单与后缀。
+ */
+export type ExportFormat = 'csv' | 'json' | 'markdown' | 'insert'
+
+export const EXPORT_SUFFIX: Record<ExportFormat, string> = {
+  csv: 'csv',
+  json: 'json',
+  markdown: 'md',
+  insert: 'sql',
+}
+
+export const EXPORT_MIME: Record<ExportFormat, string> = {
+  csv: 'text/csv',
+  json: 'application/json',
+  markdown: 'text/markdown',
+  insert: 'application/sql',
+}
+
+/** 菜单里的出现顺序与名字：两处网格共用，别各写一份。 */
+export const EXPORT_ORDER: ExportFormat[] = ['csv', 'json', 'markdown', 'insert']
+
+export const EXPORT_LABEL: Record<ExportFormat, string> = {
+  csv: 'CSV',
+  json: 'JSON',
+  markdown: 'Markdown',
+  insert: 'INSERT 语句',
+}
+
+/** 反引号标识符，与后端 ``_quote_ident`` 同规则：内部反引号翻倍。 */
+export function quoteIdent(name: string): string {
+  return '`' + name.replace(/`/g, '``') + '`'
+}
+
+/** ``schema`.`table`` 形式的导出目标。 */
+export function quoteTarget(schema: string, table: string): string {
+  return `${quoteIdent(schema)}.${quoteIdent(table)}`
+}
+
+/**
+ * MySQL 字面量，转义与后端 ``_display_literal`` 对齐（默认 sql_mode）。
+ * 导出的 .sql 是给人看过再跑的，这里求的是「和屏幕上一致」，不是「可直接执行」。
+ */
+function sqlLiteral(value: unknown): string {
+  if (value === null || value === undefined) return 'NULL'
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'NULL'
+  if (typeof value === 'boolean') return value ? '1' : '0'
+  const text = String(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\0/g, '\\0')
+  return `'${text}'`
+}
+
+/** Markdown 单元格：竖线转义、换行折成 <br>，否则一行表格会被内容劈开。 */
+function mdCell(value: unknown): string {
+  const text = value == null ? '' : String(value)
+  return text.replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
+}
+
+/** GFM 表格：粘进文档 / Issue 就能直接看的那种。 */
+export function markdownTable(source: GridSource): string {
+  const head = `| ${source.columns.map(mdCell).join(' | ')} |`
+  const rule = `| ${source.columns.map(() => '---').join(' | ')} |`
+  const body = source.rows.map((row) => `| ${row.map(mdCell).join(' | ')} |`)
+  return [head, rule, ...body].join('\n') + '\n'
+}
+
+/** 一批多行 VALUES 的 INSERT；``target`` 是已加反引号的表名。 */
+export function insertStatements(source: GridSource, target: string): string {
+  if (!source.rows.length) return `-- ${target}：没有可导出的行\n`
+  const cols = source.columns.map(quoteIdent).join(', ')
+  const values = source.rows
+    .map((row) => `(${row.map((v) => sqlLiteral(v)).join(', ')})`)
+    .join(',\n')
+  return `INSERT INTO ${target} (${cols}) VALUES\n${values};\n`
+}
+
+function jsonRecords(source: GridSource) {
+  return source.rows.map((row) =>
+    Object.fromEntries(source.columns.map((name, i) => [name, row[i] ?? null])),
+  )
+}
+
+/** 把一份结果集序列化成待落盘的文本。``target`` 只有 INSERT 用得上。 */
+export function exportText(format: ExportFormat, source: GridSource, target = '`result`'): string {
+  switch (format) {
+    case 'csv':
+      // BOM 与后端流式导出一致：Excel 只认它，缺了就把中文按本地代码页解。
+      return '\ufeff' + [csvLine(source.columns), ...source.rows.map((r) => csvLine(r))].join('\r\n')
+    case 'json':
+      return JSON.stringify(jsonRecords(source), null, 2)
+    case 'markdown':
+      return markdownTable(source)
+    case 'insert':
+      return insertStatements(source, target)
+  }
+}

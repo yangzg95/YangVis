@@ -9,6 +9,28 @@
       <span v-if="result" class="meta">
         共 {{ result.total }} 行 · {{ result.elapsed_ms }} ms
       </span>
+      <!-- 导出两条路：当前页是前端把手上这一页序列化，全部行交给服务端分批取。 -->
+      <a-dropdown placement="bottomRight" :trigger="['click']">
+        <a-button size="small" type="text" :loading="exporting">
+          <DownloadOutlined /> 导出
+        </a-button>
+        <template #overlay>
+          <a-menu :disabled="!result" @click="onExportMenu">
+            <a-sub-menu key="page">
+              <template #title>导出当前页</template>
+              <a-menu-item v-for="fmt in EXPORT_ORDER" :key="`page:${fmt}`">
+                {{ EXPORT_LABEL[fmt] }}
+              </a-menu-item>
+            </a-sub-menu>
+            <a-sub-menu key="all">
+              <template #title>导出全部行（服务端）</template>
+              <a-menu-item v-for="fmt in EXPORT_ORDER" :key="`all:${fmt}`">
+                {{ EXPORT_LABEL[fmt] }}
+              </a-menu-item>
+            </a-sub-menu>
+          </a-menu>
+        </template>
+      </a-dropdown>
       <a-tooltip title="刷新">
         <a-button size="small" type="text" :loading="loading" @click="load()">
           <ReloadOutlined />
@@ -201,6 +223,7 @@
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import {
   CopyOutlined,
+  DownloadOutlined,
   DownOutlined,
   ExpandOutlined,
   FilterOutlined,
@@ -217,11 +240,27 @@ import {
   type DbRowSort,
   type DbRowsResult,
 } from '@/api'
+import { saveBlobResponse } from '@/utils/download'
 import { useAuthStore } from '@/stores/auth'
 import GridContextMenu, { type GridMenuEntry } from './GridContextMenu.vue'
 import CellViewer from './CellViewer.vue'
 import CellEditor from './CellEditor.vue'
-import { copyText, csvLine, downloadText, isLongValue, recordValues, toColumns, toRows } from './grid'
+import {
+  copyText,
+  csvLine,
+  downloadText,
+  EXPORT_LABEL,
+  EXPORT_MIME,
+  EXPORT_ORDER,
+  EXPORT_SUFFIX,
+  exportText,
+  isLongValue,
+  quoteTarget,
+  recordValues,
+  toColumns,
+  toRows,
+  type ExportFormat,
+} from './grid'
 import { useColumnResize } from './useColumnResize'
 import { useGridScrollY } from './useGridScrollY'
 import './grid.css'
@@ -256,7 +295,7 @@ const rows = computed(() => (result.value ? toRows(result.value) : []))
 // toColumns 给初始宽，列头拖拽的覆盖值由 useColumnResize 叠上去；
 // 按「连接.库.表」持久化，重开页签宽度不丢。
 const baseColumns = computed(() => (result.value ? toColumns(result.value) : []))
-const { columns, startResize } = useColumnResize(
+const { columns, startResize, autoFit } = useColumnResize(
   baseColumns,
   `t:${props.connId}:${props.schema}:${props.table}`,
 )
@@ -427,6 +466,10 @@ const menuEntries = computed<GridMenuEntry[]>(() => {
       { key: 'sort:clear-all', label: '移除所有排序', disabled: !sorts.value.length },
       { key: 'dh', divider: true },
       { key: 'filter:custom', label: '添加筛选…' },
+      { key: 'dh2', divider: true },
+      // 拖窄了想回头：清掉手动宽度，回到按内容算出的那一档。
+      { key: 'fit:col', label: '自适应本列宽度' },
+      { key: 'fit:all', label: '自适应所有列宽度' },
     ]
   }
 
@@ -458,10 +501,18 @@ const menuEntries = computed<GridMenuEntry[]>(() => {
     {
       key: 'export',
       label: '保存数据为…',
-      children: [
-        { key: 'export:csv', label: 'CSV（当前页）' },
-        { key: 'export:json', label: 'JSON（当前页）' },
-      ],
+      children: EXPORT_ORDER.map((fmt) => ({
+        key: `export:${fmt}`,
+        label: `${EXPORT_LABEL[fmt]}（当前页）`,
+      })),
+    },
+    {
+      key: 'export-all',
+      label: '导出全部行…',
+      children: EXPORT_ORDER.map((fmt) => ({
+        key: `export-all:${fmt}`,
+        label: `${EXPORT_LABEL[fmt]}（服务端）`,
+      })),
     },
     { key: 'd3', divider: true },
     { key: 'toggle-cond', label: condBarVisible.value ? '隐藏筛选 & 排序栏' : '显示筛选 & 排序栏' },
@@ -648,19 +699,62 @@ async function pasteInto(record: Record<string, unknown> | null, column: string)
 }
 
 /** 「保存数据为…」：导出当前页（服务端分页，导的是正在看的这一页）。 */
-function exportCsv() {
+function exportPage(format: ExportFormat) {
   if (!result.value) return
-  const lines = [csvLine(result.value.columns), ...result.value.rows.map((r) => csvLine(r))]
-  downloadText(`${props.table}.csv`, lines.join('\r\n'), 'text/csv')
+  const source = { columns: result.value.columns, rows: result.value.rows }
+  downloadText(
+    `${props.table}.${EXPORT_SUFFIX[format]}`,
+    exportText(format, source, quoteTarget(props.schema, props.table)),
+    EXPORT_MIME[format],
+  )
 }
 
-function exportJson() {
-  if (!result.value) return
-  const cols = result.value.columns
-  const data = result.value.rows.map((row) =>
-    Object.fromEntries(cols.map((name, i) => [name, row[i] ?? null])),
-  )
-  downloadText(`${props.table}.json`, JSON.stringify(data, null, 2), 'application/json')
+const exporting = ref(false)
+/** 导出进度消息共用一个 key：新消息原地替换，不会叠出一列 toast。 */
+const EXPORT_TOAST = 'db-export-all'
+
+/**
+ * 「导出全部行」：条件原样交给服务端，由它分批取、流式写（受
+ * ``OPS_EXPORT_MAX_ROWS`` 上限约束，超了会拿到后端的明确报错而不是半截文件）。
+ *
+ * 整个文件先在浏览器内存里落成 blob——上限 20 万行的量级还扛得住，
+ * 真要更大规模得走流式落盘，那是另一件事。
+ */
+async function exportAll(format: ExportFormat) {
+  if (exporting.value) return
+  exporting.value = true
+  toast.open({
+    key: EXPORT_TOAST,
+    content: `正在导出 ${props.schema}.${props.table} 的全部行…`,
+    duration: 0,
+  })
+  try {
+    const res = await opsApi.dbRowsExport(props.connId, props.schema, props.table, format, {
+      filters: filters.value,
+      sorts: sorts.value,
+      where: appliedWhere.value,
+    })
+    await saveBlobResponse(res, `${props.schema}.${props.table}.${EXPORT_SUFFIX[format]}`)
+    toast.success({ key: EXPORT_TOAST, content: '导出完成', duration: 2 })
+  } catch (err: any) {
+    toast.error({ key: EXPORT_TOAST, content: err?.message || '导出失败', duration: 4 })
+  } finally {
+    exporting.value = false
+  }
+}
+
+/** 工具栏导出菜单：``page:csv`` / ``all:json``。 */
+function onExportMenu({ key }: { key: string }) {
+  const [scope, fmt] = String(key).split(':')
+  const format = fmt as ExportFormat
+  if (scope === 'all') void exportAll(format)
+  else exportPage(format)
+}
+
+/** 列头菜单给的是列名，宽度覆盖值按 ``c{i}`` 记，这里换算一下。 */
+function fitColumn(title: string) {
+  const index = result.value?.columns.indexOf(title) ?? -1
+  if (index >= 0) autoFit(`c${index}`)
 }
 
 // ---- 行内编辑（可编辑时单击单元格进入） --------------------------------------------
@@ -746,8 +840,10 @@ function onMenuPick(key: string) {
   if (key === 'edit:open') return openEditor(menu.record, col, value)
   if (key === 'edit:delete-row') return confirmDeleteRow(menu.record!)
   if (key === 'paste') return void pasteInto(menu.record, col)
-  if (key === 'export:csv') return exportCsv()
-  if (key === 'export:json') return exportJson()
+  if (key.startsWith('export-all:')) return void exportAll(key.slice(11) as ExportFormat)
+  if (key.startsWith('export:')) return exportPage(key.slice(7) as ExportFormat)
+  if (key === 'fit:col') return fitColumn(col)
+  if (key === 'fit:all') return autoFit()
   if (key === 'toggle-cond') {
     condBarVisible.value = !condBarVisible.value
     return

@@ -12,10 +12,14 @@ AI 通道永远走只读路径，与开关无关。
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
+import shlex
 import time
+import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 import pymysql
 from sqlalchemy import Select, select
@@ -27,24 +31,44 @@ from app.crypto import DecryptionError, decrypt, encrypt, is_masked, mask
 from app.models.entities import OpsDatabase, OpsSqlFavorite
 from app.models.schemas import (
     DatabaseType,
+    DbAlterAction,
+    DbAlterPreview,
     DbBatchResult,
     DbBatchStatement,
+    DbColumnDef,
     DbColumnItem,
     DbCompletionColumn,
     DbCompletionTable,
+    DbErd,
+    DbErdColumn,
+    DbErdRelation,
+    DbErdTable,
     DbExecuteResult,
+    DbForeignKeyItem,
+    DbIndexDef,
+    DbIndexItem,
     DbRowFilter,
     DbRowSort,
     DbRowsResult,
     DbRowWriteResult,
     DbSchemaItem,
+    DbTableDef,
+    DbTableDefUpdate,
+    DbTableDdl,
     DbTableItem,
     OpsDatabaseCreate,
     OpsDatabaseItem,
     OpsDatabaseUpdate,
+    RedisElementAddRequest,
+    RedisElementDeleteRequest,
+    RedisKeyCreateRequest,
+    RedisKeyDeleteRequest,
     RedisKeyDetail,
     RedisKeyItem,
     RedisScanResult,
+    RedisStringUpdateRequest,
+    RedisTtlRequest,
+    RedisWriteResult,
     SqlFavoriteCreate,
     SqlFavoriteUpdate,
 )
@@ -788,7 +812,7 @@ async def list_columns(item: OpsDatabase, schema: str, table: str) -> List[DbCol
     """一张表的列定义，按建表顺序。"""
     sql = (
         "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, "
-        "EXTRA, COLUMN_COMMENT "
+        "EXTRA, COLUMN_COMMENT, ORDINAL_POSITION "
         "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s "
         "ORDER BY ORDINAL_POSITION"
     )
@@ -808,6 +832,7 @@ async def list_columns(item: OpsDatabase, schema: str, table: str) -> List[DbCol
             default=None if r[4] is None else str(r[4]),
             extra=str(r[5] or ""),
             comment=str(r[6] or ""),
+            position=int(r[7]),
         )
         for r in rows
     ]
@@ -837,6 +862,211 @@ async def list_completion_meta(item: OpsDatabase, schema: str) -> List[DbComplet
             DbCompletionColumn(name=str(column_name), column_type=str(column_type or ""))
         )
     return [DbCompletionTable(name=name, columns=columns) for name, columns in tables.items()]
+
+
+    return [DbCompletionTable(name=name, columns=columns) for name, columns in tables.items()]
+
+
+# ---- 结构详情（DDL / 索引 / 外键 / ER 图） --------------------------------------
+#
+# DDL 走 SHOW CREATE TABLE：服务端已经把它拼成建表时的完整定义，我们不做二次
+# 拼装，免得字符集、生成列、分区这些细节在翻译中丢失。其余三样读
+# information_schema，与上面的浏览查询同一条只读会话。
+
+# ER 图最多画多少张表。mermaid 的 erDiagram 没有虚拟化，上百个实体会直接把
+# 画布糊成一团，所以宁可在服务端裁掉并如实标 truncated。
+_ERD_MAX_TABLES = 40
+
+# 一个实体最多显示几条属性。挑列时主键/唯一/索引列优先（它们才是连线两端）。
+_ERD_MAX_COLUMNS = 12
+
+
+async def table_ddl(item: OpsDatabase, schema: str, table: str) -> DbTableDdl:
+    """一张表的建表 DDL 原文。
+
+    ``SHOW CREATE TABLE`` 对视图返回的是 ``CREATE VIEW ...``，这里不区分：
+    结构页签要的就是「这张表/视图在服务器上的定义」。
+    """
+    sql = f"SHOW CREATE TABLE {_quote_ident(schema)}.{_quote_ident(table)}"
+    password = _password_of(item)
+    try:
+        # 第 2 列是语句本身（第 1 列是表名）；SHOW CREATE VIEW 同形。
+        _, rows, _, _ = await asyncio.to_thread(_query_mysql, item, password, sql, 1)
+    except pymysql.Error as exc:
+        raise OpsDbError(f"读取建表语句失败：{exc}") from exc
+    if not rows or len(rows[0]) < 2:
+        raise OpsDbError(f"表 {schema}.{table} 不存在")
+    return DbTableDdl(schema_name=schema, table=table, ddl=str(rows[0][1]))
+
+
+async def list_indexes(item: OpsDatabase, schema: str, table: str) -> List[DbIndexItem]:
+    """一张表的索引，联合索引按列序归拢。"""
+    sql = (
+        "SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME, CARDINALITY, "
+        "INDEX_TYPE, COMMENT "
+        "FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s "
+        "ORDER BY INDEX_NAME, SEQ_IN_INDEX"
+    )
+    password = _password_of(item)
+    try:
+        _, rows, _, _ = await asyncio.to_thread(
+            _query_mysql, item, password, sql, _BROWSE_CAP, (schema, table)
+        )
+    except pymysql.Error as exc:
+        raise OpsDbError(f"读取索引失败：{exc}") from exc
+
+    grouped: Dict[str, DbIndexItem] = {}
+    for row in rows:
+        name = str(row[0])
+        entry = grouped.get(name)
+        if entry is None:
+            entry = DbIndexItem(
+                name=name,
+                primary=name == "PRIMARY",
+                unique=str(row[1]) in ("0", "False"),
+                index_type=str(row[5] or ""),
+                cardinality=int(row[4]) if row[4] is not None else None,
+                comment=str(row[6] or ""),
+            )
+            grouped[name] = entry
+        entry.columns.append(str(row[3]))
+    # 主键排最前，其余按名字；和 Navicat 的索引列表顺序一致。
+    return sorted(grouped.values(), key=lambda i: (not i.primary, i.name))
+
+
+async def list_foreign_keys(item: OpsDatabase, schema: str, table: str) -> List[DbForeignKeyItem]:
+    """一张表上的外键约束（联合外键按列序合并成一条）。"""
+    sql = (
+        "SELECT k.CONSTRAINT_NAME, k.COLUMN_NAME, k.REFERENCED_TABLE_SCHEMA, "
+        "k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME, "
+        "IFNULL(r.UPDATE_RULE,''), IFNULL(r.DELETE_RULE,'') "
+        "FROM information_schema.KEY_COLUMN_USAGE k "
+        "LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS r "
+        "ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME "
+        "WHERE k.TABLE_SCHEMA=%s AND k.TABLE_NAME=%s AND k.REFERENCED_TABLE_NAME IS NOT NULL "
+        "ORDER BY k.CONSTRAINT_NAME, k.ORDINAL_POSITION"
+    )
+    password = _password_of(item)
+    try:
+        _, rows, _, _ = await asyncio.to_thread(
+            _query_mysql, item, password, sql, _BROWSE_CAP, (schema, table)
+        )
+    except pymysql.Error as exc:
+        raise OpsDbError(f"读取外键失败：{exc}") from exc
+
+    grouped: Dict[str, DbForeignKeyItem] = {}
+    for row in rows:
+        name = str(row[0])
+        entry = grouped.get(name)
+        if entry is None:
+            entry = DbForeignKeyItem(
+                name=name,
+                ref_schema=str(row[2] or ""),
+                ref_table=str(row[3] or ""),
+                on_update=str(row[5] or ""),
+                on_delete=str(row[6] or ""),
+            )
+            grouped[name] = entry
+        entry.columns.append(str(row[1]))
+        entry.ref_columns.append(str(row[4] or ""))
+    return sorted(grouped.values(), key=lambda f: f.name)
+
+
+# 关系两端都取：TABLE_NAME 侧是「引用别人的人」，REFERENCED_TABLE_NAME 侧是「被引用的人」。
+_ERD_RELATIONS_SQL = (
+    "SELECT CONSTRAINT_NAME, TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, "
+    "REFERENCED_COLUMN_NAME "
+    "FROM information_schema.KEY_COLUMN_USAGE "
+    "WHERE TABLE_SCHEMA=%s AND REFERENCED_TABLE_NAME IS NOT NULL "
+    "ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION"
+)
+
+# 选中表的列一次查完：逐表查是 N+1，40 张表就是 40 次往返。
+_ERD_COLUMNS_SQL = (
+    "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, COLUMN_KEY "
+    "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=%s "
+    "ORDER BY TABLE_NAME, ORDINAL_POSITION"
+)
+
+
+async def erd(item: OpsDatabase, schema: str) -> DbErd:
+    """一个 schema 的实体关系数据：表、挑出来的属性、外键连线。
+
+    表选取以「参与外键关系者优先」——孤立的宽表画出来只是一堆没有连线的方块，
+    对理解模型没有帮助，超上限时先裁掉它们。
+    """
+    password = _password_of(item)
+    try:
+        _, rel_rows, _, _ = await asyncio.to_thread(
+            _query_mysql, item, password, _ERD_RELATIONS_SQL, _BROWSE_CAP, (schema,)
+        )
+    except pymysql.Error as exc:
+        raise OpsDbError(f"读取外键关系失败：{exc}") from exc
+
+    # 约束名 → 关系，联合外键的多列按位置并进同一对。
+    edges: Dict[str, DbErdRelation] = {}
+    involved: set[str] = set()
+    for name, table_name, column_name, ref_table, ref_column in rel_rows:
+        key = str(name)
+        edge = edges.get(key)
+        if edge is None:
+            edge = DbErdRelation(
+                name=key, from_table=str(table_name), to_table=str(ref_table)
+            )
+            edges[key] = edge
+        edge.from_columns.append(str(column_name))
+        edge.to_columns.append(str(ref_column or ""))
+        involved.add(str(table_name))
+        involved.add(str(ref_table))
+
+    tables = await list_tables(item, schema)
+    all_names = [t.name for t in tables]
+    ordered = sorted(involved) + [n for n in all_names if n not in involved]
+    selected = ordered[:_ERD_MAX_TABLES]
+    truncated = len(ordered) > _ERD_MAX_TABLES
+    in_selected = set(selected)
+
+    # 裁掉指向未选中表的连线，否则前端拿到的图里有悬空实体。
+    relations = [
+        e for e in edges.values() if e.from_table in in_selected and e.to_table in in_selected
+    ]
+
+    try:
+        _, col_rows, _, _ = await asyncio.to_thread(
+            _query_mysql, item, password, _ERD_COLUMNS_SQL, _COMPLETION_CAP, (schema,)
+        )
+    except pymysql.Error as exc:
+        raise OpsDbError(f"读取表结构失败：{exc}") from exc
+
+    raw_columns: Dict[str, List[DbErdColumn]] = {name: [] for name in selected}
+    for table_name, column_name, column_type, column_key in col_rows:
+        name = str(table_name)
+        bucket = raw_columns.get(name)
+        if bucket is not None:
+            bucket.append(
+                DbErdColumn(
+                    name=str(column_name),
+                    column_type=str(column_type or ""),
+                    key=str(column_key or ""),
+                )
+            )
+
+    type_by_name = {t.name: t.table_type for t in tables}
+    table_items = []
+    for name in selected:
+        cols = raw_columns[name]
+        # 有键的列（PRI/UNI/MUL）是连线的两端，先入图；剩下的按建表顺序补到上限。
+        keyed_cols = [c for c in cols if c.key]
+        plain_cols = [c for c in cols if not c.key]
+        table_items.append(
+            DbErdTable(
+                name=name,
+                table_type=type_by_name.get(name, "BASE TABLE"),
+                columns=(keyed_cols + plain_cols)[:_ERD_MAX_COLUMNS],
+            )
+        )
+
+    return DbErd(schema_name=schema, tables=table_items, relations=relations, truncated=truncated)
 
 
 # 筛选操作符 → SQL 片段。%s 走驱动参数化，值永不进 SQL 文本。
@@ -878,6 +1108,22 @@ def _build_order_by(sorts: Sequence[DbRowSort]) -> str:
     return f" ORDER BY {keys}"
 
 
+def _browse_clauses(
+    filters: Sequence[DbRowFilter], sorts: Sequence[DbRowSort], where: str
+) -> Tuple[str, List[Any], str]:
+    """浏览与导出共用的 WHERE / ORDER BY 片段。
+
+    两处必须给出同一套条件语义，否则「导出全部」和屏幕上这一页筛的就不是
+    同一批行了。返回 ``(where_sql, params, order_sql)``。
+    """
+    structured, params = _build_where(filters)
+    parts = [f"({where})"] if where else []
+    if structured:
+        parts.append(structured)
+    where_sql = f" WHERE {' AND '.join(parts)}" if parts else ""
+    return where_sql, params, _build_order_by(sorts)
+
+
 def _browse_rows_sync(
     item: OpsDatabase,
     password: str,
@@ -895,12 +1141,7 @@ def _browse_rows_sync(
     给前端底部的「执行的 SQL」栏用。
     """
     target = f"{_quote_ident(schema)}.{_quote_ident(table)}"
-    structured, params = _build_where(filters)
-    parts = [f"({where})"] if where else []
-    if structured:
-        parts.append(structured)
-    where_sql = f" WHERE {' AND '.join(parts)}" if parts else ""
-    order_sql = _build_order_by(sorts)
+    where_sql, params, order_sql = _browse_clauses(filters, sorts, where)
     # 空参数必须传 None 而不是空序列：pymysql 对非 None 参数会做一次 % 格式化，
     # 手输条件里的字面 %（如 LIKE '%张%'）会被误当占位符，直接抛 ValueError。
     args = tuple(params) or None
@@ -971,6 +1212,248 @@ async def browse_rows(
     )
 
 
+# ---- 全量导出（服务端流式） ------------------------------------------------------
+#
+# 浏览页一次最多 500 行，「导出全部」要的却是满足条件的每一行，不能让前端翻页
+# 拼文件。这里在同一把只读连接上按批 LIMIT/OFFSET 取，取一批就吐一批：峰值内存
+# 是一个批次，不是整张表；会话仍是 TRANSACTION READ ONLY，与浏览同一条保证。
+
+# 每批取多少行。直接吃浏览的页大小，两处口径不会分叉。
+_EXPORT_BATCH = MAX_PAGE_SIZE
+
+
+class _ExportSession:
+    """一次导出的现场：连接、列名、总行数、下一批的偏移。
+
+    pymysql 的连接不是线程安全的，这里靠「同一时刻只有一个线程碰它」保证——
+    异步生成器逐批 await，天然串行。
+    """
+
+    def __init__(
+        self,
+        conn: pymysql.connections.Connection,
+        schema: str,
+        table: str,
+        columns: List[str],
+        total: int,
+        head_sql: str,
+        args: Optional[Tuple[Any, ...]],
+    ) -> None:
+        self.conn = conn
+        self.schema = schema
+        self.table = table
+        self.columns = columns
+        self.total = total
+        # 不含 LIMIT/OFFSET 的那半条 SELECT，每批只补上偏移。
+        self.head_sql = head_sql
+        self.args = args
+        self.offset = 0
+
+    def close(self) -> None:
+        try:
+            self.conn.rollback()
+        except pymysql.Error:
+            # 收尾失败不该盖住导出本身的结果；连接照关，事务留在服务端自行回收。
+            logger.debug("export session rollback failed", exc_info=True)
+        finally:
+            self.conn.close()
+
+
+def _stable_order_sync(cur: Any, schema: str, table: str, columns: Sequence[str]) -> str:
+    """没排序时补一个确定的排序键。
+
+    OFFSET 分页靠顺序说话：同一行在两批里都出现，文件就重复；都不出现，就漏行。
+    钉主键，没主键钉第一列。
+    """
+    cur.execute(_COLUMNS_META_SQL, (schema, table))
+    pk = [str(row[0]) for row in cur.fetchall() if str(row[1] or "").upper() == "PRI"]
+    keys = pk or list(columns[:1])
+    return _build_order_by([DbRowSort(column=name, direction="asc") for name in keys])
+
+
+def _open_export_sync(
+    item: OpsDatabase,
+    password: str,
+    schema: str,
+    table: str,
+    filters: Sequence[DbRowFilter],
+    sorts: Sequence[DbRowSort],
+    where: str,
+) -> _ExportSession:
+    """开只读会话，数好行数、取到列名，把连接原样交给导出流。"""
+    target = f"{_quote_ident(schema)}.{_quote_ident(table)}"
+    where_sql, params, order_sql = _browse_clauses(filters, sorts, where)
+    args = tuple(params) or None
+    conn = _connect_mysql(item, password)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {target}{where_sql}", args)
+            total = int(cur.fetchone()[0])
+            # LIMIT 0 只为拿 description：列名要在第一批之前就有，空表也得有个表头。
+            cur.execute(f"SELECT * FROM {target}{where_sql}{order_sql} LIMIT 0", args)
+            columns = [d[0] for d in (cur.description or [])]
+            if not order_sql:
+                order_sql = _stable_order_sync(cur, schema, table, columns)
+    except Exception:
+        conn.close()
+        raise
+    return _ExportSession(
+        conn, schema, table, columns, total, f"SELECT * FROM {target}{where_sql}{order_sql}", args
+    )
+
+
+async def open_export(
+    item: OpsDatabase,
+    schema: str,
+    table: str,
+    filters: Sequence[DbRowFilter] = (),
+    sorts: Sequence[DbRowSort] = (),
+    where: str = "",
+) -> _ExportSession:
+    """导出前的准备。条件校验、连不上、超上限都在这一步抛，还能走正常 HTTP 报错。
+
+    ``where`` 的安全检查与 :func:`browse_rows` 同一套：手输片段拼进完整 SELECT
+    过一遍只读网关，多语句 / 写操作 / 危险函数直接拒。
+    """
+    where = (where or "").strip()
+    if len(where) > 1024:
+        raise OpsDbError("筛选条件太长（上限 1024 字符）")
+    if where:
+        target = f"{_quote_ident(schema)}.{_quote_ident(table)}"
+        verdict = classify_sql(f"SELECT * FROM {target} WHERE ({where})")
+        if not verdict.allowed:
+            raise OpsDbError(f"筛选条件未通过安全检查：{verdict.reason}")
+
+    password = _password_of(item)
+    try:
+        session = await asyncio.to_thread(
+            _open_export_sync, item, password, schema, table, filters, sorts, where
+        )
+    except pymysql.Error as exc:
+        raise OpsDbError(f"读取数据失败：{exc}") from exc
+
+    max_rows = get_settings().OPS_EXPORT_MAX_ROWS
+    if session.total > max_rows:
+        session.close()
+        raise OpsDbError(f"要导出 {session.total} 行，超过上限 {max_rows} 行，请先加筛选条件")
+    return session
+
+
+def _fetch_export_batch_sync(
+    conn: pymysql.connections.Connection, head_sql: str, args: Optional[Tuple[Any, ...]], offset: int
+) -> List[Sequence[Any]]:
+    with conn.cursor() as cur:
+        cur.execute(f"{head_sql} LIMIT {_EXPORT_BATCH} OFFSET {offset}", args)
+        return list(cur.fetchall())
+
+
+async def _export_batches(session: _ExportSession) -> AsyncIterator[List[Sequence[Any]]]:
+    """一批一批地取，取满总数或取到短批就收。
+
+    短批意味着没有下一批了：连接是只读事务，InnoDB 的可重复读让 COUNT(*) 和
+    后面每批看的是同一个快照，一批不满额就说明快照里只剩这些行。
+    """
+    while session.offset < session.total:
+        rows = await asyncio.to_thread(
+            _fetch_export_batch_sync, session.conn, session.head_sql, session.args, session.offset
+        )
+        if not rows:
+            return
+        session.offset += len(rows)
+        yield rows
+        if len(rows) < _EXPORT_BATCH:
+            return
+
+
+# 出现这些字符就得整格加引号，否则分隔符会和内容里的同类字符混在一起。
+_CSV_SPECIALS = (",", '"', "\n", "\r")
+
+
+def _csv_cell(value: Any) -> str:
+    text = "" if value is None else str(_stringify(value))
+    if any(ch in text for ch in _CSV_SPECIALS):
+        # 内部引号翻倍是 CSV 唯一的转义写法，前端 csvLine 同样如此。
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
+def _csv_line(values: Sequence[Any]) -> str:
+    return ",".join(_csv_cell(v) for v in values)
+
+
+def _md_cell(value: Any) -> str:
+    """Markdown 单元格：竖线转义，换行折成 <br>，否则整行表格会被劈开。"""
+    text = "" if value is None else str(_stringify(value))
+    return text.replace("|", "\\|").replace("\r\n", "<br>").replace("\n", "<br>")
+
+
+async def _stream_csv(session: _ExportSession) -> AsyncIterator[str]:
+    # BOM：Excel 只认它，缺了就把 UTF-8 按本地代码页解，中文全是乱码。
+    yield "\ufeff" + _csv_line(session.columns) + "\r\n"
+    async for rows in _export_batches(session):
+        yield "".join(_csv_line(row) + "\r\n" for row in rows)
+
+
+async def _stream_json(session: _ExportSession) -> AsyncIterator[str]:
+    # 数组边界手写，而不是攒成 list 再 dumps：一次导出可能几十万行。
+    yield "[\n"
+    first = True
+    async for rows in _export_batches(session):
+        parts = []
+        for row in rows:
+            record = {name: _stringify(v) for name, v in zip(session.columns, row)}
+            parts.append(("  " if first else ",\n  ") + json.dumps(record, ensure_ascii=False))
+            first = False
+        yield "".join(parts)
+    yield "\n]"
+
+
+async def _stream_markdown(session: _ExportSession) -> AsyncIterator[str]:
+    yield _md_row(session.columns) + "\n"
+    yield "| " + " | ".join("---" for _ in session.columns) + " |\n"
+    async for rows in _export_batches(session):
+        yield "".join(_md_row(row) + "\n" for row in rows)
+
+
+def _md_row(values: Sequence[Any]) -> str:
+    return "| " + " | ".join(_md_cell(v) for v in values) + " |"
+
+
+async def _stream_insert(session: _ExportSession) -> AsyncIterator[str]:
+    target = f"{_quote_ident(session.schema)}.{_quote_ident(session.table)}"
+    cols = ", ".join(_quote_ident(c) for c in session.columns)
+    async for rows in _export_batches(session):
+        # 一批一条多行 INSERT：几十万行逐句写，文件大到没法在编辑器里翻开。
+        values = ",\n".join(
+            "(" + ", ".join(_display_literal(_stringify(v)) for v in row) + ")" for row in rows
+        )
+        yield f"INSERT INTO {target} ({cols}) VALUES\n{values};\n\n"
+
+
+# 格式名 → 写入器。路由用同样的键做 pattern 校验与 media type 映射。
+_EXPORT_STREAMERS: Dict[str, Any] = {
+    "csv": _stream_csv,
+    "json": _stream_json,
+    "markdown": _stream_markdown,
+    "insert": _stream_insert,
+}
+
+
+async def stream_export(session: _ExportSession, fmt: str) -> AsyncIterator[bytes]:
+    """导出流：文本按格式写入器产出，出去的是 UTF-8 字节。
+
+    客户端中途取消也会走 finally——连接挂在生成器上，不收尾就漏一条会话。
+    """
+    streamer = _EXPORT_STREAMERS.get(fmt)
+    if streamer is None:
+        raise OpsDbError(f"不支持的导出格式：{fmt}")
+    try:
+        async for text in streamer(session):
+            yield text.encode("utf-8")
+    finally:
+        session.close()
+
+
 # ---- 行级写（数据浏览页的改值 / 删除记录） --------------------------------------
 #
 # 与手敲控制台的差异只在 SQL 来源：控制台执行用户敲的原文，这里由服务端按
@@ -986,7 +1469,12 @@ _COLUMNS_META_SQL = (
 
 
 def _display_literal(value: Any) -> str:
-    """把值渲染成 MySQL 字面量，仅供审计展示与网关兜底判定（不参与执行）。"""
+    """把值渲染成 MySQL 字面量，仅供审计展示、导出文件和网关兜底判定——
+    本函数产出的文本从不直接交给连接执行，所以走的是最严的转义。
+
+    转义按默认 sql_mode（反斜杠是转义符）来；``NO_BACKSLASH_ESCAPES`` 下
+    ``\\n`` 会变成两个字符而不是换行，取回的语句值得瞄一眼再跑。
+    """
     if value is None:
         return "NULL"
     if isinstance(value, bool):
@@ -1141,6 +1629,478 @@ async def delete_row(
     return await _row_write(item, schema, table, "delete", key, None, "删除失败")
 
 
+# ---- 设计表（表定义编辑） -------------------------------------------------------
+#
+# 三条红线，跟行级写同源：
+# 1. 语句只由服务端按「期望定义 vs information_schema 现状」生成，值全部走
+#    字面量转义、标识符全部反引号转义；
+# 2. 每条生成语句再单独过一次可写网关；
+# 3. 执行时逐句校验目标就是这张表——设计表页签改不动别的表。
+#
+# 预览与执行是两次请求，中间表结构可能被别人改过。这里不试图防住这种并发
+# （防不住，也没有事务能防住 DDL），失败的那句会带着 MySQL 的原始错误返回，
+# 与手敲控制台的批量执行同一套语义。
+
+# 类型串是唯一直接进 DDL 的用户文本（标识符有反引号、值有引号兜着）。
+# 收成「类型名 + 可选括号参数 + 可选符号修饰」，再叠加下面对 ; / -- / /* 的
+# 一刀切拒绝，注入面就只剩「写一个 MySQL 不认的类型」——那是执行期的事。
+_COLUMN_TYPE_RE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_]*"
+    r"(?:\([0-9A-Za-z_,.+()'\- ]{0,120}\))?"
+    r"(?:[ ]+(?:unsigned|signed|zerofill))?$",
+    re.IGNORECASE,
+)
+
+# 名字 / 注释 / 默认值是直接抄进 DDL 文本的用户内容。引号和反斜杠一并拒掉：
+# 内联字面量只剩「反斜杠转义」这一层保护，而连接一旦开着 NO_BACKSLASH_ESCAPES，
+# ``\'`` 就不是转义而是字符串结束——不赌会话配置，直接不给进来。
+_DDL_TEXT_RE = re.compile(r"[\x00'\\;]|--|/\*|\*/")
+
+_TIMESTAMP_DEFAULT_RE = re.compile(r"^current_timestamp(?:\([0-9]\))?$", re.IGNORECASE)
+
+
+def _check_ddl_text(value: str, label: str) -> None:
+    if _DDL_TEXT_RE.search(value):
+        raise OpsDbError(f"{label}含有不能进 DDL 的字符（引号、反斜杠、分号或注释符）")
+
+
+def _default_clause(value: Optional[str]) -> str:
+    """DEFAULT 子句的值部分：CURRENT_TIMESTAMP 系列必须裸写，其余是字面量。"""
+    if value is not None and _TIMESTAMP_DEFAULT_RE.match(value.strip()):
+        return value.strip().upper()
+    return _display_literal(value)
+
+
+def _column_clause(col: DbColumnDef) -> str:
+    """一条列定义（不含列名），形如 ``varchar(64) NOT NULL DEFAULT '' COMMENT 'x'``。"""
+    _check_ddl_text(col.name, "列名")
+    _check_ddl_text(col.column_type, "列类型")
+    if not _COLUMN_TYPE_RE.match(col.column_type.strip()):
+        raise OpsDbError(f"列类型「{col.column_type}」不是合法的 MySQL 类型写法")
+    parts = [_quote_ident(col.name), col.column_type.strip()]
+    parts.append("NULL" if col.nullable else "NOT NULL")
+    if col.auto_increment:
+        parts.append("AUTO_INCREMENT")
+    if col.has_default:
+        _check_ddl_text(col.default or "", "默认值")
+        parts.append(f"DEFAULT {_default_clause(col.default)}")
+    if col.on_update_current_timestamp:
+        parts.append("ON UPDATE CURRENT_TIMESTAMP")
+    if col.comment:
+        _check_ddl_text(col.comment, "列注释")
+        parts.append(f"COMMENT {_display_literal(col.comment)}")
+    return " ".join(parts)
+
+
+def _position_clause(prev: Optional[str]) -> str:
+    return "FIRST" if prev is None else f"AFTER {_quote_ident(prev)}"
+
+
+def _quoted_list(columns: Sequence[str]) -> str:
+    return "(" + ", ".join(_quote_ident(c) for c in columns) + ")"
+
+
+def _action(
+    kind: str,
+    target: str,
+    action: str,
+    note: str,
+    destructive: bool = False,
+) -> DbAlterAction:
+    return DbAlterAction(
+        kind=kind,  # type: ignore[arg-type]
+        sql=f"ALTER TABLE {target} {action}",
+        note=note,
+        destructive=destructive,
+    )
+
+
+_TABLE_INFO_SQL = (
+    "SELECT ENGINE, TABLE_COLLATION, TABLE_COMMENT FROM information_schema.TABLES "
+    "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s"
+)
+
+
+async def table_def(item: OpsDatabase, schema: str, table: str) -> DbTableDef:
+    """一张表的当前定义（设计表页签的初值）。"""
+    password = _password_of(item)
+    try:
+        _, rows, _, _ = await asyncio.to_thread(
+            _query_mysql, item, password, _TABLE_INFO_SQL, 1, (schema, table)
+        )
+    except pymysql.Error as exc:
+        raise OpsDbError(f"读取表信息失败：{exc}") from exc
+    if not rows:
+        raise OpsDbError(f"表 {schema}.{table} 不存在")
+    engine, collation, comment = (str(rows[0][0] or ""), str(rows[0][1] or ""), str(rows[0][2] or ""))
+
+    columns = await list_columns(item, schema, table)
+    indexes = await list_indexes(item, schema, table)
+    pk = next((i.columns for i in indexes if i.primary), [])
+    return DbTableDef(
+        schema_name=schema,
+        table=table,
+        engine=engine or None,
+        collation=collation or None,
+        comment=comment,
+        columns=columns,
+        primary_key=list(pk),
+        indexes=[i for i in indexes if not i.primary],
+    )
+
+
+def _column_state(col: DbColumnItem) -> Dict[str, Any]:
+    """把 information_schema 的一列折成可与期望定义对比的形态。
+
+    ``has_default`` 这里只能按「COLUMN_DEFAULT 非空」推断：可空且没写 DEFAULT 的列，
+    MySQL 在 information_schema 里同样是 NULL，两者区分不出来。所以用户在表单里
+    勾上「默认值=NULL」而服务端读回「没有默认值」时，会多生成一句语义为空的
+    MODIFY——比漏掉用户显式设置的默认值要安全。
+    """
+    extra = col.extra.upper()
+    return {
+        "column_type": col.column_type.strip(),
+        "nullable": col.nullable,
+        "auto_increment": "AUTO_INCREMENT" in extra,
+        "on_update": "ON UPDATE" in extra,
+        "has_default": col.default is not None,
+        "default": col.default,
+        "comment": col.comment,
+    }
+
+
+def _wanted_state(col: DbColumnDef) -> Dict[str, Any]:
+    return {
+        "column_type": col.column_type.strip(),
+        "nullable": col.nullable,
+        "auto_increment": col.auto_increment,
+        "on_update": col.on_update_current_timestamp,
+        # 表达式默认值（CURRENT_TIMESTAMP / (uuid())）读回来带括号或大小写差异，
+        # 逐字比较会把「没改」误判成「改了」，所以默认值只在用户显式给值时才参与比较。
+        "has_default": col.has_default,
+        "default": col.default if col.has_default else None,
+        "comment": col.comment,
+    }
+
+
+def _changed(cur: Dict[str, Any], want: DbColumnDef) -> bool:
+    """列定义是否变了。
+
+    没勾默认值时 ``default`` 不参与比较：表达式默认值（``CURRENT_TIMESTAMP`` /
+    ``(uuid())``）读回来带括号和大小写差异，逐字比会把「没改」判成「改了」，
+    白白重建一次表。
+    """
+    target = _wanted_state(want)
+    if not target["has_default"]:
+        return any(
+            cur[key] != target[key]
+            for key in ("column_type", "nullable", "auto_increment", "on_update", "comment")
+        )
+    return cur != target
+
+
+def _source_name(col: DbColumnDef, current_by_name: Dict[str, DbColumnItem]) -> Optional[str]:
+    """这列对应的当前列名：改名时是旧名，没改名时是同名；对不上就是新增列。"""
+    source = col.origin_name or col.name
+    return source if source in current_by_name else None
+
+
+def _position_anchors(desired_survivors: List[str], current_survivors: List[str]) -> set[str]:
+    """相对顺序没变的最长一串列，它们不需要重写位置。
+
+    MySQL 改列顺序只能整表重建（``MODIFY ... AFTER`` 走 ALGORITHM=COPY），所以
+    「谁挪了位置」要算最少：把期望顺序映射到当前顺序下标，取最长递增子序列，
+    序列里的列原地不动，其余才各配一句改位置的 ALTER。交换相邻两列因此只生成
+    一条语句，而不是两条。
+    """
+    if not desired_survivors:
+        return set()
+    index_in_current = {name: i for i, name in enumerate(current_survivors)}
+    seq = [index_in_current[name] for name in desired_survivors]
+    # O(n^2) 的 DP 足够：列数上限 512，这里要的是看得懂而不是快。
+    length = [1] * len(seq)
+    previous = [-1] * len(seq)
+    for i in range(len(seq)):
+        for j in range(i):
+            if seq[j] < seq[i] and length[j] + 1 > length[i]:
+                length[i] = length[j] + 1
+                previous[i] = j
+    anchors: set[str] = set()
+    cursor = max(range(len(seq)), key=lambda i: length[i])
+    while cursor >= 0:
+        anchors.add(desired_survivors[cursor])
+        cursor = previous[cursor]
+    return anchors
+
+
+def _diff_columns(
+    target: str, current: List[DbColumnItem], desired: List[DbColumnDef]
+) -> Tuple[List[DbAlterAction], List[str]]:
+    current_by_name = {c.name: c for c in current}
+    final_names: set[str] = set()
+    desired_by_source: Dict[str, DbColumnDef] = {}
+    for col in desired:
+        _check_ddl_text(col.name, "列名")
+        if col.name in final_names:
+            raise OpsDbError(f"列名「{col.name}」重复")
+        final_names.add(col.name)
+        source = _source_name(col, current_by_name)
+        if source is not None:
+            desired_by_source[source] = col
+        elif col.origin_name:
+            raise OpsDbError(f"改名列「{col.origin_name}」在当前表里不存在")
+
+    # 存活列按「改名后的新名」各排一遍当前顺序与期望顺序，位置判定只在它们之间比。
+    survivors = [desired_by_source[c.name].name for c in current if c.name in desired_by_source]
+    survivor_names = set(survivors)
+    anchors = _position_anchors([c.name for c in desired if c.name in survivor_names], survivors)
+
+    actions: List[DbAlterAction] = []
+    warnings: List[str] = []
+    for position, col in enumerate(desired):
+        prev = desired[position - 1].name if position else None
+        source = _source_name(col, current_by_name)
+        if source is None:
+            actions.append(
+                _action(
+                    "column-add",
+                    target,
+                    f"ADD COLUMN {_column_clause(col)} {_position_clause(prev)}",
+                    "新增列",
+                )
+            )
+            continue
+
+        cur = current_by_name[source]
+        renamed = source != col.name
+        moved = col.name not in anchors
+        changed = _changed(_column_state(cur), col)
+        if not (changed or moved or renamed):
+            continue
+        if "GENERATED" in cur.extra.upper():
+            raise OpsDbError(f"列「{source}」是生成列，设计表不支持修改它")
+
+        clause = _column_clause(col)
+        if source != col.name:
+            kind, note, lead = "column-rename", "列改名，数据保留", f"CHANGE COLUMN {_quote_ident(source)}"
+        else:
+            kind, lead = "column-modify", "MODIFY COLUMN"
+            note = "类型/约束变更" if changed else "调整列顺序"
+        action = f"{lead} {clause}"
+        if moved:
+            action += f" {_position_clause(prev)}"
+        actions.append(_action(kind, target, action, note))
+        if changed and _column_state(cur)["column_type"] != col.column_type.strip():
+            warnings.append(
+                f"列「{col.name}」的类型从 {cur.column_type} 改为 {col.column_type}，"
+                "超出新类型的数据会被截断或报错"
+            )
+
+    dropped = [c.name for c in current if c.name not in desired_by_source]
+    for name in dropped:
+        if "GENERATED" in (current_by_name[name].extra or "").upper():
+            raise OpsDbError(f"列「{name}」是生成列，请到查询控制台手写 DDL 删除")
+        actions.append(
+            _action(
+                "column-drop",
+                target,
+                f"DROP COLUMN {_quote_ident(name)}",
+                "删除列会丢失该列全部数据",
+                destructive=True,
+            )
+        )
+    if dropped:
+        warnings.append(f"将删除 {len(dropped)} 列，数据不可恢复：{'、'.join(dropped)}")
+    return actions, warnings
+
+
+def _diff_primary(
+    target: str, current_pk: List[str], desired_pk: List[str], desired: List[DbColumnDef]
+) -> Tuple[List[DbAlterAction], List[str]]:
+    if [c.lower() for c in current_pk] == [c.lower() for c in desired_pk]:
+        return [], []
+    names = {c.name for c in desired}
+    missing = [c for c in desired_pk if c not in names]
+    if missing:
+        raise OpsDbError(f"主键列不在列清单里：{'、'.join(missing)}")
+
+    # 换主键必须一句做完：拆成先 DROP 再 ADD 会留下「没有主键」的中间状态，
+    # 而自增列在没有键的表上会被 MySQL 直接拒绝。
+    parts: List[str] = []
+    warnings: List[str] = []
+    if current_pk:
+        parts.append("DROP PRIMARY KEY")
+    if desired_pk:
+        parts.append(f"ADD PRIMARY KEY {_quoted_list(desired_pk)}")
+        if not current_pk:
+            warnings.append(f"新建主键：{'、'.join(desired_pk)}")
+    else:
+        warnings.append("表将没有主键：数据浏览页只能退化为全列匹配定位行")
+    if not desired_pk and any(c.auto_increment for c in desired):
+        warnings.append("自增列要求表上有键，去掉主键后执行可能失败")
+    warnings.append("主键变更需要重建表，耗时与锁行为取决于 MySQL 版本和存储引擎")
+    return [_action("primary", target, ", ".join(parts), "调整主键")], warnings
+
+
+def _diff_indexes(
+    target: str,
+    current: List[DbIndexItem],
+    desired: List[DbIndexDef],
+    column_names: set[str],
+) -> Tuple[List[DbAlterAction], List[str]]:
+    for item in desired:
+        _check_ddl_text(item.name, "索引名")
+        unknown = [c for c in item.columns if c not in column_names]
+        if unknown:
+            raise OpsDbError(f"索引「{item.name}」引用了不存在的列：{'、'.join(unknown)}")
+
+    current_by_name = {i.name: i for i in current}
+    desired_by_name = {i.name: i for i in desired}
+    actions: List[DbAlterAction] = []
+    for name in sorted(current_by_name.keys() - desired_by_name.keys()):
+        actions.append(
+            _action("index-drop", target, f"DROP INDEX {_quote_ident(name)}", "删除索引", True)
+        )
+    for name, item in desired_by_name.items():
+        cur = current_by_name.get(name)
+        unchanged = (
+            cur is not None
+            and cur.unique == item.unique
+            and [c.lower() for c in cur.columns] == [c.lower() for c in item.columns]
+        )
+        if unchanged:
+            continue
+        if cur is not None:
+            # 索引不能原地改列，只能先删后建，MySQL 会重建它。
+            actions.append(
+                _action("index-drop", target, f"DROP INDEX {_quote_ident(name)}", "索引定义变了，先删", True)
+            )
+        actions.append(
+            _action(
+                "index-add",
+                target,
+                f"{'ADD UNIQUE KEY' if item.unique else 'ADD KEY'} {_quote_ident(name)} {_quoted_list(item.columns)}",
+                "重建索引" if cur is not None else "新建索引",
+            )
+        )
+    return actions, (["索引重建在大表上会锁表一段时间"] if actions else [])
+
+
+def build_alter_preview(
+    schema: str, table: str, definition: DbTableDef, payload: DbTableDefUpdate
+) -> DbAlterPreview:
+    """按「当前定义 vs 期望定义」算出要执行的 ALTER 语句。纯函数，不碰数据库。"""
+    target = f"{_quote_ident(schema)}.{_quote_ident(table)}"
+
+    # 主键列必须 NOT NULL。与其在换主键那句里补一条 MODIFY，不如在期望定义里
+    # 就收紧——后面的列 diff 自然会把 NOT NULL 带上，新增列也一并生效。
+    columns = [
+        col.model_copy(update={"nullable": False}) if col.name in payload.primary_key else col
+        for col in payload.columns
+    ]
+
+    actions: List[DbAlterAction] = []
+    warnings: List[str] = []
+    for part, part_warnings in (
+        _diff_columns(target, definition.columns, columns),
+        _diff_primary(target, definition.primary_key, payload.primary_key, columns),
+        # 索引要能引用刚改名出去的列，所以列 diff 先跑，拿最终列名集合再校验索引。
+        _diff_indexes(target, definition.indexes, payload.indexes, {c.name for c in columns}),
+    ):
+        actions += part
+        warnings += part_warnings
+
+    if (payload.comment or "") != (definition.comment or ""):
+        _check_ddl_text(payload.comment, "表注释")
+        actions.append(
+            _action("comment", target, f"COMMENT = {_display_literal(payload.comment)}", "改表注释")
+        )
+
+    return DbAlterPreview(actions=actions, warnings=list(dict.fromkeys(warnings)))
+
+
+async def preview_alter(
+    item: OpsDatabase, schema: str, table: str, payload: DbTableDefUpdate
+) -> DbAlterPreview:
+    return build_alter_preview(schema, table, await table_def(item, schema, table), payload)
+
+
+async def apply_alter(
+    item: OpsDatabase, schema: str, table: str, statements: Sequence[str]
+) -> Tuple[DbBatchResult, bool]:
+    """执行设计表预览产出的语句：逐句过网关、逐句执行，一句失败不中断。
+
+    返回 (结果, 是否有语句被安全网关拦下)，口径与 :func:`execute_batch` 一致；
+    被拒的语句不占数据库连接，直接落成 error 行。
+    """
+    target = f"{_quote_ident(schema)}.{_quote_ident(table)}"
+    started_at = datetime.now(timezone.utc)
+    started = time.perf_counter()
+
+    results: List[Optional[DbBatchStatement]] = [None] * len(statements)
+    allowed: List[Tuple[int, str]] = []
+    any_forbidden = False
+    for i, raw in enumerate(statements):
+        sql = raw.strip().rstrip(";")
+        reason = ""
+        if not sql:
+            reason = "语句为空"
+        elif not sql.startswith(f"ALTER TABLE {target} "):
+            # 设计表页签只改得动它打开的那张表。语句本该是预览原样回传的，
+            # 途中被人换成别的表就在这里拦下——比对用生成时的精确前缀。
+            reason = f"设计表只能修改 {schema}.{table}"
+        else:
+            verdict = classify_sql_writable(sql)
+            if not verdict.allowed:
+                reason = verdict.reason or "该语句被安全策略拒绝"
+        if reason:
+            any_forbidden = True
+            results[i] = DbBatchStatement(
+                index=i + 1, sql=_preview_sql(sql), status="error", message=reason
+            )
+        else:
+            allowed.append((i, sql))
+
+    if allowed:
+        password = _password_of(item)
+        try:
+            executed = await asyncio.to_thread(
+                _run_mysql_batch,
+                item,
+                password,
+                [sql for _, sql in allowed],
+                schema,
+                True,
+            )
+        except pymysql.Error as exc:
+            raise OpsDbError(f"连接数据库失败：{exc}") from exc
+        # 逐句成败回填原位置；被网关拒掉的句子保住它的拒绝原因。
+        for (i, sql), result in zip(allowed, executed):
+            elapsed, error = result[4], result[5]
+            results[i] = DbBatchStatement(
+                index=i + 1,
+                sql=_preview_sql(sql),
+                status="error" if error else "ok",
+                message=error or "执行完成",
+                elapsed_ms=elapsed,
+            )
+
+    settled = [r for r in results if r is not None]
+    succeeded = sum(1 for r in settled if r.status == "ok")
+    return (
+        DbBatchResult(
+            statements=settled,
+            total=len(settled),
+            succeeded=succeeded,
+            failed=len(settled) - succeeded,
+            started_at=started_at,
+            finished_at=datetime.now(timezone.utc),
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+        ),
+        any_forbidden,
+    )
+
+
 async def _list_redis_dbs(item: OpsDatabase) -> List[DbSchemaItem]:
     """Redis 的「schema」是有 key 的逻辑库，外加台账里配置的默认库。"""
     from redis.exceptions import RedisError
@@ -1264,6 +2224,270 @@ async def _read_redis_value(client: Any, key: str, key_type: str) -> Tuple[Any, 
 
     # module 类型（JSON / Bloom 等）没有通用的只读取值方式，如实告诉用户。
     return None, False
+
+
+# ---- Redis 结构化写（值 / 元素 / TTL / 批量删除） ---------------------------------
+#
+# 和 MySQL 的行内改值同一个思路：界面上交上来的是坐标（key、field、member、
+# 下标），命令由服务端用 redis-py 的类型化方法拼出来，值作为独立参数进协议层，
+# 从不参与命令文本的构造——所以这一路不需要 classify_redis 的关键字网关。
+# 闸门是路由层的「连接 writable × 用户 ops_write」，加上 Redis 自己会报的
+# WRONGTYPE、下标越界。
+
+
+# 审计文本里单个参数的长度上限：值可以是几百 KB，历史列表要看得清是哪条。
+_REDIS_ARG_LEN = 2000
+
+# 多参数命令（RPUSH / UNLINK 等）在文本里列出的参数个数，其余用总数代替。
+_REDIS_ARG_DISPLAY = 10
+
+
+def _redis_arg(value: str) -> str:
+    """命令文本里的一个参数。只做展示（审计、提示），产出的文本从不回放执行。"""
+    text = value
+    if len(text) > _REDIS_ARG_LEN:
+        text = text[:_REDIS_ARG_LEN] + f"…（共 {len(value)} 字符）"
+    # 换行压成可见字符：审计列表是一行一条记录。
+    text = text.replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
+    return shlex.quote(text)
+
+
+def _redis_command(name: str, key: str, args: Sequence[str] = ()) -> str:
+    """``NAME key arg…`` 形态的命令文本，超长参数列表按个数截。"""
+    parts = [name, _redis_arg(key)]
+    shown = [_redis_arg(a) for a in args[:_REDIS_ARG_DISPLAY]]
+    rest = len(args) - len(shown)
+    if rest > 0:
+        shown.append(f"…（另有 {rest} 个）")
+    return " ".join(parts + shown)
+
+
+async def _redis_write(
+    item: OpsDatabase, db: int, action: Callable[[Any], Awaitable[Any]]
+) -> Tuple[Any, int]:
+    """开一条连接跑一个写动作，返回 (回复, 耗时 ms)。
+
+    只把 RedisError 转成 OpsDbError：动作里主动抛的语义错误（类型不对、下标
+    越界）原样往上走，别在里面套两层「失败」。
+    """
+    from redis.exceptions import RedisError
+
+    password = _password_of(item)
+    started = time.perf_counter()
+    client = _connect_redis(item, password, db)
+    try:
+        raw = await action(client)
+    except RedisError as exc:
+        raise OpsDbError(f"写入失败：{exc}") from exc
+    finally:
+        await client.aclose()
+    return raw, int((time.perf_counter() - started) * 1000)
+
+
+def _as_members(value: Any, label: str) -> List[str]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise OpsDbError(f"{label}需要是一个非空数组")
+    return [str(v) for v in value]
+
+
+def _as_pairs(value: Any, label: str) -> List[Tuple[str, str]]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise OpsDbError(f"{label}需要是非空的 [值, 值] 数组")
+    pairs: List[Tuple[str, str]] = []
+    for raw in value:
+        if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+            raise OpsDbError(f"{label}的每一项都必须是两元素数组")
+        pairs.append((str(raw[0]), str(raw[1])))
+    return pairs
+
+
+async def create_key(item: OpsDatabase, req: RedisKeyCreateRequest) -> RedisWriteResult:
+    """新建一个 key。已存在直接拒绝——「新建」不该悄悄覆盖别人正在用的数据。"""
+    key, key_type = req.key, req.key_type
+
+    if key_type == "string":
+        text = "" if req.value is None else str(req.value)
+        display = _redis_command("SET", key, [text])
+
+        async def action(client: Any) -> Any:
+            return await client.set(key, text)
+
+    elif key_type == "list":
+        members = _as_members(req.value, "列表元素")
+        display = _redis_command("RPUSH", key, members)
+
+        async def action(client: Any) -> Any:
+            return await client.rpush(key, *members)
+
+    elif key_type == "set":
+        members = _as_members(req.value, "集合成员")
+        display = _redis_command("SADD", key, members)
+
+        async def action(client: Any) -> Any:
+            return await client.sadd(key, *members)
+
+    elif key_type == "zset":
+        pairs = _as_pairs(req.value, "有序集合元素")
+        scored: List[Tuple[str, float]] = []
+        for member, raw_score in pairs:
+            try:
+                scored.append((member, float(raw_score)))
+            except ValueError:
+                raise OpsDbError("有序集合的 score 需要是数字") from None
+        display = _redis_command("ZADD", key, [f"{m} {s}" for m, s in scored])
+
+        async def action(client: Any) -> Any:
+            return await client.zadd(key, {m: s for m, s in scored})
+
+    else:  # hash
+        pairs = _as_pairs(req.value, "哈希字段")
+        display = _redis_command("HSET", key, [f"{f} {v}" for f, v in pairs])
+
+        async def action(client: Any) -> Any:
+            return await client.hset(key, mapping=dict(pairs))
+
+    async def run(client: Any) -> Any:
+        # 存在性检查与写入在同一条连接里连着做：界面上的「新建」不该覆盖已有数据。
+        if await client.exists(key):
+            raise OpsDbError("key 已存在，请直接编辑它的值")
+        await action(client)
+        # TTL 也在这一条连接上补完，新建和设过期中间不断线。
+        if req.ttl:
+            await client.expire(key, req.ttl)
+
+    _, elapsed = await _redis_write(item, req.db, run)
+    if req.ttl:
+        display = f"{display}; EXPIRE {_redis_arg(key)} {req.ttl}"
+    return RedisWriteResult(command=display, elapsed_ms=elapsed)
+
+
+async def set_string(item: OpsDatabase, req: RedisStringUpdateRequest) -> RedisWriteResult:
+    """改 string 的值。"""
+    key = req.key
+
+    async def action(client: Any) -> Any:
+        current = str(await client.type(key))
+        if current not in ("none", "string"):
+            raise OpsDbError(f"该 key 是 {current} 类型，不能按 string 改值")
+        # 先记 pttl 再补回：SET 会清掉过期时间，而 KEEPTTL 只有 6.0 以上才有，
+        # 「改个值把缓存的 TTL 弄没了」是这里最不该发生的副作用。
+        pttl = int(await client.pttl(key))
+        await client.set(key, req.value)
+        if pttl > 0:
+            await client.pexpire(key, pttl)
+
+    _, elapsed = await _redis_write(item, req.db, action)
+    return RedisWriteResult(
+        command=_redis_command("SET", key, [req.value]), elapsed_ms=elapsed
+    )
+
+
+async def add_element(item: OpsDatabase, req: RedisElementAddRequest) -> RedisWriteResult:
+    """给集合加一个元素（hash 的 field 已存在则按 HSET 语义覆盖值）。"""
+    key = req.key
+    if req.key_type == "hash":
+        if not req.field:
+            raise OpsDbError("哈希字段需要同时给出 field 和 value")
+        value = req.value or ""
+        display = _redis_command("HSET", key, [req.field, value])
+        action = lambda client: client.hset(key, req.field, value)
+    elif req.key_type == "list":
+        if req.value is None:
+            raise OpsDbError("列表元素需要给出 value")
+        head = req.position == "head"
+        display = _redis_command(
+            "LPUSH" if head else "RPUSH", key, [req.value]
+        )
+        action = lambda client: (client.lpush if head else client.rpush)(key, req.value)
+    elif req.key_type == "set":
+        if req.value is None:
+            raise OpsDbError("集合成员需要给出 value")
+        display = _redis_command("SADD", key, [req.value])
+        action = lambda client: client.sadd(key, req.value)
+    else:  # zset
+        if req.value is None or req.score is None:
+            raise OpsDbError("有序集合元素需要同时给出 member 和 score")
+        display = _redis_command("ZADD", key, [f"{req.score} {req.value}"])
+        action = lambda client: client.zadd(key, {req.value: req.score})
+
+    raw, elapsed = await _redis_write(item, req.db, action)
+    return RedisWriteResult(command=display, elapsed_ms=elapsed, deleted=int(raw or 0))
+
+
+async def remove_element(item: OpsDatabase, req: RedisElementDeleteRequest) -> RedisWriteResult:
+    """删掉集合里的一个元素。``target`` 的含义随类型变，见请求模型注释。"""
+    key, key_type, target = req.key, req.key_type, req.target
+
+    if key_type == "hash":
+        display = _redis_command("HDEL", key, [target])
+        action = lambda client: client.hdel(key, target)
+    elif key_type == "set":
+        display = _redis_command("SREM", key, [target])
+        action = lambda client: client.srem(key, target)
+    elif key_type == "zset":
+        display = _redis_command("ZREM", key, [target])
+        action = lambda client: client.zrem(key, target)
+    elif key_type == "stream":
+        display = _redis_command("XDEL", key, [target])
+        action = lambda client: client.xdel(key, target)
+    elif key_type == "list":
+        try:
+            index = int(target)
+        except ValueError:
+            raise OpsDbError("列表元素按下标删除，下标需要是整数") from None
+        if index < 0:
+            raise OpsDbError("列表下标不能为负")
+        # 按位置精确删一个元素没有单条命令：LREM 按值删，同值会一起没掉。
+        # 先把这一格换成随机哨兵，再按哨兵删一条——LSET 越界本身会报错，
+        # 等于顺带替我们校验了下标。
+        sentinel = f"__yangvis_del_{uuid.uuid4().hex}__"
+
+        async def action(client: Any) -> Any:
+            await client.lset(key, index, sentinel)
+            return await client.lrem(key, 1, sentinel)
+
+        display = f"LREM {_redis_arg(key)} 1 <第 {index} 个元素>"
+    else:
+        raise OpsDbError("string 没有元素可删，请改值或删除整个 key")
+
+    raw, elapsed = await _redis_write(item, req.db, action)
+    return RedisWriteResult(command=display, elapsed_ms=elapsed, deleted=int(raw or 0))
+
+
+async def set_ttl(item: OpsDatabase, req: RedisTtlRequest) -> RedisWriteResult:
+    """EXPIRE / PERSIST。"""
+    key = req.key
+    if req.action == "expire":
+        if not req.seconds:
+            raise OpsDbError("设置过期需要给出秒数")
+
+        async def action(client: Any) -> Any:
+            expired = await client.expire(key, req.seconds)
+            # EXPIRE 对不存在的 key 返回 0：此时用户以为设上了，其实什么都没发生。
+            if not expired:
+                raise OpsDbError("key 不存在或已过期")
+            return expired
+
+        display = f"EXPIRE {_redis_arg(key)} {req.seconds}"
+    else:
+        action = lambda client: client.persist(key)
+        display = f"PERSIST {_redis_arg(key)}"
+
+    raw, elapsed = await _redis_write(item, req.db, action)
+    return RedisWriteResult(command=display, elapsed_ms=elapsed, deleted=int(bool(raw)))
+
+
+async def delete_keys(item: OpsDatabase, req: RedisKeyDeleteRequest) -> RedisWriteResult:
+    """批量删除 key。用 UNLINK 而不是 DEL：大集合的回收交给后台线程，不卡主线程。"""
+    keys = [k for k in req.keys if k]
+    if not keys:
+        raise OpsDbError("没有选中任何 key")
+    display = _redis_command("UNLINK", keys[0], keys[1:])
+
+    raw, elapsed = await _redis_write(item, req.db, lambda client: client.unlink(*keys))
+    return RedisWriteResult(
+        command=display, elapsed_ms=elapsed, deleted=int(raw or 0)
+    )
 
 
 async def test_connection(item: OpsDatabase) -> str:

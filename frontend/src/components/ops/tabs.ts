@@ -4,7 +4,10 @@ import type { OpsDatabase } from '@/api'
 export type TabRequest =
   | { kind: 'data'; conn: OpsDatabase; schema: string; table: string }
   | { kind: 'structure'; conn: OpsDatabase; schema: string; table: string }
+  | { kind: 'design'; conn: OpsDatabase; schema: string; table: string }
+  | { kind: 'erd'; conn: OpsDatabase; schema: string }
   | { kind: 'query'; conn: OpsDatabase; schema?: string; sql?: string }
+  | { kind: 'redis-keys'; conn: OpsDatabase; db: number }
   | { kind: 'redis-key'; conn: OpsDatabase; db: number; rkey: string }
 
 /** 树节点。key 里编码了类型与坐标，右键菜单靠它还原上下文。 */

@@ -81,7 +81,10 @@
               >
                 <TableOutlined v-if="tab.kind === 'data'" />
                 <ProfileOutlined v-else-if="tab.kind === 'structure'" />
+                <FormOutlined v-else-if="tab.kind === 'design'" />
+                <ApartmentOutlined v-else-if="tab.kind === 'erd'" />
                 <KeyOutlined v-else-if="tab.kind === 'redis-key'" />
+                <HddOutlined v-else-if="tab.kind === 'redis-keys'" />
                 <CodeOutlined v-else />
                 <!-- 文字包一层 span：染色 ::before 是定位元素，裸文本会沉到它下面。 -->
                 <a-tooltip :title="tabTooltip(tab)"><span>{{ tab.title }}</span></a-tooltip>
@@ -101,11 +104,32 @@
               :schema="tab.schema!"
               :table="tab.table!"
             />
+            <DbDesignTab
+              v-else-if="tab.kind === 'design'"
+              :conn-id="tab.conn.id"
+              :schema="tab.schema!"
+              :table="tab.table!"
+              :writable="tab.conn.writable"
+            />
+            <DbErdTab
+              v-else-if="tab.kind === 'erd'"
+              :conn-id="tab.conn.id"
+              :schema="tab.schema!"
+              @open-table="(name) => openTab({ kind: 'data', conn: tab.conn, schema: tab.schema!, table: name })"
+            />
+            <RedisKeysTab
+              v-else-if="tab.kind === 'redis-keys'"
+              :conn-id="tab.conn.id"
+              :db="tab.db ?? 0"
+              :writable="tab.conn.writable"
+              @open-key="(key: string) => openTab({ kind: 'redis-key', conn: tab.conn, db: tab.db ?? 0, rkey: key })"
+            />
             <RedisKeyTab
               v-else-if="tab.kind === 'redis-key'"
               :conn-id="tab.conn.id"
               :db="tab.db ?? 0"
               :rkey="tab.rkey!"
+              :writable="tab.conn.writable"
             />
             <DbQueryTab
               v-else
@@ -264,8 +288,11 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Empty, Modal, message as toast } from 'ant-design-vue'
 import {
+  ApartmentOutlined,
   CodeOutlined,
   DatabaseOutlined,
+  FormOutlined,
+  HddOutlined,
   KeyOutlined,
   LeftOutlined,
   PlusOutlined,
@@ -278,9 +305,12 @@ import OpsChat from '@/components/OpsChat.vue'
 import DesktopNotice from '@/components/DesktopNotice.vue'
 import DbConnectionTree from '@/components/ops/DbConnectionTree.vue'
 import DbDataTab from '@/components/ops/DbDataTab.vue'
+import DbDesignTab from '@/components/ops/DbDesignTab.vue'
+import DbErdTab from '@/components/ops/DbErdTab.vue'
 import DbQueryTab from '@/components/ops/DbQueryTab.vue'
 import DbStructureTab from '@/components/ops/DbStructureTab.vue'
 import RedisKeyTab from '@/components/ops/RedisKeyTab.vue'
+import RedisKeysTab from '@/components/ops/RedisKeysTab.vue'
 import { clampSize, readSize, saveSize, startDragResize } from '@/components/ops/resizer'
 import '@/components/ops/resizer.css'
 import type { TabRequest, TreeMenuEvent, TreeNode } from '@/components/ops/tabs'
@@ -450,6 +480,8 @@ const querySeq = new Map<number, number>()
 
 function tabTooltip(tab: Tab): string {
   if (tab.kind === 'redis-key') return `${tab.conn.name} / db${tab.db ?? 0} / ${tab.rkey}`
+  if (tab.kind === 'redis-keys') return `${tab.conn.name} / db${tab.db ?? 0} 的 key 列表`
+  if (tab.kind === 'erd') return `${tab.conn.name} / ${tab.schema}`
   if (tab.kind === 'query') {
     // 标题里已带 @连接名，tooltip 补出默认库就是全路径。
     return tab.schema ? `${tab.title} / ${tab.schema}` : tab.title
@@ -474,6 +506,14 @@ function openTab(request: TabRequest) {
       // AI 问答带过来的 SQL 预填进编辑器。
       sql: request.sql,
     }
+  } else if (request.kind === 'redis-keys') {
+    tab = {
+      key: `rkeys:${request.conn.id}:${request.db}`,
+      kind: 'redis-keys',
+      title: `db${request.db} key 列表 @ ${request.conn.name}`,
+      conn: request.conn,
+      db: request.db,
+    }
   } else if (request.kind === 'redis-key') {
     tab = {
       key: `rkey:${request.conn.id}:${request.db}:${request.rkey}`,
@@ -483,13 +523,24 @@ function openTab(request: TabRequest) {
       db: request.db,
       rkey: request.rkey,
     }
+  } else if (request.kind === 'erd') {
+    tab = {
+      key: `erd:${request.conn.id}:${request.schema}`,
+      kind: 'erd',
+      title: `${request.schema} ER 图 @ ${request.conn.name}`,
+      conn: request.conn,
+      schema: request.schema,
+    }
   } else {
     tab = {
       key: `${request.kind}:${request.conn.id}:${request.schema}:${request.table}`,
       kind: request.kind,
-      title: request.kind === 'data'
-        ? `${request.table} @ ${request.conn.name}`
-        : `${request.table} 结构 @ ${request.conn.name}`,
+      title:
+        request.kind === 'data'
+          ? `${request.table} @ ${request.conn.name}`
+          : request.kind === 'design'
+            ? `${request.table} 设计 @ ${request.conn.name}`
+            : `${request.table} 结构 @ ${request.conn.name}`,
       conn: request.conn,
       schema: request.schema,
       table: request.table,
@@ -575,7 +626,8 @@ function confirmCloseConn(node: TreeNode) {
 /** 标签页是否属于某个库节点：MySQL 按 schema 名，Redis 按 db 序号。 */
 function tabOfDatabase(tab: Tab, node: TreeNode): boolean {
   if (tab.conn.id !== node.conn?.id) return false
-  if (node.kind === 'redisdb') return tab.kind === 'redis-key' && tab.db === (node.db ?? 0)
+  if (node.kind === 'redisdb')
+    return (tab.kind === 'redis-key' || tab.kind === 'redis-keys') && tab.db === (node.db ?? 0)
   return tab.schema !== undefined && tab.schema === node.schema
 }
 
@@ -645,15 +697,24 @@ const menuItems = computed<MenuItem[]>(() => {
     case 'schema':
       return [
         { key: 'new-query', label: '新建查询' },
+        { key: 'open-erd', label: 'ER 图' },
         { key: 'refresh', label: '刷新' },
       ]
     case 'table':
       return [
         { key: 'open-data', label: '打开数据' },
         { key: 'open-structure', label: '查看结构' },
+        // 视图没有可编辑的定义，设计表只对基表开放。
+        ...(node.tableType === 'VIEW'
+          ? []
+          : [{ key: 'open-design', label: '设计表' }]),
       ]
     case 'redisdb':
-      return [{ key: 'refresh', label: '刷新' }]
+      return [
+        // 树里一次只看得见一页 key，批量删除得有个能勾选的列表页签。
+        { key: 'open-keys', label: 'key 列表' },
+        { key: 'refresh', label: '刷新' },
+      ]
     case 'rkey':
       return [{ key: 'open-key', label: '查看详情' }]
     default:
@@ -712,6 +773,15 @@ function onMenuClick(key: string) {
       break
     case 'open-structure':
       openTab({ kind: 'structure', conn, schema: node.schema!, table: node.table! })
+      break
+    case 'open-design':
+      openTab({ kind: 'design', conn, schema: node.schema!, table: node.table! })
+      break
+    case 'open-erd':
+      openTab({ kind: 'erd', conn, schema: node.schema! })
+      break
+    case 'open-keys':
+      openTab({ kind: 'redis-keys', conn, db: node.db ?? 0 })
       break
     case 'open-key':
       openTab({ kind: 'redis-key', conn, db: node.db ?? 0, rkey: node.title })
