@@ -778,6 +778,29 @@ input {
   transition: color 150ms ease;
 }
 
+/* 首页是导航轨上唯一一个不挂在分组下的可点项，视觉上要和三个分组名平级。
+   上面那条 .ant-menu-item 的 margin: 2px 0 把 antd 给条目自带的 8px 左右外边距
+   抹平了（分组标题没被抹，它们的图标因此比首页的图标靠右 8px、选中框也窄 16px），
+   这里只给顶层那一条还回去：图标回到 level-1 竖线，框宽和分组标题一致。
+   下面再补一条发丝线把它读成「置顶区」，而不是「缩进错了的分组」；线贴着盒边，
+   盒边 = 菜单 10px 内边距 + 这 8px = 距轨边 18px，和 .sidebar-brand::after 对齐。
+   条目的裁切要放开给探出盒子的线让路；标签的省略号在 .sidebar-menu-label 上，
+   不依赖这里的 overflow。 */
+.sidebar-menu.ant-menu-dark > .ant-menu-item {
+  overflow: visible;
+  margin-inline: 8px;
+  margin-bottom: 12px;
+}
+
+.sidebar-menu.ant-menu-dark > .ant-menu-item::after {
+  content: '';
+  position: absolute;
+  inset-inline: 0;
+  bottom: -7px;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
 .sidebar-menu-label {
   display: block;
   overflow: hidden;

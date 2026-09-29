@@ -47,7 +47,11 @@ COPY backend/app ./app
 COPY --from=frontend-builder /web/dist /app/static
 
 # Create a non-root user and hand over the app dir.
+# /app/uploads must exist here: a named volume takes its ownership from this
+# path in the image, and if the path is missing the volume comes up root-owned
+# while the app runs as yangvis, so every image upload fails with EACCES.
 RUN useradd --create-home --shell /bin/bash yangvis \
+ && mkdir -p /app/uploads \
  && chown -R yangvis:yangvis /app
 USER yangvis
 

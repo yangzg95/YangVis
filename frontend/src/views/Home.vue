@@ -43,15 +43,19 @@
             <span class="module-head">
               <span class="module-icon"><component :is="mod.icon" /></span>
               <span class="module-name">{{ mod.name }}</span>
+              <span class="module-count">
+                <a-skeleton
+                  v-if="mod.value === null"
+                  active
+                  :title="false"
+                  :paragraph="{ rows: 1, width: '56px' }"
+                />
+                <template v-else>{{ mod.value.toLocaleString() }}<em>{{ mod.unit }}</em></template>
+              </span>
             </span>
             <span class="module-desc muted">{{ mod.desc }}</span>
-            <span class="module-count">
-              <a-skeleton v-if="mod.value === null" active :title="false" :paragraph="{ rows: 1, width: '72px' }" />
-              <template v-else>
-                {{ mod.value.toLocaleString() }}<em>{{ mod.unit }}</em>
-              </template>
-            </span>
             <span v-if="mod.extra" class="module-extra muted">{{ mod.extra }}</span>
+            <span class="module-open">进入模块 <ArrowRightOutlined /></span>
           </button>
         </div>
       </section>
@@ -83,6 +87,9 @@
             </span>
           </button>
         </div>
+        <div v-if="convsLoaded && recent.length" class="card-foot muted">
+          共 {{ conversations.length }} 个会话，显示最近 {{ recent.length }} 条
+        </div>
       </section>
     </div>
   </div>
@@ -94,6 +101,7 @@ import { useRouter } from 'vue-router'
 import { Empty } from 'ant-design-vue'
 import {
   ApiOutlined,
+  ArrowRightOutlined,
   BookOutlined,
   CloudServerOutlined,
   DatabaseOutlined,
@@ -220,9 +228,9 @@ const modules = computed<HomeModule[]>(() => {
       name: 'AI 网关',
       desc: '上游通道、模型路由与调用日志',
       icon: ApiOutlined,
-      unit: '次调用（今日）',
+      unit: '次调用',
       value: s.ai_call_count_today ?? 0,
-      extra: `${(s.ai_token_count_today ?? 0).toLocaleString()} tokens · ${s.ai_channel_count ?? 0} 个通道`,
+      extra: `今日 ${(s.ai_token_count_today ?? 0).toLocaleString()} tokens · ${s.ai_channel_count ?? 0} 个通道`,
     })
   }
   return list
@@ -303,6 +311,8 @@ onActivated(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  /* 填满内容区高度：否则两列卡片按内容收身后，下半屏全是纸色空白。 */
+  min-height: 100%;
 }
 
 .home-hero {
@@ -338,15 +348,24 @@ onActivated(() => {
   /* 模块卡片是主角，最近对话只占一列；窄窗（含手机）自动堆叠。 */
   grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr);
   gap: 16px;
-  align-items: start;
+  /* 两张卡片吃掉余下的高度并等高，卡片内部再把各自的网格/列表撑开，
+     这样余白留在卡片里而不是变成页面底部一大片纸色。 */
+  flex: 1;
+  min-height: 0;
+  align-items: stretch;
 }
 @media (max-width: 900px) {
   .home-columns {
     grid-template-columns: 1fr;
+    /* 单列时不拉伸：模块卡按内容排，最近对话跟在下面，避免中间空一段。 */
+    flex: none;
   }
 }
 
 .home-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   background: var(--surface);
   border: 1px solid var(--hairline);
   border-radius: var(--radius-lg);
@@ -375,7 +394,13 @@ onActivated(() => {
 
 .module-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
+  /* 瓦片最小 280px：宁可两列宽瓦片，也不要三列被拉成竖长的空盒子。 */
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  /* 行等高：同一里的瓦片按最高那条对齐，卡片被拉高时也是一起长，
+     而不是最后一格孤零零拔长。 */
+  grid-auto-rows: 1fr;
+  flex: 1;
+  min-height: 0;
   gap: 12px;
 }
 .module-card {
@@ -383,17 +408,28 @@ onActivated(() => {
   flex-direction: column;
   gap: 6px;
   text-align: left;
-  background: var(--surface);
-  border: 1px solid var(--hairline);
+  /* 瓦片是卡内的凹槽：中性灰底 + 一圈透明描边（占位用，悬停换成信号色描边时不跳版）。
+     白卡里再套一圈白框正是上一版看着发虚、分不清边界的原因。 */
+  background: var(--chrome);
+  border: 1px solid transparent;
   border-radius: var(--radius-lg);
   padding: 14px 16px;
   cursor: pointer;
   font: inherit;
   color: inherit;
-  transition: border-color 0.15s;
+  transition:
+    background-color 0.15s,
+    border-color 0.15s;
 }
 .module-card:hover {
+  background: var(--signal-bg);
   border-color: var(--signal-border);
+}
+.module-card:hover .module-open {
+  color: var(--signal-text);
+}
+.module-card:hover .module-open .anticon {
+  transform: translateX(3px);
 }
 .module-head {
   display: flex;
@@ -403,40 +439,85 @@ onActivated(() => {
 .module-icon {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: var(--radius-md);
+  background: var(--signal-bg-strong);
   color: var(--signal-text);
-  font-size: 16px;
+  font-size: 14px;
 }
 .module-name {
   font-size: 14px;
   font-weight: 600;
   color: var(--text-1);
 }
-.module-desc {
-  font-size: 12px;
-  line-height: 1.5;
-  min-height: 36px;
-}
 .module-count {
+  /* 数字和模块名同一行、右对齐：一列数字上下扫，比八张「底部沉个大数字」的卡片好读。 */
+  margin-inline-start: auto;
+  padding-inline-start: 8px;
+  display: flex;
+  align-items: center;
   font-size: 20px;
   font-weight: 600;
+  line-height: 1.1;
   color: var(--text-1);
-  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
 }
 .module-count em {
   font-style: normal;
   font-size: 12px;
   font-weight: 400;
   color: var(--text-3);
-  margin-left: 6px;
+  margin-left: 5px;
+  white-space: nowrap;
+}
+/* 概览还没回来时的骨架条：a-skeleton 自带段间距，压在 20px 行高里会顶歪。 */
+.module-count :deep(.ant-skeleton-paragraph) {
+  margin: 0;
+}
+.module-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  /* 说明统一收两行，长短不一的文案不会把某一格拉得比别人高。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .module-extra {
   font-size: 12px;
+  line-height: 1.5;
+}
+.module-open {
+  /* 钉在瓦片底沿：瓦片被拉高时余白留在说明和这一行之间，读起来是「留白」而不是「空半张卡」。 */
+  margin-top: auto;
+  padding-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-3);
+  transition: color 0.15s;
+}
+.module-open .anticon {
+  font-size: 11px;
+  transition: transform 0.15s;
 }
 
 .recent-list {
   display: flex;
   flex-direction: column;
+  /* 与左列同高：条目少时余白留在卡内，条目多时在卡内滚，不把底部那行挤出去。 */
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
   gap: 2px;
+}
+.card-foot {
+  padding-top: 12px;
+  border-top: 1px solid var(--hairline);
 }
 .recent-item {
   display: flex;
