@@ -27,6 +27,7 @@ from app.routers import (
     ai_gateway_openai,
     auth,
     chat,
+    dashboard,
     interview,
     knowledge,
     memory,
@@ -77,6 +78,7 @@ app.include_router(settings_router.router, prefix=API_PREFIX)
 app.include_router(users.router, prefix=API_PREFIX)
 app.include_router(agents.router, prefix=API_PREFIX)
 app.include_router(chat.router, prefix=API_PREFIX)
+app.include_router(dashboard.router, prefix=API_PREFIX)
 app.include_router(memory.router, prefix=API_PREFIX)
 app.include_router(ops.router, prefix=API_PREFIX)
 app.include_router(ops_files.router, prefix=API_PREFIX)

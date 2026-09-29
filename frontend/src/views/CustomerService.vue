@@ -795,6 +795,35 @@ async function handleReportDiscuss() {
   send()
 }
 
+// ---- 深链打开指定会话 -------------------------------------------------------
+// 首页「最近对话」带 ?conv=<id> 进这里，省掉一次侧栏点击。id 不在列表里
+// （已删除或不属于当前用户）就静默停在初始空态。
+const CONVERSATION_QUERY_RE = /^\d+$/
+
+async function handleConversationDeepLink() {
+  const raw = route.query.conv
+  if (typeof raw !== 'string' || !CONVERSATION_QUERY_RE.test(raw)) return
+  // 与报告深链同一约定：先清 query，刷新这个标签页不会重复打开。
+  void router.replace({ query: {} })
+  const id = Number(raw)
+  // keep-alive 复活时列表可能是首屏拉的那份，也可能从没拉过（深链比 onMounted
+  // 的并发加载更早完成）——缺就补一次，别拿旧列表判存在性。
+  if (!convsLoaded.value) await loadConversations()
+  if (conversations.value.some((conv) => conv.id === id)) {
+    await selectConversation(id)
+  }
+}
+
+// 对话页挂在 keep-alive 里：页面已经开着时从首页再点一条会话，onMounted 不会
+// 重跑，所以路由上的 query 变化得走同一套深链处理。
+watch(
+  () => [route.path, route.query.conv] as const,
+  ([path, conv]) => {
+    if (path !== '/customer-service' || !conv || booting.value) return
+    void handleConversationDeepLink()
+  },
+)
+
 // ---- 发送 ------------------------------------------------------------------
 
 function onComposerEnter(e: KeyboardEvent) {
@@ -1101,6 +1130,7 @@ onMounted(async () => {
   // 报告页「发起对话」带着 ?report=kind/id 进这里：能不能直接发送取决于
   // 模型/智能体/项目是否就绪，所以要等上面全部加载完再处理。
   await handleReportDiscuss()
+  await handleConversationDeepLink()
 })
 
 onUnmounted(() => abort?.())

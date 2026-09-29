@@ -36,6 +36,17 @@ MAX_DECK_PAGES = 80
 
 LAYOUTS = frozenset({"cover", "section", "bullets", "image", "quote", "closing"})
 
+# 要点列表的降档表：(类名后缀, 字号 u, 行高倍数, 条目间距 u, 每行字数相对系数)。
+# 单行高度 = 字号 × 行高；系数是该档字号相对默认 2.4u 的倍数（字越小一行塞得越
+# 多）。这些数字必须和 _CSS 里 .points / .points.dense / .points.denser 写的一模
+# 一样，否则估算是照着另一套版面算的 —— test_bullet_tier_numbers_match_the_css
+# 就是盯这件事的。垂直预算由 :func:`_body_budget_u` 按页头的真实行数算出来。
+_BULLET_TIERS = (
+    ("", 2.4, 1.5, 1.7, 1.0),
+    (" dense", 1.95, 1.4, 1.15, 1.23),
+    (" denser", 1.6, 1.35, 0.9, 1.5),
+)
+
 # 主题预设：只放颜色。尺寸一律用 --u（容器宽度的 1%），换预设不会撑破版面。
 PRESETS: Dict[str, Dict[str, str]] = {
     "ink": {
@@ -206,10 +217,13 @@ def render_document(
     urls = asset_urls(assets)
     safe_pages = sanitize_pages(pages, urls.keys())
     total = len(safe_pages) or 1
+    ratio = RATIOS[safe_theme["ratio"]]
+    # 画幅决定正文能占多高：要点降档与配图的高度上限都用它算，4:3 不该按 16:9 压字。
+    content_h_u = _content_height_u(ratio)
 
     if safe_pages:
         body = "\n".join(
-            _render_page(index, page, urls, total)
+            _render_page(index, page, urls, total, content_h_u)
             for index, page in enumerate(safe_pages)
         )
     else:
@@ -220,6 +234,7 @@ def render_document(
              "subtitle": "", "bullets": [], "asset_id": "", "notes": ""},
             urls,
             total,
+            content_h_u,
         )
 
     colors = dict(PRESETS[safe_theme["preset"]])
@@ -231,7 +246,6 @@ def render_document(
     # 结束，用换行分隔的话 ``--bg`` 会把后面所有声明整个吞进去，变成一个非法
     # 值 —— 于是 body 背景透明、主题永不生效，屏幕上就是一片底色黑。
     theme_css = ";".join(f"--{name}:{value}" for name, value in colors.items())
-    ratio = RATIOS[safe_theme["ratio"]]
     doc_title = _e(title or "幻灯片")
 
     parts = [
@@ -264,7 +278,9 @@ def _para(class_name: str, text: str) -> str:
     return f'<p class="{class_name}">{text}</p>' if text else ""
 
 
-def _render_page(index: int, page: Dict[str, Any], urls: Dict[str, str], total: int) -> str:
+def _render_page(
+    index: int, page: Dict[str, Any], urls: Dict[str, str], total: int, content_h_u: float
+) -> str:
     layout = page["layout"]
     title = _e(page["title"])
     subtitle = _e(page["subtitle"])
@@ -272,6 +288,8 @@ def _render_page(index: int, page: Dict[str, Any], urls: Dict[str, str], total: 
     notes = _e(page["notes"])
     chapter = f"{index:02d}"
     image_url = _e(urls.get(page["asset_id"], ""))
+    # 页头吃掉多少垂直空间决定要点要不要降档，用未转义的原值估算。
+    budget_u = _body_budget_u(page["title"], page["subtitle"], content_h_u)
 
     if layout == "cover":
         body = _stack(
@@ -294,9 +312,13 @@ def _render_page(index: int, page: Dict[str, Any], urls: Dict[str, str], total: 
         figure = ""
         if image_url:
             figure = f'<figure class="shot"><img src="{image_url}" alt="{title}"></figure>'
+        # 左列要点和配图共用同一份剩余高度：把预算以 --body-h 交给 CSS，图片再高
+        # 也只长到这一步，越高的图只会自己缩下去，不会把整页顶出舞台。
+        # 配图页的要点只占左列（约整页宽的三分之一），同样的字数在这里更早溢出。
+        split_style = f' style="--body-h:calc(var(--u)*{budget_u:.2f})"'
         body = (
             _head(title, subtitle, chapter)
-            + f'<div class="split">{_bullet_list(bullets)}{figure}</div>'
+            + f'<div class="split"{split_style}>{_bullet_list(bullets, per_line=15, budget_u=budget_u)}{figure}</div>'
         )
     elif layout == "quote":
         body = _stack(
@@ -317,7 +339,7 @@ def _render_page(index: int, page: Dict[str, Any], urls: Dict[str, str], total: 
             ],
         )
     else:  # bullets
-        body = _head(title, subtitle, chapter) + _bullet_list(bullets)
+        body = _head(title, subtitle, chapter) + _bullet_list(bullets, per_line=28, budget_u=budget_u)
 
     note_tag = f'<aside class="notes">{notes}</aside>' if notes else ""
     return (
@@ -340,11 +362,59 @@ def _head(title: str, subtitle: str, chapter: str) -> str:
     )
 
 
-def _bullet_list(bullets: List[str], *, class_name: str = "points") -> str:
+def _bullet_list(
+    bullets: List[str],
+    *,
+    class_name: str = "points",
+    per_line: int = 0,
+    budget_u: float = 0.0,
+) -> str:
+    """渲染要点列表。
+
+    ``per_line`` 是默认字号下一行放得下的字数，``budget_u`` 是正文还能占的垂直
+    空间（单位 ``--u``）；两者都给了才参与降档，``per_line=0`` 表示不降档（引用
+    页 / 结尾页的列表本来就小，外层还是整块居中的版式）。
+    """
     if not bullets:
         return ""
     items = "".join(f"<li>{_e(item)}</li>" for item in bullets)
-    return f'<ul class="{class_name}">{items}</ul>'
+    tier = _bullet_tier(bullets, per_line, budget_u)
+    return f'<ul class="{class_name}{tier}">{items}</ul>'
+
+
+def _bullet_tier(bullets: List[str], per_line: int, budget_u: float) -> str:
+    """按估算的占行数挑一档字号：生成侧要求每页不超过 5 条，这里是超出时的兜底。"""
+    if per_line <= 0 or budget_u <= 0:
+        return ""
+    for suffix, font_u, line_h, gap_u, width_factor in _BULLET_TIERS:
+        chars = max(6, int(per_line * width_factor))
+        lines = sum(max(1, -(-len(item) // chars)) for item in bullets)
+        if lines * font_u * line_h + (len(bullets) - 1) * gap_u <= budget_u:
+            return suffix
+    return _BULLET_TIERS[-1][0]
+
+
+def _body_budget_u(title: str, subtitle: str, content_h_u: float) -> float:
+    """内容页的正文还能占多少垂直空间（单位 ``--u``，即舞台宽度的 1%）。
+
+    ``content_h_u`` 由 :func:`_content_height_u` 按画幅给出（16:9 是 42.25u，
+    4:3 更高，同样的要点在 4:3 下就不必降档）。页头按它的真实行数扣：章节号
+    2.4u、标题 4.2u * 1.2 = 5.04u 一行、副标题 2u * 1.5 = 3u 一行，段间 gap
+    两处 1.1u，页头下边距 2.6u。标题多换一行，要点就要再降一档 —— 行数只是
+    估算，宁可扣得比实际多一点。
+    """
+    title_lines = max(1, -(-len(title) // 20))
+    head = 2.4 + 1.1 + title_lines * 5.04
+    if subtitle:
+        head += 1.1 + max(1, -(-len(subtitle) // 42)) * 3.0
+    return content_h_u - head - 2.6
+
+
+def _content_height_u(ratio: str) -> float:
+    """舞台内容区的高度（单位 ``--u``）：宽度定死是 100u，高度按画幅换算，
+    再减上下各 7u 的内边距。"""
+    width, _, height = ratio.partition("/")
+    return 100.0 * float(height) / float(width) - 14.0
 
 
 # 尺寸一律以 --u 为单位，而 --u 是舞台宽度的百分之一：预览面板里 300px 宽和
@@ -366,6 +436,14 @@ container-type:size;overflow:hidden}
 display:none;flex-direction:column;justify-content:center;gap:calc(var(--u)*2.6);
 animation:fade .28s ease}
 .slide.is-active{display:flex}
+/* 内容页（要点 / 配图）的标题钉在上边带，正文在剩下的空间里垂直居中。
+   整块居中会让标题随正文多少上下跳 —— 翻页时每一页的标题位置都不一样，
+   看上去就是「没对齐」；短正文还会整页悬在中间，下面空一大块。 */
+.slide-bullets,.slide-image{justify-content:flex-start;gap:0}
+/* 上面把 gap 收了，标题与正文的间距改由页头出：gap 会额外压在 auto 外边距
+   之上，正文的上下留白就不对称（看着像往上贴）。 */
+.slide-bullets .page-head,.slide-image .page-head{margin-bottom:calc(var(--u)*2.6)}
+.slide-bullets>.points,.slide-image>.split{margin-top:auto;margin-bottom:auto}
 @keyframes fade{from{opacity:0;transform:translateY(calc(var(--u)*.8))}to{opacity:1;transform:none}}
 .stack{display:flex;flex-direction:column;gap:calc(var(--u)*2.4)}
 .chapter{font-variant-numeric:tabular-nums;font-size:calc(var(--u)*1.6);
@@ -398,13 +476,22 @@ line-height:1.5;max-width:30em}
 align-items:center}
 .shot{margin:0;display:flex;align-items:center;justify-content:center;
 background:var(--surface);border:1px solid var(--line);border-radius:calc(var(--u)*1.2);
-padding:calc(var(--u)*1.6);max-height:calc(var(--u)*54)}
-.shot img{max-width:100%;max-height:calc(var(--u)*50);display:block;border-radius:calc(var(--u)*.6)}
+padding:calc(var(--u)*1.6);max-height:var(--body-h,calc(var(--u)*30))}
+.shot img{max-width:100%;max-height:calc(var(--body-h,calc(var(--u)*30)) - var(--u)*4);
+display:block;border-radius:calc(var(--u)*.6)}
 .quote-inner{gap:calc(var(--u)*3)}
 .quote{margin:0;padding-left:calc(var(--u)*3);border-left:calc(var(--u)*.8) solid var(--accent);
 font-size:calc(var(--u)*4.6);line-height:1.3;font-weight:700;max-width:26em}
 .quote-by{margin:0;color:var(--muted);font-size:calc(var(--u)*2.2)}
 .quote-points li{font-size:calc(var(--u)*2.2);color:var(--muted)}
+/* 要点超出预算时的两档降级，与 _BULLET_TIERS 一一对应：少一行比字小一点更难
+   接受，所以宁肯降字号也要让最后一条留在舞台上。 */
+.points.dense{gap:calc(var(--u)*1.15)}
+.points.dense li{font-size:calc(var(--u)*1.95);line-height:1.4}
+.points.dense li::before{top:calc(var(--u)*.75);width:calc(var(--u)*.8);height:calc(var(--u)*.8)}
+.points.denser{gap:calc(var(--u)*0.9)}
+.points.denser li{font-size:calc(var(--u)*1.6);line-height:1.35}
+.points.denser li::before{top:calc(var(--u)*.6);width:calc(var(--u)*.65);height:calc(var(--u)*.65)}
 .notes{position:absolute;bottom:calc(var(--u)*6);left:calc(var(--u)*8);
 right:calc(var(--u)*8);display:none;font-size:calc(var(--u)*1.7);color:var(--muted)}
 .slide.show-notes .notes{display:block}

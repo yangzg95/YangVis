@@ -135,6 +135,7 @@ import {
   CloudServerOutlined,
   DatabaseOutlined,
   FundProjectionScreenOutlined,
+  HomeOutlined,
   LogoutOutlined,
   MenuOutlined,
   MessageOutlined,
@@ -158,6 +159,7 @@ interface MenuLeaf {
 }
 
 const MENU: MenuNode[] = [
+  { path: '/', title: '首页', icon: HomeOutlined },
   {
     path: '/service',
     title: '智能应用',

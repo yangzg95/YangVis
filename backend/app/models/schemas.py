@@ -1754,3 +1754,26 @@ class AiLogPurgeRequest(BaseModel):
 
 class AiLogPurgeResult(BaseModel):
     deleted: int = 0
+
+
+# ---- 首页工作台 ---------------------------------------------------------------
+
+
+class DashboardSummary(BaseModel):
+    """首页工作台的概览：各模块在调用方名下的资源数量。"""
+
+    agent_count: int = 0
+    knowledge_project_count: int = 0
+    knowledge_document_count: int = 0
+    conversation_count: int = 0
+    resume_count: int = 0
+    slide_count: int = 0
+    interview_count: int = 0
+    server_count: int = 0
+    database_count: int = 0
+
+    # AI 网关是平台级共享资产，只有管理员看得到。留 None 而不是 0：前端按
+    # 「这一格出不出现」判断，0 会被读成「网关还没接通道」而不是「无权查看」。
+    ai_channel_count: Optional[int] = None
+    ai_call_count_today: Optional[int] = None
+    ai_token_count_today: Optional[int] = None

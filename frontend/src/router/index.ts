@@ -10,7 +10,9 @@ const routes: RouteRecordRaw[] = [
     },
     {
         path: '/',
-        redirect: '/customer-service',
+        name: 'Home',
+        component: () => import('@/views/Home.vue'),
+        meta: {title: '首页'},
     },
     {
         path: '/service',
@@ -135,7 +137,7 @@ const routes: RouteRecordRaw[] = [
     },
     {
         path: '/:pathMatch(.*)*',
-        redirect: '/customer-service',
+        redirect: '/',
     },
 ]
 

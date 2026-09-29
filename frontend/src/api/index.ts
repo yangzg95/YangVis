@@ -2236,6 +2236,28 @@ export const slidesApi = {
     }),
 }
 
+// ---- 首页工作台 --------------------------------------------------------------
+
+export interface DashboardSummary {
+  agent_count: number
+  knowledge_project_count: number
+  knowledge_document_count: number
+  conversation_count: number
+  resume_count: number
+  slide_count: number
+  interview_count: number
+  server_count: number
+  database_count: number
+  /** 网关是平台级共享资产，只对管理员出数；null 表示无权查看而非「一个都没有」。 */
+  ai_channel_count: number | null
+  ai_call_count_today: number | null
+  ai_token_count_today: number | null
+}
+
+export const dashboardApi = {
+  summary: () => request<DashboardSummary>({ url: '/dashboard/summary' }),
+}
+
 /** 拼一条同源的 ws:// 或 wss:// 地址，路径沿用 axios 的 `/api` 前缀。 */export function opsWsUrl(path: string, params: Record<string, string | number>): string {
   const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
   const query = new URLSearchParams()

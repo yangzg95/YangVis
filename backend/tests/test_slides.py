@@ -158,6 +158,15 @@ def _render(**kwargs):
     return slides_html.render_document(**base)
 
 
+def _page_layouts(doc: str):
+    """文档里真实渲染出来的页面版式。
+
+    断言版式不能用 ``"slide-image" in doc``：CSS 里本来就带着 ``.slide-image``
+    选择器，那样永远为真。
+    """
+    return re.findall(r'<section class="slide slide-([a-z]+)"', doc)
+
+
 def test_render_escapes_text_everywhere():
     doc = _render(
         pages=[
@@ -216,10 +225,90 @@ def test_sanitize_theme_normalizes_hex_without_hash():
     assert "--accent:#ff8800" in _render(theme={"accent": "ff8800"})
 
 
+# ---- 渲染器：放映时的垂直版面 --------------------------------------------------
+
+
+def test_content_page_pins_head_and_centers_body_block():
+    """内容页的标题钉在上沿，正文在剩下的空间里居中。
+
+    整块居中会让标题随正文条数上下跳，翻页时每一页标题位置都不同 —— 那就是
+    「放映时居中怪怪的」。
+    """
+    css = slides_html._CSS
+    assert ".slide-bullets,.slide-image{justify-content:flex-start;gap:0}" in css
+    assert ".slide-bullets>.points,.slide-image>.split{margin-top:auto;margin-bottom:auto}" in css
+    # gap 会额外压在 auto 外边距之上，正文上下留白就不对称，所以间距由页头出。
+    assert ".slide-bullets .page-head,.slide-image .page-head{margin-bottom:" in css
+
+
+def test_bullet_tier_follows_wrapped_lines_not_item_count():
+    budget_16x9 = slides_html._body_budget_u("一个标题", "一句副标题", slides_html._content_height_u("16 / 9"))
+    # 5 条以内、每条一行：默认档。
+    assert slides_html._bullet_tier(["要点" * 4, "短"], 28, budget_16x9) == ""
+    # 7 条就撑不住整页高度，降一档。
+    seven = [f"要点{i}：说明一个环节" for i in range(7)]
+    assert slides_html._bullet_tier(seven, 28, budget_16x9) == " dense"
+    # 3 条但每条都要换行，同样得降档 —— 触发条件是行数，不是条数。
+    long_three = ["要点：说明文字" * 9] * 3
+    assert slides_html._bullet_tier(long_three, 28, budget_16x9) == " dense"
+    # 再挤也只能降到最后一档，字号不能无限缩。
+    twelve = [f"第 {i} 条要点，说明一个环节" for i in range(12)]
+    assert slides_html._bullet_tier(twelve, 28, budget_16x9) == " denser"
+
+
+def test_bullet_tier_uses_the_real_aspect_ratio():
+    """4:3 的舞台更高，同样的内容不必按 16:9 压字号。"""
+    bullets = [f"要点{i}：说明一个环节" for i in range(7)]
+    wide = slides_html._body_budget_u("标题", "副标题", slides_html._content_height_u("16 / 9"))
+    tall = slides_html._body_budget_u("标题", "副标题", slides_html._content_height_u("4 / 3"))
+    assert slides_html._bullet_tier(bullets, 28, wide) == " dense"
+    assert slides_html._bullet_tier(bullets, 28, tall) == ""
+
+
+def test_body_budget_shrinks_when_title_wraps():
+    flat = slides_html._body_budget_u("短标题", "", slides_html._content_height_u("16 / 9"))
+    wrapped = slides_html._body_budget_u("标题" * 11, "", slides_html._content_height_u("16 / 9"))
+    assert abs((flat - wrapped) - 5.04) < 0.01, (flat, wrapped)
+    assert slides_html._body_budget_u("标题", "", 42.25) > slides_html._body_budget_u("标题", "副标题", 42.25)
+
+
+def test_only_full_width_lists_get_tiers():
+    # 引用页 / 结尾页的列表由外层版式整块居中，字号本来就更小，不参与降档。
+    many = [f"要点{i}：说明一个环节" for i in range(10)]
+    assert slides_html._bullet_list(many, class_name="quote-points") == (
+        '<ul class="quote-points">' + "".join(f"<li>{item}</li>" for item in many) + "</ul>"
+    )
+    assert 'class="points denser"' in _render(
+        pages=[{"layout": "bullets", "title": "一个标题", "subtitle": "一句副标题", "bullets": many}]
+    )
+
+
+def test_bullet_tier_numbers_match_the_css():
+    """降档表里的字号 / 行高 / 间距必须和 CSS 写的一致。
+
+    估算是照着版面算的：改了 ``.points.dense`` 的字号而没改表，降档就会按错的
+    高度判断，页面该缩的时候不缩。
+    """
+    css = slides_html._CSS
+    for _suffix, font_u, line_h, gap_u, _factor in slides_html._BULLET_TIERS:
+        assert f"font-size:calc(var(--u)*{font_u})" in css, font_u
+        assert f"line-height:{line_h}" in css, line_h
+        assert f"gap:calc(var(--u)*{gap_u})" in css, gap_u
+
+
+def test_image_page_bounds_the_shot_height():
+    """配图页把正文可用高度交给 CSS 的 ``--body-h``：竖图只会自己缩，不会把整页顶出舞台。"""
+    doc = _render(
+        pages=[{"layout": "image", "title": "配图页", "asset_id": "aa11", "bullets": ["要点"]}],
+        assets=[{"id": "aa11", "rel_path": "slides/7/aa11bb22cc33dd44.png"}],
+    )
+    assert re.search(r'class="split" style="--body-h:calc\(var\(--u\)\*\d+\.\d{2}\)"', doc), doc
+    assert "max-height:var(--body-h" in slides_html._CSS
+
+
 def test_render_downgrades_image_page_without_asset():
     doc = _render(pages=[{"layout": "image", "title": "配图页", "asset_id": "deadbeef"}])
-    assert "slide-image" not in doc
-    assert "slide-bullets" in doc, "引用了不存在的图片时降级成要点页，不留破图"
+    assert _page_layouts(doc) == ["bullets"], "引用了不存在的图片时降级成要点页，不留破图"
 
 
 def test_render_ignores_asset_with_unsafe_rel_path():
@@ -228,7 +317,7 @@ def test_render_ignores_asset_with_unsafe_rel_path():
         assets=[{"id": "aa11", "rel_path": "slides/7/../../evil.png"}],
     )
     assert "<img" not in doc
-    assert "slide-bullets" in doc
+    assert _page_layouts(doc) == ["bullets"]
 
 
 def test_render_keeps_asset_with_safe_rel_path():
@@ -237,11 +326,12 @@ def test_render_keeps_asset_with_safe_rel_path():
         assets=[{"id": "aa11", "rel_path": "slides/7/aa11bb22cc33dd44.png"}],
     )
     assert '<img src="/uploads/slides/7/aa11bb22cc33dd44.png"' in doc
+    assert _page_layouts(doc) == ["image"]
 
 
 def test_render_falls_back_for_unknown_layout_and_empty_deck():
-    assert "slide-bullets" in _render(pages=[{"layout": "matrix", "title": "非法版式"}])
-    assert "slide-cover" in _render(title="还没有内容"), "空 deck 也给一张封面，放映不至于白屏"
+    assert _page_layouts(_render(pages=[{"layout": "matrix", "title": "非法版式"}])) == ["bullets"]
+    assert _page_layouts(_render(title="还没有内容")) == ["cover"], "空 deck 也给一张封面，放映不至于白屏"
 
 
 def test_sanitize_pages_keeps_legal_sid_and_reissues_others():
@@ -384,7 +474,7 @@ def test_create_deck_starts_analyzing_with_cover_html(db):
     deck = _deck(db)
     assert deck.status == STATUS_ANALYZING
     assert deck.slides == []
-    assert "slide-cover" in deck.html, "先渲染一张封面，未生成完也能打开预览"
+    assert _page_layouts(deck.html) == ["cover"], "先渲染一张封面，未生成完也能打开预览"
 
 
 def test_deck_is_scoped_to_owner(db):
@@ -514,7 +604,7 @@ def test_asset_lifecycle_updates_html_and_unreferences_pages(db, media):
     assert rel_path == stored.rel_path
     reloaded = service.get_deck(deck.id)
     assert reloaded.slides[0]["asset_id"] == ""
-    assert "slide-image" not in reloaded.html, "删图后引用它的页面降级"
+    assert _page_layouts(reloaded.html) == ["bullets"], "删图后引用它的页面降级"
 
 
 def test_add_asset_caps_per_deck(db, media, monkeypatch):
