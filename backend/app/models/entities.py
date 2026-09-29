@@ -1046,3 +1046,179 @@ class AiCallLog(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<AiCallLog id={self.id} model={self.model!r} status={self.status_code}>"
+
+
+class Workflow(Base):
+    """一条可配置的智能体流水线。
+
+    内置工作流以 ``owner_id = 0`` 预置，随代码 seed（与 ``agent`` 同一套规则：
+    所有人可见、不可直接改、可复制后调整）。
+
+    ``input_schema`` 声明这条流程接受哪些变量（``name`` / ``label`` /
+    ``required``）：变量取值由调用方给，步骤模板只做 ``{{name}}`` 替换。条件段落
+    与领域数据解析留在代码里，不塞进模板——否则就得为模板发明一门小语言。
+    """
+
+    __tablename__ = "workflow"
+    __table_args__ = (UniqueConstraint("owner_id", "slug", name="uk_workflow_owner_slug"),)
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True, default=0)
+    slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # [{"name": "resume_content", "label": "简历全文", "required": true}, ...]
+    input_schema: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    is_builtin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<Workflow id={self.id} slug={self.slug!r} builtin={self.is_builtin}>"
+
+
+class WorkflowStep(Base):
+    """工作流的一个步骤：一次智能体调用。
+
+    ``group_key`` 相同的步骤属于同一个并行组，组内并发执行、全部结束后才进下一组；
+    组与组之间按 ``sort_order`` 顺序执行。单步流程就是「一步一组的例外情况」，
+    不需要为此区分两种执行模式。
+
+    ``output_var`` 有值时，本步的输出会以该名字进上下文，供后续步骤的模板引用；
+    留空表示只是个中间步骤。
+    """
+
+    __tablename__ = "workflow_step"
+    __table_args__ = (UniqueConstraint("workflow_id", "key", name="uk_workflow_step_key"),)
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    workflow_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    # 步骤标识：运行历史、单步重跑与日志都靠它定位，创建后不轻易改名。
+    key: Mapped[str] = mapped_column(String(64), nullable=False)
+    group_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # 人设来自 agent.slug（能力与输出格式在 agent 上），不复制一份进模板。
+    agent_slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_tpl: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # markdown（原样收下）| json（按契约解析，解析失败即步骤失败）
+    output_kind: Mapped[str] = mapped_column(String(16), nullable=False, default="markdown")
+    # output_kind=json 时要求的顶层字段，例如 ["report", "suggestions"]。
+    output_keys: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    output_var: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # 按步骤覆盖模型配置；NULL 表示用调用者的默认对话模型。
+    # 只对个人工作流有意义：model_config 是按 owner 隔离的，内置步骤里
+    # 写死某个用户的配置 id 对其他人毫无意义。
+    model_config_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    # 可选步骤失败不拖垮整条流程（例如「附一段配图建议」这类锦上添花的步骤）。
+    optional: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<WorkflowStep id={self.id} workflow={self.workflow_id} key={self.key!r}>"
+
+
+class WorkflowRun(Base):
+    """一次工作流执行。
+
+    ``inputs`` 是发起时的变量快照，之后即使来源数据（简历、材料）被删，这次运行
+    的现场仍然可回看——与 ``resume_toolkit_task.inputs`` 同一个取舍。
+    """
+
+    __tablename__ = "workflow_run"
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    workflow_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    # 定义可能被改名或删除，历史列表要能看懂当时跑的是哪条。
+    workflow_slug: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    inputs: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+    # pending（已建未跑）| running（执行中）| succeeded | failed | cancelled
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    error_msg: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    elapsed_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<WorkflowRun id={self.id} workflow={self.workflow_slug!r} status={self.status!r}>"
+
+
+class WorkflowRunStep(Base):
+    """一次运行中单个步骤的现场。
+
+    这一层是过去完全没有的东西：先前每个后台任务只在业务行上留一个
+    ``status``/``report``，跑完就说不清「模型当时收到的是哪段 prompt」。
+    存下渲染后的 prompt 与原始输出，单步失败才能既看得见原因、又能重跑。
+
+    并行组的步骤会并发写入，每个步骤用自己的 session（见
+    ``services/workflows.py`` 的 ``execute_run``）。
+    """
+
+    __tablename__ = "workflow_run_step"
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    # 冗余 owner：读取快照时要能直接按用户收敛，不必先 join run。
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    run_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    key: Mapped[str] = mapped_column(String(64), nullable=False)
+    group_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # pending | running | succeeded | failed | skipped
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+
+    prompt: Mapped[str | None] = mapped_column(_LONG_TEXT, nullable=True)
+    output: Mapped[str | None] = mapped_column(_LONG_TEXT, nullable=True)
+    # output_kind=json 时解析出的对象；markdown 步骤为 NULL。
+    parsed: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error_msg: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # 这次实际用的模型配置，排查「为什么这一步慢/为什么换了模型」的第一手线索。
+    model_config_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    elapsed_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<WorkflowRunStep id={self.id} run={self.run_id} key={self.key!r} status={self.status!r}>"

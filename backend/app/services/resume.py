@@ -10,9 +10,7 @@ SPA 的 30s axios 超时，所以接口只负责落库一行状态记录，真�
 from __future__ import annotations
 
 import io
-import json
 import logging
-import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -21,7 +19,6 @@ from typing import List, Optional
 from sqlalchemy import Select, select, update
 from sqlalchemy.orm import Session
 
-from app.errors import BusinessError, CODE_CHAT_NOT_READY
 from app.models.entities import (
     ModelConfig,
     Resume,
@@ -29,7 +26,6 @@ from app.models.entities import (
     ResumeToolkitTask,
 )
 from app.models.schemas import (
-    ModelPurpose,
     ResumeComparisonDetail,
     ResumeComparisonItem,
     ResumeDetail,
@@ -38,9 +34,20 @@ from app.models.schemas import (
     ResumeToolkitDetail,
     ResumeToolkitItem,
 )
-from app.services.agents import AgentService
+from app.services.agent_run import (
+    extract_json_object,
+    labeled_section,
+    model_error_text,
+    require_chat_model,
+    run_agent,
+)
 from app.services.chunking import UnsupportedFileType, extract_text, normalise
-from app.services.providers import build_chat_model
+from app.services.workflows import (
+    RUN_SUCCEEDED,
+    STEP_SUCCEEDED,
+    WorkflowService,
+    execute_run,
+)
 
 logger = logging.getLogger("yangvis.resume")
 
@@ -51,11 +58,6 @@ RESUME_SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".txt", ".md", ".markdown")
 # 对比时最多 10 份简历，每份留 12000 字符，加上 prompt 也不会把窗口撑爆。
 MAX_RESUME_CHARS = 12000
 
-# 后台任务（分析/对比/求职助手）的模型调用超时。这些调用是非流式的——要
-# 等整份报告生成完才返回，输出动辄上千 token，全局 30s 的 MODEL_HTTP_TIMEOUT
-# 几乎必然超时（慢模型、长 JD 时尤甚），所以给 5 分钟。
-MODEL_TASK_TIMEOUT = 300.0
-
 # 状态值。不用 Enum：实体里存的是裸字符串，schema 也是裸字符串。
 STATUS_UPLOADED = "uploaded"
 STATUS_ANALYZING = "analyzing"
@@ -63,9 +65,9 @@ STATUS_READY = "ready"
 STATUS_ERROR = "error"
 
 # 分析与对比的人设（含输出格式要求）都在内置智能体上，随 seed 管线就地刷新；
-# 这里只留 slug。变量内容（简历全文）走 human 消息，不进 system_prompt。
-AGENT_SLUG_ANALYZE = "resume-analyzer"
-AGENT_SLUG_COMPARE = "resume-compare"
+# 这里只留「哪条工作流」。变量内容（简历全文）走运行输入，不进模板 seed。
+WORKFLOW_ANALYZE = "resume-analysis"
+WORKFLOW_COMPARE = "resume-comparison"
 
 
 # ---- 求职助手（toolkit）-------------------------------------------------------
@@ -125,10 +127,6 @@ TOOLKIT_KINDS: dict = {
 }
 
 
-def _labeled_section(label: str, text: str) -> str:
-    return f'{label}：\n"""\n{text.strip()}\n"""'
-
-
 def _toolkit_title(kind: str, inputs: dict) -> str:
     """按 kind 和输入快照生成记录标题，如「面试准备 · 高级前端工程师」。"""
     source_name = inputs.get("resume_title") or (
@@ -160,38 +158,38 @@ def _toolkit_prompt(kind: str, inputs: dict) -> str:
 
     if kind == "optimize":
         head = f"目标岗位：{position}\n\n" if position else ""
-        return head + _labeled_section("简历全文", content)
+        return head + labeled_section("简历全文", content)
 
     if kind == "career-match":
         parts = []
         if content:
-            parts.append(_labeled_section("简历全文", content))
+            parts.append(labeled_section("简历全文", content))
         if background:
-            parts.append(_labeled_section("个人背景补充", background))
+            parts.append(labeled_section("个人背景补充", background))
         return "\n\n".join(parts)
 
     if kind == "jd-match":
         return (
-            _labeled_section("职位描述", _truncate(inputs.get("job_description") or ""))
+            labeled_section("职位描述", _truncate(inputs.get("job_description") or ""))
             + "\n\n"
-            + _labeled_section("简历全文", content)
+            + labeled_section("简历全文", content)
         )
 
     if kind == "interview-prep":
         parts = [f"目标岗位：{position}"]
         job_description = (inputs.get("job_description") or "").strip()
         if job_description:
-            parts.append(_labeled_section("职位描述", _truncate(job_description)))
+            parts.append(labeled_section("职位描述", _truncate(job_description)))
         if content:
-            parts.append(_labeled_section("求职者简历全文", content))
+            parts.append(labeled_section("求职者简历全文", content))
         return "\n\n".join(parts)
 
     if kind == "portfolio-plan":
         parts = [f"目标职位：{position}"]
         if content:
-            parts.append(_labeled_section("求职者简历全文", content))
+            parts.append(labeled_section("求职者简历全文", content))
         if background:
-            parts.append(_labeled_section("个人背景补充", background))
+            parts.append(labeled_section("个人背景补充", background))
         return "\n\n".join(parts)
 
     if kind == "salary-negotiation":
@@ -246,47 +244,33 @@ def _truncate(text: str, limit: int = MAX_RESUME_CHARS) -> str:
     return f"{text[:limit]}\n……（原文过长，已截断）"
 
 
-def _task_error_text(exc: Exception) -> str:
-    """把后台任务里的模型异常转成用户能看懂的失败原因。"""
-    text = str(exc)
-    if "timed out" in text.lower() or "timeout" in text.lower():
-        return (
-            "模型响应超时：本次生成内容较长，可重新发起试试；"
-            "若反复出现，建议到「系统设置 → 模型管理」换用响应更快的模型。"
-        )
-    return text[:512]
-
-
 def _parse_analysis(raw_text: str) -> tuple[str, List[str]]:
     """从模型输出里拆出报告和改进意见。
 
-    模型并不总是守规矩：JSON 外面裹一层 ```json 代码栅栏、前后带寒暄，
-    都是常态。先剥栅栏再截取第一个 ``{`` 到最后一个 ``}`` 之间的部分解析；
-    实在不行就把整段输出当成报告，至少分析结果不会整个丢掉。
+    剥 ```json 代码栅栏、截取第一个 ``{`` 到最后一个 ``}`` 这些由
+    :func:`extract_json_object` 统一处理。这里只留下简历自己的一层兜底：
+    解析不出来就把整段输出当报告——一份格式跑偏的报告对用户还有用，
+    一条「解析失败」的空白页没有。
     """
-    text = raw_text.strip()
-    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
-    if fence:
-        text = fence.group(1)
+    try:
+        data = extract_json_object(raw_text)
+    except ValueError:
+        logger.debug("analysis output was not valid json, falling back to raw text")
+        return raw_text.strip(), []
 
-    start, end = text.find("{"), text.rfind("}")
-    if 0 <= start < end:
-        try:
-            data = json.loads(text[start : end + 1])
-            report = str(data.get("report") or "").strip()
-            suggestions = [
-                str(item).strip()
-                for item in (data.get("suggestions") or [])
-                if str(item).strip()
-            ]
-            if report:
-                return report, suggestions
-        except (json.JSONDecodeError, AttributeError, TypeError):
-            pass
-
-    # 模型没按约定输出 JSON：整段当成报告，格式异常的原因留在这里可查。
-    logger.debug("analysis output was not valid json, falling back to raw text")
-    return raw_text.strip(), []
+    report = str(data.get("report") or "").strip()
+    # 模型把 suggestions 写成字符串或对象都可能：按列表逐项转文本，别的形态
+    # 一律丢弃，否则遍历字符串会把建议拆成一个个字。
+    raw_suggestions = data.get("suggestions")
+    suggestions = (
+        [str(item).strip() for item in raw_suggestions if str(item).strip()]
+        if isinstance(raw_suggestions, list)
+        else []
+    )
+    if not report:
+        logger.debug("analysis json had no report field, falling back to raw text")
+        return raw_text.strip(), []
+    return report, suggestions
 
 
 class ResumeService:
@@ -295,7 +279,6 @@ class ResumeService:
     def __init__(self, db: Session, owner_id: int) -> None:
         self._db = db
         self._owner_id = owner_id
-        self._agents = AgentService(db, owner_id)
 
     @property
     def owner_id(self) -> int:
@@ -316,19 +299,7 @@ class ResumeService:
 
     def require_chat_config(self) -> ModelConfig:
         """分析与对比共用的一份门槛：用户得先有一份验证过的默认对话模型。"""
-        config = self._db.scalar(
-            select(ModelConfig).where(
-                ModelConfig.owner_id == self._owner_id,
-                ModelConfig.purpose == ModelPurpose.CHAT.value,
-                ModelConfig.is_default.is_(True),
-            )
-        )
-        if config is None or not config.last_test_ok:
-            raise BusinessError(
-                CODE_CHAT_NOT_READY,
-                "尚未配置可用的对话模型。请先到「系统设置 → 模型管理」添加并通过连通性测试。",
-            )
-        return config
+        return require_chat_model(self._db, self._owner_id)
 
     # -- 简历 CRUD -----------------------------------------------------------
 
@@ -407,37 +378,55 @@ class ResumeService:
     # -- AI 分析 -------------------------------------------------------------
 
     async def _ask(self, slug: str, user_prompt: str) -> str:
-        """按 slug 取内置智能体的人设发起一轮问答，返回纯文本输出。
+        """一次性的单次调用：求职助手那 6 类还没搬进工作流（P2），先走共享执行器。
 
-        人设（含输出格式要求）在 agent.system_prompt 上，模型配置与温度也跟着
-        智能体走；简历全文这类变量内容放 human 消息。
+        与 :meth:`_run_workflow` 的区别只在于要不要落运行记录——两者最终调的是
+        同一个 :func:`run_agent`，所以模型名、超时、内容块拉平这些细节不会有两份。
         """
-        from langchain_core.messages import HumanMessage, SystemMessage
+        return await run_agent(self._db, self._owner_id, slug, user_prompt)
 
-        agent = self._agents.require_by_slug(slug)
-        config = self.require_chat_config()
-        # 模型名与 base_url 是定位「为什么慢/为什么失败」的第一手线索；api_key 不进日志。
-        logger.info(
-            "calling chat model: agent=%s model=%s base_url=%s prompt_chars=%s owner=%s",
-            slug,
-            config.model_name,
-            config.base_url,
-            len(user_prompt),
-            self._owner_id,
+    async def _run_workflow(self, slug: str, step_key: str, inputs: dict) -> str:
+        """发起一条内置工作流，等它跑完，返回指定步骤的输出。
+
+        简历这边暂时继续用自己的 ``status`` / ``report`` 列（P2 才换成运行记录），
+        但模型调用已经由工作流引擎执行：每次分析都会在 ``workflow_run`` 与
+        ``workflow_run_step`` 里留下渲染后的 prompt 和原始输出，「当时模型到底
+        收到了什么」从此问得出来。
+        """
+        workflows = WorkflowService(self._db, self._owner_id)
+        workflow = workflows.require_by_slug(slug)
+        run = workflows.create_run(workflow.id, inputs)
+
+        async for event, payload in execute_run(owner_id=self._owner_id, run_id=run.id):
+            if event == "step_end" and payload.get("error"):
+                logger.info(
+                    "workflow %s step %s failed: %s", slug, payload.get("key"), payload["error"]
+                )
+
+        finished = workflows.get_run(run.id)
+        if finished.status != RUN_SUCCEEDED:
+            raise RuntimeError(finished.error_msg or "工作流执行失败")
+        step = next(
+            (row for row in workflows.run_steps(run.id) if row.key == step_key), None
         )
-        model = build_chat_model(
-            config, temperature=agent.temperature / 100, timeout=MODEL_TASK_TIMEOUT
-        )
-        result = await model.ainvoke(
-            [SystemMessage(content=agent.system_prompt), HumanMessage(content=user_prompt)]
-        )
-        text = result.content if hasattr(result, "content") else str(result)
-        if isinstance(text, list):  # 部分 provider 返回 content block 列表
-            text = "".join(
-                block.get("text", "") if isinstance(block, dict) else str(block)
-                for block in text
-            )
-        return str(text)
+        if step is None or step.status != STEP_SUCCEEDED:
+            raise RuntimeError("工作流没有产出这一步的结果")
+        return step.output or ""
+
+    def _analysis_inputs(self, resume: Resume) -> dict:
+        """把一份简历整理成工作流的输入变量。
+
+        「有补充描述才加那一段」这种条件拼装留在代码里：模板只做变量替换，
+        否则就得为模板发明一门小语言，而这段逻辑用 Python 读起来更便宜。
+        """
+        return {
+            "resume_content": _truncate(resume.content),
+            "description_note": (
+                f"上传者对这份简历的补充描述：{resume.description}\n\n"
+                if resume.description
+                else ""
+            ),
+        }
 
     def start_analysis(self, resume_id: int) -> Resume:
         """把简历置为分析中。真正的模型调用由后台任务完成。"""
@@ -462,13 +451,9 @@ class ResumeService:
             len(resume.content),
         )
         try:
-            description = (
-                f"上传者对这份简历的补充描述：{resume.description}\n\n"
-                if resume.description
-                else ""
+            text = await self._run_workflow(
+                WORKFLOW_ANALYZE, "analyze", self._analysis_inputs(resume)
             )
-            user_prompt = f'{description}简历全文：\n"""\n{_truncate(resume.content)}\n"""'
-            text = await self._ask(AGENT_SLUG_ANALYZE, user_prompt)
             report, suggestions = _parse_analysis(text)
 
             resume.report = report
@@ -492,7 +477,7 @@ class ResumeService:
                 exc_info=True,
             )
             resume.status = STATUS_ERROR
-            resume.error_msg = _task_error_text(exc)
+            resume.error_msg = model_error_text(exc)
         self._db.commit()
 
     # -- 简历对比 -------------------------------------------------------------
@@ -560,11 +545,16 @@ class ResumeService:
                     f"=== 简历 {index}：{resume.title} ==={description}\n"
                     f"\"\"\"\n{_truncate(resume.content)}\n\"\"\""
                 )
-            user_prompt = (
-                f"下面共 {len(resumes)} 份候选人的简历全文，请做一次横向对比分析。\n\n"
-                + "\n\n".join(blocks)
-            )
-            report = (await self._ask(AGENT_SLUG_COMPARE, user_prompt)).strip()
+            report = (
+                await self._run_workflow(
+                    WORKFLOW_COMPARE,
+                    "compare",
+                    {
+                        "resumes_block": "\n\n".join(blocks),
+                        "resume_count": str(len(resumes)),
+                    },
+                )
+            ).strip()
             if not report:
                 raise RuntimeError("模型返回了空报告")
 
@@ -586,7 +576,7 @@ class ResumeService:
                 exc_info=True,
             )
             comparison.status = STATUS_ERROR
-            comparison.error_msg = _task_error_text(exc)
+            comparison.error_msg = model_error_text(exc)
         self._db.commit()
 
     # -- 求职助手（toolkit）----------------------------------------------------
@@ -712,7 +702,7 @@ class ResumeService:
                 exc_info=True,
             )
             task.status = STATUS_ERROR
-            task.error_msg = _task_error_text(exc)
+            task.error_msg = model_error_text(exc)
         self._db.commit()
 
     # -- 序列化 -------------------------------------------------------------

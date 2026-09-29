@@ -16,6 +16,7 @@ from app.bootstrap import (
     migrate_schema,
     reset_stale_jobs,
     seed_agents,
+    seed_workflows,
     validate_settings,
 )
 from app.config import get_settings
@@ -38,6 +39,7 @@ from app.routers import (
     settings as settings_router,
     slides,
     users,
+    workflows,
 )
 
 logger = logging.getLogger("yangvis")
@@ -77,6 +79,7 @@ app.include_router(knowledge.router, prefix=API_PREFIX)
 app.include_router(settings_router.router, prefix=API_PREFIX)
 app.include_router(users.router, prefix=API_PREFIX)
 app.include_router(agents.router, prefix=API_PREFIX)
+app.include_router(workflows.router, prefix=API_PREFIX)
 app.include_router(chat.router, prefix=API_PREFIX)
 app.include_router(dashboard.router, prefix=API_PREFIX)
 app.include_router(memory.router, prefix=API_PREFIX)
@@ -273,6 +276,7 @@ async def on_startup() -> None:
         ("migrate_schema", migrate_schema),
         ("bootstrap_admin", lambda: bootstrap_admin(settings)),
         ("seed_agents", seed_agents),
+        ("seed_workflows", seed_workflows),
         ("reset_stale_jobs", reset_stale_jobs),
     ):
         try:

@@ -1,7 +1,6 @@
 """Chat endpoints: conversations, history and the streaming answer."""
 from __future__ import annotations
 
-import json
 import logging
 from typing import AsyncIterator
 
@@ -27,6 +26,7 @@ from app.models.schemas import (
     OpsConversationRequest,
 )
 from app.services.chat import ROLE_USER, ChatService, derive_title
+from app.sse import SSE_HEADERS, sse_event
 
 logger = logging.getLogger("yangvis.chat")
 
@@ -241,26 +241,26 @@ async def confirm_action(
         # ops_write 闸门必须在 CAS 之前：无权限用户不能把 pending 认领成
         # approved。拒绝（reject）不设限——拒绝是安全方向。
         if not user.can_ops_write:
-            yield _sse("error", {"code": 403, "message": "没有运维写权限，请联系管理员"})
+            yield sse_event("error", {"code": 403, "message": "没有运维写权限，请联系管理员"})
             return
         try:
             async for event, data in service.confirm_action_stream(
                 action_id=action_id,
                 is_disconnected=request.is_disconnected,
             ):
-                yield _sse(event, data)
+                yield sse_event(event, data)
         except BusinessError as exc:
-            yield _sse("error", {"code": exc.code, "message": exc.msg})
+            yield sse_event("error", {"code": exc.code, "message": exc.msg})
         except LookupError as exc:
-            yield _sse("error", {"code": 404, "message": str(exc)})
+            yield sse_event("error", {"code": 404, "message": str(exc)})
         except Exception as exc:  # noqa: BLE001 - the stream must not just stop
             logger.exception("ops action %s confirm failed", action_id)
-            yield _sse("error", {"code": -1, "message": f"命令执行失败：{exc}"})
+            yield sse_event("error", {"code": -1, "message": f"命令执行失败：{exc}"})
 
     return StreamingResponse(
         stream(),
         media_type="text/event-stream",
-        headers=_SSE_HEADERS,
+        headers=SSE_HEADERS,
         status_code=status.HTTP_200_OK,
     )
 
@@ -285,19 +285,6 @@ async def update_message(
 
 
 # ---- Streaming completion ---------------------------------------------------
-
-def _sse(event: str, data: object) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-
-_SSE_HEADERS = {
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive",
-    # Nginx buffers proxied responses by default, which holds the whole
-    # stream until completion and defeats the point of streaming.
-    "X-Accel-Buffering": "no",
-}
-
 
 @router.post("/completions")
 async def completions(
@@ -350,7 +337,7 @@ async def completions(
             # Tell the client which conversation this belongs to before any
             # tokens arrive, so a first message can update the URL / sidebar
             # even if the answer later fails.
-            yield _sse(
+            yield sse_event(
                 "meta",
                 {
                     "conversation_id": conversation.id,
@@ -374,23 +361,23 @@ async def completions(
                 # running to completion and saving an answer they never saw.
                 is_disconnected=request.is_disconnected,
             ):
-                yield _sse(event, data)
+                yield sse_event(event, data)
 
         except BusinessError as exc:
-            yield _sse("error", {"code": exc.code, "message": exc.msg})
+            yield sse_event("error", {"code": exc.code, "message": exc.msg})
         except LookupError as exc:
-            yield _sse("error", {"code": 404, "message": str(exc)})
+            yield sse_event("error", {"code": 404, "message": str(exc)})
         except Exception as exc:  # noqa: BLE001 - the stream must not just stop
             logger.exception(
                 "chat completion failed for conversation %s",
                 getattr(conversation, "id", None),
             )
-            yield _sse("error", {"code": -1, "message": f"回答生成失败：{exc}"})
+            yield sse_event("error", {"code": -1, "message": f"回答生成失败：{exc}"})
 
     return StreamingResponse(
         stream(),
         media_type="text/event-stream",
-        headers=_SSE_HEADERS,
+        headers=SSE_HEADERS,
         status_code=status.HTTP_200_OK,
     )
 
@@ -419,7 +406,7 @@ async def retry_last_answer(
             agent = service.resolve_agent(conversation.agent_id)
             config = service.require_chat_config(conversation.model_config_id)
 
-            yield _sse(
+            yield sse_event(
                 "meta",
                 {
                     "conversation_id": conversation.id,
@@ -441,19 +428,19 @@ async def retry_last_answer(
                 type_ids=conversation.type_ids,
                 is_disconnected=request.is_disconnected,
             ):
-                yield _sse(event, data)
+                yield sse_event(event, data)
 
         except BusinessError as exc:
-            yield _sse("error", {"code": exc.code, "message": exc.msg})
+            yield sse_event("error", {"code": exc.code, "message": exc.msg})
         except LookupError as exc:
-            yield _sse("error", {"code": 404, "message": str(exc)})
+            yield sse_event("error", {"code": 404, "message": str(exc)})
         except Exception as exc:  # noqa: BLE001 - the stream must not just stop
             logger.exception("chat retry failed for conversation %s", conversation_id)
-            yield _sse("error", {"code": -1, "message": f"重试失败：{exc}"})
+            yield sse_event("error", {"code": -1, "message": f"重试失败：{exc}"})
 
     return StreamingResponse(
         stream(),
         media_type="text/event-stream",
-        headers=_SSE_HEADERS,
+        headers=SSE_HEADERS,
         status_code=status.HTTP_200_OK,
     )

@@ -27,7 +27,6 @@ from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import ObjectDeletedError
 
-from app.errors import BusinessError, CODE_CHAT_NOT_READY
 from app.models.entities import InterviewRecord, ModelConfig
 from app.models.schemas import (
     InterviewCreate,
@@ -36,11 +35,13 @@ from app.models.schemas import (
     InterviewQuestion,
     InterviewQuestionIn,
     InterviewUpdate,
-    ModelPurpose,
 )
-from app.services.agents import AgentService
-from app.services.providers import build_chat_model
-from app.services.resume import MODEL_TASK_TIMEOUT, _labeled_section, _task_error_text
+from app.services.agent_run import (
+    labeled_section,
+    model_error_text,
+    require_chat_model,
+    run_agent,
+)
 
 logger = logging.getLogger("yangvis.interview")
 
@@ -122,10 +123,10 @@ def _answer_prompt(record: InterviewRecord, question: dict) -> str:
     head = f"应聘公司：{record.company}\n面试岗位：{record.position}"
     if record.round:
         head += f"\n面试轮次：{record.round}"
-    parts = [head, _labeled_section("面试问题", question.get("question") or "")]
+    parts = [head, labeled_section("面试问题", question.get("question") or "")]
     my_answer = (question.get("my_answer") or "").strip()
     if my_answer:
-        parts.append(_labeled_section("求职者当时的回答", my_answer))
+        parts.append(labeled_section("求职者当时的回答", my_answer))
     return "\n\n".join(parts)
 
 
@@ -135,7 +136,6 @@ class InterviewService:
     def __init__(self, db: Session, owner_id: int) -> None:
         self._db = db
         self._owner_id = owner_id
-        self._agents = AgentService(db, owner_id)
 
     @property
     def owner_id(self) -> int:
@@ -146,50 +146,13 @@ class InterviewService:
     def _scope(self, stmt: Select) -> Select:
         return stmt.where(InterviewRecord.owner_id == self._owner_id)
 
-    # -- 模型配置（与 ResumeService 同一道门槛）----------------------------------
+    # -- 模型门槛与单次调用（共用 agent_run，不各自复制一份）--------------------
 
     def require_chat_config(self) -> ModelConfig:
-        config = self._db.scalar(
-            select(ModelConfig).where(
-                ModelConfig.owner_id == self._owner_id,
-                ModelConfig.purpose == ModelPurpose.CHAT.value,
-                ModelConfig.is_default.is_(True),
-            )
-        )
-        if config is None or not config.last_test_ok:
-            raise BusinessError(
-                CODE_CHAT_NOT_READY,
-                "尚未配置可用的对话模型。请先到「系统设置 → 模型管理」添加并通过连通性测试。",
-            )
-        return config
+        return require_chat_model(self._db, self._owner_id)
 
     async def _ask(self, slug: str, user_prompt: str) -> str:
-        """按 slug 取内置智能体的人设发起一轮问答，返回纯文本输出。"""
-        from langchain_core.messages import HumanMessage, SystemMessage
-
-        agent = self._agents.require_by_slug(slug)
-        config = self.require_chat_config()
-        logger.info(
-            "calling chat model: agent=%s model=%s base_url=%s prompt_chars=%s owner=%s",
-            slug,
-            config.model_name,
-            config.base_url,
-            len(user_prompt),
-            self._owner_id,
-        )
-        model = build_chat_model(
-            config, temperature=agent.temperature / 100, timeout=MODEL_TASK_TIMEOUT
-        )
-        result = await model.ainvoke(
-            [SystemMessage(content=agent.system_prompt), HumanMessage(content=user_prompt)]
-        )
-        text = result.content if hasattr(result, "content") else str(result)
-        if isinstance(text, list):  # 部分 provider 返回 content block 列表
-            text = "".join(
-                block.get("text", "") if isinstance(block, dict) else str(block)
-                for block in text
-            )
-        return str(text)
+        return await run_agent(self._db, self._owner_id, slug, user_prompt)
 
     # -- 面试场次 CRUD ----------------------------------------------------------
 
@@ -366,7 +329,7 @@ class InterviewService:
                 qid,
                 status=REF_ERROR,
                 answer=None,
-                error=_task_error_text(exc),
+                error=model_error_text(exc),
             )
         self._db.commit()
 

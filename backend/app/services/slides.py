@@ -23,17 +23,19 @@ from sqlalchemy import Select, select, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.errors import CODE_CHAT_NOT_READY, BusinessError
 from app.models.entities import ModelConfig, SlideDeck
 from app.models.schemas import (
-    ModelPurpose,
     SlideAsset,
     SlideDeckDetail,
     SlideDeckItem,
     SlideTheme,
 )
-from app.services.agents import AgentService
-from app.services.providers import build_chat_model
+from app.services.agent_run import (
+    labeled_section,
+    model_error_text,
+    require_chat_model,
+    run_agent,
+)
 from app.services.slides_html import (
     MAX_DECK_PAGES,
     render_document,
@@ -53,16 +55,8 @@ STATUS_ERROR = "error"
 
 AGENT_SLUG_GENERATE = "slide-architect"
 
-# 与简历/对比同一理由：非流式调用要等整个 completion 落地才返回，十几页结构
-# 动辄上千 token，全局 30s 的 MODEL_HTTP_TIMEOUT 几乎必然超时。
-MODEL_TASK_TIMEOUT = 300.0
-
 # 默认外观，deck 还没生成时也用这套。
 DEFAULT_THEME: Dict[str, Any] = {"preset": "teal", "ratio": "16x9", "accent": None}
-
-
-def _labeled_section(label: str, text: str) -> str:
-    return f'{label}：\n"""\n{text.strip()}\n"""'
 
 
 def _truncate(text: str) -> str:
@@ -70,18 +64,6 @@ def _truncate(text: str) -> str:
     if len(text) <= limit:
         return text
     return f"{text[:limit]}\n……（材料过长，已截断）"
-
-
-def _task_error_text(exc: Exception) -> str:
-    """把后台任务里的模型异常转成用户能看懂的失败原因。"""
-    text = str(exc)
-    lowered = text.lower()
-    if "timed out" in lowered or "timeout" in lowered:
-        return (
-            "模型响应超时：幻灯片一次要读完全部材料并产出整份结构，"
-            "可重新生成试试；若反复出现，建议换用响应更快的模型。"
-        )
-    return text[:512]
 
 
 def _json_candidate(text: str) -> Optional[str]:
@@ -143,7 +125,7 @@ def _generate_prompt(
     if requirement:
         parts.append(f"用户对这份幻灯片的要求：{requirement}")
     if source_text:
-        parts.append(_labeled_section("材料全文", _truncate(source_text)))
+        parts.append(labeled_section("材料全文", _truncate(source_text)))
     if asset_names:
         # 模型看不到图片内容，只拿到清单；image 版式必须引用清单里的 id。
         listing = "\n".join(f"- {name}" for name in asset_names)
@@ -164,7 +146,6 @@ class SlideService:
     def __init__(self, db: Session, owner_id: int) -> None:
         self._db = db
         self._owner_id = owner_id
-        self._agents = AgentService(db, owner_id)
 
     @property
     def owner_id(self) -> int:
@@ -175,23 +156,11 @@ class SlideService:
     def _scope(self, stmt: Select) -> Select:
         return stmt.where(SlideDeck.owner_id == self._owner_id)
 
-    # -- 模型配置 -----------------------------------------------------------
+    # -- 模型门槛（与简历同一份共用实现）---------------------------------------
 
     def require_chat_config(self) -> ModelConfig:
         """生成门槛：用户得先有一份验证过的默认对话模型（与简历同一约定）。"""
-        config = self._db.scalar(
-            select(ModelConfig).where(
-                ModelConfig.owner_id == self._owner_id,
-                ModelConfig.purpose == ModelPurpose.CHAT.value,
-                ModelConfig.is_default.is_(True),
-            )
-        )
-        if config is None or not config.last_test_ok:
-            raise BusinessError(
-                CODE_CHAT_NOT_READY,
-                "尚未配置可用的对话模型。请先到「系统设置 → 模型管理」添加并通过连通性测试。",
-            )
-        return config
+        return require_chat_model(self._db, self._owner_id)
 
     # -- CRUD ---------------------------------------------------------------
 
@@ -317,34 +286,10 @@ class SlideService:
     async def _ask(self, slug: str, user_prompt: str) -> str:
         """按 slug 取内置智能体的人设发起一轮问答，返回纯文本输出。
 
-        与简历同一形态：人设（含输出格式要求）在 agent.system_prompt 上，模型
-        配置与温度也跟着智能体走；材料全文这类变量内容放 human 消息。
+        人设（含输出格式要求）在 ``agent.system_prompt`` 上，模型配置与温度也跟着
+        智能体走；材料全文这类变量内容放 human 消息。
         """
-        from langchain_core.messages import HumanMessage, SystemMessage
-
-        agent = self._agents.require_by_slug(slug)
-        config = self.require_chat_config()
-        logger.info(
-            "calling chat model: agent=%s model=%s base_url=%s prompt_chars=%s owner=%s",
-            slug,
-            config.model_name,
-            config.base_url,
-            len(user_prompt),
-            self._owner_id,
-        )
-        model = build_chat_model(
-            config, temperature=agent.temperature / 100, timeout=MODEL_TASK_TIMEOUT
-        )
-        result = await model.ainvoke(
-            [SystemMessage(content=agent.system_prompt), HumanMessage(content=user_prompt)]
-        )
-        text = result.content if hasattr(result, "content") else str(result)
-        if isinstance(text, list):  # 部分 provider 返回 content block 列表
-            text = "".join(
-                block.get("text", "") if isinstance(block, dict) else str(block)
-                for block in text
-            )
-        return str(text)
+        return await run_agent(self._db, self._owner_id, slug, user_prompt)
 
     def start_generation(self, deck_id: int, requirement: Optional[str] = None) -> SlideDeck:
         """置为生成中；``requirement`` 给了就覆盖当时的要求（重生成时补一句）。"""
@@ -414,7 +359,7 @@ class SlideService:
                 exc_info=True,
             )
             deck.status = STATUS_ERROR
-            deck.error_msg = _task_error_text(exc)
+            deck.error_msg = model_error_text(exc)
         self._db.commit()
 
     # -- 编辑 ---------------------------------------------------------------

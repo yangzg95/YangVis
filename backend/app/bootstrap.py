@@ -15,6 +15,7 @@ from app.services.knowledge import reset_stale_indexing
 from app.services.ops_actions import reset_stale_ops_actions
 from app.services.resume import reset_stale_analysis
 from app.services.slides import reset_stale_slides
+from app.services.workflows import reset_stale_runs, seed_builtin_workflows
 from app.security import hash_password
 
 logger = logging.getLogger("yangvis.bootstrap")
@@ -243,6 +244,16 @@ def seed_agents() -> None:
         seed_builtin_agents(db)
 
 
+def seed_workflows() -> None:
+    """安装内置工作流定义（幂等）。
+
+    和内置智能体同一条管线：人设在 agent 上，「哪几步、每步喂什么模板」在工作流
+    上，两者都在启动时就地刷新，改了代码重启即生效。
+    """
+    with SessionLocal() as db:
+        seed_builtin_workflows(db)
+
+
 def reset_stale_jobs() -> None:
     """把上一个进程中途遗留下来的任务收尾。
 
@@ -260,6 +271,8 @@ def reset_stale_jobs() -> None:
         reset_stale_ops_actions(db)
         # 幻灯片的整份生成同样是 worker 里的一次非流式模型调用，重启即丢。
         reset_stale_slides(db)
+        # 工作流跑在请求进程里，重启会把它连同正在执行的步骤一起丢掉。
+        reset_stale_runs(db)
 
 
 def bootstrap_admin(settings: Settings) -> None:

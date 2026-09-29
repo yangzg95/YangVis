@@ -478,6 +478,132 @@ class AgentItem(BaseModel):
     updated_at: datetime
 
 
+# ---- 工作流 ---------------------------------------------------------------
+
+class WorkflowInputField(BaseModel):
+    """工作流声明的一个输入变量。"""
+
+    name: str
+    label: str
+    required: bool = True
+
+
+class WorkflowStepItem(BaseModel):
+    model_config = _ALLOW_MODEL_PREFIX
+
+    key: str
+    group_key: str
+    sort_order: int
+    agent_slug: str
+    # 人设的展示名，便于界面不用再去查 agent 列表。
+    agent_name: Optional[str] = None
+    prompt_tpl: str
+    output_kind: str
+    output_keys: Optional[List[str]] = None
+    output_var: Optional[str] = None
+    model_config_id: Optional[int] = None
+    optional: bool
+
+
+class WorkflowItem(BaseModel):
+    id: int
+    slug: str
+    name: str
+    description: Optional[str] = None
+    inputs: List[WorkflowInputField] = Field(default_factory=list)
+    steps: List[WorkflowStepItem] = Field(default_factory=list)
+    is_builtin: bool
+    enabled: bool
+    sort_order: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkflowRunRequest(BaseModel):
+    """发起一次运行：键是 ``WorkflowItem.inputs`` 里的变量名。"""
+
+    inputs: Dict[str, str] = Field(default_factory=dict)
+
+
+class WorkflowStepInput(BaseModel):
+    """编辑器里的一个步骤：整份定义随 ``WorkflowCreate`` / ``WorkflowUpdate`` 提交。
+
+    没有 ``sort_order``——数组顺序就是执行顺序，让客户端再维护一份编号只会和
+    界面上的上下移动对不上。
+    """
+
+    model_config = _ALLOW_MODEL_PREFIX
+
+    key: str = Field(..., min_length=1, max_length=64)
+    group_key: str = Field(..., min_length=1, max_length=64)
+    agent_slug: str = Field(..., min_length=1, max_length=64)
+    prompt_tpl: str = Field(..., min_length=1)
+    output_kind: str = Field(default="markdown", max_length=16)
+    output_keys: Optional[List[str]] = None
+    output_var: Optional[str] = Field(default=None, max_length=64)
+    model_config_id: Optional[int] = None
+    optional: bool = False
+
+
+class WorkflowDefinition(BaseModel):
+    """一条工作流的可编辑内容。
+
+    更新是**整份替换**而不是补丁：步骤列表是相互约束的（模板只能引用前面步骤的
+    产物、同组不能互相引用），逐字段打补丁没法判断改完还合不合法，而界面上的
+    编辑器本来就是一次提交整份。
+    """
+
+    name: str = Field(..., min_length=1, max_length=128)
+    description: Optional[str] = Field(default=None, max_length=512)
+    inputs: List[WorkflowInputField] = Field(default_factory=list)
+    steps: List[WorkflowStepInput] = Field(..., min_length=1)
+
+
+class WorkflowCreate(WorkflowDefinition):
+    slug: str = Field(..., min_length=2, max_length=64, pattern=r"^[a-z0-9][a-z0-9-]*$")
+
+
+class WorkflowUpdate(WorkflowDefinition):
+    enabled: Optional[bool] = None
+
+
+class WorkflowRunStepItem(BaseModel):
+    model_config = _ALLOW_MODEL_PREFIX
+
+    id: int
+    key: str
+    group_key: str
+    agent_slug: str
+    status: str
+    prompt: Optional[str] = None
+    output: Optional[str] = None
+    parsed: Optional[Dict[str, Any]] = None
+    error_msg: Optional[str] = None
+    model_config_id: Optional[int] = None
+    elapsed_ms: Optional[int] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+
+class WorkflowRunItem(BaseModel):
+    id: int
+    workflow_id: int
+    workflow_slug: str
+    status: str
+    error_msg: Optional[str] = None
+    elapsed_ms: Optional[int] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class WorkflowRunDetail(WorkflowRunItem):
+    """运行详情：带输入快照与每一步的现场。"""
+
+    inputs: Dict[str, Any] = Field(default_factory=dict)
+    steps: List[WorkflowRunStepItem] = Field(default_factory=list)
+
+
 # ---- 长期记忆 ---------------------------------------------------------------
 
 class MemoryItem(BaseModel):

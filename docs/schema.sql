@@ -385,6 +385,89 @@ CREATE TABLE IF NOT EXISTS ai_call_log (
 
 
 -- ---------------------------------------------------------------------------
+-- 工作流：把「功能里硬编码的一次模型调用」搬进配置
+--
+-- 定义（workflow / workflow_step）与现场（workflow_run / workflow_run_step）
+-- 分开：定义可以被改动甚至删除，历史运行要一直读得懂。组间顺序、组内并行，
+-- 每个步骤就是一次智能体调用（见 services/workflows.py）。
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS workflow (
+  id           BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id     BIGINT        NOT NULL DEFAULT 0 COMMENT '0 = 内置，全体可见',
+  slug         VARCHAR(64)   NOT NULL,
+  name         VARCHAR(128)  NOT NULL,
+  description  VARCHAR(512)  NULL,
+  input_schema JSON          NULL COMMENT '[{name, label, required}]，声明接受哪些变量',
+  is_builtin   TINYINT(1)    NOT NULL DEFAULT 0,
+  enabled      TINYINT(1)    NOT NULL DEFAULT 1 COMMENT '只影响界面上的可选性；内置流程被功能自己调用时不看这一位',
+  sort_order   INT           NOT NULL DEFAULT 0,
+  created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_workflow_owner_slug (owner_id, slug),
+  KEY idx_workflow_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一条可配置的智能体流水线';
+
+CREATE TABLE IF NOT EXISTS workflow_step (
+  id              BIGINT PRIMARY KEY AUTO_INCREMENT,
+  workflow_id     BIGINT       NOT NULL COMMENT 'workflow.id',
+  `key`           VARCHAR(64)  NOT NULL COMMENT '步骤标识：运行记录、单步重跑与日志都靠它定位',
+  group_key       VARCHAR(64)  NOT NULL COMMENT '同组并行执行，组间按 sort_order 顺序',
+  sort_order      INT          NOT NULL DEFAULT 0,
+  agent_slug      VARCHAR(64)  NOT NULL COMMENT '人设来自 agent.slug，不在模板里复制一份',
+  prompt_tpl      TEXT         NOT NULL COMMENT '只做 {{name}} 替换，不含条件判断',
+  output_kind     VARCHAR(16)  NOT NULL DEFAULT 'markdown' COMMENT 'markdown | json',
+  output_keys     JSON         NULL COMMENT 'output_kind=json 时要求的顶层字段',
+  output_var      VARCHAR(64)  NULL COMMENT '有值则本步输出以此名进上下文，供后续步骤引用',
+  model_config_id BIGINT       NULL COMMENT '按步骤覆盖模型配置；NULL 用调用者的默认对话模型',
+  optional        TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '可选步骤失败不拖垮整条流程',
+  created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_workflow_step_key (workflow_id, `key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='工作流的一个步骤（一次智能体调用）';
+
+CREATE TABLE IF NOT EXISTS workflow_run (
+  id            BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id      BIGINT       NOT NULL COMMENT 'sys_user.id',
+  workflow_id   BIGINT       NOT NULL COMMENT 'workflow.id',
+  workflow_slug VARCHAR(64)  NOT NULL COMMENT '定义可能被改名或删除，历史列表要能看懂当时跑的是哪条',
+  inputs        JSON         NOT NULL COMMENT '发起时的变量快照，来源数据删了现场仍可回看',
+  status        VARCHAR(16)  NOT NULL DEFAULT 'pending' COMMENT 'pending | running | succeeded | failed | cancelled',
+  error_msg     VARCHAR(512) NULL,
+  elapsed_ms    BIGINT       NULL,
+  started_at    DATETIME     NULL,
+  finished_at   DATETIME     NULL,
+  created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_run_owner (owner_id),
+  KEY idx_run_workflow (workflow_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一次工作流执行';
+
+CREATE TABLE IF NOT EXISTS workflow_run_step (
+  id              BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id        BIGINT       NOT NULL COMMENT '冗余 owner：读快照时按用户收敛，不必先 join run',
+  run_id          BIGINT       NOT NULL COMMENT 'workflow_run.id',
+  `key`           VARCHAR(64)  NOT NULL,
+  group_key       VARCHAR(64)  NOT NULL,
+  agent_slug      VARCHAR(64)  NOT NULL,
+  sort_order      INT          NOT NULL DEFAULT 0,
+  status          VARCHAR(16)  NOT NULL DEFAULT 'pending' COMMENT 'pending | running | succeeded | failed | skipped',
+  prompt          MEDIUMTEXT   NULL COMMENT '渲染后的 prompt——「当时模型到底收到了什么」问得出来',
+  output          MEDIUMTEXT   NULL COMMENT '模型的原始输出',
+  parsed          JSON         NULL COMMENT 'json 步骤解析出的对象；markdown 步骤为 NULL',
+  error_msg       VARCHAR(512) NULL,
+  model_config_id BIGINT       NULL COMMENT '这次实际用的模型配置',
+  elapsed_ms      BIGINT       NULL,
+  started_at      DATETIME     NULL,
+  finished_at     DATETIME     NULL,
+  created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_run_step_owner (owner_id),
+  KEY idx_run_step_run (run_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一次运行中单个步骤的现场';
+
+
+-- ---------------------------------------------------------------------------
 -- 升级已有库：新增「项目」维度
 --
 -- app/bootstrap.py 的 migrate_schema() 在启动时会自动执行等价操作（含回填），

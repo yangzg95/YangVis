@@ -14,7 +14,7 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/Home.vue'),
         meta: {title: '首页'},
     },
-    // 以下顺序就是侧栏菜单顺序：智能体 / 智能问答 / 智能办公 / 智能运维 / 系统。
+    // 以下顺序就是侧栏菜单顺序：智能体 / 问答 / 办公 / 运维 / 系统设置。
     // 菜单分组 key 与路由前缀一一对应，不再有 /settings 挂在 /system 组下的错位。
     {
         path: '/agents',

@@ -21,6 +21,7 @@ from app.models.schemas import SlideDeckSave
 from app.services import slides as slides_module
 from app.services import slides_html
 from app.services import slides_store as store
+from app.services.agent_run import model_error_text
 from app.services.slides import (
     STATUS_ANALYZING,
     STATUS_ERROR,
@@ -29,7 +30,6 @@ from app.services.slides import (
     _generate_prompt,
     _json_candidate,
     _parse_deck_output,
-    _task_error_text,
     _truncate,
     reset_stale_slides,
 )
@@ -411,8 +411,8 @@ def test_truncate_marks_over_limit_source():
 
 
 def test_task_error_text_explains_timeout():
-    assert "超时" in _task_error_text(TimeoutError("Request timed out."))
-    assert _task_error_text(ValueError("别的错")) == "别的错"
+    assert "超时" in model_error_text(TimeoutError("Request timed out."))
+    assert model_error_text(ValueError("别的错")) == "别的错"
 
 
 # ---- 服务层（SQLite 内存库） --------------------------------------------------

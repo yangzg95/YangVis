@@ -159,6 +159,7 @@ interface MenuLeaf {
 }
 
 // 分组按功能口径划：问答（问东西/查东西）与办公（投料→产出）分开，
+// 一级标题不带「智能」前缀——它描述的是能力而不是归属；「智能体」是名词，例外。
 // 智能体单独一级——它同时被对话、简历、幻灯片、数据库问答用（Agent 上的
 // use_knowledge/use_ops/use_memory 开关），挂在任何业务组里都会误导。
 // 分组的 path 只当 a-menu 的 key 用，永远不会被导航；/qa 因此不是路由。
@@ -167,7 +168,7 @@ const MENU: MenuNode[] = [
   { path: '/agents', title: '智能体', icon: RobotOutlined },
   {
     path: '/qa',
-    title: '智能问答',
+    title: '问答',
     icon: MessageOutlined,
     children: [
       { path: '/chat', title: '对话', icon: MessageOutlined },
@@ -176,7 +177,7 @@ const MENU: MenuNode[] = [
   },
   {
     path: '/office',
-    title: '智能办公',
+    title: '办公',
     icon: AppstoreOutlined,
     children: [
       { path: '/office/resume', title: '简历', icon: ProfileOutlined },
@@ -185,7 +186,7 @@ const MENU: MenuNode[] = [
   },
   {
     path: '/ops',
-    title: '智能运维',
+    title: '运维',
     icon: CloudServerOutlined,
     children: [
       { path: '/ops/server', title: '服务器' },
