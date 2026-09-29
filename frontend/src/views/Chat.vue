@@ -24,7 +24,7 @@
       description="对话功能需要一个已通过连通性测试的对话模型才能回答问题。"
     >
       <template #action>
-        <a-button size="small" type="primary" @click="router.push('/settings')">
+        <a-button size="small" type="primary" @click="router.push('/system/settings')">
           去配置
         </a-button>
       </template>
@@ -39,7 +39,7 @@
       description="当前智能体会检索知识库，因此还需要一个向量模型。也可以切换到不检索知识库的智能体。"
     >
       <template #action>
-        <a-button size="small" type="primary" @click="router.push('/settings')">
+        <a-button size="small" type="primary" @click="router.push('/system/settings')">
           去配置
         </a-button>
       </template>
@@ -713,7 +713,7 @@ async function removeConversation(id: number) {
 }
 
 // ---- 基于报告发起对话 ---------------------------------------------------------
-// 报告页（ReportView）「发起对话」新开标签页进 /customer-service?report=<kind>/<id>。
+// 报告页（ReportView）「发起对话」新开标签页进 /chat?report=<kind>/<id>。
 // query 只传引用不传全文：报告全文由这里重新拉取（noopener 下拿不到 opener 的
 // sessionStorage，URL 也塞不下几千字），数据以后端为准。
 
@@ -819,7 +819,7 @@ async function handleConversationDeepLink() {
 watch(
   () => [route.path, route.query.conv] as const,
   ([path, conv]) => {
-    if (path !== '/customer-service' || !conv || booting.value) return
+    if (path !== '/chat' || !conv || booting.value) return
     void handleConversationDeepLink()
   },
 )

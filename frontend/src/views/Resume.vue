@@ -1097,7 +1097,7 @@ const openToolkitReport = (id: number) => openReportTab('toolkit', id)
 // ---- 辅助 ---------------------------------------------------------------------
 
 function goToSettings() {
-  router.push('/settings')
+  router.push('/system/settings')
 }
 
 function statusText(status: ResumeStatus | string): string {

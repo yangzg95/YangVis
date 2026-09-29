@@ -6,7 +6,7 @@
         <div class="hero-sub muted">{{ todayText }}</div>
       </div>
       <div class="hero-actions">
-        <a-button type="primary" @click="go('/customer-service')">
+        <a-button type="primary" @click="go('/chat')">
           <MessageOutlined /> 开始对话
         </a-button>
         <a-button @click="go('/knowledge')">
@@ -25,7 +25,7 @@
       description="对话、简历分析、幻灯片生成这类功能都要一个已通过连通性测试的对话模型。"
     >
       <template #action>
-        <a-button size="small" type="primary" @click="go('/settings')">去配置</a-button>
+        <a-button size="small" type="primary" @click="go('/system/settings')">去配置</a-button>
       </template>
     </a-alert>
 
@@ -63,7 +63,7 @@
       <section class="home-card">
         <div class="card-title">
           最近对话
-          <button v-if="recent.length" type="button" class="card-more" @click="go('/customer-service')">
+          <button v-if="recent.length" type="button" class="card-more" @click="go('/chat')">
             查看全部
           </button>
         </div>
@@ -164,7 +164,7 @@ const modules = computed<HomeModule[]>(() => {
   const s = summary.value
   const list: HomeModule[] = [
     {
-      path: '/customer-service',
+      path: '/chat',
       name: '对话',
       desc: '与智能体问答，可挂知识库与运维工具',
       icon: MessageOutlined,
@@ -178,6 +178,14 @@ const modules = computed<HomeModule[]>(() => {
       icon: BookOutlined,
       unit: '份文档',
       value: s?.knowledge_document_count ?? null,
+    },
+    {
+      path: '/agents',
+      name: '智能体',
+      desc: '人设、提示词与工具开关',
+      icon: RobotOutlined,
+      unit: '个智能体',
+      value: s?.agent_count ?? null,
     },
     {
       path: '/office/resume',
@@ -211,14 +219,6 @@ const modules = computed<HomeModule[]>(() => {
       icon: DatabaseOutlined,
       unit: '个连接',
       value: s?.database_count ?? null,
-    },
-    {
-      path: '/agents',
-      name: '智能体',
-      desc: '人设、提示词与工具开关',
-      icon: RobotOutlined,
-      unit: '个智能体',
-      value: s?.agent_count ?? null,
     },
   ]
   // 网关是平台级资产，后端只对管理员出这三项；卡片也以管理员身份为条件。
@@ -284,9 +284,9 @@ function go(path: string) {
   router.push(path)
 }
 
-/** 带着会话 id 进对话页，由那边打开指定会话（见 CustomerService 的深链处理）。 */
+/** 带着会话 id 进对话页，由那边打开指定会话（见 Chat 的深链处理）。 */
 function openConversation(id: number) {
-  router.push({ path: '/customer-service', query: { conv: String(id) } })
+  router.push({ path: '/chat', query: { conv: String(id) } })
 }
 
 async function loadAll() {

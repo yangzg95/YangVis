@@ -313,7 +313,7 @@ function openShow(id: number) {
 }
 
 function goToSettings() {
-  router.push('/settings')
+  router.push('/system/settings')
 }
 
 function errorText(err: unknown, fallback: string): string {

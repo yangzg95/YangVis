@@ -123,7 +123,7 @@ async function loadReport() {
 function onStartDiscuss() {
   if (!state.report) return
   const href = router.resolve({
-    name: 'CustomerService',
+    name: 'Chat',
     query: { report: `${kind}/${id}` },
   }).href
   window.open(href, '_blank', 'noopener')

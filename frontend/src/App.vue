@@ -158,15 +158,27 @@ interface MenuLeaf {
   icon: unknown
 }
 
+// 分组按功能口径划：问答（问东西/查东西）与办公（投料→产出）分开，
+// 智能体单独一级——它同时被对话、简历、幻灯片、数据库问答用（Agent 上的
+// use_knowledge/use_ops/use_memory 开关），挂在任何业务组里都会误导。
+// 分组的 path 只当 a-menu 的 key 用，永远不会被导航；/qa 因此不是路由。
 const MENU: MenuNode[] = [
   { path: '/', title: '首页', icon: HomeOutlined },
+  { path: '/agents', title: '智能体', icon: RobotOutlined },
   {
-    path: '/service',
-    title: '智能应用',
+    path: '/qa',
+    title: '智能问答',
+    icon: MessageOutlined,
+    children: [
+      { path: '/chat', title: '对话', icon: MessageOutlined },
+      { path: '/knowledge', title: '知识库', icon: BookOutlined },
+    ],
+  },
+  {
+    path: '/office',
+    title: '智能办公',
     icon: AppstoreOutlined,
     children: [
-      { path: '/customer-service', title: '对话', icon: MessageOutlined },
-      { path: '/knowledge', title: '知识库', icon: BookOutlined },
       { path: '/office/resume', title: '简历', icon: ProfileOutlined },
       { path: '/office/slides', title: '幻灯片', icon: FundProjectionScreenOutlined },
     ],
@@ -185,8 +197,7 @@ const MENU: MenuNode[] = [
     title: '系统设置',
     icon: SettingOutlined,
     children: [
-      { path: '/settings', title: '通用设置' },
-      { path: '/agents', title: '智能体', icon: RobotOutlined },
+      { path: '/system/settings', title: '通用设置' },
       { path: '/system/ai-gateway', title: 'AI 网关', icon: ApiOutlined, adminOnly: true },
       { path: '/system/users', title: '用户管理', icon: TeamOutlined, adminOnly: true },
     ],

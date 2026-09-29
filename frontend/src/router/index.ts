@@ -14,15 +14,25 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/Home.vue'),
         meta: {title: '首页'},
     },
+    // 以下顺序就是侧栏菜单顺序：智能体 / 智能问答 / 智能办公 / 智能运维 / 系统。
+    // 菜单分组 key 与路由前缀一一对应，不再有 /settings 挂在 /system 组下的错位。
     {
-        path: '/service',
-        redirect: '/customer-service',
+        path: '/agents',
+        name: 'Agents',
+        component: () => import('@/views/Agents.vue'),
+        meta: {title: '智能体'},
     },
     {
-        path: '/customer-service',
-        name: 'CustomerService',
-        component: () => import('@/views/CustomerService.vue'),
+        path: '/chat',
+        name: 'Chat',
+        component: () => import('@/views/Chat.vue'),
         meta: {title: '对话'},
+    },
+    {
+        path: '/knowledge',
+        name: 'Knowledge',
+        component: () => import('@/views/Knowledge.vue'),
+        meta: {title: '知识库'},
     },
     {
         path: '/office',
@@ -102,26 +112,14 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '数据库问答', bare: true},
     },
     {
-        path: '/agents',
-        name: 'Agents',
-        component: () => import('@/views/Agents.vue'),
-        meta: {title: '智能体'},
-    },
-    {
         path: '/system',
-        redirect: '/settings',
+        redirect: '/system/settings',
     },
     {
-        path: '/settings',
+        path: '/system/settings',
         name: 'Settings',
         component: () => import('@/views/Settings.vue'),
         meta: {title: '通用设置'},
-    },
-    {
-        path: '/system/users',
-        name: 'Users',
-        component: () => import('@/views/Users.vue'),
-        meta: {title: '用户管理'},
     },
     {
         path: '/system/ai-gateway',
@@ -130,10 +128,10 @@ const routes: RouteRecordRaw[] = [
         meta: {title: 'AI 网关'},
     },
     {
-        path: '/knowledge',
-        name: 'Knowledge',
-        component: () => import('@/views/Knowledge.vue'),
-        meta: {title: '知识库'},
+        path: '/system/users',
+        name: 'Users',
+        component: () => import('@/views/Users.vue'),
+        meta: {title: '用户管理'},
     },
     {
         path: '/:pathMatch(.*)*',

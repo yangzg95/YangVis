@@ -1029,7 +1029,7 @@ async function runSearch() {
 // ---- 辅助函数 --------------------------------------------------------------
 
 function goToSettings() {
-  router.push('/settings')
+  router.push('/system/settings')
 }
 
 // 文件大小格式化统一用 utils/format 的 fmtSize（812 B / 4.2 K / 30.1 M）。
