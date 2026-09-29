@@ -14,13 +14,19 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/Home.vue'),
         meta: {title: '首页'},
     },
-    // 以下顺序就是侧栏菜单顺序：智能体 / 问答 / 办公 / 运维 / 系统设置。
+    // 以下顺序就是侧栏菜单顺序：智能体 / 工作流 / 问答 / 办公 / 运维 / 系统设置。
     // 菜单分组 key 与路由前缀一一对应，不再有 /settings 挂在 /system 组下的错位。
     {
         path: '/agents',
         name: 'Agents',
         component: () => import('@/views/Agents.vue'),
         meta: {title: '智能体'},
+    },
+    {
+        path: '/workflows',
+        name: 'Workflows',
+        component: () => import('@/views/Workflows.vue'),
+        meta: {title: '工作流'},
     },
     {
         path: '/chat',

@@ -673,11 +673,23 @@ class WorkflowService:
                     prompt_tpl=step.prompt_tpl,
                     output_kind=step.output_kind,
                     output_keys=list(step.output_keys) if step.output_keys else None,
-                    output_var=step.output_var,
+                    # 空串按「没有产物变量」处理：否则界面上清空一格就在库里留下
+                    # 一个既不是 NULL 也不是名字的值。
+                    output_var=step.output_var or None,
                     model_config_id=step.model_config_id,
                     optional=step.optional,
                 )
             )
+
+        # 分组必须连续：引擎按 group_key 首次出现归组，同名组被别的组隔开时，
+        # 编辑器里看到的顺序和实际执行顺序就不是一回事了。
+        placed: List[str] = []
+        for step in steps:
+            if placed and placed[-1] != step.group_key and step.group_key in placed:
+                raise ValueError(
+                    f"并行分组 {step.group_key} 的步骤不连续：同组的步骤请放在一起"
+                )
+            placed.append(step.group_key)
 
         self._check_template_vars(steps, declared)
         return steps

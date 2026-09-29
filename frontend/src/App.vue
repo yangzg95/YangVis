@@ -139,6 +139,7 @@ import {
   LogoutOutlined,
   MenuOutlined,
   MessageOutlined,
+  PartitionOutlined,
   ProfileOutlined,
   RobotOutlined,
   SettingOutlined,
@@ -162,10 +163,12 @@ interface MenuLeaf {
 // 一级标题不带「智能」前缀——它描述的是能力而不是归属；「智能体」是名词，例外。
 // 智能体单独一级——它同时被对话、简历、幻灯片、数据库问答用（Agent 上的
 // use_knowledge/use_ops/use_memory 开关），挂在任何业务组里都会误导。
+// 工作流紧挨着智能体：它把智能体串成流水线，两者是一组配置项，都不属于某个业务页。
 // 分组的 path 只当 a-menu 的 key 用，永远不会被导航；/qa 因此不是路由。
 const MENU: MenuNode[] = [
   { path: '/', title: '首页', icon: HomeOutlined },
   { path: '/agents', title: '智能体', icon: RobotOutlined },
+  { path: '/workflows', title: '工作流', icon: PartitionOutlined },
   {
     path: '/qa',
     title: '问答',

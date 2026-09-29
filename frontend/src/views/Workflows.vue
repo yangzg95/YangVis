@@ -1,0 +1,277 @@
+<template>
+  <div class="page-card">
+    <div class="page-title">工作流</div>
+    <div class="subtitle">
+      一条工作流就是把「一次功能调用」拆成几步写模型的流水线：输入变量、每步的人设与
+      Prompt 模板、输出格式都在这儿改，不用发版。步骤之间可以并行。
+    </div>
+
+    <div class="toolbar">
+      <a-button type="primary" @click="openCreate">
+        <PlusOutlined /> 新建工作流
+      </a-button>
+    </div>
+
+    <!-- 首屏骨架屏：避免先闪「还没有工作流」再填充。 -->
+    <div v-if="loading && !workflows.length" class="workflow-grid">
+      <a-card v-for="i in 2" :key="i" size="small" class="workflow-card">
+        <a-skeleton active :title="{ width: '40%' }" :paragraph="{ rows: 4 }" />
+      </a-card>
+    </div>
+    <template v-else>
+      <div class="workflow-grid">
+        <a-card v-for="workflow in workflows" :key="workflow.id" size="small" class="workflow-card">
+          <div class="wf-head">
+            <span class="wf-name">{{ workflow.name }}</span>
+            <a-tag v-if="workflow.is_builtin">内置</a-tag>
+            <span class="spacer" />
+            <span class="wf-slug">{{ workflow.slug }}</span>
+          </div>
+
+          <div class="wf-desc">{{ workflow.description || '暂无描述' }}</div>
+
+          <!-- 步骤链：一行看清组间顺序与组内并行，比逐条列步骤省地方。 -->
+          <div class="wf-chain">
+            <template v-for="(group, index) in chainOf(workflow)" :key="index">
+              <span v-if="index" class="wf-arrow">→</span>
+              <span class="wf-group" :class="{ parallel: group.steps.length > 1 }">
+                <span v-if="group.parallel" class="wf-group-name">{{ group.name }}</span>
+                <span
+                  v-for="(step, stepIndex) in group.steps"
+                  :key="step.key"
+                  class="wf-step"
+                  :class="{ 'wf-optional': step.optional }"
+                >
+                  <span v-if="stepIndex" class="wf-parallel">∥</span>
+                  {{ step.key }}
+                  <span class="wf-agent">{{ step.agent_name || step.agent_slug }}</span>
+                </span>
+              </span>
+            </template>
+          </div>
+
+          <div class="wf-tags">
+            <a-tag>{{ workflow.steps.length }} 步</a-tag>
+            <a-tag>{{ chainOf(workflow).length }} 个分组</a-tag>
+            <a-tag v-if="workflow.inputs.length">{{ workflow.inputs.length }} 个输入</a-tag>
+            <a-tag v-if="!workflow.enabled" color="orange">已停用</a-tag>
+          </div>
+
+          <template #actions>
+            <span @click="openRuns(workflow)">运行</span>
+            <span v-if="workflow.is_builtin" @click="openView(workflow)">查看</span>
+            <template v-else>
+              <span @click="openEdit(workflow)">编辑</span>
+              <span @click="onDuplicate(workflow)">复制</span>
+              <a-popconfirm title="确认删除该工作流？运行记录会保留。" @confirm="onDelete(workflow)">
+                <span class="danger">删除</span>
+              </a-popconfirm>
+            </template>
+          </template>
+        </a-card>
+      </div>
+
+      <a-empty v-if="!workflows.length" description="还没有工作流" />
+    </template>
+
+    <WorkflowEditorDrawer
+      v-model:open="editorOpen"
+      :workflow="current"
+      :readonly="readonly"
+      @saved="onSaved"
+    />
+    <WorkflowRunsDrawer v-model:open="runsOpen" :workflow="current" />
+  </div>
+</template>
+
+<script setup lang="ts">
+import { onMounted, ref } from 'vue'
+import { message } from 'ant-design-vue'
+import { PlusOutlined } from '@ant-design/icons-vue'
+import { workflowsApi, type Workflow, type WorkflowStep } from '@/api'
+import WorkflowEditorDrawer from '@/components/WorkflowEditorDrawer.vue'
+import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
+
+const workflows = ref<Workflow[]>([])
+const loading = ref(false)
+const current = ref<Workflow | null>(null)
+const editorOpen = ref(false)
+const readonly = ref(false)
+const runsOpen = ref(false)
+
+interface StepGroup {
+  name: string
+  parallel: boolean
+  steps: WorkflowStep[]
+}
+
+/**
+ * 相邻且分组名相同的步骤算一组：后端按这个口径执行，界面也按这个口径画，
+ * 两者不会各说各话。
+ */
+function chainOf(workflow: Workflow): StepGroup[] {
+  const groups: StepGroup[] = []
+  for (const step of workflow.steps) {
+    const last = groups[groups.length - 1]
+    if (last && last.name === step.group_key) {
+      last.steps.push(step)
+      continue
+    }
+    groups.push({ name: step.group_key, parallel: false, steps: [step] })
+  }
+  for (const group of groups) group.parallel = group.steps.length > 1
+  return groups
+}
+
+async function load() {
+  loading.value = true
+  try {
+    const data = await workflowsApi.list()
+    workflows.value = data.items
+  } finally {
+    loading.value = false
+  }
+}
+
+function openCreate() {
+  current.value = null
+  readonly.value = false
+  editorOpen.value = true
+}
+
+function openEdit(workflow: Workflow) {
+  current.value = workflow
+  readonly.value = false
+  editorOpen.value = true
+}
+
+function openView(workflow: Workflow) {
+  current.value = workflow
+  readonly.value = true
+  editorOpen.value = true
+}
+
+function openRuns(workflow: Workflow) {
+  current.value = workflow
+  runsOpen.value = true
+}
+
+async function onSaved(saved: Workflow) {
+  // 抽屉里改完直接换清单：抽屉绑的是旧对象，不刷新的话第二次保存会拿旧定义覆盖。
+  current.value = saved
+  await load()
+}
+
+async function onDuplicate(workflow: Workflow) {
+  try {
+    const copy = await workflowsApi.duplicate(workflow.id)
+    message.success(`已复制为「${copy.name}」`)
+  } catch {
+    return // 拦截器已弹 toast。
+  }
+  await load()
+}
+
+async function onDelete(workflow: Workflow) {
+  try {
+    await workflowsApi.remove(workflow.id)
+    message.success('已删除')
+  } catch {
+    return
+  }
+  await load()
+}
+
+onMounted(load)
+</script>
+
+<style scoped>
+.subtitle {
+  color: var(--text-3);
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+/* flex 基底用全局 .toolbar（style.css），这里只留本页差异。 */
+.toolbar {
+  margin-bottom: 16px;
+  justify-content: flex-end;
+}
+.workflow-grid {
+  display: grid;
+  /* 步骤链比智能体卡片宽，最小列也相应放宽；超小屏用 min() 兜住不横向溢出。 */
+  grid-template-columns: repeat(auto-fill, minmax(min(420px, 100%), 1fr));
+  gap: 16px;
+}
+.wf-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.wf-name {
+  font-weight: 600;
+  font-size: 15px;
+}
+.wf-slug {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-3);
+}
+.wf-desc {
+  color: rgba(0, 0, 0, 0.65);
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 40px;
+  margin-top: 6px;
+}
+.wf-chain {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+.wf-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--paper);
+}
+.wf-group.parallel {
+  border-style: dashed;
+}
+.wf-group-name {
+  color: var(--text-3);
+}
+.wf-step {
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+.wf-optional {
+  color: var(--text-3);
+}
+.wf-agent {
+  font-family: inherit;
+  color: var(--text-3);
+  margin-left: 2px;
+}
+.wf-arrow,
+.wf-parallel {
+  color: var(--text-3);
+}
+.wf-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+.spacer {
+  flex: 1;
+}
+.danger {
+  color: #cf1322;
+}
+</style>

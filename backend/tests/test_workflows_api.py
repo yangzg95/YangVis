@@ -19,6 +19,7 @@ from app.models.entities import ModelConfig, Workflow
 from app.models.schemas import CurrentUser, ModelPurpose
 from app.routers import workflows as workflows_router
 from app.services import workflows as workflows_module
+from app.services.agents import seed_builtin_agents
 from app.services.workflows import seed_builtin_workflows
 
 OWNER = 1
@@ -48,6 +49,7 @@ def env(tmp_path, monkeypatch):
     app.dependency_overrides[require_user] = lambda: CurrentUser(user_id=OWNER, username="t")
 
     with Session() as db:
+        seed_builtin_agents(db)
         seed_builtin_workflows(db)
         db.add(
             ModelConfig(
@@ -117,6 +119,106 @@ def test_runs_route_is_not_shadowed_by_workflow_id(env):
     response = client.get("/api/workflows/runs")
     assert response.status_code == 200
     assert response.json()["data"]["items"] == []
+
+
+# ---- 定义编辑 ---------------------------------------------------------------
+
+
+def _body(**overrides) -> dict:
+    """一条最小可运行的个人工作流（人设取内置的通用助手）。
+
+    校验细节在 ``test_workflows.py`` 里钉，这里只验 HTTP 层：整份提交、错误怎么
+    呈现、内置项的改法。
+    """
+    payload = {
+        "slug": "my-flow",
+        "name": "我的流程",
+        "inputs": [{"name": "topic", "label": "主题", "required": True}],
+        "steps": [
+            {
+                "key": "draft",
+                "group_key": "draft",
+                "agent_slug": "general-chat",
+                "prompt_tpl": "就{{topic}}写一段话",
+            }
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_create_update_and_delete_a_personal_workflow(env):
+    client, _ = env
+
+    created = client.post("/api/workflows", json=_body()).json()
+    assert created["code"] == 0
+    assert created["data"]["is_builtin"] is False
+    assert [step["key"] for step in created["data"]["steps"]] == ["draft"]
+    assert created["data"]["steps"][0]["agent_name"] == "通用助手"
+    workflow_id = created["data"]["id"]
+
+    updated = client.put(
+        f"/api/workflows/{workflow_id}",
+        json={**_body(), "name": "改过名的流程", "enabled": False},
+    ).json()
+    assert updated["data"]["name"] == "改过名的流程"
+    assert updated["data"]["enabled"] is False
+
+    assert client.delete(f"/api/workflows/{workflow_id}").json()["message"] == "deleted"
+    assert client.get(f"/api/workflows/{workflow_id}").status_code == 404
+
+
+def test_create_reports_a_validation_failure_as_an_envelope_error(env):
+    client, Session = env
+
+    body = client.post(
+        "/api/workflows", json=_body(steps=[{**_body()["steps"][0], "agent_slug": "ghost"}])
+    ).json()
+
+    # 与智能体同一套约定：形状没错但内容不合法是业务拒绝，走 code 不走 HTTP 状态。
+    assert body["code"] == -1
+    assert "不存在的智能体" in body["message"]
+    with Session() as db:
+        assert db.query(Workflow).filter_by(slug="my-flow").first() is None
+
+
+def test_builtin_definition_is_read_only_but_can_be_copied(env):
+    client, Session = env
+    with Session() as db:
+        builtin_id = db.scalar(select(Workflow).where(Workflow.slug == "resume-analysis")).id
+
+    refused = client.put(f"/api/workflows/{builtin_id}", json=_body()).json()
+    assert refused["code"] == -1
+    assert "内置工作流不可修改" in refused["message"]
+
+    copied = client.post(f"/api/workflows/{builtin_id}/duplicate").json()["data"]
+    assert copied["is_builtin"] is False
+    assert copied["slug"] == "resume-analysis-copy"
+    assert [step["key"] for step in copied["steps"]] == ["analyze"]
+
+    edited = client.put(
+        f"/api/workflows/{copied['id']}",
+        json={
+            "name": copied["name"],
+            "description": copied["description"],
+            "inputs": [{"name": "resume_content", "label": "简历全文", "required": True}],
+            "steps": [
+                {
+                    "key": "analyze",
+                    "group_key": "analyze",
+                    "agent_slug": "resume-analyzer",
+                    "prompt_tpl": "只看{{resume_content}}",
+                    "output_kind": "json",
+                    "output_keys": ["report"],
+                    "output_var": "analysis",
+                }
+            ],
+        },
+    ).json()
+    assert edited["data"]["steps"][0]["prompt_tpl"] == "只看{{resume_content}}"
+    assert edited["data"]["inputs"] == [
+        {"name": "resume_content", "label": "简历全文", "required": True}
+    ]
 
 
 # ---- 运行 -------------------------------------------------------------------

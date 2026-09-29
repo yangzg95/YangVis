@@ -424,6 +424,22 @@ def test_create_rejects_referencing_a_parallel_sibling(db):
         WorkflowService(db, OWNER).create(payload)
 
 
+def test_create_rejects_an_interleaved_group(db):
+    _agents_named(db, "writer", "scorer")
+    # 引擎按首次出现归组，所以 a/c 会和 b 抢执行顺序：编辑器里的列表顺序就不是
+    # 真实顺序了，这种写法直接拒掉。
+    payload = _create_payload(
+        steps=[
+            {"key": "a", "group_key": "g1", "agent_slug": "writer", "prompt_tpl": "写{{topic}}"},
+            {"key": "b", "group_key": "g2", "agent_slug": "scorer", "prompt_tpl": "评{{topic}}"},
+            {"key": "c", "group_key": "g1", "agent_slug": "writer", "prompt_tpl": "再写{{topic}}"},
+        ]
+    )
+
+    with pytest.raises(ValueError, match="不连续"):
+        WorkflowService(db, OWNER).create(payload)
+
+
 def test_create_allows_referencing_an_earlier_group_output(db):
     _agents_named(db, "writer", "scorer")
     payload = _create_payload(

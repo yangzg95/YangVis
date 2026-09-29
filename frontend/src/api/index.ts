@@ -476,6 +476,125 @@ export const agentsApi = {
     request<Agent>({ url: `/agents/${id}/duplicate`, method: 'POST' }),
 }
 
+// ---- 工作流 ----------------------------------------------------------------
+
+export interface WorkflowInputField {
+  name: string
+  label: string
+  required: boolean
+}
+
+export interface WorkflowStep {
+  key: string
+  /** 同组并行执行，组间按数组顺序（也就是 sort_order）依次跑。 */
+  group_key: string
+  sort_order: number
+  agent_slug: string
+  agent_name?: string | null
+  prompt_tpl: string
+  output_kind: string
+  output_keys?: string[] | null
+  /** 有值则本步输出以该名进上下文，供后续步骤的模板引用。 */
+  output_var?: string | null
+  model_config_id?: number | null
+  optional: boolean
+}
+
+export interface Workflow {
+  id: number
+  slug: string
+  name: string
+  description?: string | null
+  inputs: WorkflowInputField[]
+  steps: WorkflowStep[]
+  is_builtin: boolean
+  enabled: boolean
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+/** 提交给后端的整份定义：创建与更新都是整体替换，不是补丁。 */
+export interface WorkflowPayload {
+  slug?: string
+  name: string
+  description?: string | null
+  inputs: WorkflowInputField[]
+  steps: Omit<WorkflowStep, 'sort_order' | 'agent_name'>[]
+  enabled?: boolean
+}
+
+export type RunStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+export type RunStepStatus = RunStatus | 'skipped'
+
+export interface WorkflowRun {
+  id: number
+  workflow_id: number
+  /** 定义可能已改名或删除，历史列表靠这一列认得出当时跑的是哪条。 */
+  workflow_slug: string
+  status: RunStatus
+  error_msg?: string | null
+  elapsed_ms?: number | null
+  started_at?: string | null
+  finished_at?: string | null
+  created_at: string
+}
+
+export interface WorkflowRunStep {
+  id: number
+  key: string
+  group_key: string
+  agent_slug: string
+  status: RunStepStatus
+  /** 渲染后的 prompt：「当时模型到底收到了什么」问得出来。 */
+  prompt?: string | null
+  output?: string | null
+  parsed?: Record<string, unknown> | null
+  error_msg?: string | null
+  model_config_id?: number | null
+  elapsed_ms?: number | null
+  started_at?: string | null
+  finished_at?: string | null
+}
+
+export interface WorkflowRunDetail extends WorkflowRun {
+  inputs: Record<string, string>
+  steps: WorkflowRunStep[]
+}
+
+export const workflowsApi = {
+  list: (enabledOnly = false) =>
+    request<{ items: Workflow[]; total: number }>({
+      url: '/workflows',
+      params: enabledOnly ? { enabled_only: true } : undefined,
+    }),
+  get: (id: number) => request<Workflow>({ url: `/workflows/${id}` }),
+  create: (payload: WorkflowPayload) =>
+    request<Workflow>({ url: '/workflows', method: 'POST', data: payload }),
+  update: (id: number, payload: WorkflowPayload) =>
+    request<Workflow>({ url: `/workflows/${id}`, method: 'PUT', data: payload }),
+  remove: (id: number) => request<null>({ url: `/workflows/${id}`, method: 'DELETE' }),
+  duplicate: (id: number) =>
+    request<Workflow>({ url: `/workflows/${id}/duplicate`, method: 'POST' }),
+  listRuns: (params: { workflowId?: number; limit?: number } = {}) =>
+    request<{ items: WorkflowRun[]; total: number }>({
+      url: '/workflows/runs',
+      params: {
+        workflow_id: params.workflowId,
+        limit: params.limit ?? 20,
+      },
+    }),
+  runDetail: (id: number) => request<WorkflowRunDetail>({ url: `/workflows/runs/${id}` }),
+  /**
+   * 发起一次运行并跟随进度。
+   *
+   * 事件只报状态与长度，正文一律从 {@link runDetail} 按步取：中途换设备、
+   * 流断开之后打开历史详情，看到的进度是一样的。
+   */
+  streamRun: (workflowId: number, inputs: Record<string, string>, handlers: StreamHandlers) =>
+    streamSse(`/api/workflows/${workflowId}/runs/stream`, { inputs }, handlers),
+}
+
 // ---- 长期记忆 ----------------------------------------------------------------
 
 export interface MemoryItem {
@@ -595,6 +714,34 @@ export interface StreamHandlers {
   onExec?: (data: ExecEvent) => void
   onDone?: (data: { message_id: number; conversation_id: number }) => void
   onError?: (data: { code: number; message: string }) => void
+  // ---- 工作流运行的进度事件（对话用不到这几项）----
+
+  onRunStart?: (data: {
+    run_id: number
+    workflow_slug: string
+    steps: {
+      key: string
+      group_key: string
+      agent_slug: string
+      agent_name?: string | null
+      output_kind: string
+      optional: boolean
+    }[]
+  }) => void
+  onStepStart?: (data: { key: string; group_key: string }) => void
+  onStepEnd?: (data: {
+    key: string
+    status: RunStepStatus
+    error?: string | null
+    output_chars: number
+    elapsed_ms?: number | null
+  }) => void
+  onRunEnd?: (data: {
+    run_id: number
+    status: RunStatus
+    error?: string | null
+    elapsed_ms?: number | null
+  }) => void
 }
 
 export const chatApi = {
@@ -799,6 +946,19 @@ function dispatchSse(
       break
     case 'done':
       handlers.onDone?.(data)
+      break
+    // 工作流的进度事件：事件名与对话的互不重叠，共用一套解析与中断逻辑。
+    case 'run_start':
+      handlers.onRunStart?.(data)
+      break
+    case 'step_start':
+      handlers.onStepStart?.(data)
+      break
+    case 'step_end':
+      handlers.onStepEnd?.(data)
+      break
+    case 'run_end':
+      handlers.onRunEnd?.(data)
       break
     case 'error':
       handlers.onError?.(data)
