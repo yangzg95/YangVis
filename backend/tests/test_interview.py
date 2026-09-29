@@ -9,7 +9,7 @@ from app.services.interview import (
     REF_NONE,
     REF_READY,
     STALE_ANSWER_ERROR,
-    _answer_prompt,
+    _answer_inputs,
     _find_question,
     _merge_ref_fields,
     _new_qid,
@@ -94,7 +94,7 @@ def test_reset_stale_questions_without_analyzing_is_noop():
     assert fixed == questions
 
 
-# ---- _answer_prompt --------------------------------------------------------------
+# ---- _answer_inputs --------------------------------------------------------------
 
 
 def _record(**overrides) -> InterviewRecord:
@@ -110,25 +110,26 @@ def _record(**overrides) -> InterviewRecord:
     return record
 
 
-def test_answer_prompt_includes_background_and_question():
-    prompt = _answer_prompt(_record(round="二面"), _question("aaa", question="讲讲你做过的高并发优化"))
+def test_answer_inputs_carries_background_and_question():
+    inputs = _answer_inputs(
+        _record(round="二面"), _question("aaa", question="讲讲你做过的高并发优化")
+    )
 
-    assert "应聘公司：示例科技" in prompt
-    assert "面试岗位：高级后端工程师" in prompt
-    assert "面试轮次：二面" in prompt
-    assert "面试问题" in prompt
-    assert "讲讲你做过的高并发优化" in prompt
-    # 没有「当时的回答」就不该出现这一段。
-    assert "求职者当时的回答" not in prompt
-
-
-def test_answer_prompt_includes_my_answer_when_present():
-    prompt = _answer_prompt(_record(), _question("aaa", my_answer="我当时答了缓存预热"))
-
-    assert "求职者当时的回答" in prompt
-    assert "我当时答了缓存预热" in prompt
+    assert inputs["company"] == "示例科技"
+    assert inputs["position"] == "高级后端工程师"
+    assert inputs["round_note"] == "\n面试轮次：二面"
+    assert inputs["question"] == "讲讲你做过的高并发优化"
+    # 没有「当时的回答」就不该出现那一段。
+    assert inputs["answer_note"] == ""
 
 
-def test_answer_prompt_omits_round_when_empty():
-    prompt = _answer_prompt(_record(round=None), _question("aaa"))
-    assert "面试轮次" not in prompt
+def test_answer_inputs_wraps_my_answer_in_a_section():
+    inputs = _answer_inputs(_record(), _question("aaa", my_answer="我当时答了缓存预热"))
+
+    assert "求职者当时的回答" in inputs["answer_note"]
+    assert "我当时答了缓存预热" in inputs["answer_note"]
+
+
+def test_answer_inputs_leaves_the_round_line_out_when_empty():
+    inputs = _answer_inputs(_record(round=None), _question("aaa"))
+    assert inputs["round_note"] == ""

@@ -124,6 +124,7 @@ class BuiltinStep:
     output_var: Optional[str] = None
     optional: bool = False
     sort_order: int = 0
+    model_config_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -137,12 +138,16 @@ class BuiltinWorkflow:
 
 
 # 内置工作流随代码 seed，与内置智能体同一套规则：所有人可见、不可直接修改、
-# 可复制成自己的版本再改（复制与编辑接口在 P1 的工作流编辑器里补）。
+# 可复制成自己的版本再改。
+#
+# 这里只写「框住材料的骨架」——主题、职位描述这些标签和三引号边界；条件段落
+# （「有补充说明才加那一段」）由调用方拼成整块变量传进来。于是 prompt 里既看得
+# 出这条流程在讲什么，又不会把 Python 里的拼装逻辑抄第二份。
 BUILTIN_WORKFLOWS: tuple[BuiltinWorkflow, ...] = (
     BuiltinWorkflow(
         slug="resume-analysis",
         name="简历分析",
-        description="读一份简历全文，产出分析报告与改进意见（「智能办公 · 简历」的单份分析）",
+        description="读一份简历全文，产出分析报告与改进意见（「办公 · 简历」的单份分析）",
         inputs=(
             BuiltinInput("resume_content", "简历全文"),
             # 条件段落由调用方拼好再传进来：没有补充描述时就是空串。
@@ -185,6 +190,183 @@ BUILTIN_WORKFLOWS: tuple[BuiltinWorkflow, ...] = (
         ),
         sort_order=20,
     ),
+    BuiltinWorkflow(
+        slug="slide-generation",
+        name="幻灯片生成",
+        description="把一份材料整理成整份幻灯片的 JSON 结构（「办公 · 幻灯片」的生成）",
+        inputs=(
+            BuiltinInput("title", "主题"),
+            BuiltinInput("description_note", "补充说明段落", required=False),
+            BuiltinInput("requirement_note", "用户要求段落", required=False),
+            BuiltinInput("source_block", "材料全文段落", required=False),
+            BuiltinInput("asset_block", "可用配图清单段落", required=False),
+            BuiltinInput("max_pages", "页数上限"),
+        ),
+        steps=(
+            BuiltinStep(
+                key="compose",
+                agent_slug="slide-architect",
+                prompt_tpl=(
+                    "主题：{{title}}\n\n"
+                    "{{description_note}}{{requirement_note}}{{source_block}}{{asset_block}}"
+                    "请依据以上材料产出整份幻灯片的 JSON 结构。"
+                    "页数不超过 {{max_pages}} 页。"
+                ),
+                group_key="compose",
+                sort_order=10,
+            ),
+        ),
+        sort_order=30,
+    ),
+    BuiltinWorkflow(
+        slug="interview-answer",
+        name="面试参考答案",
+        description="按面试背景与题目给出一条参考答案（面试记录页的「生成答案」）",
+        inputs=(
+            BuiltinInput("company", "应聘公司"),
+            BuiltinInput("position", "面试岗位"),
+            BuiltinInput("round_note", "轮次说明", required=False),
+            BuiltinInput("question", "面试问题"),
+            BuiltinInput("answer_note", "求职者当时的回答段落", required=False),
+        ),
+        steps=(
+            BuiltinStep(
+                key="answer",
+                agent_slug="interview-answerer",
+                prompt_tpl=(
+                    "应聘公司：{{company}}\n"
+                    "面试岗位：{{position}}{{round_note}}\n\n"
+                    "面试问题：\n\"\"\"\n{{question}}\n\"\"\"\n\n{{answer_note}}"
+                ),
+                group_key="answer",
+                sort_order=10,
+            ),
+        ),
+        sort_order=40,
+    ),
+    BuiltinWorkflow(
+        slug="toolkit-optimize",
+        name="简历优化",
+        description="求职助手：按目标岗位重写并优化一份简历",
+        inputs=(
+            BuiltinInput("position_note", "目标岗位段落", required=False),
+            BuiltinInput("resume_content", "简历全文"),
+        ),
+        steps=(
+            BuiltinStep(
+                key="report",
+                agent_slug="resume-optimizer",
+                prompt_tpl="{{position_note}}简历全文：\n\"\"\"\n{{resume_content}}\n\"\"\"",
+                group_key="report",
+                sort_order=10,
+            ),
+        ),
+        sort_order=50,
+    ),
+    BuiltinWorkflow(
+        slug="toolkit-career-match",
+        name="职业匹配分析",
+        description="求职助手：从简历与个人背景看适合哪些岗位方向",
+        inputs=(
+            BuiltinInput("resume_block", "简历全文段落", required=False),
+            BuiltinInput("background_block", "个人背景段落", required=False),
+        ),
+        steps=(
+            BuiltinStep(
+                key="report",
+                agent_slug="career-matcher",
+                prompt_tpl="{{resume_block}}{{background_block}}",
+                group_key="report",
+                sort_order=10,
+            ),
+        ),
+        sort_order=55,
+    ),
+    BuiltinWorkflow(
+        slug="toolkit-jd-match",
+        name="简历匹配审计",
+        description="求职助手：拿一份简历对着具体职位描述逐条审计",
+        inputs=(
+            BuiltinInput("job_description", "职位描述"),
+            BuiltinInput("resume_content", "简历全文"),
+        ),
+        steps=(
+            BuiltinStep(
+                key="report",
+                agent_slug="jd-match-auditor",
+                prompt_tpl=(
+                    "职位描述：\n\"\"\"\n{{job_description}}\n\"\"\"\n\n"
+                    "简历全文：\n\"\"\"\n{{resume_content}}\n\"\"\""
+                ),
+                group_key="report",
+                sort_order=10,
+            ),
+        ),
+        sort_order=60,
+    ),
+    BuiltinWorkflow(
+        slug="toolkit-interview-prep",
+        name="面试准备策略",
+        description="求职助手：按岗位与简历列出一份面试准备清单",
+        inputs=(
+            BuiltinInput("position", "岗位名称"),
+            BuiltinInput("job_description_block", "职位描述段落", required=False),
+            BuiltinInput("resume_block", "简历全文段落", required=False),
+        ),
+        steps=(
+            BuiltinStep(
+                key="report",
+                agent_slug="interview-coach",
+                prompt_tpl="目标岗位：{{position}}\n\n{{job_description_block}}{{resume_block}}",
+                group_key="report",
+                sort_order=10,
+            ),
+        ),
+        sort_order=65,
+    ),
+    BuiltinWorkflow(
+        slug="toolkit-portfolio-plan",
+        name="证明构建计划",
+        description="求职助手：规划能证明目标职位能力的作品与经历",
+        inputs=(
+            BuiltinInput("position", "目标职位"),
+            BuiltinInput("resume_block", "简历全文段落", required=False),
+            BuiltinInput("background_block", "个人背景段落", required=False),
+        ),
+        steps=(
+            BuiltinStep(
+                key="report",
+                agent_slug="portfolio-planner",
+                prompt_tpl="目标职位：{{position}}\n\n{{resume_block}}{{background_block}}",
+                group_key="report",
+                sort_order=10,
+            ),
+        ),
+        sort_order=70,
+    ),
+    BuiltinWorkflow(
+        slug="toolkit-salary-negotiation",
+        name="薪资最大化框架",
+        description="求职助手：围绕一个 offer 给出薪资谈判框架",
+        inputs=(
+            BuiltinInput("offer_amount", "offer 年薪"),
+            BuiltinInput("position_note", "岗位说明", required=False),
+            BuiltinInput("notes_note", "补充说明", required=False),
+        ),
+        steps=(
+            BuiltinStep(
+                key="report",
+                agent_slug="salary-negotiator",
+                prompt_tpl=(
+                    "我刚刚收到一份工作邀请，年薪：{{offer_amount}}"
+                    "{{position_note}}{{notes_note}}"
+                ),
+                group_key="report",
+                sort_order=10,
+            ),
+        ),
+        sort_order=75,
+    ),
 )
 
 
@@ -203,6 +385,7 @@ def _steps_of(builtin: BuiltinWorkflow) -> List[dict]:
                 "output_keys": list(step.output_keys) if step.output_keys else None,
                 "output_var": step.output_var,
                 "optional": step.optional,
+                "model_config_id": step.model_config_id,
             }
         )
     return rows
@@ -1165,4 +1348,45 @@ async def execute_run(
             "error": run.error_msg,
             "elapsed_ms": run.elapsed_ms,
         }
+
+
+async def run_builtin(
+    db: Session,
+    owner_id: int,
+    slug: str,
+    inputs: Dict[str, str],
+    *,
+    step_key: Optional[str] = None,
+) -> str:
+    """跑完一条内置工作流，返回它那一步的产物文本。
+
+    功能侧（简历、幻灯片、面试、求职助手）调一次模型的路径统一到这里：以前是
+    ``_ask(slug, prompt)`` 直接发一次请求，现在同样的调用先落一条运行，步骤的
+    渲染结果、原始输出、耗时都进 ``workflow_run_step``——「当时模型到底收到了
+    什么」从此问得出来，prompt 与模型也就能在「工作流」页面上改了。
+
+    ``step_key`` 省略时取最后一个成功步骤：内置流程基本都是单步，调用方不必
+    跟着定义里的 key 改一遍。
+    """
+    workflows = WorkflowService(db, owner_id)
+    workflow = workflows.require_by_slug(slug)
+    run = workflows.create_run(workflow.id, inputs)
+
+    async for event, payload in execute_run(owner_id=owner_id, run_id=run.id):
+        if event == "step_end" and payload.get("error"):
+            logger.info(
+                "workflow %s step %s failed: %s", slug, payload.get("key"), payload["error"]
+            )
+
+    finished = workflows.get_run(run.id)
+    if finished.status != RUN_SUCCEEDED:
+        raise RuntimeError(finished.error_msg or "工作流执行失败")
+
+    rows = [row for row in workflows.run_steps(run.id) if row.status == STEP_SUCCEEDED]
+    step = next(
+        (row for row in reversed(rows) if step_key is None or row.key == step_key), None
+    )
+    if step is None:
+        raise RuntimeError(f"工作流 {slug} 没有产出可用的结果")
+    return step.output or ""
 

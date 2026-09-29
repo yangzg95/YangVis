@@ -40,13 +40,14 @@ from app.services.agent_run import (
     labeled_section,
     model_error_text,
     require_chat_model,
-    run_agent,
 )
+from app.services.workflows import run_builtin
 
 logger = logging.getLogger("yangvis.interview")
 
-# 参考答案生成的人设在内置智能体上，随 seed 管线就地刷新；这里只留 slug。
-AGENT_SLUG_ANSWER = "interview-answerer"
+# 参考答案的人设（interview-answerer）与 Prompt 骨架都在内置工作流上，界面上能改；
+# 这里只留「哪条流程」。
+WORKFLOW_ANSWER = "interview-answer"
 
 # 每题 AI 参考答案的状态值。不用 Enum：questions 里存的是裸 JSON。
 REF_NONE = "none"
@@ -118,16 +119,19 @@ def _reset_stale_questions(questions: list) -> tuple[list, int]:
     return fixed, count
 
 
-def _answer_prompt(record: InterviewRecord, question: dict) -> str:
-    """把面试背景与题目组装成喂给模型的 human 消息。人设在智能体上。"""
-    head = f"应聘公司：{record.company}\n面试岗位：{record.position}"
-    if record.round:
-        head += f"\n面试轮次：{record.round}"
-    parts = [head, labeled_section("面试问题", question.get("question") or "")]
+def _answer_inputs(record: InterviewRecord, question: dict) -> dict:
+    """把面试背景与题目整理成那条工作流声明的输入变量。
+
+    「有轮次才加那一行、有当时的回答才附那一段」留在代码里拼：模板只做替换。
+    """
     my_answer = (question.get("my_answer") or "").strip()
-    if my_answer:
-        parts.append(labeled_section("求职者当时的回答", my_answer))
-    return "\n\n".join(parts)
+    return {
+        "company": record.company,
+        "position": record.position,
+        "round_note": f"\n面试轮次：{record.round}" if record.round else "",
+        "question": question.get("question") or "",
+        "answer_note": labeled_section("求职者当时的回答", my_answer) if my_answer else "",
+    }
 
 
 class InterviewService:
@@ -146,13 +150,10 @@ class InterviewService:
     def _scope(self, stmt: Select) -> Select:
         return stmt.where(InterviewRecord.owner_id == self._owner_id)
 
-    # -- 模型门槛与单次调用（共用 agent_run，不各自复制一份）--------------------
+    # -- 模型门槛 ---------------------------------------------------------------
 
     def require_chat_config(self) -> ModelConfig:
         return require_chat_model(self._db, self._owner_id)
-
-    async def _ask(self, slug: str, user_prompt: str) -> str:
-        return await run_agent(self._db, self._owner_id, slug, user_prompt)
 
     # -- 面试场次 CRUD ----------------------------------------------------------
 
@@ -295,7 +296,11 @@ class InterviewService:
             if target is None:
                 logger.info("interview answer skipped: record=%s qid=%s deleted", record_id, qid)
                 return
-            answer = (await self._ask(AGENT_SLUG_ANSWER, _answer_prompt(record, target))).strip()
+            answer = (
+                await run_builtin(
+                    self._db, self._owner_id, WORKFLOW_ANSWER, _answer_inputs(record, target)
+                )
+            ).strip()
             if not answer:
                 raise RuntimeError("模型返回了空回答")
 

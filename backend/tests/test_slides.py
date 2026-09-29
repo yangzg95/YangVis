@@ -2,10 +2,9 @@
 
 分两层（与 AI 网关测试同一形态）：上半是不碰数据库的纯函数——存储的路径校验与
 渲染器的白名单/转义，这两块是整份功能唯一的注入面，界面上点不全；下半用
-SQLite 内存库跑 ``SlideService`` 的写入路径，模型调用一律 monkeypatch 掉，
-不连任何真实服务。
+SQLite 内存库跑 ``SlideService`` 的写入路径，不连任何真实服务。生成那几条走
+工作流引擎的链路在 ``test_workflow_flows.py`` 里测——那里的模型调用才需要打桩。
 """
-import asyncio
 import re
 from types import SimpleNamespace
 
@@ -27,7 +26,7 @@ from app.services.slides import (
     STATUS_ERROR,
     STATUS_READY,
     SlideService,
-    _generate_prompt,
+    _generate_inputs,
     _json_candidate,
     _parse_deck_output,
     _truncate,
@@ -389,17 +388,20 @@ def test_parse_deck_output_rejects_garbage(text):
         _parse_deck_output(text)
 
 
-def test_generate_prompt_carries_material_and_asset_ids():
-    prompt = _generate_prompt(
+def test_generate_inputs_carries_material_and_asset_ids():
+    inputs = _generate_inputs(
         title="季度复盘",
         description=None,
         requirement="面向管理层",
         source_text="正文……",
         asset_names=["aa11bb22cc33dd44: 架构图.png"],
     )
-    assert "面向管理层" in prompt
-    assert "正文……" in prompt
-    assert "aa11bb22cc33dd44: 架构图.png" in prompt, "模型只能引用清单里的 asset_id"
+    assert inputs["title"] == "季度复盘"
+    assert inputs["requirement_note"] == "用户对这份幻灯片的要求：面向管理层\n\n"
+    assert "正文……" in inputs["source_block"]
+    assert "aa11bb22cc33dd44: 架构图.png" in inputs["asset_block"], "模型只能引用清单里的 asset_id"
+    assert inputs["description_note"] == "", "没填的段落就是空串，模板里那一格自然什么也没有"
+    assert inputs["max_pages"] == str(slides_html.MAX_DECK_PAGES)
 
 
 def test_truncate_marks_over_limit_source():
@@ -452,12 +454,6 @@ def _finished(db, **kwargs) -> SlideDeck:
     deck.status = STATUS_READY
     db.commit()
     return deck
-
-
-def _await(value):
-    async def run():
-        return value
-    return run()
 
 
 def test_create_deck_requires_material(db):
@@ -624,69 +620,6 @@ def test_remove_asset_unknown_id(db):
 def test_require_chat_config_blocks_without_model(db):
     with pytest.raises(BusinessError):
         _service(db).require_chat_config()
-
-
-def test_run_generation_writes_ready_state(db, monkeypatch):
-    service = _service(db)
-    deck = _deck(db)
-    output = (
-        '```json\n{"theme":{"preset":"paper","ratio":"16x9","accent":"#123456"},'
-        '"slides":[{"layout":"cover","title":"复盘封面"},'
-        '{"layout":"bullets","title":"结论","bullets":["增长 12%"]}]}\n```'
-    )
-
-    async def fake_ask(self, slug, user_prompt):
-        assert slug == "slide-architect"
-        return output
-
-    monkeypatch.setattr(SlideService, "_ask", fake_ask)
-    asyncio.run(service.run_generation(deck.id))
-
-    done = service.get_deck(deck.id)
-    assert done.status == STATUS_READY
-    assert done.error_msg is None
-    assert [page["layout"] for page in done.slides] == ["cover", "bullets"]
-    assert done.theme["accent"] == "#123456"
-    assert "增长 12%" in done.html
-
-
-def test_run_generation_falls_back_when_model_gives_no_pages(db, monkeypatch):
-    service = _service(db)
-    deck = _deck(db)
-    monkeypatch.setattr(SlideService, "_ask", lambda self, slug, prompt: _await('{"slides": []}'))
-    asyncio.run(service.run_generation(deck.id))
-
-    done = service.get_deck(deck.id)
-    assert done.status == STATUS_ERROR
-    assert "合法页面" in done.error_msg
-
-
-def test_run_generation_records_model_exception(db, monkeypatch):
-    service = _service(db)
-    deck = _deck(db)
-
-    async def fake_ask(self, slug, user_prompt):
-        raise RuntimeError("上游 502")
-
-    monkeypatch.setattr(SlideService, "_ask", fake_ask)
-    asyncio.run(service.run_generation(deck.id))
-
-    done = service.get_deck(deck.id)
-    assert done.status == STATUS_ERROR
-    assert "上游 502" in done.error_msg
-
-
-def test_run_generation_error_on_unparsable_output(db, monkeypatch):
-    service = _service(db)
-    deck = _deck(db)
-    monkeypatch.setattr(
-        SlideService, "_ask", lambda self, slug, prompt: _await("我今天不返回 JSON")
-    )
-    asyncio.run(service.run_generation(deck.id))
-
-    done = service.get_deck(deck.id)
-    assert done.status == STATUS_ERROR
-    assert "可解析" in done.error_msg
 
 
 def test_start_generation_blocks_double_trigger(db):

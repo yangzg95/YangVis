@@ -34,7 +34,6 @@ from app.services.agent_run import (
     labeled_section,
     model_error_text,
     require_chat_model,
-    run_agent,
 )
 from app.services.slides_html import (
     MAX_DECK_PAGES,
@@ -43,6 +42,7 @@ from app.services.slides_html import (
     sanitize_theme,
 )
 from app.services.slides_store import StoredImage
+from app.services.workflows import run_builtin
 
 logger = logging.getLogger("yangvis.slides")
 
@@ -53,7 +53,9 @@ STATUS_ANALYZING = "analyzing"
 STATUS_READY = "ready"
 STATUS_ERROR = "error"
 
-AGENT_SLUG_GENERATE = "slide-architect"
+# 生成这一步的人设（slide-architect）与 Prompt 骨架都在内置工作流上，界面上能改；
+# 这里只留「哪条流程」。
+WORKFLOW_GENERATE = "slide-generation"
 
 # 默认外观，deck 还没生成时也用这套。
 DEFAULT_THEME: Dict[str, Any] = {"preset": "teal", "ratio": "16x9", "accent": None}
@@ -110,34 +112,37 @@ def _parse_deck_output(raw_text: str) -> tuple[Dict[str, Any], List[Any]]:
     raise ValueError("模型返回的结构既不是对象也不是数组")
 
 
-def _generate_prompt(
+def _generate_inputs(
     *,
     title: str,
     description: Optional[str],
     requirement: Optional[str],
     source_text: str,
     asset_names: List[str],
-) -> str:
-    """组装喂模型的 human 消息。人设与输出格式在智能体上。"""
-    parts = [f"主题：{title}"]
-    if description:
-        parts.append(f"补充说明：{description}")
-    if requirement:
-        parts.append(f"用户对这份幻灯片的要求：{requirement}")
-    if source_text:
-        parts.append(labeled_section("材料全文", _truncate(source_text)))
-    if asset_names:
+) -> Dict[str, str]:
+    """把一份 deck 整理成那条工作流声明的输入变量。
+
+    「有材料才附材料、有配图才附配图」这类条件拼装留在代码里，模板只做替换；
+    每一段自带结尾空行，拼起来就是原来那段 human 消息。
+    """
+    listing = "\n".join(f"- {name}" for name in asset_names)
+    return {
+        "title": title,
+        "description_note": f"补充说明：{description}\n\n" if description else "",
+        "requirement_note": (
+            f"用户对这份幻灯片的要求：{requirement}\n\n" if requirement else ""
+        ),
+        "source_block": (
+            f"{labeled_section('材料全文', _truncate(source_text))}\n\n" if source_text else ""
+        ),
         # 模型看不到图片内容，只拿到清单；image 版式必须引用清单里的 id。
-        listing = "\n".join(f"- {name}" for name in asset_names)
-        parts.append(
-            "可用配图（id: 文件名，只有这些 id 能被 asset_id 引用）：\n"
-            f"{listing}"
-        )
-    parts.append(
-        "请依据以上材料产出整份幻灯片的 JSON 结构。"
-        f"页数不超过 {MAX_DECK_PAGES} 页。"
-    )
-    return "\n\n".join(parts)
+        "asset_block": (
+            f"可用配图（id: 文件名，只有这些 id 能被 asset_id 引用）：\n{listing}\n\n"
+            if asset_names
+            else ""
+        ),
+        "max_pages": str(MAX_DECK_PAGES),
+    }
 
 
 class SlideService:
@@ -283,14 +288,6 @@ class SlideService:
 
     # -- AI 生成 ------------------------------------------------------------
 
-    async def _ask(self, slug: str, user_prompt: str) -> str:
-        """按 slug 取内置智能体的人设发起一轮问答，返回纯文本输出。
-
-        人设（含输出格式要求）在 ``agent.system_prompt`` 上，模型配置与温度也跟着
-        智能体走；材料全文这类变量内容放 human 消息。
-        """
-        return await run_agent(self._db, self._owner_id, slug, user_prompt)
-
     def start_generation(self, deck_id: int, requirement: Optional[str] = None) -> SlideDeck:
         """置为生成中；``requirement`` 给了就覆盖当时的要求（重生成时补一句）。"""
         deck = self.get_deck(deck_id)
@@ -322,14 +319,18 @@ class SlideService:
                 for asset in (deck.assets or [])
                 if isinstance(asset, dict) and asset.get("id")
             ]
-            prompt = _generate_prompt(
-                title=deck.title,
-                description=deck.description,
-                requirement=deck.requirement,
-                source_text=deck.source_text or "",
-                asset_names=asset_names,
+            text = await run_builtin(
+                self._db,
+                self._owner_id,
+                WORKFLOW_GENERATE,
+                _generate_inputs(
+                    title=deck.title,
+                    description=deck.description,
+                    requirement=deck.requirement,
+                    source_text=deck.source_text or "",
+                    asset_names=asset_names,
+                ),
             )
-            text = await self._ask(AGENT_SLUG_GENERATE, prompt)
             theme, pages = _parse_deck_output(text)
             # 模型给的外观要先过白名单再谈合并：非法 preset / 比例 / 颜色一律
             # 回落默认，不能让任意字符串进到 CSS 里。

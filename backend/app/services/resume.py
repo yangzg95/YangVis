@@ -39,15 +39,9 @@ from app.services.agent_run import (
     labeled_section,
     model_error_text,
     require_chat_model,
-    run_agent,
 )
 from app.services.chunking import UnsupportedFileType, extract_text, normalise
-from app.services.workflows import (
-    RUN_SUCCEEDED,
-    STEP_SUCCEEDED,
-    WorkflowService,
-    execute_run,
-)
+from app.services.workflows import run_builtin
 
 logger = logging.getLogger("yangvis.resume")
 
@@ -79,10 +73,12 @@ class ToolkitKindSpec:
     ``needs_resume`` / ``allows_resume`` 约束「简历来源」（已上传简历或粘贴文本）；
     ``background_as_source`` 为真时，background 字段也能充当来源（职业匹配分析）。
     ``required_fields`` 是简历来源之外的必填项：(字段名, 中文名)。
+    ``workflow_slug`` 指向内置工作流里的那条流水线——人设、Prompt 骨架与模型
+    都在工作流和它的步骤上，这里只声明「这类任务走哪条」。
     """
 
     label: str
-    agent_slug: str
+    workflow_slug: str
     needs_resume: bool = False
     allows_resume: bool = False
     background_as_source: bool = False
@@ -92,36 +88,36 @@ class ToolkitKindSpec:
 TOOLKIT_KINDS: dict = {
     "optimize": ToolkitKindSpec(
         label="简历优化",
-        agent_slug="resume-optimizer",
+        workflow_slug="toolkit-optimize",
         needs_resume=True,
     ),
     "career-match": ToolkitKindSpec(
         label="职业匹配分析",
-        agent_slug="career-matcher",
+        workflow_slug="toolkit-career-match",
         needs_resume=True,
         background_as_source=True,
     ),
     "jd-match": ToolkitKindSpec(
         label="简历匹配审计",
-        agent_slug="jd-match-auditor",
+        workflow_slug="toolkit-jd-match",
         needs_resume=True,
         required_fields=(("job_description", "职位描述"),),
     ),
     "interview-prep": ToolkitKindSpec(
         label="面试准备策略",
-        agent_slug="interview-coach",
+        workflow_slug="toolkit-interview-prep",
         allows_resume=True,
         required_fields=(("position", "岗位名称"),),
     ),
     "portfolio-plan": ToolkitKindSpec(
         label="证明构建计划",
-        agent_slug="portfolio-planner",
+        workflow_slug="toolkit-portfolio-plan",
         allows_resume=True,
         required_fields=(("position", "目标职位"),),
     ),
     "salary-negotiation": ToolkitKindSpec(
         label="薪资最大化框架",
-        agent_slug="salary-negotiator",
+        workflow_slug="toolkit-salary-negotiation",
         required_fields=(("offer_amount", "offer 年薪"),),
     ),
 }
@@ -149,56 +145,62 @@ def _toolkit_title(kind: str, inputs: dict) -> str:
     return f"{label} · {subject}"[:128] if subject else label
 
 
-def _toolkit_prompt(kind: str, inputs: dict) -> str:
-    """把输入快照组装成喂给模型的 human 消息。人设与输出格式在智能体上。"""
-    content = inputs.get("resolved_resume") or ""
+def _toolkit_inputs(kind: str, inputs: dict) -> dict:
+    """把输入快照整理成那条工作流声明的输入变量。
+
+    条件段落在这里拼好（「有目标岗位才加那一行」），模板里只有 ``{{变量}}`` 与
+    固定骨架：模板不做判断，否则就得为它发明一门小语言。整段材料用
+    :func:`labeled_section` 包成三引号边界，材料里的「请忽略上面」才会被当成
+    内容读。
+    """
+    content = (inputs.get("resolved_resume") or "").strip()
     position = (inputs.get("position") or "").strip()
     background = (inputs.get("background") or "").strip()
     notes = (inputs.get("notes") or "").strip()
 
     if kind == "optimize":
-        head = f"目标岗位：{position}\n\n" if position else ""
-        return head + labeled_section("简历全文", content)
+        return {
+            "position_note": f"目标岗位：{position}\n\n" if position else "",
+            "resume_content": content,
+        }
 
     if kind == "career-match":
-        parts = []
-        if content:
-            parts.append(labeled_section("简历全文", content))
-        if background:
-            parts.append(labeled_section("个人背景补充", background))
-        return "\n\n".join(parts)
+        return {
+            "resume_block": f"{labeled_section('简历全文', content)}\n\n" if content else "",
+            "background_block": labeled_section("个人背景补充", background) if background else "",
+        }
 
     if kind == "jd-match":
-        return (
-            labeled_section("职位描述", _truncate(inputs.get("job_description") or ""))
-            + "\n\n"
-            + labeled_section("简历全文", content)
-        )
+        return {
+            "job_description": _truncate(inputs.get("job_description") or ""),
+            "resume_content": content,
+        }
 
     if kind == "interview-prep":
-        parts = [f"目标岗位：{position}"]
         job_description = (inputs.get("job_description") or "").strip()
-        if job_description:
-            parts.append(labeled_section("职位描述", _truncate(job_description)))
-        if content:
-            parts.append(labeled_section("求职者简历全文", content))
-        return "\n\n".join(parts)
+        return {
+            "position": position,
+            "job_description_block": (
+                f"{labeled_section('职位描述', _truncate(job_description))}\n\n"
+                if job_description
+                else ""
+            ),
+            "resume_block": labeled_section("求职者简历全文", content) if content else "",
+        }
 
     if kind == "portfolio-plan":
-        parts = [f"目标职位：{position}"]
-        if content:
-            parts.append(labeled_section("求职者简历全文", content))
-        if background:
-            parts.append(labeled_section("个人背景补充", background))
-        return "\n\n".join(parts)
+        return {
+            "position": position,
+            "resume_block": f"{labeled_section('求职者简历全文', content)}\n\n" if content else "",
+            "background_block": labeled_section("个人背景补充", background) if background else "",
+        }
 
     if kind == "salary-negotiation":
-        parts = [f"我刚刚收到一份工作邀请，年薪：{(inputs.get('offer_amount') or '').strip()}"]
-        if position:
-            parts.append(f"岗位：{position}")
-        if notes:
-            parts.append(f"补充说明：{notes}")
-        return "\n".join(parts)
+        return {
+            "offer_amount": (inputs.get("offer_amount") or "").strip(),
+            "position_note": f"\n岗位：{position}" if position else "",
+            "notes_note": f"\n补充说明：{notes}" if notes else "",
+        }
 
     raise ValueError(f"未知的求职助手类型：{kind}")
 
@@ -377,42 +379,6 @@ class ResumeService:
 
     # -- AI 分析 -------------------------------------------------------------
 
-    async def _ask(self, slug: str, user_prompt: str) -> str:
-        """一次性的单次调用：求职助手那 6 类还没搬进工作流（P2），先走共享执行器。
-
-        与 :meth:`_run_workflow` 的区别只在于要不要落运行记录——两者最终调的是
-        同一个 :func:`run_agent`，所以模型名、超时、内容块拉平这些细节不会有两份。
-        """
-        return await run_agent(self._db, self._owner_id, slug, user_prompt)
-
-    async def _run_workflow(self, slug: str, step_key: str, inputs: dict) -> str:
-        """发起一条内置工作流，等它跑完，返回指定步骤的输出。
-
-        简历这边暂时继续用自己的 ``status`` / ``report`` 列（P2 才换成运行记录），
-        但模型调用已经由工作流引擎执行：每次分析都会在 ``workflow_run`` 与
-        ``workflow_run_step`` 里留下渲染后的 prompt 和原始输出，「当时模型到底
-        收到了什么」从此问得出来。
-        """
-        workflows = WorkflowService(self._db, self._owner_id)
-        workflow = workflows.require_by_slug(slug)
-        run = workflows.create_run(workflow.id, inputs)
-
-        async for event, payload in execute_run(owner_id=self._owner_id, run_id=run.id):
-            if event == "step_end" and payload.get("error"):
-                logger.info(
-                    "workflow %s step %s failed: %s", slug, payload.get("key"), payload["error"]
-                )
-
-        finished = workflows.get_run(run.id)
-        if finished.status != RUN_SUCCEEDED:
-            raise RuntimeError(finished.error_msg or "工作流执行失败")
-        step = next(
-            (row for row in workflows.run_steps(run.id) if row.key == step_key), None
-        )
-        if step is None or step.status != STEP_SUCCEEDED:
-            raise RuntimeError("工作流没有产出这一步的结果")
-        return step.output or ""
-
     def _analysis_inputs(self, resume: Resume) -> dict:
         """把一份简历整理成工作流的输入变量。
 
@@ -451,8 +417,8 @@ class ResumeService:
             len(resume.content),
         )
         try:
-            text = await self._run_workflow(
-                WORKFLOW_ANALYZE, "analyze", self._analysis_inputs(resume)
+            text = await run_builtin(
+                self._db, self._owner_id, WORKFLOW_ANALYZE, self._analysis_inputs(resume)
             )
             report, suggestions = _parse_analysis(text)
 
@@ -546,9 +512,10 @@ class ResumeService:
                     f"\"\"\"\n{_truncate(resume.content)}\n\"\"\""
                 )
             report = (
-                await self._run_workflow(
+                await run_builtin(
+                    self._db,
+                    self._owner_id,
                     WORKFLOW_COMPARE,
-                    "compare",
                     {
                         "resumes_block": "\n\n".join(blocks),
                         "resume_count": str(len(resumes)),
@@ -676,9 +643,14 @@ class ResumeService:
             task.title,
         )
         try:
-            spec = TOOLKIT_KINDS[task.kind]
-            prompt = _toolkit_prompt(task.kind, task.inputs)
-            report = (await self._ask(spec.agent_slug, prompt)).strip()
+            report = (
+                await run_builtin(
+                    self._db,
+                    self._owner_id,
+                    TOOLKIT_KINDS[task.kind].workflow_slug,
+                    _toolkit_inputs(task.kind, task.inputs),
+                )
+            ).strip()
             if not report:
                 raise RuntimeError("模型返回了空报告")
 
