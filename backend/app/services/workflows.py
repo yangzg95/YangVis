@@ -6,10 +6,11 @@
 
 三件事说清楚：
 
-* **变量替换不做条件判断**。模板只有 ``{{name}}`` 这一种语法；「有补充描述才
-  加这一段」这类条件拼装由调用方的输入构造代码完成（见 ``services/resume.py``
-  的 ``_analysis_inputs``）。想让模板表达条件，就得为它发明一门小语言，而那段
-  逻辑本来就是 Python 里更好读、更好测的地方。
+* **变量替换不做条件判断**。模板只有 ``{{name}}`` 与 ``{{name.字段}}`` 两种引用
+  （后者只对 JSON 步骤的解析结果取字段）；「有补充描述才加这一段」这类条件拼装
+  由调用方的输入构造代码完成（见 ``services/resume.py`` 的 ``_analysis_inputs``）。
+  想让模板表达条件，就得为它发明一门小语言，而那段逻辑本来就是 Python 里更好读、
+  更好测的地方。
 * **每步现场都落库**。渲染后的 prompt、原始输出、解析结果、耗时、用的哪份模型
   配置，全进 ``workflow_run_step``。以前一个后台任务只在业务行上留个状态，
   「当时模型到底收到了什么」根本问不出来。
@@ -23,11 +24,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import timedelta
 from typing import (
     AsyncIterator,
     Awaitable,
@@ -70,6 +72,7 @@ from app.services.agent_run import (
     run_agent,
 )
 from app.services.agents import BUILTIN_OWNER_ID, AgentService
+from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.workflows")
 
@@ -119,12 +122,26 @@ _RUN_TO_SUBJECT = {
 # 把账号的 QPS 打满，连累同一时间别人正在打的对话。
 STEP_CONCURRENCY = 4
 
+# 跟随流多久读一次运行表。步骤状态本来就是每步一提交，这里只是把它读出来；
+# 一次模型调用要几秒到几十秒，1.2 秒够跟得上，也不会让读变成压力。
+FOLLOW_POLL_SECONDS = 1.2
+
+# 运行记录的默认保留天数：比这更早、又不再是谁的当前状态的运行，启动时清掉。
+RUN_RETENTION_DAYS = 30
+
+
 _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\}\}")
 
 # 变量名、步骤 key 与分组名的合法字符。必须与上面 ``_PLACEHOLDER`` 的字符集对齐：
 # 一个声明成 ``my-var`` 的变量模板里永远引用不到，静默少喂一段材料比保存时报错
-# 难查得多。不含点号——``a.b`` 这种字段访问目前是未实现能力，不该当成合法名字。
+# 难查得多。不含点号——``a.b`` 里的 ``a`` 是变量名，点号后面是它的字段（见
+# :func:`_lookup`）。
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# ``{{a.b.c}}`` 里每一段的形状：对象的键，或数组的下标。形状不对（``a..b``、
+# ``a.b-c``）在保存时就说清楚，而不是等运行时报「取不到字段」——那时错误挂在
+# 运行记录里，比编辑器里一行红字难定位得多。
+_FIELD_SEGMENT = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*|\d+)$")
 
 
 # ---- 内置工作流 -------------------------------------------------------------
@@ -506,41 +523,147 @@ def reset_stale_runs(db: Session) -> None:
     db.execute(
         update(WorkflowRun)
         .where(WorkflowRun.id.in_(run_ids))
-        .values(status=RUN_FAILED, error_msg=STALE_RUN_ERROR, finished_at=datetime.now(timezone.utc))
+        .values(status=RUN_FAILED, error_msg=STALE_RUN_ERROR, finished_at=db_now())
     )
     db.execute(
         update(WorkflowRunStep)
         .where(WorkflowRunStep.run_id.in_(run_ids))
         .where(WorkflowRunStep.status.in_((STEP_PENDING, STEP_RUNNING)))
-        .values(status=STEP_FAILED, error_msg=STALE_RUN_ERROR, finished_at=datetime.now(timezone.utc))
+        .values(status=STEP_FAILED, error_msg=STALE_RUN_ERROR, finished_at=db_now())
     )
     db.commit()
     logger.info("reset %s stale workflow run(s) after a restart", len(stale))
 
 
+def prune_runs(
+    db: Session, *, owner_id: Optional[int] = None, keep_days: int = RUN_RETENTION_DAYS
+) -> Tuple[int, int]:
+    """清掉「既太老、又不是任何人的当前状态」的运行记录，返回 ``(运行数, 步骤数)``。
+
+    一条运行被删要同时满足三条：早于保留窗口、不在跑、不是它那个业务对象的最近一次。
+    后两条是硬要求——业务行的状态由认领它的那次运行翻译出来（见 :func:`subject_state`），
+    把「最近一次」删掉等于把那份简历现在的状态删了；进行中的删掉则留下一堆没人跑完的
+    失败。没认领业务对象的那几次（在工作流页面上手动发起的）没有状态要担，过窗口就删。
+
+    ``owner_id`` 省略就是全站的：启动时那一次走的就是这个口径。
+    """
+    cutoff = db_now() - timedelta(days=keep_days)
+    stmt = select(
+        WorkflowRun.id, WorkflowRun.status, WorkflowRun.subject_kind, WorkflowRun.subject_ref
+    ).where(WorkflowRun.created_at < cutoff)
+    if owner_id is not None:
+        stmt = stmt.where(WorkflowRun.owner_id == owner_id)
+    candidates = db.execute(stmt).all()
+    if not candidates:
+        return 0, 0
+
+    # 每个业务对象的最近一次（id 最大）单独查：候选集里只有过了窗口的老运行，
+    # 在这儿比「谁最新」会把该删的那次算成保留的那次。
+    latest_ids = set(
+        db.execute(
+            select(func.max(WorkflowRun.id))
+            .where(WorkflowRun.subject_kind.is_not(None))
+            .group_by(WorkflowRun.subject_kind, WorkflowRun.subject_ref)
+        ).scalars().all()
+    )
+    doomed = [
+        run_id
+        for run_id, status, _kind, _ref in candidates
+        if status not in (RUN_PENDING, RUN_RUNNING) and run_id not in latest_ids
+    ]
+    if not doomed:
+        return 0, 0
+
+    deleted_steps = int(
+        db.execute(delete(WorkflowRunStep).where(WorkflowRunStep.run_id.in_(doomed))).rowcount or 0
+    )
+    deleted_runs = int(
+        db.execute(delete(WorkflowRun).where(WorkflowRun.id.in_(doomed))).rowcount or 0
+    )
+    db.commit()
+    logger.info(
+        "pruned %s workflow run(s) (%s step row(s)) older than %s day(s)",
+        deleted_runs,
+        deleted_steps,
+        keep_days,
+    )
+    return deleted_runs, deleted_steps
+
+
 # ---- 模板 ------------------------------------------------------------------
 
-def render_prompt(tpl: str, context: Dict[str, object]) -> str:
-    """把 ``{{name}}`` 替换成上下文里的值。
+# 取不到值的哨兵：``None`` 是一种合法的值（JSON 里的 null），不能拿来当缺失。
+_MISSING = object()
 
-    引用了不存在的变量直接报错，而不是替换成空串：静悄悄少喂一段简历全文，
+
+def render_prompt(tpl: str, context: Dict[str, object]) -> str:
+    """把 ``{{name}}`` 与 ``{{name.字段}}`` 替换成上下文里的值。
+
+    引用了取不到的东西直接报错，而不是替换成空串：静悄悄少喂一段简历全文，
     模型照样能编出一份看着挺完整的报告，而那份报告是废的，代价是一整趟调用的
     时间和 token。
     """
-    missing: List[str] = []
+    problems: List[str] = []
 
     def replace(match: re.Match) -> str:
         name = match.group(1)
-        if name not in context:
-            missing.append(name)
+        value = _lookup(context, name)
+        if value is _MISSING:
+            problems.append(_missing_reason(context, name))
             return match.group(0)
-        value = context[name]
-        return "" if value is None else str(value)
+        return _stringify(value)
 
     rendered = _PLACEHOLDER.sub(replace, tpl)
-    if missing:
-        raise ValueError(f"模板引用了未定义的变量：{'、'.join(sorted(set(missing)))}")
+    if problems:
+        raise ValueError(f"模板取值失败：{'、'.join(sorted(set(problems)))}")
     return rendered
+
+
+def _lookup(context: Dict[str, object], name: str) -> object:
+    """按 ``a`` 或 ``a.b.c`` 从上下文取值；取不到返回 :data:`_MISSING`。
+
+    ``{{a}}`` 拿到的永远是这一步的整段产物；点号路径只有 JSON 步骤的产物走得通
+    ——执行时进上下文的是它按契约解析出来的对象（见 ``execute_run``），整段文本
+    里混着的解释性文字不该被下游当成结构体引用。
+    """
+    root, _, path = name.partition(".")
+    if root not in context:
+        return _MISSING
+    value = context[root]
+    if not path:
+        return value
+    for segment in path.split("."):
+        if isinstance(value, dict):
+            if segment not in value:
+                return _MISSING
+            value = value[segment]
+        elif isinstance(value, list) and segment.isdigit() and int(segment) < len(value):
+            value = value[int(segment)]
+        else:
+            # 字符串、数字、越界的下标、``a..b`` 里的空段——都没有再往里走一层的道理。
+            return _MISSING
+    return value
+
+
+def _missing_reason(context: Dict[str, object], name: str) -> str:
+    """报错时说得出是哪一种取不到：根变量根本没有，还是那条路径走不通。"""
+    root, _, path = name.partition(".")
+    if root not in context:
+        return f"未定义的变量 {root}"
+    return f"{name}（{root} 的产物里没有这个字段）"
+
+
+def _stringify(value: object) -> str:
+    """把取到的值变成喂进 prompt 的文本。
+
+    对象与数组按 JSON 序列化，不是 Python 的 repr：单引号和 ``None`` 模型会照抄
+    进它的输出里，下游再按 JSON 解析就崩。
+    """
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _group_order(steps: Sequence[WorkflowStep]) -> List[Tuple[str, List[WorkflowStep]]]:
@@ -910,28 +1033,42 @@ class WorkflowService:
 
     @staticmethod
     def _check_template_vars(steps: List[WorkflowStep], declared: List[str]) -> None:
-        """模板里的 ``{{name}}`` 必须是声明过的输入，或**前面并行组**的产物。"""
+        """``{{name}}`` 的根必须是声明过的输入或**前面并行组**的产物；``{{name.字段}}`` 只允许挂在 JSON 步骤的产物上。"""
         known = set(declared)
+        # 只有 JSON 步骤的产物进上下文时带着解析结果，才有点号可取（见 execute_run）。
+        json_vars = {
+            step.output_var
+            for step in steps
+            if step.output_var and step.output_kind == OUTPUT_JSON
+        }
         for _, members in _group_order(steps):
             in_group = {step.output_var: step.key for step in members if step.output_var}
             for step in members:
                 for name in _PLACEHOLDER.findall(step.prompt_tpl):
-                    if name in known:
+                    root, _, path = name.partition(".")
+                    if root not in known:
+                        if root in in_group:
+                            raise ValueError(
+                                f"步骤 {step.key} 引用了同组步骤 {in_group[root]} 的产物 {root}："
+                                "同一组是并行执行的，那一步这时还没有输出"
+                            )
+                        raise ValueError(
+                            f"步骤 {step.key} 的模板引用了未定义的变量 {root}："
+                            "它既不是这条流程声明的输入，也不是前面步骤的产物"
+                        )
+                    if "." not in name:
                         continue
-                    if name in in_group:
+                    if root not in json_vars:
                         raise ValueError(
-                            f"步骤 {step.key} 引用了同组步骤 {in_group[name]} 的产物 {name}："
-                            "同一组是并行执行的，那一步这时还没有输出"
+                            f"步骤 {step.key} 的模板引用了 {name}：{root} 是整段文本，"
+                            f"没有字段可取，请引用整段 {{{{{root}}}}}"
                         )
-                    if "." in name:
+                    broken = [part for part in path.split(".") if not _FIELD_SEGMENT.match(part)]
+                    if broken:
                         raise ValueError(
-                            f"步骤 {step.key} 的模板引用了 {name}：暂不支持按字段取值，"
-                            f"只能用整段产物 {name.split('.')[0]}"
+                            f"步骤 {step.key} 的模板引用了 {name}：字段名 {broken[0]!r} 不合法，"
+                            "只能写字母开头的键或数组下标"
                         )
-                    raise ValueError(
-                        f"步骤 {step.key} 的模板引用了未定义的变量 {name}："
-                        "它既不是这条流程声明的输入，也不是前面步骤的产物"
-                    )
             known |= set(in_group)
 
     # -- 发起运行 -------------------------------------------------------------
@@ -1031,10 +1168,17 @@ class WorkflowService:
     def list_runs(
         self,
         workflow_id: Optional[int] = None,
-        limit: int = 20,
         *,
         subject: Optional[Tuple[str, object]] = None,
-    ) -> List[WorkflowRun]:
+        run_status: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Tuple[List[WorkflowRun], int]:
+        """一页运行记录与**匹配条件**的总条数，新的在前。
+
+        总数按同一套条件算：界面上的「共 N 次」要说的是筛出来的那批，而不是
+        当页有几条——按 ``limit`` 报回去的话，翻到第二页数字就变了。
+        """
         stmt = select(WorkflowRun).where(WorkflowRun.owner_id == self._owner_id)
         if workflow_id is not None:
             stmt = stmt.where(WorkflowRun.workflow_id == workflow_id)
@@ -1046,9 +1190,17 @@ class WorkflowService:
                 WorkflowRun.subject_kind == subject[0],
                 WorkflowRun.subject_ref == str(subject[1]),
             )
-        return list(
-            self._db.scalars(stmt.order_by(WorkflowRun.id.desc()).limit(limit)).all()
+        if run_status is not None:
+            stmt = stmt.where(WorkflowRun.status == run_status)
+        total = int(self._db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+        items = list(
+            self._db.scalars(
+                stmt.order_by(WorkflowRun.id.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            ).all()
         )
+        return items, total
 
     def _reopen_for_read(self) -> None:
         """结束当前读事务，让下一次 SELECT 拿新快照。
@@ -1082,8 +1234,36 @@ class WorkflowService:
             ).all()
         )
 
+    def run_model_names(self, run_ids: Sequence[int]) -> Dict[int, List[str]]:
+        """这批运行各步用到的模型，按步骤顺序去重。
+
+        一次问完整页：列表一页 20 次运行，按行逐条查就是 20 次往返，而这就是
+        「运行记录打开慢」的全部原因。没跑到的步骤没有模型可报，配置在跑完后被
+        删掉的也报不出名字，两种都跳过。
+        """
+        ids = list(run_ids)
+        if not ids:
+            return {}
+        rows = self._db.execute(
+            select(WorkflowRunStep.run_id, ModelConfig.model_name)
+            .outerjoin(ModelConfig, ModelConfig.id == WorkflowRunStep.model_config_id)
+            .where(
+                WorkflowRunStep.owner_id == self._owner_id,
+                WorkflowRunStep.run_id.in_(ids),
+            )
+            .order_by(WorkflowRunStep.run_id, WorkflowRunStep.sort_order, WorkflowRunStep.id)
+        ).all()
+        names: Dict[int, List[str]] = {}
+        for run_id, model_name in rows:
+            if not model_name:
+                continue
+            bucket = names.setdefault(run_id, [])
+            if model_name not in bucket:
+                bucket.append(model_name)
+        return names
+
     @staticmethod
-    def to_run_item(run: WorkflowRun) -> WorkflowRunItem:
+    def to_run_item(run: WorkflowRun, model_names: Sequence[str] = ()) -> WorkflowRunItem:
         return WorkflowRunItem(
             id=run.id,
             workflow_id=run.workflow_id,
@@ -1094,15 +1274,26 @@ class WorkflowService:
             status=run.status,
             error_msg=run.error_msg,
             elapsed_ms=run.elapsed_ms,
+            model_names=list(model_names),
             started_at=run.started_at,
             finished_at=run.finished_at,
             created_at=run.created_at,
         )
 
     def to_run_detail(self, run: WorkflowRun) -> WorkflowRunDetail:
-        """运行详情：带输入快照与每一步的现场（含渲染后的 prompt）。"""
+        """运行详情：带输入快照与每一步的现场（含渲染后的 prompt）。
+
+        步骤行存的是当时的现场，「这一步可选吗、要什么格式、是谁的人设」长在定义上，
+        所以这里按 key 对一次：对得上就带上，对不上（定义后来改过、步骤已删）就按
+        行本身显示——现场的主人是那次运行，不是当前的定义。
+        """
+        rows = self.run_steps(run.id)
+        definitions = {step.key: step for step in self.steps_of(run.workflow_id)}
+        agent_names = self._agent_names(row.agent_slug for row in rows)
         return WorkflowRunDetail(
-            **self.to_run_item(run).model_dump(),
+            **self.to_run_item(
+                run, self.run_model_names([run.id]).get(run.id, [])
+            ).model_dump(),
             inputs=dict(run.inputs or {}),
             steps=[
                 WorkflowRunStepItem(
@@ -1110,6 +1301,9 @@ class WorkflowService:
                     key=row.key,
                     group_key=row.group_key,
                     agent_slug=row.agent_slug,
+                    agent_name=agent_names.get(row.agent_slug),
+                    output_kind=definitions[row.key].output_kind if row.key in definitions else None,
+                    optional=definitions[row.key].optional if row.key in definitions else False,
                     status=row.status,
                     prompt=row.prompt,
                     output=row.output,
@@ -1120,7 +1314,7 @@ class WorkflowService:
                     started_at=row.started_at,
                     finished_at=row.finished_at,
                 )
-                for row in self.run_steps(run.id)
+                for row in rows
             ],
         )
 
@@ -1174,10 +1368,16 @@ def subject_state(
     没有运行记录时按「有没有产物」判断——本次改造之前发起的存量任务就是靠这个
     仍然显示为已完成。``idle`` 是那份产物也没有时的取值：简历用 ``uploaded``
     （传上来还没分析），创建即发起生成的 deck / 任务用自己的初始态。
+
+    反过来也要对上：**运行成功却没有产物**不能报「已完成」。单步重跑就会造出这种
+    组合——那一步重新跑通了，业务行上的产物却不会被一个步骤重写（后处理在功能侧），
+    照 ``succeeded → ready`` 直译就是一页什么都没有的「已完成」。
     """
     if run is None:
         return (SUBJECT_READY if has_product else idle), None
     status = _RUN_TO_SUBJECT.get(run.status, SUBJECT_ERROR)
+    if status == SUBJECT_READY and not has_product:
+        return SUBJECT_ERROR, "工作流跑完了，但结果没有写回这条记录，请重新发起一次完整任务"
     return status, run.error_msg if status == SUBJECT_ERROR else None
 
 
@@ -1226,7 +1426,17 @@ class _StepOutcome:
     optional: bool
     output_var: Optional[str] = None
     output: Optional[str] = None
+    parsed: Optional[object] = None
     error: Optional[str] = None
+
+
+def _context_value(output: Optional[str], parsed: Optional[object]) -> object:
+    """一步的产物进上下文的样子：整段文本，JSON 步换成解析出来的对象。
+
+    这样 ``{{x}}`` 引用 JSON 步骤时喂给下游的是按契约筛过的结构（模型原文里混着
+    的解释性文字不喂），``{{x.字段}}`` 也才有的可取（见 :func:`_lookup`）。
+    """
+    return parsed if parsed is not None else (output or "")
 
 
 # 队列里标记「这一组跑完了」的哨兵，与事件名区分开。
@@ -1267,7 +1477,7 @@ async def _execute_step(
             return outcome
 
         row.status = STEP_RUNNING
-        row.started_at = datetime.now(timezone.utc)
+        row.started_at = db_now()
         db.commit()
 
         try:
@@ -1278,12 +1488,18 @@ async def _execute_step(
             return await _finish_step(db, row, step, queue, str(exc), started)
 
         try:
+            # 落这一步**实际**用的模型：定义里的 model_config_id 只写按步骤的覆盖，
+            # 空着的是运行时的默认对话模型。历史行只存前者的话，绝大多数运行在
+            # 界面上就是「没用什么模型」。
+            config = require_chat_model(db, owner_id, step.model_config_id)
+            row.model_config_id = config.id
+            db.commit()
             text = await run_agent(
                 db,
                 owner_id,
                 step.agent_slug,
                 prompt,
-                config_id=step.model_config_id,
+                config_id=config.id,
             )
             plain, parsed = parse_output(text, step.output_kind, step.output_keys)
         except Exception as exc:  # noqa: BLE001 - 步骤的失败就是这一步的状态
@@ -1315,8 +1531,7 @@ async def _finish_step(
     row.parsed = parsed
     row.error_msg = error
     row.elapsed_ms = elapsed_ms
-    row.model_config_id = step.model_config_id
-    row.finished_at = datetime.now(timezone.utc)
+    row.finished_at = db_now()
     db.commit()
 
     outcome = _StepOutcome(
@@ -1325,6 +1540,7 @@ async def _finish_step(
         optional=step.optional,
         output_var=step.output_var,
         output=output,
+        parsed=parsed,
         error=error,
     )
     await queue.put(("step_end", _step_event(outcome, elapsed_ms=elapsed_ms, parsed=parsed)))
@@ -1388,7 +1604,7 @@ async def execute_run(
         require_chat_model(db, owner_id)
 
         run.status = RUN_RUNNING
-        run.started_at = datetime.now(timezone.utc)
+        run.started_at = db_now()
         run.error_msg = None
         db.commit()
 
@@ -1451,7 +1667,9 @@ async def execute_run(
             for outcome in results:
                 if isinstance(outcome, _StepOutcome):
                     if outcome.status == STEP_SUCCEEDED and outcome.output_var:
-                        context[outcome.output_var] = outcome.output
+                        context[outcome.output_var] = _context_value(
+                            outcome.output, outcome.parsed
+                        )
                     elif outcome.status == STEP_FAILED and outcome.optional and outcome.output_var:
                         # 可选步骤挂了不算完：它的产物按空串进上下文，下游那句
                         # 「如果有配图建议就附上」自然就不附上。不补这一手的话，
@@ -1485,7 +1703,7 @@ async def execute_run(
                 WorkflowRunStep.run_id == run_id,
                 WorkflowRunStep.status.in_((STEP_PENDING, STEP_RUNNING)),
             )
-            .values(status=STEP_SKIPPED, finished_at=datetime.now(timezone.utc))
+            .values(status=STEP_SKIPPED, finished_at=db_now())
         )
 
         run = db.get(WorkflowRun, run_id)
@@ -1497,7 +1715,7 @@ async def execute_run(
         else:
             run.error_msg = failed
         run.elapsed_ms = int((time.monotonic() - started) * 1000)
-        run.finished_at = datetime.now(timezone.utc)
+        run.finished_at = db_now()
         db.commit()
 
         if aborted:
@@ -1512,6 +1730,328 @@ async def execute_run(
         }
 
 
+# ---- 中途接上正在跑的运行 ----------------------------------------------------
+
+# 步骤的这些取值算「跑完了」：剩下的都是进行中。
+_STEP_SETTLED = (STEP_SUCCEEDED, STEP_FAILED, STEP_SKIPPED)
+
+
+def _follow_state(
+    db: Session, owner_id: int, run_id: int
+) -> Tuple[Optional[dict], Dict[str, dict]]:
+    """读一次运行的现状：运行行加每一步的状态摘要（不含正文）。
+
+    开头先 ``commit()`` 换事务——写这些行的是**另一条连接**（后台任务或另一个
+    worker），留在旧事务里读，永远读不到它的提交。
+    """
+    db.commit()
+    run = db.scalar(
+        select(WorkflowRun).where(
+            WorkflowRun.owner_id == owner_id, WorkflowRun.id == run_id
+        )
+    )
+    if run is None:
+        return None, {}
+    steps = {
+        row.key: {
+            "status": row.status,
+            "group_key": row.group_key,
+            "agent_slug": row.agent_slug,
+            "error": row.error_msg,
+            "output_chars": len(row.output or ""),
+            "elapsed_ms": row.elapsed_ms,
+        }
+        for row in db.scalars(
+            select(WorkflowRunStep)
+            .where(
+                WorkflowRunStep.owner_id == owner_id, WorkflowRunStep.run_id == run_id
+            )
+            .order_by(WorkflowRunStep.sort_order, WorkflowRunStep.id)
+        ).all()
+    }
+    state = {
+        "run_id": run.id,
+        "workflow_id": run.workflow_id,
+        "workflow_slug": run.workflow_slug,
+        "status": run.status,
+        "error": run.error_msg,
+        "elapsed_ms": run.elapsed_ms,
+    }
+    return state, steps
+
+
+async def follow_run(
+    *,
+    owner_id: int,
+    run_id: int,
+    is_disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
+    poll_seconds: float = FOLLOW_POLL_SECONDS,
+) -> AsyncIterator[Tuple[str, object]]:
+    """接上一次已经在跑的运行：先回放现状，再把之后的变化推出去。
+
+    发起它的那条流不保证还活着——页面会关、会换设备，功能侧的生成（简历分析、
+    幻灯片）本来就不在任何流里跑。这里不执行任何东西，只读 ``workflow_run_step``
+    里已经落库的事实，事件名与载荷形状跟 :func:`execute_run` 一致，所以客户端
+    不用为「跟着跑」和「中途接上」写两套解析。
+
+    运行进终态就收流；``is_disconnected`` 与 :func:`execute_run` 同一用法。
+    """
+    from app.database import SessionLocal
+
+    with SessionLocal() as db:
+        state, steps = _follow_state(db, owner_id, run_id)
+        if state is None:
+            raise LookupError("运行记录不存在")
+
+        definitions = {
+            step.key: step
+            for step in db.scalars(
+                select(WorkflowStep).where(WorkflowStep.workflow_id == state["workflow_id"])
+            ).all()
+        }
+        agent_names = {
+            agent.slug: agent.name for agent in AgentService(db, owner_id).list()
+        }
+        # 定义可能在这之后被改过（内置流程每次启动都就地刷新），步骤行才是
+        # 当时的事实；两者都有，定义只补上「这一步标不标可选、要什么格式」。
+        yield "run_start", {
+            "run_id": state["run_id"],
+            "workflow_slug": state["workflow_slug"],
+            "status": state["status"],
+            "steps": [
+                {
+                    "key": key,
+                    "group_key": info["group_key"],
+                    "agent_slug": info["agent_slug"],
+                    "agent_name": agent_names.get(info["agent_slug"]),
+                    "output_kind": definitions[key].output_kind if key in definitions else None,
+                    "optional": definitions[key].optional if key in definitions else False,
+                    "status": info["status"],
+                }
+                for key, info in steps.items()
+            ],
+        }
+
+        seen = {key: info["status"] for key, info in steps.items()}
+        while state["status"] in (RUN_PENDING, RUN_RUNNING):
+            await asyncio.sleep(poll_seconds)
+            if is_disconnected is not None and await is_disconnected():
+                return
+            state, steps = _follow_state(db, owner_id, run_id)
+            if state is None:
+                # 记录被清理掉了：接着转圈只会让界面卡在「执行中」。
+                raise LookupError("运行记录不存在")
+            for key, info in steps.items():
+                if info["status"] == seen.get(key):
+                    continue
+                seen[key] = info["status"]
+                if info["status"] in _STEP_SETTLED:
+                    yield "step_end", {
+                        "key": key,
+                        "status": info["status"],
+                        "error": info["error"],
+                        "output_chars": info["output_chars"],
+                        "elapsed_ms": info["elapsed_ms"],
+                    }
+                else:
+                    # pending / running 都算「这一步没定下来」。重跑会把已经跑完的
+                    # 一步打回 pending，这条事件让客户端先清掉上一次的显示。
+                    yield "step_start", {
+                        "key": key,
+                        "group_key": info["group_key"],
+                        "status": info["status"],
+                    }
+
+        yield "run_end", {
+            "run_id": run_id,
+            "status": state["status"],
+            "error": state["error"],
+            "elapsed_ms": state["elapsed_ms"],
+        }
+
+
+# ---- 单步重跑 ---------------------------------------------------------------
+
+def _detach(db: Session, obj: object) -> object:
+    """让一个对象带着已加载的列脱离 session。
+
+    重跑要在**另一条连接**上写这一步，读它的 session 若还开着事务，SQLite 会
+    被这个读快照挡住写。``commit()`` 会过期全部属性，所以脱离前先读一次把整行取回来。
+    """
+    db.commit()
+    _ = obj.id  # noqa: B018 - 这次读就是要触发整行重新加载
+    db.expunge(obj)
+    return obj
+
+
+def prepare_step_rerun(db: Session, owner_id: int, run_id: int, key: str) -> WorkflowRun:
+    """把一次终态运行里的那一步打回待运行，现场交给调用方的后台任务去跑。
+
+    闸门都在这儿：还在跑的运行不能重发（两个执行体会抢同一行），定义里已经没有的
+    步骤不能重跑——prompt 模板只存在于定义里，步骤行只存渲染出来的那一份。
+    """
+    run = db.scalar(
+        select(WorkflowRun).where(
+            WorkflowRun.owner_id == owner_id, WorkflowRun.id == run_id
+        )
+    )
+    if run is None:
+        raise LookupError("运行记录不存在")
+    if run.status in (RUN_PENDING, RUN_RUNNING):
+        raise ValueError("这次运行还没结束，等它跑完再重跑单步")
+    row = db.scalar(
+        select(WorkflowRunStep).where(
+            WorkflowRunStep.owner_id == owner_id,
+            WorkflowRunStep.run_id == run_id,
+            WorkflowRunStep.key == key,
+        )
+    )
+    if row is None:
+        raise ValueError("这次运行里没有这一步")
+    definition = db.scalar(
+        select(WorkflowStep).where(
+            WorkflowStep.workflow_id == run.workflow_id, WorkflowStep.key == key
+        )
+    )
+    if definition is None:
+        raise ValueError("这条流程的定义里已经没有这一步，没有模板可以重跑")
+
+    row.status = STEP_PENDING
+    row.prompt = None
+    row.output = None
+    row.parsed = None
+    row.error_msg = None
+    row.elapsed_ms = None
+    row.started_at = None
+    row.finished_at = None
+    # 整条运行回到执行中：这一步跑完之前，业务行上显示的是「分析中」，
+    # 而不是上一次的结果——它确实正在被重做。
+    run.status = RUN_RUNNING
+    run.error_msg = None
+    run.elapsed_ms = None
+    run.finished_at = None
+    db.commit()
+    return run
+
+
+def _rerun_context(db: Session, run: WorkflowRun, target_key: str) -> Dict[str, object]:
+    """按当时落库的上游产物重建这一步的上下文。
+
+    只带目标步骤**之前**那些组的输出：同组并行步骤第一次跑的时候也看不见彼此的
+    产物，重跑要复刻的就是当时那张 prompt，不能因为这次跑得晚就多喂一段。
+    """
+    definitions = list(
+        db.scalars(
+            select(WorkflowStep)
+            .where(WorkflowStep.workflow_id == run.workflow_id)
+            .order_by(WorkflowStep.sort_order, WorkflowStep.id)
+        ).all()
+    )
+    by_key = {step.key: step for step in definitions}
+    target = by_key.get(target_key)
+    earlier = []
+    for group_key, _members in _group_order(definitions):
+        if target is None or group_key == target.group_key:
+            break
+        earlier.append(group_key)
+
+    context: Dict[str, object] = dict(run.inputs or {})
+    for row in db.scalars(
+        select(WorkflowRunStep)
+        .where(WorkflowRunStep.owner_id == run.owner_id, WorkflowRunStep.run_id == run.id)
+        .order_by(WorkflowRunStep.sort_order, WorkflowRunStep.id)
+    ).all():
+        step = by_key.get(row.key)
+        if step is None or not step.output_var or row.group_key not in earlier:
+            continue
+        if row.status == STEP_SUCCEEDED:
+            context[step.output_var] = _context_value(row.output, row.parsed)
+        elif row.status == STEP_FAILED and step.optional:
+            # 与执行器同一处理：可选步骤的产物按空串进上下文，下游自己跳过。
+            context[step.output_var] = ""
+    return context
+
+
+def settle_run_status(db: Session, owner_id: int, run_id: int, *, error: Optional[str] = None) -> None:
+    """按现在的全部步骤行重算一次运行的状态。
+
+    重跑只换这一步的产物，功能侧的后处理（写回简历报告、deck 页面）只认整条流程
+    跑完，所以「这一步成功」不等于「业务行有结果」。那一层由 :func:`subject_state`
+    兜住：运行成功却没有产物，界面上报的是明确的错。
+    """
+    run = db.scalar(
+        select(WorkflowRun).where(
+            WorkflowRun.owner_id == owner_id, WorkflowRun.id == run_id
+        )
+    )
+    if run is None:
+        return
+    rows = list(
+        db.scalars(
+            select(WorkflowRunStep).where(
+                WorkflowRunStep.owner_id == owner_id, WorkflowRunStep.run_id == run_id
+            )
+        ).all()
+    )
+    failed = [row for row in rows if row.status == STEP_FAILED]
+    unfinished = [
+        row for row in rows if row.status in (STEP_PENDING, STEP_RUNNING, STEP_SKIPPED)
+    ]
+    if error:
+        run.status, run.error_msg = RUN_FAILED, error
+    elif failed:
+        run.status, run.error_msg = RUN_FAILED, failed[0].error_msg or "步骤执行失败"
+    elif unfinished:
+        run.status, run.error_msg = RUN_FAILED, f"重跑的这一步之后还有 {len(unfinished)} 步没有跑"
+    else:
+        run.status, run.error_msg = RUN_SUCCEEDED, None
+    run.finished_at = db_now()
+    db.commit()
+
+
+async def rerun_step(*, owner_id: int, run_id: int, key: str) -> None:
+    """重跑一次运行里的单个步骤，跑完按全部步骤行重算运行状态。
+
+    由路由的后台任务调用（``prepare_step_rerun`` 已经把它打回 pending 了）。
+    进度不在这儿发：步骤状态本来就是一步一提交，客户端用 :func:`follow_run` 接上。
+    """
+    from app.database import SessionLocal
+
+    with SessionLocal() as db:
+        run = db.scalar(
+            select(WorkflowRun).where(
+                WorkflowRun.owner_id == owner_id, WorkflowRun.id == run_id
+            )
+        )
+        if run is None:
+            logger.warning("rerun step %s: run %s has gone", key, run_id)
+            return
+        definition = db.scalar(
+            select(WorkflowStep).where(
+                WorkflowStep.workflow_id == run.workflow_id, WorkflowStep.key == key
+            )
+        )
+        if definition is None:
+            settle_run_status(db, owner_id, run_id, error="这条流程的定义里已经没有这一步")
+            return
+        context = _rerun_context(db, run, key)
+        step = _detach(db, definition)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    try:
+        await _execute_step(
+            owner_id=owner_id, run_id=run_id, step=step, context=context, queue=queue
+        )
+    except Exception as exc:  # noqa: BLE001 - 不能让运行卡在 running
+        logger.warning("rerun step %s of run %s crashed: %s", key, run_id, exc, exc_info=True)
+        with SessionLocal() as db:
+            settle_run_status(db, owner_id, run_id, error=model_error_text(exc))
+        return
+
+    with SessionLocal() as db:
+        settle_run_status(db, owner_id, run_id)
+
+
 def start_builtin(
     db: Session,
     owner_id: int,
@@ -1523,7 +2063,7 @@ def start_builtin(
 ) -> WorkflowRun:
     """功能侧发起一条内置流程：在请求里把运行建出来，交给后台任务去跑。
 
-    与 :func:`finish_builtin` 拆成两步，是为了让「这次任务的状态」在请求返回时就
+    与 :func:`finish_builtin_step` 拆成两步，是为了让「这次任务的状态」在请求返回时就
     已经落库：以前 ``start_analysis`` 往业务行写一个 ``analyzing``、后台任务再往
     运行表写一份，两边各是各的事实源。现在认领了这个业务对象（``subject``）的运行
     就是它的状态本身，重启后的收尾也只有 ``reset_stale_runs`` 一处。
@@ -1542,14 +2082,18 @@ def start_builtin(
     )
 
 
-async def finish_builtin(
+async def finish_builtin_step(
     db: Session,
     owner_id: int,
     run_id: int,
     *,
     step_key: Optional[str] = None,
-) -> str:
-    """跑完一条内置工作流，返回它那一步的产物文本。
+) -> WorkflowRunStep:
+    """跑完一条内置工作流，返回它产出结果的那一步。
+
+    行上两样都给：``output`` 是模型的原始文本，``parsed`` 是按这一步声明的输出
+    契约解析出来的对象（markdown 步没有对象，是 ``None``）。后处理直接读 ``parsed``
+    就行——引擎已经剥过代码栅栏、核对过期望字段，这里再解析一遍只是把同一件事做两次。
 
     功能侧（简历、幻灯片、面试、求职助手）调一次模型的路径统一到这里：同样的调用
     先落一条运行，步骤的渲染结果、原始输出、耗时都进 ``workflow_run_step``——
@@ -1584,5 +2128,16 @@ async def finish_builtin(
     )
     if step is None:
         raise RuntimeError(f"工作流 {finished.workflow_slug} 没有产出可用的结果")
-    return step.output or ""
+    return step
+
+
+async def builtin_output(
+    db: Session,
+    owner_id: int,
+    run_id: int,
+    *,
+    step_key: Optional[str] = None,
+) -> str:
+    """只要产物文本的调用方用这个；要按输出契约拿对象就选 :func:`finish_builtin_step`。"""
+    return (await finish_builtin_step(db, owner_id, run_id, step_key=step_key)).output or ""
 

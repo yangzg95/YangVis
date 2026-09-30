@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
 from typing import Any, List, Optional, Tuple
 
 import asyncssh
@@ -28,6 +27,7 @@ from app.models.schemas import (
     OpsServerUpdate,
     ServerAuthType,
 )
+from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.ops_server")
 
@@ -192,7 +192,7 @@ class OpsServerService:
         logger.info("owner %s deleted server %s (%s)", self._owner_id, server.id, server.name)
 
     def record_check(self, server: OpsServer, *, ok: bool, message: str = "") -> None:
-        server.last_checked_at = datetime.now(timezone.utc)
+        server.last_checked_at = db_now()
         server.last_check_ok = ok
         server.last_check_error = None if ok else message[:512]
         self._db.commit()

@@ -44,7 +44,7 @@
         <span class="muted">{{ form.inputs.length }} 个</span>
       </div>
       <div class="hint block" v-pre>
-        步骤模板里能用 {{变量名}} 引用的，就是这里声明的变量加上前面步骤的产物。条件段落（「有补充说明才加这一段」）请在调用方拼好再作为一个变量传进来——模板只做替换，不含判断。
+        步骤模板里能用 {{变量名}} 引用的，就是这里声明的变量加上前面步骤的产物。输出格式是 JSON 的步骤还能按字段取：{{产物名.字段}}，嵌套对象接着往下点、数组用下标（{{大纲.pages.1.title}}）；整段引用它拿到的是解析出来的对象。条件段落（「有补充说明才加这一段」）请在调用方拼好再作为一个变量传进来——模板只做替换，不含判断。
       </div>
       <div v-for="(field, index) in form.inputs" :key="index" class="field-row">
         <a-input v-model:value="field.name" placeholder="变量名 topic" class="w-name" :disabled="readonly" />
@@ -139,6 +139,22 @@
             placeholder="就{{topic}}写一段话"
             :disabled="readonly"
           />
+          <!-- 引用芯片：点一下就把 {{...}} 插到光标处，省得手打花括号打错一位。
+               列什么是后端说了算——声明过的输入，加上前面并行组的产物；同组并行
+               的那几步这时还没有输出，所以不列（见 _check_template_vars）。 -->
+          <div v-if="chipsFor(index).length" class="chip-row">
+            <button
+              v-for="chip in chipsFor(index)"
+              :key="chip"
+              type="button"
+              class="chip"
+              :class="{ 'chip-field': chip.includes('.') }"
+              :disabled="readonly"
+              :title="chip.includes('.') ? '插入按字段取值' : '插入整段引用'"
+              v-text="chip"
+              @mousedown.prevent="insertChip(index, chip, $event)"
+            />
+          </div>
         </a-form-item>
 
         <div class="step-foot">
@@ -203,7 +219,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import {
   ArrowDownOutlined,
@@ -347,6 +363,71 @@ function move(index: number, delta: number) {
   form.steps.splice(target, 0, step)
 }
 
+/** 每一步属于第几个并行组：分组名与上一步相同就是同一组（后端同一套口径）。 */
+const groupSequence = computed(() => {
+  const sequences: number[] = []
+  let current = -1
+  let previous: string | null = null
+  for (const step of form.steps) {
+    const key = step.group_key.trim()
+    if (key !== previous) {
+      current += 1
+      previous = key
+    }
+    sequences.push(current)
+  }
+  return sequences
+})
+
+/**
+ * 这一步的模板里能引用谁：声明过的输入，加上**前面**并行组的产物。
+ *
+ * JSON 步骤额外列出按字段取值（``{{产物.字段}}``，字段来自它的期望字段）——后端
+ * 只允许 JSON 步这样取，芯片列出的集合必须和校验一致，否则点出来的是一个存不下的
+ * 模板。
+ */
+function chipsFor(index: number): string[] {
+  const own = groupSequence.value[index] ?? 0
+  const chips: string[] = []
+  for (const field of form.inputs) {
+    const name = field.name.trim()
+    if (name) chips.push(`{{${name}}}`)
+  }
+  form.steps.forEach((step, stepIndex) => {
+    if ((groupSequence.value[stepIndex] ?? 0) >= own) return
+    const variable = step.output_var.trim()
+    if (!variable) return
+    chips.push(`{{${variable}}}`)
+    if (step.output_kind !== 'json') return
+    for (const key of step.output_keys) {
+      const field = key.trim()
+      if (field) chips.push(`{{${variable}.${field}}}`)
+    }
+  })
+  return [...new Set(chips)]
+}
+
+/** 点芯片：插到光标处，选中的文字被替换；没在用这一步的输入框就 append 到末尾。 */
+function insertChip(index: number, insert: string, event: MouseEvent) {
+  const step = form.steps[index]
+  if (!step) return
+  const card = (event.currentTarget as HTMLElement).closest('.step-card')
+  const focused = document.activeElement as HTMLTextAreaElement | null
+  const area = card && focused && card.contains(focused) ? focused : null
+  if (!area) {
+    step.prompt_tpl += insert
+    return
+  }
+  const from = area.selectionStart ?? step.prompt_tpl.length
+  const to = area.selectionEnd ?? from
+  step.prompt_tpl = step.prompt_tpl.slice(0, from) + insert + step.prompt_tpl.slice(to)
+  const caret = from + insert.length
+  void nextTick(() => {
+    area.focus()
+    area.setSelectionRange(caret, caret)
+  })
+}
+
 function firstIncomplete(): string | null {
   if (!form.name.trim()) return '请填写工作流名称'
   if (!editing.value && !/^[a-z0-9][a-z0-9-]*$/.test(form.slug.trim()))
@@ -455,6 +536,35 @@ async function submit() {
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
+}
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.chip {
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 0 6px;
+  cursor: pointer;
+}
+.chip:hover:not(:disabled) {
+  border-color: var(--signal-border);
+  background: var(--signal-bg);
+  color: var(--signal-text);
+}
+.chip:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.chip-field {
+  color: var(--text-3);
 }
 .step-no {
   width: 20px;

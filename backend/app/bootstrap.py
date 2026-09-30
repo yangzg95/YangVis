@@ -12,7 +12,11 @@ from app.models.entities import KbProject, KnowledgeType, SysUser
 from app.services.agents import seed_builtin_agents
 from app.services.knowledge import reset_stale_indexing
 from app.services.ops_actions import reset_stale_ops_actions
-from app.services.workflows import reset_stale_runs, seed_builtin_workflows
+from app.services.workflows import (
+    prune_runs,
+    reset_stale_runs,
+    seed_builtin_workflows,
+)
 from app.security import hash_password
 
 logger = logging.getLogger("yangvis.bootstrap")
@@ -325,6 +329,16 @@ def reset_stale_jobs() -> None:
         reset_stale_ops_actions(db)
         # 工作流跑在请求进程里，重启会把它连同正在执行的步骤一起丢掉。
         reset_stale_runs(db)
+
+
+def prune_workflow_runs() -> None:
+    """清掉过了保留窗口的运行记录（启动时一次，全站口径）。
+
+    放在 ``reset_stale_jobs`` 之后：那条把上个进程遗留的 ``running`` 收成了失败，
+    先收尾再清理，否则它们会作为「还在跑」被一直留着。
+    """
+    with SessionLocal() as db:
+        prune_runs(db)
 
 
 def bootstrap_admin(settings: Settings) -> None:

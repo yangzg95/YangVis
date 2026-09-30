@@ -49,8 +49,8 @@ from app.services.slides_store import StoredImage
 from app.services.workflows import (
     SUBJECT_ERROR,
     SUBJECT_SLIDE_DECK,
+    builtin_output,
     fail_run,
-    finish_builtin,
     latest_run,
     latest_runs,
     running_subjects,
@@ -357,7 +357,10 @@ class SlideService:
             len(deck.assets or []),
         )
         try:
-            text = await finish_builtin(self._db, self._owner_id, run.id)
+            # 这一步在流程里声明的是 markdown：模型的产物既可能是对象（带 theme），
+            # 也可能是整页数组，而引擎的 JSON 契约只收对象。所以这里照旧自己解析原文，
+            # 不能改取 parsed。
+            text = await builtin_output(self._db, self._owner_id, run.id)
             theme, pages = _parse_deck_output(text)
             # 模型给的外观要先过白名单再谈合并：非法 preset / 比例 / 颜色一律
             # 回落默认，不能让任意字符串进到 CSS 里。

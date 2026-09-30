@@ -14,6 +14,7 @@ from app.bootstrap import (
     bootstrap_admin,
     create_tables,
     migrate_schema,
+    prune_workflow_runs,
     reset_stale_jobs,
     seed_agents,
     seed_workflows,
@@ -278,6 +279,8 @@ async def on_startup() -> None:
         ("seed_agents", seed_agents),
         ("seed_workflows", seed_workflows),
         ("reset_stale_jobs", reset_stale_jobs),
+        # 清理放在收尾之后：遗留的 running 先变成失败，才谈得上按窗口删。
+        ("prune_workflow_runs", prune_workflow_runs),
     ):
         try:
             step()

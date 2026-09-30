@@ -574,6 +574,11 @@ class WorkflowRunStepItem(BaseModel):
     key: str
     group_key: str
     agent_slug: str
+    # 这一步挂的是哪个人设、可不可选、要什么格式：来自流程**当前**的定义。定义可能在
+    # 这次运行之后被改过（内置流程每次启动就地刷新），所以这几项对得上才带。
+    agent_name: Optional[str] = None
+    optional: bool = False
+    output_kind: Optional[str] = None
     status: str
     prompt: Optional[str] = None
     output: Optional[str] = None
@@ -585,7 +590,16 @@ class WorkflowRunStepItem(BaseModel):
     finished_at: Optional[datetime] = None
 
 
+# 运行的状态值，与 services/workflows.py 的 RUN_* 同一套。查询参数用它而不是裸
+# ``str``：非法状态由 FastAPI 直接挡在 422，不必在路由里再判一次。
+RunStatus = Literal["pending", "running", "succeeded", "failed", "cancelled"]
+
+
 class WorkflowRunItem(BaseModel):
+    # ``model_names`` 撞在 Pydantic 的 ``model_`` 保留前缀上，与本文件里其余
+    # 带 model_* 字段的 DTO 同一处理。
+    model_config = _ALLOW_MODEL_PREFIX
+
     id: int
     workflow_id: int
     workflow_slug: str
@@ -596,6 +610,9 @@ class WorkflowRunItem(BaseModel):
     status: str
     error_msg: Optional[str] = None
     elapsed_ms: Optional[int] = None
+    # 这次运行各步实际用到的模型（``model_name``），按步骤顺序去重：列表上一眼看出
+    # 「这次是 deepseek 还是通义跑的」，不用展开逐步骤看。
+    model_names: List[str] = Field(default_factory=list)
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     created_at: datetime
@@ -606,6 +623,17 @@ class WorkflowRunDetail(WorkflowRunItem):
 
     inputs: Dict[str, Any] = Field(default_factory=dict)
     steps: List[WorkflowRunStepItem] = Field(default_factory=list)
+
+
+class WorkflowRunPruneRequest(BaseModel):
+    """清理多少天之前的运行记录。"""
+
+    keep_days: int = Field(..., ge=1, le=3650)
+
+
+class WorkflowRunPruneResult(BaseModel):
+    deleted_runs: int
+    deleted_steps: int
 
 
 # ---- 长期记忆 ---------------------------------------------------------------

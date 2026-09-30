@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import Select, delete, func, select
@@ -46,6 +45,7 @@ from app.models.schemas import (
 from app.services import vectorstore
 from app.services.chunking import split_text
 from app.services.providers import build_embeddings
+from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.knowledge")
 
@@ -437,7 +437,7 @@ class KnowledgeService:
             return
         state.status = status
         state.error_msg = error[:512] if error else None
-        state.updated_at = datetime.now(timezone.utc)
+        state.updated_at = db_now()
         self._db.commit()
 
     def _refresh_counts(self) -> None:

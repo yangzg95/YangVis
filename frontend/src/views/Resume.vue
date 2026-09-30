@@ -467,7 +467,12 @@
     <!-- 报告不再用抽屉看：「查看报告」统一新开标签页进 /office/report/...（见 ReportView）。 -->
 
     <!-- 状态标签点开的运行现场：列表上那个「分析中/失败」到底是哪次运行、跑了什么。 -->
-    <WorkflowRunsDrawer v-model:open="runsOpen" :workflow="null" :subject="runsSubject" />
+    <WorkflowRunsDrawer
+      v-model:open="runsOpen"
+      :workflow="null"
+      :subject="runsSubject"
+      @changed="onRunsChanged"
+    />
   </div>
 </template>
 
@@ -1154,6 +1159,12 @@ const runsSubject = ref<WorkflowRunSubject | null>(null)
 function openRuns(subject: WorkflowRunSubject) {
   runsSubject.value = subject
   runsOpen.value = true
+}
+
+/** 抽屉里跑完一次（或重跑完一步）：这三张列表的状态都是由那次运行翻译出来的，跟着换。 */
+async function onRunsChanged() {
+  await Promise.all([loadResumes(), loadComparisons(), loadToolkit()])
+  syncPolling()
 }
 
 /** 状态标签的悬浮说明：失败时先给原因，再告诉这点会开什么。 */

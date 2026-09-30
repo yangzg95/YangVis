@@ -556,6 +556,8 @@ export interface WorkflowRun {
   status: RunStatus
   error_msg?: string | null
   elapsed_ms?: number | null
+  /** 这次运行各步用到的模型名，按步骤顺序去重（列表行上直接显示，不必展开）。 */
+  model_names?: string[]
   started_at?: string | null
   finished_at?: string | null
   created_at: string
@@ -567,6 +569,10 @@ export interface WorkflowRunStep {
   group_key: string
   agent_slug: string
   status: RunStepStatus
+  /** 这一步挂的人设与要什么格式：来自流程当前的定义，定义改过就对不上，为 null。 */
+  agent_name?: string | null
+  output_kind?: string | null
+  optional?: boolean
   /** 渲染后的 prompt：「当时模型到底收到了什么」问得出来。 */
   prompt?: string | null
   output?: string | null
@@ -597,7 +603,15 @@ export const workflowsApi = {
   remove: (id: number) => request<null>({ url: `/workflows/${id}`, method: 'DELETE' }),
   duplicate: (id: number) =>
     request<Workflow>({ url: `/workflows/${id}/duplicate`, method: 'POST' }),
-  listRuns: (params: { workflowId?: number; limit?: number; subject?: [WorkflowSubjectKind, string | number] } = {}) =>
+  listRuns: (
+    params: {
+      workflowId?: number
+      status?: RunStatus
+      page?: number
+      pageSize?: number
+      subject?: [WorkflowSubjectKind, string | number]
+    } = {},
+  ) =>
     request<{ items: WorkflowRun[]; total: number }>({
       url: '/workflows/runs',
       params: {
@@ -606,7 +620,9 @@ export const workflowsApi = {
         // 「简历 3」和「deck 3」混进同一页，后端会直接 400。
         subject_kind: params.subject?.[0],
         subject_ref: params.subject?.[1],
-        limit: params.limit ?? 20,
+        status: params.status,
+        page: params.page ?? 1,
+        page_size: params.pageSize ?? 20,
       },
     }),
   runDetail: (id: number) => request<WorkflowRunDetail>({ url: `/workflows/runs/${id}` }),
@@ -618,6 +634,32 @@ export const workflowsApi = {
    */
   streamRun: (workflowId: number, inputs: Record<string, string>, handlers: StreamHandlers) =>
     streamSse(`/api/workflows/${workflowId}/runs/stream`, { inputs }, handlers),
+  /**
+   * 接上一次已经在跑的运行：先回放现状，再等它跑完。
+   *
+   * 功能页面发起的生成本来就不在 {@link streamRun} 那条流里跑，页面中途打开时
+   * 用这个跟上。纯读，所以是 GET。
+   */
+  followRun: (runId: number, handlers: StreamHandlers) =>
+    streamSse(`/api/workflows/runs/${runId}/stream`, undefined, handlers, 'GET'),
+  /**
+   * 重跑一次运行里的单个步骤。接口立刻返回，进度还是走 {@link followRun}。
+   *
+   * 这一步的产物不会写回业务行——后处理只认整条流程跑完，要新结果请回功能页面
+   * 重新发起一次完整任务。
+   */
+  rerunStep: (runId: number, key: string) =>
+    request<WorkflowRun>({
+      url: `/workflows/runs/${runId}/steps/${encodeURIComponent(key)}/rerun`,
+      method: 'POST',
+    }),
+  /** 清掉早于 keep_days、又不再是谁的当前状态的运行记录。 */
+  pruneRuns: (keepDays: number) =>
+    request<{ deleted_runs: number; deleted_steps: number }>({
+      url: '/workflows/runs/prune',
+      method: 'POST',
+      data: { keep_days: keepDays },
+    }),
 }
 
 // ---- 长期记忆 ----------------------------------------------------------------
@@ -744,16 +786,20 @@ export interface StreamHandlers {
   onRunStart?: (data: {
     run_id: number
     workflow_slug: string
+    /** 中途接上的跟随流给的是运行此刻的状态；发起那条流里恒为 running。 */
+    status?: string
     steps: {
       key: string
       group_key: string
       agent_slug: string
       agent_name?: string | null
-      output_kind: string
+      output_kind?: string | null
       optional: boolean
+      /** 跟随流接上时这一步已经跑到哪了；发起流里全是 pending。 */
+      status?: string
     }[]
   }) => void
-  onStepStart?: (data: { key: string; group_key: string }) => void
+  onStepStart?: (data: { key: string; group_key: string; status?: string }) => void
   onStepEnd?: (data: {
     key: string
     status: RunStepStatus
@@ -877,20 +923,26 @@ export const chatApi = {
  *
  * 这里刻意绕开上面那个 axios 实例：它的拦截器会去拆一层 JSON envelope，
  * 而 token stream 根本没有这层结构。改用 fetch 加 ReadableStream reader。
- * 返回一个用于中断的函数。
+ * 默认 POST（要带请求体的那条对话流就靠它）；工作流的「跟随进度」是纯读，
+ * 走 GET。返回一个用于中断的函数。
  */
-function streamSse(url: string, body: unknown, handlers: StreamHandlers): () => void {
+function streamSse(
+  url: string,
+  body: unknown,
+  handlers: StreamHandlers,
+  method: 'GET' | 'POST' = 'POST',
+): () => void {
   const controller = new AbortController()
 
   void (async () => {
     try {
       const response = await fetch(url, {
-        method: 'POST',
+        method,
         headers: {
           'Content-Type': 'application/json',
           ...(getAccessToken() ? { Authorization: getAccessToken() as string } : {}),
         },
-        body: body === undefined ? undefined : JSON.stringify(body),
+        body: method === 'GET' || body === undefined ? undefined : JSON.stringify(body),
         signal: controller.signal,
       })
 

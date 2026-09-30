@@ -18,7 +18,6 @@ import re
 import shlex
 import time
 import uuid
-from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 import pymysql
@@ -81,6 +80,7 @@ from app.services.ops_safety import (
     ensure_limit,
     split_sql_script,
 )
+from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.ops_database")
 
@@ -220,7 +220,7 @@ class OpsDatabaseService:
         logger.info("owner %s deleted database %s (%s)", self._owner_id, item.id, item.name)
 
     def record_check(self, item: OpsDatabase, *, ok: bool, message: str = "") -> None:
-        item.last_checked_at = datetime.now(timezone.utc)
+        item.last_checked_at = db_now()
         item.last_check_ok = ok
         item.last_check_error = None if ok else message[:512]
         self._db.commit()
@@ -589,7 +589,7 @@ async def execute_batch(
     if len(statements) > _BATCH_MAX_STATEMENTS:
         raise OpsDbError(f"一次最多执行 {_BATCH_MAX_STATEMENTS} 条语句")
 
-    started_at = datetime.now(timezone.utc)
+    started_at = db_now()
     started = time.perf_counter()
 
     # 先整体过一遍安全网关：被拒的语句不进数据库连接，直接落成 error 占位；
@@ -646,7 +646,7 @@ async def execute_batch(
                     text=None if columns else done_text,
                 )
 
-    finished_at = datetime.now(timezone.utc)
+    finished_at = db_now()
     settled = [r for r in results if r is not None]
     succeeded = sum(1 for r in settled if r.status == "ok")
     return (
@@ -2034,7 +2034,7 @@ async def apply_alter(
     被拒的语句不占数据库连接，直接落成 error 行。
     """
     target = f"{_quote_ident(schema)}.{_quote_ident(table)}"
-    started_at = datetime.now(timezone.utc)
+    started_at = db_now()
     started = time.perf_counter()
 
     results: List[Optional[DbBatchStatement]] = [None] * len(statements)
@@ -2094,7 +2094,7 @@ async def apply_alter(
             succeeded=succeeded,
             failed=len(settled) - succeeded,
             started_at=started_at,
-            finished_at=datetime.now(timezone.utc),
+            finished_at=db_now(),
             elapsed_ms=int((time.perf_counter() - started) * 1000),
         ),
         any_forbidden,

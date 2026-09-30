@@ -158,7 +158,12 @@
     </a-modal>
 
     <!-- 进度与失败原因都长在这条 deck 的运行记录上，这里就是它的入口。 -->
-    <WorkflowRunsDrawer v-model:open="runsOpen" :workflow="null" :subject="runsSubject" />
+    <WorkflowRunsDrawer
+      v-model:open="runsOpen"
+      :workflow="null"
+      :subject="runsSubject"
+      @changed="load"
+    />
   </div>
 </template>
 

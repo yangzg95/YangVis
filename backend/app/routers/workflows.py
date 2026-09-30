@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import AsyncIterator, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -20,14 +20,24 @@ from app.models.schemas import (
     APIResponse,
     CurrentUser,
     ListResponse,
+    RunStatus,
     WorkflowCreate,
     WorkflowItem,
     WorkflowRunDetail,
     WorkflowRunItem,
+    WorkflowRunPruneRequest,
+    WorkflowRunPruneResult,
     WorkflowRunRequest,
     WorkflowUpdate,
 )
-from app.services.workflows import WorkflowService, execute_run
+from app.services.workflows import (
+    WorkflowService,
+    execute_run,
+    follow_run,
+    prepare_step_rerun,
+    prune_runs,
+    rerun_step,
+)
 from app.sse import SSE_HEADERS, sse_event
 
 logger = logging.getLogger("yangvis.workflows")
@@ -50,7 +60,9 @@ async def list_runs(
     workflow_id: Optional[int] = Query(default=None),
     subject_kind: Optional[str] = Query(default=None),
     subject_ref: Optional[str] = Query(default=None),
-    limit: int = Query(default=20, ge=1, le=100),
+    run_status: Optional[RunStatus] = Query(default=None, alias="status"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
     service: WorkflowService = Depends(get_service),
 ) -> APIResponse[ListResponse[WorkflowRunItem]]:
     """调用方最近的运行，新的在前。不带 ``workflow_id`` 就是跨流程的一趟清单。
@@ -58,6 +70,9 @@ async def list_runs(
     ``subject_kind`` + ``subject_ref`` 换成按业务对象收敛——功能页面上的「运行记录」
     要的是「这份简历跑过哪几次」。两个参数成对出现：整数 id 在各张表上各自编号，
     只给 ref 会把「简历 3」和「deck 3」混进同一页。
+
+    ``status`` 按运行状态筛，``page`` / ``page_size`` 翻页；``total`` 是符合条件的
+    总条数，不是当页条数。
     """
     if (subject_kind is None) != (subject_ref is None):
         raise HTTPException(
@@ -65,11 +80,37 @@ async def list_runs(
             detail="subject_kind 与 subject_ref 要一起给",
         )
     subject = None if subject_kind is None else (subject_kind, subject_ref)
-    items = [
-        service.to_run_item(run)
-        for run in service.list_runs(workflow_id, limit, subject=subject)
-    ]
-    return APIResponse(data=ListResponse(items=items, total=len(items)))
+    runs, total = service.list_runs(
+        workflow_id,
+        subject=subject,
+        run_status=run_status,
+        page=page,
+        page_size=page_size,
+    )
+    # 模型名一次问完整页，逐行去查会把列表接口变成 N+1。
+    names = service.run_model_names([run.id for run in runs])
+    items = [service.to_run_item(run, names.get(run.id, [])) for run in runs]
+    return APIResponse(data=ListResponse(items=items, total=total))
+
+
+@router.post("/runs/prune", response_model=APIResponse[WorkflowRunPruneResult])
+async def prune_run_history(
+    payload: WorkflowRunPruneRequest,
+    db: Session = Depends(get_db),
+    service: WorkflowService = Depends(get_service),
+) -> APIResponse[WorkflowRunPruneResult]:
+    """清掉早于保留窗口、又不再是谁的当前状态的运行记录。
+
+    同一个口径在启动时也跑一次（``bootstrap.prune_workflow_runs``）：这里给的是
+    「不想等到下次重启」的手动入口，只清调用方自己的记录。
+    """
+    deleted_runs, deleted_steps = prune_runs(
+        db, owner_id=service.owner_id, keep_days=payload.keep_days
+    )
+    return APIResponse(
+        data=WorkflowRunPruneResult(deleted_runs=deleted_runs, deleted_steps=deleted_steps),
+        message=f"已清理 {deleted_runs} 次运行",
+    )
 
 
 @router.get("/runs/{run_id}", response_model=APIResponse[WorkflowRunDetail])
@@ -87,6 +128,76 @@ async def get_run(
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return APIResponse(data=service.to_run_detail(run))
+
+
+@router.get("/runs/{run_id}/stream")
+async def follow_run_stream(
+    run_id: int,
+    request: Request,
+    service: WorkflowService = Depends(get_service),
+) -> StreamingResponse:
+    """接上一次正在跑的运行，把之后的进度以 SSE 推回来。
+
+    与 ``POST /{workflow_id}/runs/stream`` 分工：那条流边跑边报，这条只读已经落库
+    的状态。功能侧发起的生成（简历分析、幻灯片）本来就不在任何流里跑，页面中途
+    打开也要看得见进度，事件形状两边一致。
+
+    先查一次归属：404 得发生在响应变成流之前，那时还有状态码可给。
+    """
+    try:
+        service.get_run(run_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    async def stream() -> AsyncIterator[str]:
+        try:
+            async for event, data in follow_run(
+                owner_id=service.owner_id,
+                run_id=run_id,
+                is_disconnected=request.is_disconnected,
+            ):
+                yield sse_event(event, data)
+        except LookupError as exc:
+            yield sse_event("error", {"code": status.HTTP_404_NOT_FOUND, "message": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - 流不能只停不掉
+            logger.exception("following workflow run %s failed", run_id)
+            yield sse_event("error", {"code": -1, "message": f"跟随进度失败：{exc}"})
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+        status_code=status.HTTP_200_OK,
+    )
+
+
+@router.post("/runs/{run_id}/steps/{key}/rerun", response_model=APIResponse[WorkflowRunItem])
+async def rerun_run_step(
+    run_id: int,
+    key: str,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+    service: WorkflowService = Depends(get_service),
+) -> APIResponse[WorkflowRunItem]:
+    """重跑一次运行里的单个步骤，进度用 ``GET /runs/{run_id}/stream`` 接。
+
+    用的是流程**当前定义**里的那一步（prompt 模板只存在定义里，运行行只存渲染结果），
+    上游产物的上下文则按当时落库的步骤行重建。跑通这一步不会重写业务行上的产物——
+    后处理在功能侧，那里只认整条流程跑完，要新产物请回功能页面重新发起。
+    """
+    try:
+        # 门槛与简历/幻灯片同一处：配置没就绪就别排队。
+        service.require_chat_config()
+        run = prepare_step_rerun(db, service.owner_id, run_id, key)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except BusinessError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.msg) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    background.add_task(rerun_step, owner_id=service.owner_id, run_id=run_id, key=key)
+    return APIResponse(data=service.to_run_item(run), message="已重新开始这一步")
 
 
 @router.get("", response_model=APIResponse[ListResponse[WorkflowItem]])

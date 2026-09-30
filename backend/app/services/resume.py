@@ -17,7 +17,6 @@ import io
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import List, Optional
 
 from sqlalchemy import Select, select
@@ -40,7 +39,6 @@ from app.models.schemas import (
     ResumeToolkitItem,
 )
 from app.services.agent_run import (
-    extract_json_object,
     labeled_section,
     model_error_text,
     require_chat_model,
@@ -51,14 +49,16 @@ from app.services.workflows import (
     SUBJECT_RESUME,
     SUBJECT_RESUME_COMPARISON,
     SUBJECT_RESUME_TOOLKIT,
+    builtin_output,
     fail_run,
-    finish_builtin,
+    finish_builtin_step,
     latest_run,
     latest_runs,
     running_subjects,
     start_builtin,
     subject_state,
 )
+from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.resume")
 
@@ -258,24 +258,22 @@ def _truncate(text: str, limit: int = MAX_RESUME_CHARS) -> str:
     return f"{text[:limit]}\n……（原文过长，已截断）"
 
 
-def _parse_analysis(raw_text: str) -> tuple[str, List[str]]:
-    """从模型输出里拆出报告和改进意见。
+def _analysis_product(parsed: object, raw_text: str) -> tuple[str, List[str]]:
+    """从这一步的产物里拆出报告和改进意见。
 
-    剥 ```json 代码栅栏、截取第一个 ``{`` 到最后一个 ``}`` 这些由
-    :func:`extract_json_object` 统一处理。这里只留下简历自己的一层兜底：
-    解析不出来就把整段输出当报告——一份格式跑偏的报告对用户还有用，
-    一条「解析失败」的空白页没有。
+    ``analyze`` 声明的是 JSON 输出，引擎已经按契约把对象解析好落在
+    ``workflow_run_step.parsed`` 上，这里只留下简历自己的一层兜底：契约没满足
+    （``parsed`` 不是对象）或者 ``report`` 是空的，就把整段输出当报告——一份格式
+    跑偏的报告对用户还有用，一条「解析失败」的空白页没有。
     """
-    try:
-        data = extract_json_object(raw_text)
-    except ValueError:
-        logger.debug("analysis output was not valid json, falling back to raw text")
+    if not isinstance(parsed, dict):
+        logger.debug("analysis step produced no json object, using raw text")
         return raw_text.strip(), []
 
-    report = str(data.get("report") or "").strip()
+    report = str(parsed.get("report") or "").strip()
     # 模型把 suggestions 写成字符串或对象都可能：按列表逐项转文本，别的形态
     # 一律丢弃，否则遍历字符串会把建议拆成一个个字。
-    raw_suggestions = data.get("suggestions")
+    raw_suggestions = parsed.get("suggestions")
     suggestions = (
         [str(item).strip() for item in raw_suggestions if str(item).strip()]
         if isinstance(raw_suggestions, list)
@@ -454,12 +452,12 @@ class ResumeService:
             len(resume.content),
         )
         try:
-            text = await finish_builtin(self._db, self._owner_id, run.id)
-            report, suggestions = _parse_analysis(text)
+            step = await finish_builtin_step(self._db, self._owner_id, run.id)
+            report, suggestions = _analysis_product(step.parsed, step.output or "")
 
             resume.report = report
             resume.suggestions = suggestions or None
-            resume.analyzed_at = datetime.now(timezone.utc)
+            resume.analyzed_at = db_now()
             self._db.commit()
             logger.info(
                 "resume analysis finished: id=%s report_chars=%s suggestions=%s elapsed=%.1fs",
@@ -563,7 +561,7 @@ class ResumeService:
             len(comparison.resume_ids),
         )
         try:
-            report = (await finish_builtin(self._db, self._owner_id, run.id)).strip()
+            report = (await builtin_output(self._db, self._owner_id, run.id)).strip()
             if not report:
                 raise RuntimeError("模型返回了空报告")
 
@@ -694,7 +692,7 @@ class ResumeService:
             task.title,
         )
         try:
-            report = (await finish_builtin(self._db, self._owner_id, run.id)).strip()
+            report = (await builtin_output(self._db, self._owner_id, run.id)).strip()
             if not report:
                 raise RuntimeError("模型返回了空报告")
 

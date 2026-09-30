@@ -7,6 +7,27 @@
     </div>
 
     <div class="toolbar">
+      <!-- 运行记录也是启动时自动清理的（保留窗口之外的、且不再是某个业务对象
+           当前状态的那些）；这里给一个不用等重启的手动入口。 -->
+      <a-popconfirm
+        title="清理运行记录"
+        ok-text="清理"
+        cancel-text="取消"
+        placement="bottomRight"
+        @confirm="pruneRuns"
+      >
+        <template #description>
+          <div class="prune-pop">
+            <div class="prune-days">
+              <span>保留最近</span>
+              <a-input-number v-model:value="keepDays" size="small" :min="1" :max="365" />
+              <span>天</span>
+            </div>
+            <div class="muted">正在跑的、以及每个业务对象的最近一次运行始终留着。</div>
+          </div>
+        </template>
+        <a-button size="small" danger>清理运行记录</a-button>
+      </a-popconfirm>
       <a-button type="primary" @click="openCreate">
         <PlusOutlined /> 新建工作流
       </a-button>
@@ -80,7 +101,7 @@
       :readonly="readonly"
       @saved="onSaved"
     />
-    <WorkflowRunsDrawer v-model:open="runsOpen" :workflow="current" />
+    <WorkflowRunsDrawer v-model:open="runsOpen" :workflow="current" @changed="load" />
   </div>
 </template>
 
@@ -98,6 +119,8 @@ const current = ref<Workflow | null>(null)
 const editorOpen = ref(false)
 const readonly = ref(false)
 const runsOpen = ref(false)
+/** 清理窗口：与后端启动时那次的默认口径一致，界面上可以临时收紧。 */
+const keepDays = ref(30)
 
 interface StepGroup {
   name: string
@@ -182,6 +205,11 @@ async function onDelete(workflow: Workflow) {
   await load()
 }
 
+async function pruneRuns() {
+  const result = await workflowsApi.pruneRuns(keepDays.value)
+  message.success(`已清理 ${result.deleted_runs} 次运行`)
+}
+
 onMounted(load)
 </script>
 
@@ -195,6 +223,17 @@ onMounted(load)
 .toolbar {
   margin-bottom: 16px;
   justify-content: flex-end;
+}
+/* 清理确认框里的那一小块：窗口选择 + 一句保留规则。 */
+.prune-pop {
+  width: 250px;
+  font-size: 12px;
+}
+.prune-days {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
 }
 .workflow-grid {
   display: grid;

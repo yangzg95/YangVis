@@ -46,8 +46,8 @@ from app.services.agent_run import (
 )
 from app.services.workflows import (
     SUBJECT_INTERVIEW_QUESTION,
+    builtin_output,
     fail_run,
-    finish_builtin,
     latest_run,
     latest_runs,
     running_subjects,
@@ -304,7 +304,7 @@ class InterviewService:
             if target is None:
                 logger.info("interview answer skipped: record=%s qid=%s deleted", record_id, qid)
                 return
-            answer = (await finish_builtin(self._db, self._owner_id, run.id)).strip()
+            answer = (await builtin_output(self._db, self._owner_id, run.id)).strip()
             if not answer:
                 raise RuntimeError("模型返回了空回答")
 

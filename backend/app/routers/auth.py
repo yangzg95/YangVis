@@ -9,7 +9,6 @@ from __future__ import annotations
 import base64
 import logging
 import math
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
@@ -31,6 +30,7 @@ from app.models.schemas import (
 from app.security import create_access_token, hash_password, verify_password
 from app.services.captcha import issue_captcha, verify_captcha
 from app.services.login_guard import locked_seconds, record_failure, reset_failures
+from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.auth")
 settings = get_settings()
@@ -100,7 +100,7 @@ async def login(
 
     reset_failures(username_key, ip)
 
-    user.last_login_at = datetime.now(timezone.utc)
+    user.last_login_at = db_now()
     db.commit()
 
     token = create_access_token(

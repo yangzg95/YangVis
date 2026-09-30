@@ -238,7 +238,12 @@
       </a-form>
     </a-modal>
 
-    <WorkflowRunsDrawer v-model:open="runsOpen" :workflow="null" :subject="runsSubject" />
+    <WorkflowRunsDrawer
+      v-model:open="runsOpen"
+      :workflow="null"
+      :subject="runsSubject"
+      @changed="loadDetail"
+    />
   </div>
 </template>
 

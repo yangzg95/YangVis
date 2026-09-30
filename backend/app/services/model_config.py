@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import List, Optional
 
 from sqlalchemy import Select, select
@@ -20,6 +19,7 @@ from app.models.schemas import (
     ModelConfigUpdate,
     ModelPurpose,
 )
+from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.model_config")
 
@@ -208,7 +208,7 @@ class ModelConfigService:
         message: str,
         vector_size: Optional[int] = None,
     ) -> None:
-        config.last_tested_at = datetime.now(timezone.utc)
+        config.last_tested_at = db_now()
         config.last_test_ok = ok
         config.last_test_error = None if ok else message[:512]
         if vector_size is not None:

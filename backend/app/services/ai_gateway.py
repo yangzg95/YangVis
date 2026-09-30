@@ -35,6 +35,7 @@ from app.models.schemas import (
     AiStatsBucket,
     AiStatsTotals,
 )
+from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.ai_gateway")
 
@@ -47,11 +48,6 @@ KEY_PREFIX = "sk-yv-"
 DISPLAY_PREFIX_LENGTH = len(KEY_PREFIX) + 6
 
 TRUNCATE_MARK = "…[已截断]"
-
-# ai_call_log.created_at 由 MySQL 的 NOW() 写入（数据库本地时间），因此做时间
-# 窗过滤时也用本地 naive 时间，与 services/ops_actions.py 同一套约定。
-def _now() -> datetime:
-    return datetime.now()
 
 
 # ---- 密钥 -------------------------------------------------------------------
@@ -290,7 +286,7 @@ class AiGatewayService:
     def record_channel_test(
         self, channel: AiChannel, *, ok: bool, message: str
     ) -> None:
-        channel.last_tested_at = _now()
+        channel.last_tested_at = db_now()
         channel.last_test_ok = ok
         channel.last_test_error = None if ok else message[:512]
         self._db.commit()
@@ -453,7 +449,7 @@ class AiGatewayService:
     def touch_key(self, key: AiApiKey) -> None:
         """回填调用计数与最近使用时间（与日志同一个事务提交）。"""
         key.call_count = (key.call_count or 0) + 1
-        key.last_used_at = _now()
+        key.last_used_at = db_now()
 
     # -- 日志 ---------------------------------------------------------------
 
@@ -513,7 +509,7 @@ class AiGatewayService:
         return row
 
     def purge_logs(self, before_days: int) -> int:
-        cutoff = _now() - timedelta(days=before_days)
+        cutoff = db_now() - timedelta(days=before_days)
         result = self._db.execute(delete(AiCallLog).where(AiCallLog.created_at < cutoff))
         self._db.commit()
         deleted = int(result.rowcount or 0)
@@ -523,7 +519,7 @@ class AiGatewayService:
     # -- 统计 ---------------------------------------------------------------
 
     def stats(self, days: int = 7) -> AiStats:
-        since = _now() - timedelta(days=days)
+        since = db_now() - timedelta(days=days)
         window = AiCallLog.created_at >= since
 
         calls = self._db.scalar(select(func.count(AiCallLog.id)).where(window)) or 0

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine, func, select, update
+from sqlalchemy import create_engine, delete, func, select, update
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
@@ -34,17 +36,25 @@ from app.services.workflows import (
     RUN_RUNNING,
     RUN_SUCCEEDED,
     STALE_RUN_ERROR,
+    SUBJECT_ERROR,
     SUBJECT_LABEL_MAX,
+    SUBJECT_READY,
     STEP_FAILED,
     STEP_PENDING,
+    STEP_RUNNING,
     STEP_SKIPPED,
     STEP_SUCCEEDED,
     WorkflowService,
     _group_order,
     execute_run,
+    follow_run,
+    prepare_step_rerun,
+    prune_runs,
     render_prompt,
+    rerun_step,
     reset_stale_runs,
     seed_builtin_workflows,
+    subject_state,
 )
 
 OWNER = 1
@@ -132,6 +142,54 @@ def _run_all(db, owner_id: int, run_id: int, **kwargs) -> list[tuple[str, dict]]
     return events
 
 
+def _rerun(db, owner_id: int, run_id: int, key: str) -> None:
+    """跑完 ``rerun_step`` 这个后台任务，事务处理与 :func:`_run_all` 同一套。"""
+
+    async def drive():
+        await rerun_step(owner_id=owner_id, run_id=run_id, key=key)
+
+    db.rollback()
+    asyncio.run(drive())
+    db.rollback()
+
+
+def _follow_all(db, run_id: int, mutate, *, owner_id: int = OWNER, poll_seconds: float = 0.02):
+    """跟着一次运行读，同时让 ``mutate`` 在另一条连接上把现状往前推。
+
+    ``follow_run`` 自己不执行任何东西，进度全靠读库，所以这里模拟的就是「另一个
+    worker 正在写这些行」。写必须放在线程里：跟随的那条连接两次读之间是开着读事务
+    的，SQLite 此时只让别人排队等锁，而同步的写会把事件循环一起堵住——谁也解不了
+    这个锁，测试只会等到超时。
+    """
+
+    async def drive():
+        polls = 0
+
+        async def watchdog():
+            nonlocal polls
+            polls += 1
+            return polls > 300  # 现状没推进也别让测试挂着不动
+
+        return [
+            (event, payload)
+            async for event, payload in follow_run(
+                owner_id=owner_id,
+                run_id=run_id,
+                is_disconnected=watchdog,
+                poll_seconds=poll_seconds,
+            )
+        ]
+
+    async def main():
+        # gather 必须在运行中的事件循环里创建，否则它抓住的是别处的循环。
+        return await asyncio.gather(drive(), asyncio.to_thread(mutate))
+
+    db.rollback()
+    events, _ = asyncio.run(main())
+    db.rollback()
+    return events
+
+
 def _seeded(db) -> dict[str, Workflow]:
     seed_builtin_workflows(db)
     return {row.slug: row for row in db.scalars(select(Workflow)).all()}
@@ -182,6 +240,59 @@ def _template_vars(prompt_tpl: str) -> set[str]:
     return {match.group(1) for match in workflows_module._PLACEHOLDER.finditer(prompt_tpl)}
 
 
+def _scene(
+    db, run_id: int, run_status: str, run_error: str | None = None, **steps: tuple[str, str | None]
+) -> None:
+    """直接把一次运行的现状写成测试要的样子：``步骤 key=(状态, 输出)``。
+
+    跟随与重跑关心的都是「库里已经有什么」，跑一遍真实执行只会让这两个场景更难
+    读；执行本身在上面的 ``execute_run`` 用例里已经钉过。
+    """
+    db.execute(
+        update(WorkflowRun)
+        .where(WorkflowRun.id == run_id)
+        .values(status=run_status, error_msg=run_error)
+    )
+    for key, (status, output) in steps.items():
+        db.execute(
+            update(WorkflowRunStep)
+            .where(WorkflowRunStep.run_id == run_id, WorkflowRunStep.key == key)
+            .values(status=status, output=output)
+        )
+    db.commit()
+
+
+def _write_run(run_id: int, **values) -> None:
+    """在**另一条连接**上改运行行：模拟正在跑它的那个 worker。"""
+    from app.database import SessionLocal
+
+    with SessionLocal() as other:
+        other.execute(update(WorkflowRun).where(WorkflowRun.id == run_id).values(**values))
+        other.commit()
+
+
+def _write_step(run_id: int, key: str, **values) -> None:
+    from app.database import SessionLocal
+
+    with SessionLocal() as other:
+        other.execute(
+            update(WorkflowRunStep)
+            .where(WorkflowRunStep.run_id == run_id, WorkflowRunStep.key == key)
+            .values(**values)
+        )
+        other.commit()
+
+
+def _aged(db, run_id: int, days_ago: int = 40) -> None:
+    """把一条运行的创建时间推到保留窗口之外（``created_at`` 没有 onupdate）。"""
+    db.execute(
+        update(WorkflowRun)
+        .where(WorkflowRun.id == run_id)
+        .values(created_at=datetime.now() - timedelta(days=days_ago))
+    )
+    db.commit()
+
+
 # ---- 模板渲染 ---------------------------------------------------------------
 
 
@@ -189,10 +300,39 @@ def test_render_prompt_substitutes_values():
     assert render_prompt("共 {{count}} 份：{{block}}", {"count": "3", "block": "正文"}) == "共 3 份：正文"
 
 
+def test_render_prompt_substitutes_a_json_product_as_json_text():
+    """整段引用 JSON 步的产物：喂的是对象序列化出来的文本，不是 Python 的 repr。"""
+    assert render_prompt("{{score}}", {"score": {"total": 8, "ok": True}}) == '{"total": 8, "ok": true}'
+
+
+def test_render_prompt_reads_fields_out_of_a_parsed_product():
+    """``{{x.字段}}``：从解析出来的对象里取值，支持嵌套对象与数组下标。"""
+    context = {"draft": {"summary": "一段摘要", "tags": ["a", "b"], "meta": {"lang": "zh"}}}
+
+    assert render_prompt(
+        "{{draft.summary}}｜{{draft.tags.1}}｜{{draft.meta.lang}}", context
+    ) == "一段摘要｜b｜zh"
+
+
+def test_render_prompt_keeps_a_null_field_as_empty_text():
+    """JSON 里的 null 是「有这个字段、没有值」，不是引用错了变量。"""
+    assert render_prompt("[{{draft.summary}}]", {"draft": {"summary": None}}) == "[]"
+
+
+def test_render_prompt_rejects_a_field_the_product_does_not_have():
+    with pytest.raises(ValueError, match="draft.summary"):
+        render_prompt("{{draft.summary}}", {"draft": {"other": "x"}})
+    # 整段文本没有字段可取：说清是路径走不通，而不是变量不存在。
+    with pytest.raises(ValueError, match="没有这个字段"):
+        render_prompt("{{draft.summary}}", {"draft": "整段初稿"})
+
+
 def test_render_prompt_rejects_unknown_variable():
     # 少喂一段简历全文，模型照样能编出一份看着完整的报告——所以必须报错而不是替换成空串。
-    with pytest.raises(ValueError, match="未定义的变量"):
+    with pytest.raises(ValueError, match="未定义的变量 resume_content"):
         render_prompt("{{resume_content}}", {"other": "x"})
+    with pytest.raises(ValueError, match="未定义的变量 other"):
+        render_prompt("{{other.field}}", {"draft": "整段初稿"})
 
 
 def test_group_order_keeps_first_appearance_sequence():
@@ -356,9 +496,32 @@ def test_list_runs_filters_by_subject_pair(db):
     service.create_run(workflow.id, {"topic": "编排"}, subject_kind="slide-deck", subject_ref=1)
     service.create_run(workflow.id, {"topic": "编排"})
 
-    assert [run.id for run in service.list_runs(subject=("resume", 1))] == [resume_run.id]
+    runs, total = service.list_runs(subject=("resume", 1))
+    assert [run.id for run in runs] == [resume_run.id]
+    assert total == 1
     # 不传 subject 时仍是跨对象的流水，工作流页面用得上。
-    assert len(service.list_runs()) == 3
+    _, total = service.list_runs()
+    assert total == 3
+
+
+def test_list_runs_pages_and_filters_by_status(db):
+    """总数是符合条件的那批，翻页不改它——否则「共 3 次」翻一页就变成「共 2 次」。"""
+    workflow = _two_step_workflow(db)
+    service = WorkflowService(db, OWNER)
+    ids = [service.create_run(workflow.id, {"topic": "编排"}).id for _ in range(3)]
+    db.execute(update(WorkflowRun).where(WorkflowRun.id == ids[0]).values(status=RUN_SUCCEEDED))
+    db.commit()
+
+    first, total = service.list_runs(page=1, page_size=2)
+    second, same_total = service.list_runs(page=2, page_size=2)
+    assert total == same_total == 3
+    assert [run.id for run in first] == list(reversed(ids))[:2]
+    assert [run.id for run in second] == [ids[0]]
+
+    done, done_total = service.list_runs(run_status=RUN_SUCCEEDED)
+    assert [run.id for run in done] == [ids[0]] and done_total == 1
+    _, pending_total = service.list_runs(run_status="pending")
+    assert pending_total == 2
 
 
 # ---- 定义编辑 ---------------------------------------------------------------
@@ -507,7 +670,7 @@ def test_create_allows_referencing_an_earlier_group_output(db):
     ]
 
 
-def test_create_rejects_dotted_field_access_with_a_hint(db):
+def test_create_rejects_field_access_on_a_text_product(db):
     _agents_named(db, "writer", "scorer")
     payload = _create_payload(
         steps=[
@@ -527,9 +690,66 @@ def test_create_rejects_dotted_field_access_with_a_hint(db):
         ]
     )
 
-    # 占位符的正则允许点号，所以这里必须自己说清楚：现在只能引用整段产物。
-    with pytest.raises(ValueError, match="暂不支持按字段取值"):
+    # 整段文本里没有字段可取：与其等运行时报「取不到」，保存时就把话说清。
+    with pytest.raises(ValueError, match="没有字段可取"):
         WorkflowService(db, OWNER).create(payload)
+
+
+def test_create_accepts_field_access_on_a_json_product(db):
+    _agents_named(db, "writer", "scorer")
+    payload = _create_payload(
+        steps=[
+            {
+                "key": "draft",
+                "group_key": "draft",
+                "agent_slug": "writer",
+                "prompt_tpl": "写{{topic}}",
+                "output_kind": "json",
+                "output_keys": ["summary"],
+                "output_var": "draft",
+            },
+            {
+                "key": "score",
+                "group_key": "score",
+                "agent_slug": "scorer",
+                "prompt_tpl": "评{{draft.summary}}，也可以整段看：{{draft}}",
+            },
+        ]
+    )
+
+    assert WorkflowService(db, OWNER).create(payload).slug == "write-and-score"
+
+
+def test_create_rejects_parallel_and_malformed_field_paths(db):
+    _agents_named(db, "writer", "scorer")
+    service = WorkflowService(db, OWNER)
+
+    def payload(tpl: str, *, draft_group: str = "all") -> WorkflowCreate:
+        return _create_payload(
+            steps=[
+                {
+                    "key": "draft",
+                    "group_key": draft_group,
+                    "agent_slug": "writer",
+                    "prompt_tpl": "写{{topic}}",
+                    "output_kind": "json",
+                    "output_var": "draft",
+                },
+                {
+                    "key": "score",
+                    "group_key": "all" if draft_group == "all" else "score",
+                    "agent_slug": "scorer",
+                    "prompt_tpl": tpl,
+                },
+            ]
+        )
+
+    # 同组是并行的：字段引用同样要挡住，只看根变量。
+    with pytest.raises(ValueError, match="同一组是并行执行的"):
+        service.create(payload("评{{draft.summary}}"))
+    # ``{{draft.}}`` 这种残缺路径：占位符的正则吃得下它，得在保存时就说不合法。
+    with pytest.raises(ValueError, match="字段名"):
+        service.create(payload("评{{draft.}}", draft_group="draft"))
 
 
 def test_create_rejects_unknown_agent_and_bad_names(db):
@@ -761,6 +981,64 @@ def test_execute_run_streams_and_persists_each_step(db, monkeypatch):
     assert finished.elapsed_ms is not None
 
 
+def test_run_model_names_reports_the_models_each_step_used(db, monkeypatch):
+    """运行记录行上的模型来自这一步**实际**用的那份配置。
+
+    定义里的 ``model_config_id`` 只写按步骤的覆盖，空着的是运行时的默认对话模型；
+    历史行照抄定义的话，几乎每一步都是空的，界面上就成了「没用什么模型」。
+    """
+    _chat_model(db)
+    override = ModelConfig(
+        owner_id=OWNER,
+        purpose=ModelPurpose.CHAT.value,
+        title="按步骤指定的模型",
+        model_name="second-unit-test",
+        base_url="http://localhost:1/v1",
+        last_test_ok=True,
+    )
+    db.add(override)
+    db.commit()
+
+    workflow = _two_step_workflow(db)
+    service = WorkflowService(db, OWNER)
+    _stub_model(monkeypatch, {"writer": "一段初稿", "scorer": "8 分"}.get)
+
+    both_default = service.create_run(workflow.id, {"topic": "编排"})
+    _run_all(db, OWNER, both_default.id)
+    # 两步都用默认模型：报一个名字就够，两步各写一遍只是噪音。
+    assert service.run_model_names([both_default.id]) == {both_default.id: ["unit-test"]}
+
+    db.execute(
+        update(WorkflowStep)
+        .where(WorkflowStep.workflow_id == workflow.id, WorkflowStep.key == "score")
+        .values(model_config_id=override.id)
+    )
+    db.commit()
+    mixed = service.create_run(workflow.id, {"topic": "编排"})
+    _run_all(db, OWNER, mixed.id)
+    assert service.run_model_names([mixed.id]) == {mixed.id: ["unit-test", "second-unit-test"]}
+    assert service.to_run_item(mixed, service.run_model_names([mixed.id])[mixed.id]).model_names == [
+        "unit-test",
+        "second-unit-test",
+    ]
+
+
+def test_run_model_names_skips_the_steps_that_never_ran(db, monkeypatch):
+    _chat_model(db)
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _stub_model(monkeypatch, {"writer": RuntimeError("上游 502")}.get)
+
+    _run_all(db, OWNER, run.id)
+
+    service = WorkflowService(db, OWNER)
+    # 跑挂的那步也知道自己用的是谁（模型在调用前就定下来了），没轮到的那步没有。
+    assert service.run_model_names([run.id]) == {run.id: ["unit-test"]}
+    rows = {row.key: row for row in service.run_steps(run.id)}
+    assert rows["score"].status == STEP_SKIPPED and rows["score"].model_config_id is None
+    assert service.run_model_names([]) == {}
+
+
 def test_execute_run_marks_later_groups_skipped_after_failure(db, monkeypatch):
     _chat_model(db)
     workflow = _two_step_workflow(db)
@@ -813,6 +1091,50 @@ def test_execute_run_runs_a_parallel_group(db, monkeypatch):
     assert events[-1][1]["status"] == RUN_SUCCEEDED
     assert {slug for slug, _ in calls} == {"writer", "scorer"}
     assert [name for name, _ in events].count("step_end") == 2
+
+
+def test_json_step_products_are_field_addressable_downstream(db, monkeypatch):
+    """JSON 步的产物按解析结果进上下文：整段引用喂对象，``{{x.字段}}`` 也取得到。"""
+    _chat_model(db)
+    workflow = _two_step_workflow(db, second_tpl="只用摘要评：{{draft.summary}}")
+    db.execute(
+        update(WorkflowStep)
+        .where(WorkflowStep.workflow_id == workflow.id, WorkflowStep.key == "draft")
+        .values(output_kind="json", output_keys=["summary"])
+    )
+    db.commit()
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    # 模型爱在 JSON 前后夹一句解释：进上下文的是解析出来的对象，那段话不会跟着走。
+    calls = _stub_model(
+        monkeypatch, {"writer": '好的：{"summary": "一段摘要", "extra": "忽略"}', "scorer": "8 分"}.get
+    )
+
+    events = _run_all(db, OWNER, run.id)
+
+    assert events[-1][1]["status"] == RUN_SUCCEEDED
+    assert ("scorer", "只用摘要评：一段摘要") in calls
+
+
+def test_rerun_step_rebuilds_json_fields_from_the_stored_scene(db, monkeypatch):
+    """重跑重建上下文时同一口径：字段取自落库的解析结果，不是当时那段文本。"""
+    _chat_model(db)
+    workflow = _two_step_workflow(db, second_tpl="只用摘要评：{{draft.summary}}")
+    db.execute(
+        update(WorkflowStep)
+        .where(WorkflowStep.workflow_id == workflow.id, WorkflowStep.key == "draft")
+        .values(output_kind="json", output_keys=["summary"])
+    )
+    db.commit()
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _stub_model(monkeypatch, {"writer": '{"summary": "一段摘要"}', "scorer": "8 分"}.get)
+    _run_all(db, OWNER, run.id)
+    run_id = run.id
+
+    prepare_step_rerun(db, OWNER, run_id, "score")
+    calls = _stub_model(monkeypatch, {"scorer": "9 分"}.get)
+    _rerun(db, OWNER, run_id, "score")
+
+    assert calls == [("scorer", "只用摘要评：一段摘要")]
 
 
 def test_same_group_step_cannot_reference_its_siblings_output(db, monkeypatch):
@@ -892,6 +1214,361 @@ def test_execute_run_requires_a_chat_model_before_any_event(db, monkeypatch):
     assert WorkflowService(db, OWNER).get_run(run.id).status == STEP_PENDING
 
 
+def test_run_timestamps_are_naive_local_not_utc(db, monkeypatch):
+    """运行与步骤的时间戳要跟 ``created_at`` 同一口径：本地 naive。
+
+    线上 ``created_at`` 由 MySQL 的 ``NOW()`` 写，是数据库所在时区的墙上时间；
+    显式写 UTC 的话，一次运行会「比它自己的创建时间早 8 小时」。测试库是 SQLite
+    （UTC），两种写法在库里看不出差别，所以这里钉的是约定本身：不带 tzinfo，且贴着
+    本地此刻。
+    """
+    _chat_model(db)
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _stub_model(monkeypatch, {"writer": "初稿", "scorer": "8 分"}.get)
+
+    before = datetime.now()
+    _run_all(db, OWNER, run.id)
+    window = (before, datetime.now() + timedelta(seconds=5))
+
+    service = WorkflowService(db, OWNER)
+    finished = service.get_run(run.id)
+    moments = [finished.started_at, finished.finished_at]
+    moments += [m for row in service.run_steps(run.id) for m in (row.started_at, row.finished_at)]
+    assert moments and all(m is not None for m in moments)
+    for moment in moments:
+        assert moment.tzinfo is None
+        assert window[0] <= moment <= window[1], f"{moment} 不在本地此刻附近，写的是别的时区"
+
+
+# ---- 中途跟随 ---------------------------------------------------------------
+
+
+def test_follow_run_replays_the_scene_and_closes_a_settled_run(db):
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _scene(
+        db,
+        run.id,
+        RUN_FAILED,
+        "上游 502",
+        draft=(STEP_SUCCEEDED, "初稿"),
+        score=(STEP_FAILED, None),
+    )
+
+    events = _follow_all(db, run.id, lambda: None)
+
+    assert [name for name, _ in events] == ["run_start", "run_end"], "终态不该进轮询循环"
+    start = events[0][1]
+    assert start["run_id"] == run.id and start["status"] == RUN_FAILED
+    assert start["workflow_slug"] == "write-and-score"
+    assert [(row["key"], row["status"], row["agent_slug"]) for row in start["steps"]] == [
+        ("draft", STEP_SUCCEEDED, "writer"),
+        ("score", STEP_FAILED, "scorer"),
+    ]
+    # 定义的元信息跟着走：界面要能说清这一步是不是可选的。
+    assert start["steps"][0]["optional"] is False
+    assert events[-1][1] == {
+        "run_id": run.id,
+        "status": RUN_FAILED,
+        "error": "上游 502",
+        "elapsed_ms": None,
+    }
+
+
+def test_follow_run_streams_only_what_the_client_missed(db):
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    run_id = run.id
+    _scene(
+        db,
+        run_id,
+        RUN_RUNNING,
+        draft=(STEP_SUCCEEDED, "初稿"),
+        score=(STEP_RUNNING, None),
+    )
+
+    def worker() -> None:
+        time.sleep(0.05)
+        _write_step(run_id, "score", status=STEP_SUCCEEDED, output="8 分", elapsed_ms=12)
+        _write_run(run_id, status=RUN_SUCCEEDED, elapsed_ms=40)
+
+    events = _follow_all(db, run_id, worker)
+    names = [name for name, _ in events]
+
+    assert names[0] == "run_start" and names[-1] == "run_end"
+    # 已经落库的第一步只出现在回放里，之后只推变化的那一步。
+    assert {row["status"] for row in events[0][1]["steps"] if row["key"] == "draft"} == {
+        STEP_SUCCEEDED
+    }
+    assert [payload for name, payload in events if name == "step_end"] == [
+        {
+            "key": "score",
+            "status": STEP_SUCCEEDED,
+            "error": None,
+            "output_chars": 3,
+            "elapsed_ms": 12,
+        }
+    ]
+    assert events[-1][1]["status"] == RUN_SUCCEEDED
+
+
+def test_follow_run_reopens_a_step_that_was_put_back_to_pending(db):
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    run_id = run.id
+    _scene(
+        db,
+        run_id,
+        RUN_RUNNING,
+        draft=(STEP_SUCCEEDED, "初稿"),
+        score=(STEP_SUCCEEDED, "8 分"),
+    )
+
+    def worker() -> None:
+        # 单步重跑的样子：整条运行回到执行中，那一步从「成功」被打回待运行。
+        _write_step(run_id, "score", status=STEP_PENDING, output=None)
+        time.sleep(0.3)
+        _write_step(run_id, "score", status=STEP_SUCCEEDED, output="9 分")
+        _write_run(run_id, status=RUN_SUCCEEDED)
+
+    events = _follow_all(db, run_id, worker)
+    names = [name for name, _ in events]
+
+    # 没有这条 step_start，客户端会拿着上一次的「成功」继续显示一个正在重跑的产物。
+    assert "step_start" in names and names.index("step_start") < names.index("step_end")
+    start = next(payload for name, payload in events if name == "step_start")
+    assert (start["key"], start["status"], start["group_key"]) == ("score", STEP_PENDING, "score")
+
+
+def test_follow_run_stops_when_the_record_is_pruned_away(db):
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    run_id = run.id
+    _scene(
+        db,
+        run_id,
+        RUN_RUNNING,
+        draft=(STEP_RUNNING, None),
+        score=(STEP_PENDING, None),
+    )
+
+    def worker() -> None:
+        time.sleep(0.05)
+        from app.database import SessionLocal
+
+        with SessionLocal() as other:
+            other.execute(delete(WorkflowRun).where(WorkflowRun.id == run_id))
+            other.commit()
+
+    # 记录没了就报错收流：接着转圈只会让界面卡在「执行中」。
+    with pytest.raises(LookupError):
+        _follow_all(db, run_id, worker)
+
+
+def test_follow_run_detaches_when_the_client_leaves(db):
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    run_id = run.id
+    _scene(
+        db,
+        run_id,
+        RUN_RUNNING,
+        draft=(STEP_RUNNING, None),
+        score=(STEP_PENDING, None),
+    )
+
+    async def drive():
+        async def gone():
+            return True
+
+        return [
+            (event, payload)
+            async for event, payload in follow_run(
+                owner_id=OWNER, run_id=run_id, is_disconnected=gone, poll_seconds=0.005
+            )
+        ]
+
+    db.rollback()
+    events = asyncio.run(drive())
+    db.rollback()
+
+    assert [name for name, _ in events] == ["run_start"]
+    assert WorkflowService(db, OWNER).get_run(run_id).status == RUN_RUNNING, "跟随不执行，断开不该改现状"
+
+
+def test_follow_run_requires_the_run_to_exist(db):
+    with pytest.raises(LookupError):
+        _follow_all(db, 999999, lambda: None)
+
+
+# ---- 单步重跑 ---------------------------------------------------------------
+
+
+def test_prepare_step_rerun_clears_the_scene_and_reopens_the_run(db, monkeypatch):
+    _chat_model(db)
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _stub_model(monkeypatch, {"writer": "初稿", "scorer": "8 分"}.get)
+    _run_all(db, OWNER, run.id)
+    run_id = run.id
+
+    prepare_step_rerun(db, OWNER, run_id, "score")
+
+    rows = {row.key: row for row in WorkflowService(db, OWNER).run_steps(run_id)}
+    assert rows["score"].status == STEP_PENDING
+    assert (rows["score"].prompt, rows["score"].output, rows["score"].error_msg) == (
+        None,
+        None,
+        None,
+    )
+    assert rows["draft"].status == STEP_SUCCEEDED, "上游的产物留着，重跑只用它"
+    # 整条运行回到执行中：这一步定下来之前，业务行上显示的就是「分析中」。
+    reopened = WorkflowService(db, OWNER).get_run(run_id)
+    assert reopened.status == RUN_RUNNING
+    assert reopened.error_msg is None and reopened.finished_at is None
+
+
+def test_prepare_step_rerun_refuses_a_run_that_is_still_going(db):
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _scene(db, run.id, RUN_RUNNING, draft=(STEP_RUNNING, None), score=(STEP_PENDING, None))
+
+    # 两个执行体抢同一行写，最后留下的现场没人知道是谁的。
+    with pytest.raises(ValueError, match="还没结束"):
+        prepare_step_rerun(db, OWNER, run.id, "draft")
+
+
+def test_prepare_step_rerun_refuses_a_step_that_is_not_there(db):
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _scene(db, run.id, RUN_SUCCEEDED, draft=(STEP_SUCCEEDED, "初稿"), score=(STEP_SUCCEEDED, "8 分"))
+    db.execute(
+        delete(WorkflowStep).where(
+            WorkflowStep.workflow_id == workflow.id, WorkflowStep.key == "score"
+        )
+    )
+    db.commit()
+
+    with pytest.raises(ValueError, match="定义里已经没有这一步"):
+        prepare_step_rerun(db, OWNER, run.id, "score")
+    with pytest.raises(ValueError, match="没有这一步"):
+        prepare_step_rerun(db, OWNER, run.id, "ghost")
+    with pytest.raises(LookupError):
+        prepare_step_rerun(db, OWNER, 999999, "draft")
+
+
+def test_rerun_step_rebuilds_context_from_the_stored_products(db, monkeypatch):
+    _chat_model(db)
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _stub_model(monkeypatch, {"writer": "初稿", "scorer": "8 分"}.get)
+    _run_all(db, OWNER, run.id)
+    run_id = run.id
+
+    prepare_step_rerun(db, OWNER, run_id, "score")
+    calls = _stub_model(
+        monkeypatch, {"scorer": "9 分", "writer": RuntimeError("重跑不该再碰上游")}.get
+    )
+    _rerun(db, OWNER, run_id, "score")
+
+    assert calls == [("scorer", "给这篇打分：初稿")]
+    rows = {row.key: row for row in WorkflowService(db, OWNER).run_steps(run_id)}
+    assert (rows["score"].status, rows["score"].output) == (STEP_SUCCEEDED, "9 分")
+    assert rows["draft"].output == "初稿", "只有那一步被换过"
+    assert WorkflowService(db, OWNER).get_run(run_id).status == RUN_SUCCEEDED
+
+
+def test_rerun_step_uses_the_current_definition(db, monkeypatch):
+    _chat_model(db)
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _stub_model(monkeypatch, {"writer": "初稿", "scorer": "8 分"}.get)
+    _run_all(db, OWNER, run.id)
+    run_id = run.id
+    db.execute(
+        update(WorkflowStep)
+        .where(WorkflowStep.workflow_id == workflow.id, WorkflowStep.key == "score")
+        .values(prompt_tpl="换个标准重评：{{draft}}")
+    )
+    db.commit()
+
+    prepare_step_rerun(db, OWNER, run_id, "score")
+    _rerun(db, OWNER, run_id, "score")
+
+    # 步骤行只存渲染出来的那一份，模板只存在于定义里——重跑用的就是现在这份定义。
+    rows = {row.key: row for row in WorkflowService(db, OWNER).run_steps(run_id)}
+    assert rows["score"].prompt == "换个标准重评：初稿"
+
+
+def test_rerun_of_a_parallel_step_still_cannot_see_its_sibling(db, monkeypatch):
+    _chat_model(db)
+    workflow = _two_step_workflow(
+        db, first_group="all", second_group="all", second_tpl="换个角度评：{{topic}}"
+    )
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _stub_model(monkeypatch, {"writer": "初稿", "scorer": "8 分"}.get)
+    _run_all(db, OWNER, run.id)
+    run_id = run.id
+    db.execute(
+        update(WorkflowStep)
+        .where(WorkflowStep.workflow_id == workflow.id, WorkflowStep.key == "score")
+        .values(prompt_tpl="补一段点评：{{draft}}")
+    )
+    db.commit()
+
+    prepare_step_rerun(db, OWNER, run_id, "score")
+    calls = _stub_model(monkeypatch, {"scorer": "9 分"}.get)
+    _rerun(db, OWNER, run_id, "score")
+
+    # 同组第一次跑的时候也看不见兄弟的产物；重跑不能因为跑得晚就突然多喂一段。
+    assert calls == []
+    rows = {row.key: row for row in WorkflowService(db, OWNER).run_steps(run_id)}
+    assert rows["score"].status == STEP_FAILED
+    assert "未定义的变量" in rows["score"].error_msg
+    assert WorkflowService(db, OWNER).get_run(run_id).status == RUN_FAILED
+
+
+def test_rerun_reports_the_steps_that_never_ran(db, monkeypatch):
+    _chat_model(db)
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    run_id = run.id
+    _stub_model(monkeypatch, {"writer": RuntimeError("上游 502"), "scorer": "8 分"}.get)
+    _run_all(db, OWNER, run.id)
+
+    prepare_step_rerun(db, OWNER, run_id, "draft")
+    _stub_model(monkeypatch, {"writer": "初稿", "scorer": "8 分"}.get)
+    _rerun(db, OWNER, run_id, "draft")
+
+    finished = WorkflowService(db, OWNER).get_run(run_id)
+    rows = {row.key: row for row in WorkflowService(db, OWNER).run_steps(run_id)}
+    assert rows["draft"].status == STEP_SUCCEEDED
+    assert rows["score"].status == STEP_SKIPPED, "重跑只换这一步，不替用户把后面补上"
+    # 这一步通了不等于整条流程通了：产物是后处理写的，后处理只认跑完的流程。
+    assert finished.status == RUN_FAILED
+    assert "还有 1 步没有跑" in finished.error_msg
+
+
+def test_rerun_settles_the_run_on_a_model_failure(db, monkeypatch):
+    _chat_model(db)
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _stub_model(monkeypatch, {"writer": "初稿", "scorer": "8 分"}.get)
+    _run_all(db, OWNER, run.id)
+    run_id = run.id
+
+    prepare_step_rerun(db, OWNER, run_id, "score")
+    _stub_model(monkeypatch, {"scorer": RuntimeError("评分模型挂了")}.get)
+    _rerun(db, OWNER, run_id, "score")
+
+    finished = WorkflowService(db, OWNER).get_run(run_id)
+    rows = {row.key: row for row in WorkflowService(db, OWNER).run_steps(run_id)}
+    assert rows["score"].status == STEP_FAILED
+    assert "评分模型挂了" in rows["score"].error_msg
+    assert finished.status == RUN_FAILED and "评分模型挂了" in finished.error_msg
+
+
 # ---- 重启收尾 ---------------------------------------------------------------
 
 
@@ -930,6 +1607,109 @@ def test_reset_stale_runs_leaves_finished_rows_alone(db):
     assert WorkflowService(db, OWNER).get_run(run.id).status == RUN_SUCCEEDED
 
 
+# ---- 保留与清理 -------------------------------------------------------------
+
+
+def test_prune_runs_keeps_the_latest_run_of_each_subject(db):
+    workflow = _two_step_workflow(db)
+    service = WorkflowService(db, OWNER)
+    old = service.create_run(
+        workflow.id, {"topic": "旧"}, subject_kind="resume", subject_ref=7
+    )
+    fresh = service.create_run(
+        workflow.id, {"topic": "新"}, subject_kind="resume", subject_ref=7
+    )
+    for row in (old, fresh):
+        _scene(
+            db,
+            row.id,
+            RUN_SUCCEEDED,
+            draft=(STEP_SUCCEEDED, "初稿"),
+            score=(STEP_SUCCEEDED, "8 分"),
+        )
+        _aged(db, row.id)
+
+    assert prune_runs(db) == (1, 2), "同一次认领里只有最近一次要留着"
+    assert {row.id for row in db.scalars(select(WorkflowRun)).all()} == {fresh.id}
+    assert db.scalar(select(func.count()).select_from(WorkflowRunStep)) == 2
+
+
+def test_prune_runs_keeps_in_flight_and_recent_runs(db):
+    workflow = _two_step_workflow(db)
+    service = WorkflowService(db, OWNER)
+    going = service.create_run(workflow.id, {"topic": "在跑"})
+    recent = service.create_run(workflow.id, {"topic": "刚跑完"})
+    old = service.create_run(workflow.id, {"topic": "早跑完了"})
+    _scene(db, going.id, RUN_RUNNING, draft=(STEP_RUNNING, None), score=(STEP_PENDING, None))
+    for row in (recent, old):
+        _scene(
+            db,
+            row.id,
+            RUN_SUCCEEDED,
+            draft=(STEP_SUCCEEDED, "初稿"),
+            score=(STEP_SUCCEEDED, "8 分"),
+        )
+    _aged(db, old.id)
+
+    # 进行中的删掉等于留下一堆没人跑完的失败；窗口内的还是历史。
+    assert prune_runs(db) == (1, 2)
+    assert {row.id for row in db.scalars(select(WorkflowRun)).all()} == {going.id, recent.id}
+
+
+def test_prune_runs_is_scoped_by_owner(db):
+    workflows = _seeded(db)
+    workflow = workflows["resume-analysis"]
+    mine = WorkflowService(db, OWNER).create_run(workflow.id, {"resume_content": "x"})
+    theirs = WorkflowService(db, 2).create_run(workflow.id, {"resume_content": "x"})
+    for row in (mine, theirs):
+        _scene(db, row.id, RUN_SUCCEEDED, analyze=(STEP_SUCCEEDED, "报告"))
+        _aged(db, row.id)
+
+    assert prune_runs(db, owner_id=OWNER) == (1, 1), "手动入口只清自己的记录"
+    assert {row.id for row in db.scalars(select(WorkflowRun)).all()} == {theirs.id}
+    # 启动时那一次不带 owner：全站一起收。
+    assert prune_runs(db) == (1, 1)
+    assert db.scalar(select(func.count()).select_from(WorkflowRun)) == 0
+
+
+def test_prune_runs_respects_the_window(db):
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _scene(db, run.id, RUN_FAILED, draft=(STEP_FAILED, None), score=(STEP_SKIPPED, None))
+    _aged(db, run.id, days_ago=5)
+
+    assert prune_runs(db, keep_days=30) == (0, 0)
+    assert prune_runs(db, keep_days=3) == (1, 2)
+
+
+def test_prune_runs_drops_unowned_runs_past_the_window(db):
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _scene(db, run.id, RUN_FAILED, draft=(STEP_FAILED, None), score=(STEP_SKIPPED, None))
+    _aged(db, run.id)
+
+    # 在工作流页面上手动跑的那几次没认领任何业务对象，也就没有状态要担——过窗口就删。
+    assert prune_runs(db) == (1, 2)
+
+
+# ---- 业务状态翻译 -----------------------------------------------------------
+
+
+def test_subject_state_refuses_ready_when_no_product_was_written(db):
+    run = WorkflowRun(
+        owner_id=OWNER,
+        workflow_id=1,
+        workflow_slug="resume-analysis",
+        inputs={},
+        status=RUN_SUCCEEDED,
+    )
+
+    # 单步重跑就能造出这种组合：那一步通了，产物却没人写回业务行。
+    status, error = subject_state(run, has_product=False)
+    assert status == SUBJECT_ERROR and "没有写回" in error
+    assert subject_state(run, has_product=True) == (SUBJECT_READY, None)
+
+
 # ---- 序列化 -----------------------------------------------------------------
 
 
@@ -944,6 +1724,35 @@ def test_to_item_exposes_steps_and_agent_names(db):
     assert [field.name for field in item.inputs] == ["resume_content", "description_note"]
     assert item.steps[0].agent_name == "简历分析师"
     assert item.steps[0].output_keys == ["report", "suggestions"]
+
+
+def test_to_run_detail_labels_steps_from_the_current_definition(db, monkeypatch):
+    _chat_model(db)
+    workflow = _two_step_workflow(db)
+    db.add_all(
+        [
+            Agent(owner_id=OWNER, slug="writer", name="写手", system_prompt="p"),
+            Agent(owner_id=OWNER, slug="scorer", name="评审", system_prompt="p"),
+        ]
+    )
+    db.execute(
+        update(WorkflowStep)
+        .where(WorkflowStep.workflow_id == workflow.id, WorkflowStep.key == "score")
+        .values(output_kind="json", output_keys=["score"], optional=True)
+    )
+    db.commit()
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _stub_model(monkeypatch, {"writer": "初稿", "scorer": '{"score": "8"}'}.get)
+    _run_all(db, OWNER, run.id)
+
+    service = WorkflowService(db, OWNER)
+    detail = service.to_run_detail(service.get_run(run.id))
+    # 「这一步是谁、可选吗、要什么格式」长在定义上，详情得把它对上：现场只剩一串
+    # key 的话，看不出来当时编排的是什么。
+    assert [(row.agent_name, row.optional, row.output_kind) for row in detail.steps] == [
+        ("写手", False, "markdown"),
+        ("评审", True, "json"),
+    ]
 
 
 def test_to_run_detail_carries_the_scene_of_each_step(db, monkeypatch):

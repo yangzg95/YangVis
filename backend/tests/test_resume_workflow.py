@@ -27,7 +27,7 @@ from app.models.entities import (
 )
 from app.models.schemas import ModelPurpose
 from app.services import workflows as workflows_module
-from app.services.resume import ResumeService, _parse_analysis
+from app.services.resume import ResumeService, _analysis_product
 from app.services.workflows import (
     RUN_SUCCEEDED,
     STALE_RUN_ERROR,
@@ -125,19 +125,28 @@ def _read_after_engine_writes(db):
 # ---- 纯函数 -----------------------------------------------------------------
 
 
-def test_parse_analysis_reads_the_contracted_fields():
-    raw = json.dumps(
-        {"report": "整体扎实", "suggestions": ["补量化数据", "删旧技能"]}, ensure_ascii=False
+def test_analysis_product_reads_the_contracted_fields():
+    """后处理取的是引擎按契约解析好的对象，不是再把原文 parse 一遍。"""
+    report, suggestions = _analysis_product(
+        {"report": "整体扎实", "suggestions": ["补量化数据", "删旧技能"]}, "整段输出"
     )
-    report, suggestions = _parse_analysis(raw)
     assert report == "整体扎实"
     assert suggestions == ["补量化数据", "删旧技能"]
 
 
-def test_parse_analysis_falls_back_to_raw_text():
-    report, suggestions = _parse_analysis("模型这次直接给了段报告")
+def test_analysis_product_falls_back_to_raw_text():
+    report, suggestions = _analysis_product(None, "模型这次直接给了段报告")
     assert report == "模型这次直接给了段报告"
     assert suggestions == []
+
+    # report 字段在但没内容：整段输出仍然是一份能看的报告。
+    assert _analysis_product({"report": "  ", "suggestions": []}, "整段输出") == ("整段输出", [])
+
+
+def test_analysis_product_drops_a_suggestions_field_that_is_not_a_list():
+    # 遍历字符串会把建议拆成一个个字，所以非列表形态一律丢弃。
+    report, suggestions = _analysis_product({"report": "整体扎实", "suggestions": "补量化数据"}, "")
+    assert (report, suggestions) == ("整体扎实", [])
 
 
 # ---- 分析走工作流 ------------------------------------------------------------
@@ -169,6 +178,29 @@ def test_run_analysis_executes_through_the_workflow(db, model_call):
     assert step.key == "analyze" and step.status == "succeeded"
     assert "希望转做平台方向" in step.prompt and "十年 Python" in step.prompt
     assert step.parsed == {"report": "报告正文", "suggestions": ["加项目结果"]}
+
+
+def test_run_analysis_writes_the_parsed_fields_not_the_raw_text(db, model_call):
+    """模型裹了代码栅栏与寒暄时，报告里只该有契约里那几个字段的内容。
+
+    这一步声明的是 JSON 输出，剥栅栏与核对字段由引擎做完；后处理再去 parse 一遍
+    只会得到同一个对象，还会把「跑偏的格式」变成一条看不见的第二套解析逻辑。
+    """
+    model_call(
+        '```json\n{"report": "报告正文", "suggestions": ["加项目结果"]}\n```\n以上就是我的分析。'
+    )
+    service = ResumeService(db, OWNER)
+    resume = _resume(db)
+    service.start_analysis(resume.id)
+
+    asyncio.run(service.run_analysis(resume.id))
+    _read_after_engine_writes(db)
+
+    done = service.get_resume(resume.id)
+    assert done.report == "报告正文"
+    assert done.suggestions == ["加项目结果"]
+    step = db.scalar(select(WorkflowRunStep))
+    assert "以上就是我的分析" in step.output
 
 
 def test_status_comes_from_the_run_and_nothing_else(db, model_call):
