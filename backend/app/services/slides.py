@@ -4,8 +4,12 @@
 :meth:`SlideService._scope`，handler 不直接接触 session。
 
 生成是后台任务：一次要读完全部材料再产出十几页结构，远超 SPA 的 30s axios
-超时，所以接口只落一行 ``analyzing`` 记录，真正的模型调用跑在
+超时，所以接口只建一条认领这份 deck 的运行，真正的模型调用跑在
 ``BackgroundTasks`` 里，前端靠轮询状态感知进度（与简历分析同一形态）。
+
+进度与失败原因只有 ``workflow_run`` 一份事实源：界面上的 ``status`` /
+``error_msg`` 由 :func:`subject_state` 从最近一次运行翻译出来，deck 这一行只存
+产物（slides / theme / html）。
 
 事实源是 ``slides`` 这一列结构化页面；``html`` 是从它确定性渲染出来的派生物
 （见 :mod:`app.services.slides_html`），每次写入和每次读取都会重渲一遍。用户改
@@ -19,11 +23,11 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import Select, select, update
+from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models.entities import ModelConfig, SlideDeck
+from app.models.entities import ModelConfig, SlideDeck, WorkflowRun
 from app.models.schemas import (
     SlideAsset,
     SlideDeckDetail,
@@ -42,16 +46,21 @@ from app.services.slides_html import (
     sanitize_theme,
 )
 from app.services.slides_store import StoredImage
-from app.services.workflows import run_builtin
+from app.services.workflows import (
+    SUBJECT_ERROR,
+    SUBJECT_SLIDE_DECK,
+    fail_run,
+    finish_builtin,
+    latest_run,
+    latest_runs,
+    running_subjects,
+    start_builtin,
+    subject_state,
+)
 
 logger = logging.getLogger("yangvis.slides")
 
 settings = get_settings()
-
-# 状态值。不用 Enum：实体里存的是裸字符串，schema 也是裸字符串。
-STATUS_ANALYZING = "analyzing"
-STATUS_READY = "ready"
-STATUS_ERROR = "error"
 
 # 生成这一步的人设（slide-architect）与 Prompt 骨架都在内置工作流上，界面上能改；
 # 这里只留「哪条流程」。
@@ -187,7 +196,7 @@ class SlideService:
         requirement: Optional[str],
         source_text: str,
     ) -> SlideDeck:
-        """落一条 ``analyzing`` 记录。材料与图片无关（图片是后加的素材）。
+        """落一条记录并为它建一条运行。材料与图片无关（图片是后加的素材）。
 
         ``source_text`` 是路由侧把上传文档解析出的文本与用户粘贴的文案合在一起的
         结果；三者全空时拒掉——没有任何材料，模型只能瞎编。
@@ -207,13 +216,13 @@ class SlideService:
             assets=[],
             theme=dict(DEFAULT_THEME),
             slides=[],
-            status=STATUS_ANALYZING,
         )
         self._db.add(deck)
         self._db.commit()
         self._db.refresh(deck)
         self._refresh_html(deck)
         self._db.commit()
+        self._start_generation_run(deck)
         logger.info(
             "slide deck created: id=%s owner=%s title=%r source_chars=%s",
             deck.id,
@@ -230,7 +239,7 @@ class SlideService:
         来自这一行自己的 assets。
         """
         deck = self.get_deck(deck_id)
-        if deck.status == STATUS_ANALYZING:
+        if running_subjects(self._db, self._owner_id, SUBJECT_SLIDE_DECK, [deck.id]):
             raise ValueError("幻灯片正在生成中，请稍后再删")
         rel_paths = [
             str(asset.get("rel_path") or "")
@@ -288,49 +297,66 @@ class SlideService:
 
     # -- AI 生成 ------------------------------------------------------------
 
+    def _start_generation_run(self, deck: SlideDeck) -> WorkflowRun:
+        """为这份 deck 建一条认领它的运行，输入取当时的材料快照。
+
+        运行在请求里建、在后台任务里跑：接口一返回，界面上就是「生成中」，
+        而这份状态只有 ``workflow_run`` 一处。
+        """
+        asset_names = [
+            f"{asset.get('id')}: {asset.get('name')}"
+            for asset in (deck.assets or [])
+            if isinstance(asset, dict) and asset.get("id")
+        ]
+        return start_builtin(
+            self._db,
+            self._owner_id,
+            WORKFLOW_GENERATE,
+            _generate_inputs(
+                title=deck.title,
+                description=deck.description,
+                requirement=deck.requirement,
+                source_text=deck.source_text or "",
+                asset_names=asset_names,
+            ),
+            subject=(SUBJECT_SLIDE_DECK, deck.id),
+        )
+
     def start_generation(self, deck_id: int, requirement: Optional[str] = None) -> SlideDeck:
-        """置为生成中；``requirement`` 给了就覆盖当时的要求（重生成时补一句）。"""
+        """新建一条生成运行；``requirement`` 给了就覆盖当时的要求（重生成时补一句）。"""
         deck = self.get_deck(deck_id)
-        if deck.status == STATUS_ANALYZING:
+        if running_subjects(self._db, self._owner_id, SUBJECT_SLIDE_DECK, [deck.id]):
             raise ValueError("该幻灯片正在生成中，请勿重复触发")
         if requirement is not None:
             deck.requirement = requirement.strip()[:512] or None
-        deck.status = STATUS_ANALYZING
-        deck.error_msg = None
         self._db.commit()
         self._db.refresh(deck)
+        self._start_generation_run(deck)
         return deck
 
     async def run_generation(self, deck_id: int) -> None:
-        """后台任务体：调模型、清洗结构、重渲染 HTML。异常一律落状态而不抛出。"""
+        """后台任务体：跑发起时建好的运行，清洗结构、重渲染 HTML。
+
+        失败的去处是运行本身；清洗没留下任何合法页面这类**后处理**失败，用
+        :func:`fail_run` 把已经成功的运行降级，别让它显示成「已完成但什么都没有」。
+        """
         started = time.monotonic()
         deck = self.get_deck(deck_id)
+        run = latest_run(self._db, self._owner_id, SUBJECT_SLIDE_DECK, deck.id)
+        if run is None:
+            logger.error("slide deck has no run to execute: id=%s", deck_id)
+            return
         logger.info(
-            "slide generation started: id=%s owner=%s title=%r source_chars=%s assets=%s",
+            "slide generation started: id=%s run=%s owner=%s title=%r source_chars=%s assets=%s",
             deck_id,
+            run.id,
             self._owner_id,
             deck.title,
             len(deck.source_text or ""),
             len(deck.assets or []),
         )
         try:
-            asset_names = [
-                f"{asset.get('id')}: {asset.get('name')}"
-                for asset in (deck.assets or [])
-                if isinstance(asset, dict) and asset.get("id")
-            ]
-            text = await run_builtin(
-                self._db,
-                self._owner_id,
-                WORKFLOW_GENERATE,
-                _generate_inputs(
-                    title=deck.title,
-                    description=deck.description,
-                    requirement=deck.requirement,
-                    source_text=deck.source_text or "",
-                    asset_names=asset_names,
-                ),
-            )
+            text = await finish_builtin(self._db, self._owner_id, run.id)
             theme, pages = _parse_deck_output(text)
             # 模型给的外观要先过白名单再谈合并：非法 preset / 比例 / 颜色一律
             # 回落默认，不能让任意字符串进到 CSS 里。
@@ -343,15 +369,14 @@ class SlideService:
             deck.theme = merged_theme
             deck.html = None
             self._refresh_html(deck)
-            deck.status = STATUS_READY
-            deck.error_msg = None
+            self._db.commit()
             logger.info(
                 "slide generation finished: id=%s pages=%s elapsed=%.1fs",
                 deck_id,
                 len(slides),
                 time.monotonic() - started,
             )
-        except Exception as exc:  # noqa: BLE001 - 状态字段就是这类错误的归宿
+        except Exception as exc:  # noqa: BLE001 - 失败写在运行上，不留到这里抛出
             logger.warning(
                 "slide generation failed: id=%s elapsed=%.1fs error=%s",
                 deck_id,
@@ -359,9 +384,7 @@ class SlideService:
                 exc,
                 exc_info=True,
             )
-            deck.status = STATUS_ERROR
-            deck.error_msg = model_error_text(exc)
-        self._db.commit()
+            fail_run(self._db, self._owner_id, run.id, model_error_text(exc))
 
     # -- 编辑 ---------------------------------------------------------------
 
@@ -425,19 +448,34 @@ class SlideService:
 
     # -- 序列化 -------------------------------------------------------------
 
-    @staticmethod
-    def to_item(deck: SlideDeck) -> SlideDeckItem:
+    def _item_of(self, deck: SlideDeck, run: Optional[WorkflowRun]) -> SlideDeckItem:
+        # idle 用 error：deck 一创建就带着运行，「没有运行又没有页面」只剩改造之前
+        # 那些被重启收尾成失败的历史行这一种解释。
+        status, error_msg = subject_state(
+            run, has_product=bool(deck.slides), idle=SUBJECT_ERROR
+        )
         return SlideDeckItem(
             id=deck.id,
             title=deck.title,
             description=deck.description,
-            status=deck.status,
-            error_msg=deck.error_msg,
+            status=status,
+            error_msg=error_msg,
             page_count=len(deck.slides or []),
             asset_count=len(deck.assets or []),
             created_at=deck.created_at,
             updated_at=deck.updated_at,
         )
+
+    def to_item(self, deck: SlideDeck) -> SlideDeckItem:
+        return self._item_of(
+            deck, latest_run(self._db, self._owner_id, SUBJECT_SLIDE_DECK, deck.id)
+        )
+
+    def to_items(self, decks: List[SlideDeck]) -> List[SlideDeckItem]:
+        runs = latest_runs(
+            self._db, self._owner_id, SUBJECT_SLIDE_DECK, [deck.id for deck in decks]
+        )
+        return [self._item_of(deck, runs.get(str(deck.id))) for deck in decks]
 
     def to_detail(self, deck: SlideDeck) -> SlideDeckDetail:
         # 页面与素材直接给清洗后的形状：前端编辑器拿到的 sid / layout /
@@ -454,19 +492,3 @@ class SlideService:
             assets=[SlideAsset(**{k: v for k, v in item.items() if k in SlideAsset.model_fields})
                     for item in (deck.assets or []) if isinstance(item, dict)],
         )
-
-
-def reset_stale_slides(db: Session) -> None:
-    """把上一个进程遗留的「生成中」标记为失败。
-
-    后台任务活在 Gunicorn worker 里，进程一重启它们就没了；不收拾的话这些行
-    会永远停在 analyzing，用户既删不了也等不到结果（与简历同一处理）。
-    """
-    stale = db.execute(
-        update(SlideDeck)
-        .where(SlideDeck.status == STATUS_ANALYZING)
-        .values(status=STATUS_ERROR, error_msg="服务重启导致生成中断，请重新生成")
-    ).rowcount
-    db.commit()
-    if stale:
-        logger.warning("reset stale slide decks after restart: %s", stale)

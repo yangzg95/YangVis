@@ -4,8 +4,12 @@
 经过 :meth:`ResumeService._scope`，handler 不直接接触 session。
 
 分析与对比都是后台任务：一次调用要等模型读完整份（甚至几份）简历全文，远超
-SPA 的 30s axios 超时，所以接口只负责落库一行状态记录，真正的模型调用在
+SPA 的 30s axios 超时，所以接口只负责把这次运行建出来，真正的模型调用在
 ``BackgroundTasks`` 里跑，前端靠轮询状态感知进度。
+
+进度与失败原因不在简历行上：发起分析就是 ``start_builtin`` 建一条认领了这份简历
+的运行，界面上的 ``status`` / ``error_msg`` 由 :func:`subject_state` 从最近一次
+运行翻译出来。这一行只留产物（报告、改进意见、分析时间）。
 """
 from __future__ import annotations
 
@@ -16,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import Select, select, update
+from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
 from app.models.entities import (
@@ -24,6 +28,7 @@ from app.models.entities import (
     Resume,
     ResumeComparison,
     ResumeToolkitTask,
+    WorkflowRun,
 )
 from app.models.schemas import (
     ResumeComparisonDetail,
@@ -41,7 +46,19 @@ from app.services.agent_run import (
     require_chat_model,
 )
 from app.services.chunking import UnsupportedFileType, extract_text, normalise
-from app.services.workflows import run_builtin
+from app.services.workflows import (
+    SUBJECT_ERROR,
+    SUBJECT_RESUME,
+    SUBJECT_RESUME_COMPARISON,
+    SUBJECT_RESUME_TOOLKIT,
+    fail_run,
+    finish_builtin,
+    latest_run,
+    latest_runs,
+    running_subjects,
+    start_builtin,
+    subject_state,
+)
 
 logger = logging.getLogger("yangvis.resume")
 
@@ -52,14 +69,9 @@ RESUME_SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".txt", ".md", ".markdown")
 # 对比时最多 10 份简历，每份留 12000 字符，加上 prompt 也不会把窗口撑爆。
 MAX_RESUME_CHARS = 12000
 
-# 状态值。不用 Enum：实体里存的是裸字符串，schema 也是裸字符串。
-STATUS_UPLOADED = "uploaded"
-STATUS_ANALYZING = "analyzing"
-STATUS_READY = "ready"
-STATUS_ERROR = "error"
-
-# 分析与对比的人设（含输出格式要求）都在内置智能体上，随 seed 管线就地刷新；
-# 这里只留「哪条工作流」。变量内容（简历全文）走运行输入，不进模板 seed。
+# 分析与对比的人设（含输出格式要求）都在内置智能体上，Prompt 骨架在内置工作流上，
+# 两边都随 seed 管线就地刷新；这里只留「哪条流程」。
+# 变量内容（简历全文）走运行输入，不进模板 seed。
 WORKFLOW_ANALYZE = "resume-analysis"
 WORKFLOW_COMPARE = "resume-comparison"
 
@@ -333,7 +345,6 @@ class ResumeService:
             mime=mime,
             size=size,
             content=content,
-            status=STATUS_UPLOADED,
         )
         self._db.add(resume)
         self._db.commit()
@@ -365,7 +376,7 @@ class ResumeService:
 
     def delete_resume(self, resume_id: int) -> None:
         resume = self.get_resume(resume_id)
-        if resume.status == STATUS_ANALYZING:
+        if self._analyzing(SUBJECT_RESUME, resume.id):
             raise ValueError("简历正在分析中，请稍后再删")
         self._db.delete(resume)
         self._db.commit()
@@ -376,6 +387,14 @@ class ResumeService:
         resume.netdisk_fs_id = fs_id
         resume.netdisk_path = path
         self._db.commit()
+
+    # -- 运行状态：业务行上没有 status，一切从认领它的运行读 ---------------------
+
+    def _analyzing(self, subject_kind: str, subject_ref: object) -> bool:
+        """这个业务对象还在跑吗？删除与重复触发的闸门读的是运行，不是列。"""
+        return bool(
+            running_subjects(self._db, self._owner_id, subject_kind, [subject_ref])
+        )
 
     # -- AI 分析 -------------------------------------------------------------
 
@@ -395,38 +414,52 @@ class ResumeService:
         }
 
     def start_analysis(self, resume_id: int) -> Resume:
-        """把简历置为分析中。真正的模型调用由后台任务完成。"""
+        """为这份简历建一条认领它的运行；模型调用由后台任务完成。
+
+        运行在这里就落库，接口一返回界面上就是「分析中」——以前这一步写的是
+        ``resume.status``，状态列退役后它就是这条运行。
+        """
         resume = self.get_resume(resume_id)
-        if resume.status == STATUS_ANALYZING:
+        if self._analyzing(SUBJECT_RESUME, resume.id):
             raise ValueError("该简历正在分析中，请勿重复触发")
-        resume.status = STATUS_ANALYZING
-        resume.error_msg = None
-        self._db.commit()
+        start_builtin(
+            self._db,
+            self._owner_id,
+            WORKFLOW_ANALYZE,
+            self._analysis_inputs(resume),
+            subject=(SUBJECT_RESUME, resume.id),
+        )
         self._db.refresh(resume)
         return resume
 
     async def run_analysis(self, resume_id: int) -> None:
-        """后台任务体：调模型、写结果。任何异常都落到状态上而不是抛出去。"""
+        """后台任务体：跑认领这次分析的运行，只写产物。
+
+        失败的去处是运行本身（``workflow_run_step`` 里的现场与 ``error_msg``），
+        这里只负责把它记进日志；后处理挂了才用 :func:`fail_run` 降级运行。
+        """
         started = time.monotonic()
         resume = self.get_resume(resume_id)
+        run = latest_run(self._db, self._owner_id, SUBJECT_RESUME, resume.id)
+        if run is None:
+            logger.error("resume analysis has no run to execute: id=%s", resume_id)
+            return
         logger.info(
-            "resume analysis started: id=%s owner=%s title=%r content_chars=%s",
+            "resume analysis started: id=%s run=%s owner=%s title=%r content_chars=%s",
             resume_id,
+            run.id,
             self._owner_id,
             resume.title,
             len(resume.content),
         )
         try:
-            text = await run_builtin(
-                self._db, self._owner_id, WORKFLOW_ANALYZE, self._analysis_inputs(resume)
-            )
+            text = await finish_builtin(self._db, self._owner_id, run.id)
             report, suggestions = _parse_analysis(text)
 
             resume.report = report
             resume.suggestions = suggestions or None
-            resume.status = STATUS_READY
-            resume.error_msg = None
             resume.analyzed_at = datetime.now(timezone.utc)
+            self._db.commit()
             logger.info(
                 "resume analysis finished: id=%s report_chars=%s suggestions=%s elapsed=%.1fs",
                 resume_id,
@@ -434,7 +467,7 @@ class ResumeService:
                 len(suggestions),
                 time.monotonic() - started,
             )
-        except Exception as exc:  # noqa: BLE001 - 状态字段就是这类错误的归宿
+        except Exception as exc:  # noqa: BLE001 - 失败写在运行上，不留到这里抛出
             logger.warning(
                 "resume analysis failed: id=%s elapsed=%.1fs error=%s",
                 resume_id,
@@ -442,11 +475,23 @@ class ResumeService:
                 exc,
                 exc_info=True,
             )
-            resume.status = STATUS_ERROR
-            resume.error_msg = model_error_text(exc)
-        self._db.commit()
+            fail_run(self._db, self._owner_id, run.id, model_error_text(exc))
 
     # -- 简历对比 -------------------------------------------------------------
+
+    def _comparison_inputs(self, resumes: List[Resume]) -> dict:
+        """把多份简历拼成对比用的那一段材料（发起时定稿，进运行的输入快照）。"""
+        blocks = []
+        for index, resume in enumerate(resumes, start=1):
+            description = f"\n补充描述：{resume.description}" if resume.description else ""
+            blocks.append(
+                f"=== 简历 {index}：{resume.title} ==={description}\n"
+                f"\"\"\"\n{_truncate(resume.content)}\n\"\"\""
+            )
+        return {
+            "resumes_block": "\n\n".join(blocks),
+            "resume_count": str(len(resumes)),
+        }
 
     def create_comparison(self, resume_ids: List[int], title: Optional[str]) -> ResumeComparison:
         resumes = [self.get_resume(rid) for rid in resume_ids]
@@ -456,11 +501,19 @@ class ResumeService:
             owner_id=self._owner_id,
             title=title or None,
             resume_ids=list(resume_ids),
-            status=STATUS_ANALYZING,
         )
         self._db.add(comparison)
         self._db.commit()
         self._db.refresh(comparison)
+        # 材料在发起时就定稿：这一行之后即使有简历被删，进行中的对比与历史记录
+        # 喂给模型的还是当时那几份全文。
+        start_builtin(
+            self._db,
+            self._owner_id,
+            WORKFLOW_COMPARE,
+            self._comparison_inputs(resumes),
+            subject=(SUBJECT_RESUME_COMPARISON, comparison.id),
+        )
         logger.info(
             "owner %s created resume comparison %s over %d resume(s)",
             self._owner_id,
@@ -487,54 +540,40 @@ class ResumeService:
 
     def delete_comparison(self, comparison_id: int) -> None:
         comparison = self.get_comparison(comparison_id)
-        if comparison.status == STATUS_ANALYZING:
+        if self._analyzing(SUBJECT_RESUME_COMPARISON, comparison.id):
             raise ValueError("对比分析进行中，请稍后再删")
         self._db.delete(comparison)
         self._db.commit()
 
     async def run_comparison(self, comparison_id: int) -> None:
-        """后台任务体：把多份简历全文喂给模型，落一份对比报告。"""
+        """后台任务体：跑发起时建好的那条对比运行，只写报告。"""
         started = time.monotonic()
         comparison = self.get_comparison(comparison_id)
+        run = latest_run(self._db, self._owner_id, SUBJECT_RESUME_COMPARISON, comparison.id)
+        if run is None:
+            logger.error("resume comparison has no run to execute: id=%s", comparison_id)
+            return
         logger.info(
-            "resume comparison started: id=%s owner=%s resumes=%s",
+            "resume comparison started: id=%s run=%s owner=%s resumes=%s",
             comparison_id,
+            run.id,
             self._owner_id,
             len(comparison.resume_ids),
         )
         try:
-            resumes = [self.get_resume(rid) for rid in comparison.resume_ids]
-            blocks = []
-            for index, resume in enumerate(resumes, start=1):
-                description = f"\n补充描述：{resume.description}" if resume.description else ""
-                blocks.append(
-                    f"=== 简历 {index}：{resume.title} ==={description}\n"
-                    f"\"\"\"\n{_truncate(resume.content)}\n\"\"\""
-                )
-            report = (
-                await run_builtin(
-                    self._db,
-                    self._owner_id,
-                    WORKFLOW_COMPARE,
-                    {
-                        "resumes_block": "\n\n".join(blocks),
-                        "resume_count": str(len(resumes)),
-                    },
-                )
-            ).strip()
+            report = (await finish_builtin(self._db, self._owner_id, run.id)).strip()
             if not report:
                 raise RuntimeError("模型返回了空报告")
 
             comparison.report = report
-            comparison.status = STATUS_READY
-            comparison.error_msg = None
+            self._db.commit()
             logger.info(
                 "resume comparison finished: id=%s report_chars=%s elapsed=%.1fs",
                 comparison_id,
                 len(report),
                 time.monotonic() - started,
             )
-        except Exception as exc:  # noqa: BLE001 - 同上，落状态
+        except Exception as exc:  # noqa: BLE001 - 同 run_analysis，失败写在运行上
             logger.warning(
                 "resume comparison failed: id=%s elapsed=%.1fs error=%s",
                 comparison_id,
@@ -542,9 +581,7 @@ class ResumeService:
                 exc,
                 exc_info=True,
             )
-            comparison.status = STATUS_ERROR
-            comparison.error_msg = model_error_text(exc)
-        self._db.commit()
+            fail_run(self._db, self._owner_id, run.id, model_error_text(exc))
 
     # -- 求职助手（toolkit）----------------------------------------------------
 
@@ -570,7 +607,7 @@ class ResumeService:
         return snapshot
 
     def create_toolkit_task(self, payload: ResumeToolkitCreate) -> ResumeToolkitTask:
-        """校验必填项并落一条 analyzing 记录；模型调用由后台任务完成。"""
+        """校验必填项、落记录并建一条认领它的运行；模型调用由后台任务完成。"""
         spec = TOOLKIT_KINDS.get(payload.kind)
         if spec is None:
             raise ValueError(f"未知的任务类型：{payload.kind}")
@@ -594,11 +631,17 @@ class ResumeService:
             kind=payload.kind,
             title=_toolkit_title(payload.kind, snapshot),
             inputs=snapshot,
-            status=STATUS_ANALYZING,
         )
         self._db.add(task)
         self._db.commit()
         self._db.refresh(task)
+        start_builtin(
+            self._db,
+            self._owner_id,
+            spec.workflow_slug,
+            _toolkit_inputs(payload.kind, snapshot),
+            subject=(SUBJECT_RESUME_TOOLKIT, task.id),
+        )
         logger.info(
             "toolkit task created: id=%s kind=%s owner=%s title=%r",
             task.id,
@@ -626,37 +669,34 @@ class ResumeService:
 
     def delete_toolkit_task(self, task_id: int) -> None:
         task = self.get_toolkit_task(task_id)
-        if task.status == STATUS_ANALYZING:
+        if self._analyzing(SUBJECT_RESUME_TOOLKIT, task.id):
             raise ValueError("生成进行中，请稍后再删")
         self._db.delete(task)
         self._db.commit()
 
     async def run_toolkit_task(self, task_id: int) -> None:
-        """后台任务体：按快照组装 prompt、调模型、落报告。异常落状态而不抛出。"""
+        """后台任务体：跑认领这条任务的运行，只写报告。"""
         started = time.monotonic()
         task = self.get_toolkit_task(task_id)
+        run = latest_run(self._db, self._owner_id, SUBJECT_RESUME_TOOLKIT, task.id)
+        if run is None:
+            logger.error("toolkit task has no run to execute: id=%s", task_id)
+            return
         logger.info(
-            "toolkit task started: id=%s kind=%s owner=%s title=%r",
+            "toolkit task started: id=%s run=%s kind=%s owner=%s title=%r",
             task_id,
+            run.id,
             task.kind,
             self._owner_id,
             task.title,
         )
         try:
-            report = (
-                await run_builtin(
-                    self._db,
-                    self._owner_id,
-                    TOOLKIT_KINDS[task.kind].workflow_slug,
-                    _toolkit_inputs(task.kind, task.inputs),
-                )
-            ).strip()
+            report = (await finish_builtin(self._db, self._owner_id, run.id)).strip()
             if not report:
                 raise RuntimeError("模型返回了空报告")
 
             task.report = report
-            task.status = STATUS_READY
-            task.error_msg = None
+            self._db.commit()
             logger.info(
                 "toolkit task finished: id=%s kind=%s report_chars=%s elapsed=%.1fs",
                 task_id,
@@ -664,7 +704,7 @@ class ResumeService:
                 len(report),
                 time.monotonic() - started,
             )
-        except Exception as exc:  # noqa: BLE001 - 同上，落状态
+        except Exception as exc:  # noqa: BLE001 - 同上，失败写在运行上
             logger.warning(
                 "toolkit task failed: id=%s kind=%s elapsed=%.1fs error=%s",
                 task_id,
@@ -673,9 +713,7 @@ class ResumeService:
                 exc,
                 exc_info=True,
             )
-            task.status = STATUS_ERROR
-            task.error_msg = model_error_text(exc)
-        self._db.commit()
+            fail_run(self._db, self._owner_id, run.id, model_error_text(exc))
 
     # -- 序列化 -------------------------------------------------------------
 
@@ -689,8 +727,8 @@ class ResumeService:
         by_id = {row.id: row.title for row in rows}
         return [by_id.get(rid, "（已删除）") for rid in resume_ids]
 
-    @staticmethod
-    def to_item(resume: Resume) -> ResumeItem:
+    def _item_of(self, resume: Resume, run: Optional[WorkflowRun]) -> ResumeItem:
+        status, error_msg = subject_state(run, has_product=bool(resume.report))
         return ResumeItem(
             id=resume.id,
             title=resume.title,
@@ -698,14 +736,24 @@ class ResumeService:
             filename=resume.filename,
             mime=resume.mime,
             size=resume.size,
-            status=resume.status,
-            error_msg=resume.error_msg,
+            status=status,
+            error_msg=error_msg,
             has_report=bool(resume.report),
             has_netdisk=resume.netdisk_fs_id is not None,
             analyzed_at=resume.analyzed_at,
             created_at=resume.created_at,
             updated_at=resume.updated_at,
         )
+
+    def to_item(self, resume: Resume) -> ResumeItem:
+        return self._item_of(
+            resume, latest_run(self._db, self._owner_id, SUBJECT_RESUME, resume.id)
+        )
+
+    def to_items(self, resumes: List[Resume]) -> List[ResumeItem]:
+        """整页一次查回各自最近一次运行——列表不该每行问一次状态。"""
+        runs = latest_runs(self._db, self._owner_id, SUBJECT_RESUME, [r.id for r in resumes])
+        return [self._item_of(resume, runs.get(str(resume.id))) for resume in resumes]
 
     def to_detail(self, resume: Resume) -> ResumeDetail:
         return ResumeDetail(
@@ -714,16 +762,40 @@ class ResumeService:
             suggestions=resume.suggestions,
         )
 
-    def to_comparison_item(self, comparison: ResumeComparison) -> ResumeComparisonItem:
+    def _comparison_item(
+        self, comparison: ResumeComparison, run: Optional[WorkflowRun]
+    ) -> ResumeComparisonItem:
+        # idle 用 error：这类记录一创建就带着运行，没有运行又没有报告的行只剩
+        # 「改造之前的存量」这一种解释，而它当时就是失败或已被重启收尾。
+        status, error_msg = subject_state(
+            run, has_product=bool(comparison.report), idle=SUBJECT_ERROR
+        )
         return ResumeComparisonItem(
             id=comparison.id,
             title=comparison.title,
             resume_ids=comparison.resume_ids,
             resume_titles=self._resume_titles(comparison.resume_ids),
-            status=comparison.status,
-            error_msg=comparison.error_msg,
+            status=status,
+            error_msg=error_msg,
             created_at=comparison.created_at,
         )
+
+    def to_comparison_item(self, comparison: ResumeComparison) -> ResumeComparisonItem:
+        return self._comparison_item(
+            comparison,
+            latest_run(self._db, self._owner_id, SUBJECT_RESUME_COMPARISON, comparison.id),
+        )
+
+    def to_comparison_items(
+        self, comparisons: List[ResumeComparison]
+    ) -> List[ResumeComparisonItem]:
+        runs = latest_runs(
+            self._db, self._owner_id, SUBJECT_RESUME_COMPARISON, [c.id for c in comparisons]
+        )
+        return [
+            self._comparison_item(comparison, runs.get(str(comparison.id)))
+            for comparison in comparisons
+        ]
 
     def to_comparison_detail(self, comparison: ResumeComparison) -> ResumeComparisonDetail:
         return ResumeComparisonDetail(
@@ -731,18 +803,33 @@ class ResumeService:
             report=comparison.report,
         )
 
-    @staticmethod
-    def to_toolkit_item(task: ResumeToolkitTask) -> ResumeToolkitItem:
+    def _toolkit_item(
+        self, task: ResumeToolkitTask, run: Optional[WorkflowRun]
+    ) -> ResumeToolkitItem:
         spec = TOOLKIT_KINDS.get(task.kind)
+        status, error_msg = subject_state(
+            run, has_product=bool(task.report), idle=SUBJECT_ERROR
+        )
         return ResumeToolkitItem(
             id=task.id,
             kind=task.kind,
             kind_label=spec.label if spec else task.kind,
             title=task.title,
-            status=task.status,
-            error_msg=task.error_msg,
+            status=status,
+            error_msg=error_msg,
             created_at=task.created_at,
         )
+
+    def to_toolkit_item(self, task: ResumeToolkitTask) -> ResumeToolkitItem:
+        return self._toolkit_item(
+            task, latest_run(self._db, self._owner_id, SUBJECT_RESUME_TOOLKIT, task.id)
+        )
+
+    def to_toolkit_items(self, tasks: List[ResumeToolkitTask]) -> List[ResumeToolkitItem]:
+        runs = latest_runs(
+            self._db, self._owner_id, SUBJECT_RESUME_TOOLKIT, [t.id for t in tasks]
+        )
+        return [self._toolkit_item(task, runs.get(str(task.id))) for task in tasks]
 
     def to_toolkit_detail(self, task: ResumeToolkitTask) -> ResumeToolkitDetail:
         inputs = dict(task.inputs or {})
@@ -752,37 +839,4 @@ class ResumeService:
             **self.to_toolkit_item(task).model_dump(),
             inputs=inputs,
             report=task.report,
-        )
-
-
-def reset_stale_analysis(db: Session) -> None:
-    """把上一个进程遗留的「分析中」标记为失败。
-
-    后台任务活在 Gunicorn worker 里，进程一重启它们就没了；不收拾的话，
-    这些行会永远停在 analyzing，用户既删不了也等不到结果。
-    """
-    # 逐张表收尾并计数：重启把这些任务变成 error 是重要的运维信号，不该静默发生。
-    stale_resumes = db.execute(
-        update(Resume)
-        .where(Resume.status == STATUS_ANALYZING)
-        .values(status=STATUS_ERROR, error_msg="服务重启导致分析中断，请重新生成")
-    ).rowcount
-    stale_comparisons = db.execute(
-        update(ResumeComparison)
-        .where(ResumeComparison.status == STATUS_ANALYZING)
-        .values(status=STATUS_ERROR, error_msg="服务重启导致分析中断，请重新发起对比")
-    ).rowcount
-    stale_toolkit = db.execute(
-        update(ResumeToolkitTask)
-        .where(ResumeToolkitTask.status == STATUS_ANALYZING)
-        .values(status=STATUS_ERROR, error_msg="服务重启导致生成中断，请重新发起")
-    ).rowcount
-    db.commit()
-
-    if stale_resumes or stale_comparisons or stale_toolkit:
-        logger.warning(
-            "reset stale resume jobs after restart: resumes=%s comparisons=%s toolkit=%s",
-            stale_resumes,
-            stale_comparisons,
-            stale_toolkit,
         )

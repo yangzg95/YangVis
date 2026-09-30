@@ -76,7 +76,7 @@ def _not_found(exc: LookupError) -> HTTPException:
 async def list_decks(
     service: SlideService = Depends(get_service),
 ) -> APIResponse[ListResponse[SlideDeckItem]]:
-    items = [SlideService.to_item(deck) for deck in service.list_decks()]
+    items = service.to_items(service.list_decks())
     return APIResponse(data=ListResponse(items=items, total=len(items)))
 
 
@@ -143,7 +143,7 @@ async def create_deck(
         return APIResponse(code=-1, message=str(exc))
 
     background.add_task(_generate_task, service.owner_id, deck.id)
-    return APIResponse(data=SlideService.to_item(deck), message="已开始生成")
+    return APIResponse(data=service.to_item(deck), message="已开始生成")
 
 
 @router.get("/{deck_id}", response_model=APIResponse[SlideDeckDetail])
@@ -224,7 +224,7 @@ async def regenerate_deck(
     except ValueError as exc:
         return APIResponse(code=-1, message=str(exc))
     background.add_task(_generate_task, service.owner_id, deck_id)
-    return APIResponse(data=SlideService.to_item(deck), message="已开始生成")
+    return APIResponse(data=service.to_item(deck), message="已开始生成")
 
 
 # ---- 预览 / 导出 --------------------------------------------------------------

@@ -80,7 +80,7 @@ def get_netdisk_service(
 async def list_resumes(
     service: ResumeService = Depends(get_service),
 ) -> APIResponse[ListResponse[ResumeItem]]:
-    items = [ResumeService.to_item(resume) for resume in service.list_resumes()]
+    items = service.to_items(service.list_resumes())
     return APIResponse(data=ListResponse(items=items, total=len(items)))
 
 
@@ -133,7 +133,7 @@ async def upload_resume(
         except Exception as exc:  # noqa: BLE001 - 网盘只是备份通道
             logger.warning("resume %s netdisk sync failed: %s", resume.id, exc)
 
-    return APIResponse(data=ResumeService.to_item(resume))
+    return APIResponse(data=service.to_item(resume))
 
 
 @router.get("/resumes/{resume_id}", response_model=APIResponse[ResumeDetail])
@@ -182,7 +182,7 @@ async def update_resume(
         )
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    return APIResponse(data=ResumeService.to_item(resume))
+    return APIResponse(data=service.to_item(resume))
 
 
 @router.delete("/resumes/{resume_id}", response_model=APIResponse[None])
@@ -290,7 +290,7 @@ async def analyze_resume(
     except ValueError as exc:
         return APIResponse(code=-1, message=str(exc))
     background.add_task(_analyze_task, service.owner_id, resume_id)
-    return APIResponse(data=ResumeService.to_item(resume), message="已开始分析")
+    return APIResponse(data=service.to_item(resume), message="已开始分析")
 
 
 async def _analyze_task(owner_id: int, resume_id: int) -> None:
@@ -329,7 +329,7 @@ async def create_comparison(
 async def list_comparisons(
     service: ResumeService = Depends(get_service),
 ) -> APIResponse[ListResponse[ResumeComparisonItem]]:
-    items = [service.to_comparison_item(item) for item in service.list_comparisons()]
+    items = service.to_comparison_items(service.list_comparisons())
     return APIResponse(data=ListResponse(items=items, total=len(items)))
 
 
@@ -387,14 +387,14 @@ async def create_toolkit_task(
     except ValueError as exc:
         return APIResponse(code=-1, message=str(exc))
     background.add_task(_toolkit_task, service.owner_id, task.id)
-    return APIResponse(data=ResumeService.to_toolkit_item(task), message="已开始生成")
+    return APIResponse(data=service.to_toolkit_item(task), message="已开始生成")
 
 
 @router.get("/toolkit", response_model=APIResponse[ListResponse[ResumeToolkitItem]])
 async def list_toolkit_tasks(
     service: ResumeService = Depends(get_service),
 ) -> APIResponse[ListResponse[ResumeToolkitItem]]:
-    items = [ResumeService.to_toolkit_item(task) for task in service.list_toolkit_tasks()]
+    items = service.to_toolkit_items(service.list_toolkit_tasks())
     return APIResponse(data=ListResponse(items=items, total=len(items)))
 
 

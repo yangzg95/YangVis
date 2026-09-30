@@ -13,6 +13,10 @@
 * **每步现场都落库**。渲染后的 prompt、原始输出、解析结果、耗时、用的哪份模型
   配置，全进 ``workflow_run_step``。以前一个后台任务只在业务行上留个状态，
   「当时模型到底收到了什么」根本问不出来。
+* **一条运行认领一个业务对象**。``subject_kind`` / ``subject_ref`` 把运行挂到
+  简历、deck、面试题上，业务行的 ``status`` / ``error_msg`` 由此翻译出来（见
+  :func:`subject_state`）——以前同一件事在业务表和运行表各存一份，两套状态机
+  各自收尾。
 * **步骤并发写各自的行**。每个步骤用自己的 session：SQLAlchemy 的 Session
   不是并发安全的，一组并行步骤共用请求 session 会写出互相覆盖的脏数据。
 """
@@ -35,7 +39,7 @@ from typing import (
     Tuple,
 )
 
-from sqlalchemy import Select, delete, select, update
+from sqlalchemy import Select, delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.errors import CODE_CHAT_NOT_READY, BusinessError
@@ -82,6 +86,29 @@ STEP_RUNNING = "running"
 STEP_SUCCEEDED = "succeeded"
 STEP_FAILED = "failed"
 STEP_SKIPPED = "skipped"
+
+# 一次运行为哪个业务对象跑的，写进 ``workflow_run.subject_kind``。值的形状与
+# workflow.slug 一致（小写-连字符），业务侧只认这几个名字。
+SUBJECT_RESUME = "resume"
+SUBJECT_RESUME_COMPARISON = "resume-comparison"
+SUBJECT_RESUME_TOOLKIT = "resume-toolkit"
+SUBJECT_SLIDE_DECK = "slide-deck"
+SUBJECT_INTERVIEW_QUESTION = "interview-question"
+
+# 业务行的状态词表：以前直接长在业务表上，现在由最近一次运行翻译出来。
+# 取值一个都没改——前端那几套 statusText 映射不用跟着动。
+SUBJECT_UPLOADED = "uploaded"  # 还没有过任何运行
+SUBJECT_ANALYZING = "analyzing"
+SUBJECT_READY = "ready"
+SUBJECT_ERROR = "error"
+
+_RUN_TO_SUBJECT = {
+    RUN_PENDING: SUBJECT_ANALYZING,
+    RUN_RUNNING: SUBJECT_ANALYZING,
+    RUN_SUCCEEDED: SUBJECT_READY,
+    RUN_FAILED: SUBJECT_ERROR,
+    RUN_CANCELLED: SUBJECT_ERROR,
+}
 
 # 并行组内同时执行几个步骤。步骤是「发一次非流式请求然后等」，瓶颈在上游模型
 # 和它的并发额度，不是本地 CPU；上限存在是为了别让一次 6 个方向的批量生成
@@ -905,12 +932,23 @@ class WorkflowService:
 
     # -- 发起运行 -------------------------------------------------------------
 
-    def create_run(self, workflow_id: int, inputs: Dict[str, str]) -> WorkflowRun:
+    def create_run(
+        self,
+        workflow_id: int,
+        inputs: Dict[str, str],
+        *,
+        subject_kind: Optional[str] = None,
+        subject_ref: Optional[object] = None,
+    ) -> WorkflowRun:
         """校验输入、落一条运行与每步的 ``pending`` 行。
 
         步骤行在这里一次性建齐：这样「六个方向跑到第三页崩了」在运行历史里
         看得见全貌（前两页成功、第三页失败、后面三页 pending/skipped），
         而不是只有已执行的那几步。
+
+        ``subject_kind`` / ``subject_ref`` 把这次运行认领给一个业务对象（见
+        :func:`subject_state`）：功能侧发起的流水线都该带上，否则业务行的状态
+        没有出处。
         """
         workflow = self.get(workflow_id)
         # 与内置智能体同一条规则：内置流程是功能自己的流水线，用户把它从界面上
@@ -948,6 +986,9 @@ class WorkflowService:
             owner_id=self._owner_id,
             workflow_id=workflow.id,
             workflow_slug=workflow.slug,
+            subject_kind=subject_kind,
+            # 业务主键统一按字符串存：整数 id 与面试题的 qid 走同一个索引。
+            subject_ref=None if subject_ref is None else str(subject_ref),
             inputs=given,
             status=RUN_PENDING,
         )
@@ -1056,6 +1097,96 @@ class WorkflowService:
                 for row in self.run_steps(run.id)
             ],
         )
+
+
+# ---- 运行 ↔ 业务对象 --------------------------------------------------------
+
+def latest_runs(
+    db: Session, owner_id: int, subject_kind: str, refs: Sequence[object]
+) -> Dict[str, WorkflowRun]:
+    """每个业务对象的**最近一次**运行，按 ``subject_ref`` 取。
+
+    「最近一次」=  id 最大：重新分析、重新生成都是新起一条运行，旧记录只做历史。
+    一次查询把整页列表要的状态都取回来，简历/幻灯片列表不是每行一次查询。
+    """
+    keys = [str(ref) for ref in refs]
+    if not keys:
+        return {}
+    newest = (
+        select(WorkflowRun.subject_ref, func.max(WorkflowRun.id).label("run_id"))
+        .where(
+            WorkflowRun.owner_id == owner_id,
+            WorkflowRun.subject_kind == subject_kind,
+            WorkflowRun.subject_ref.in_(keys),
+        )
+        .group_by(WorkflowRun.subject_ref)
+        .subquery()
+    )
+    rows = db.scalars(
+        select(WorkflowRun).join(newest, WorkflowRun.id == newest.c.run_id)
+    ).all()
+    return {row.subject_ref: row for row in rows}
+
+
+def latest_run(
+    db: Session, owner_id: int, subject_kind: str, subject_ref: object
+) -> Optional[WorkflowRun]:
+    return latest_runs(db, owner_id, subject_kind, [subject_ref]).get(str(subject_ref))
+
+
+def subject_state(
+    run: Optional[WorkflowRun],
+    *,
+    has_product: bool,
+    idle: str = SUBJECT_UPLOADED,
+) -> Tuple[str, Optional[str]]:
+    """把最近一次运行翻译成业务行的 ``(状态, 错误信息)``。
+
+    业务表上不再有 ``status`` / ``error_msg``：以前一次生成要往两处写，重启时
+    ``reset_stale_runs`` 与业务侧各自的收尾互不知情，同一件事能给出两个答案。
+
+    没有运行记录时按「有没有产物」判断——本次改造之前发起的存量任务就是靠这个
+    仍然显示为已完成。``idle`` 是那份产物也没有时的取值：简历用 ``uploaded``
+    （传上来还没分析），创建即发起生成的 deck / 任务用自己的初始态。
+    """
+    if run is None:
+        return (SUBJECT_READY if has_product else idle), None
+    status = _RUN_TO_SUBJECT.get(run.status, SUBJECT_ERROR)
+    return status, run.error_msg if status == SUBJECT_ERROR else None
+
+
+def running_subjects(
+    db: Session, owner_id: int, subject_kind: str, refs: Sequence[object]
+) -> List[str]:
+    """这些业务对象里**还在跑**的（pending/running）——删除与重复触发的闸门。
+
+    只看最近一次运行：历史里失败的运行不该挡着用户删东西。
+    """
+    return [
+        ref
+        for ref, run in latest_runs(db, owner_id, subject_kind, refs).items()
+        if run.status in (RUN_PENDING, RUN_RUNNING)
+    ]
+
+
+def fail_run(db: Session, owner_id: int, run_id: int, message: str) -> None:
+    """把「每一步都跑通了、产物却没法用」的运行降级为失败。
+
+    业务侧的后处理（清洗页面结构、校验报告非空）在引擎之外：那时运行本身是
+    ``succeeded`` 的，模型的现场要留着，但这次任务确实没成——状态得跟着改，
+    否则界面上会出现一份什么都没有的「已完成」。
+    """
+    run = db.scalar(
+        select(WorkflowRun).where(
+            WorkflowRun.owner_id == owner_id, WorkflowRun.id == run_id
+        )
+    )
+    if run is None or run.status != RUN_SUCCEEDED:
+        return
+    run.status = RUN_FAILED
+    run.error_msg = message
+    db.commit()
+    logger.info("run %s marked failed by its caller: %s", run_id, message)
 
 
 # ---- 执行 ------------------------------------------------------------------
@@ -1333,7 +1464,12 @@ async def execute_run(
 
         run = db.get(WorkflowRun, run_id)
         run.status = RUN_CANCELLED if aborted else (RUN_FAILED if failed else RUN_SUCCEEDED)
-        run.error_msg = failed
+        if aborted:
+            # 取消也写个原因：业务行的状态现在是从这条运行翻译出来的，一个没有任何
+            # 说明的失败只会让用户看到「失败」两个字。
+            run.error_msg = "页面已关闭，本次运行已中止"
+        else:
+            run.error_msg = failed
         run.elapsed_ms = int((time.monotonic() - started) * 1000)
         run.finished_at = datetime.now(timezone.utc)
         db.commit()
@@ -1350,43 +1486,69 @@ async def execute_run(
         }
 
 
-async def run_builtin(
+def start_builtin(
     db: Session,
     owner_id: int,
     slug: str,
     inputs: Dict[str, str],
     *,
+    subject: Tuple[str, object],
+) -> WorkflowRun:
+    """功能侧发起一条内置流程：在请求里把运行建出来，交给后台任务去跑。
+
+    与 :func:`finish_builtin` 拆成两步，是为了让「这次任务的状态」在请求返回时就
+    已经落库：以前 ``start_analysis`` 往业务行写一个 ``analyzing``、后台任务再往
+    运行表写一份，两边各是各的事实源。现在认领了这个业务对象（``subject``）的运行
+    就是它的状态本身，重启后的收尾也只有 ``reset_stale_runs`` 一处。
+    """
+    workflows = WorkflowService(db, owner_id)
+    workflow = workflows.require_by_slug(slug)
+    return workflows.create_run(
+        workflow.id, inputs, subject_kind=subject[0], subject_ref=subject[1]
+    )
+
+
+async def finish_builtin(
+    db: Session,
+    owner_id: int,
+    run_id: int,
+    *,
     step_key: Optional[str] = None,
 ) -> str:
     """跑完一条内置工作流，返回它那一步的产物文本。
 
-    功能侧（简历、幻灯片、面试、求职助手）调一次模型的路径统一到这里：以前是
-    ``_ask(slug, prompt)`` 直接发一次请求，现在同样的调用先落一条运行，步骤的
-    渲染结果、原始输出、耗时都进 ``workflow_run_step``——「当时模型到底收到了
-    什么」从此问得出来，prompt 与模型也就能在「工作流」页面上改了。
+    功能侧（简历、幻灯片、面试、求职助手）调一次模型的路径统一到这里：同样的调用
+    先落一条运行，步骤的渲染结果、原始输出、耗时都进 ``workflow_run_step``——
+    「当时模型到底收到了什么」从此问得出来，prompt 与模型也就能在「工作流」页面上
+    改了。
+
+    失败抛 :class:`RuntimeError`，原因已经在运行记录上；调用方的**后处理**挂了
+    （清洗页面结构那类）时用 :func:`fail_run` 把运行降级，别指望这里替它兜。
 
     ``step_key`` 省略时取最后一个成功步骤：内置流程基本都是单步，调用方不必
     跟着定义里的 key 改一遍。
     """
     workflows = WorkflowService(db, owner_id)
-    workflow = workflows.require_by_slug(slug)
-    run = workflows.create_run(workflow.id, inputs)
+    run = workflows.get_run(run_id)
 
-    async for event, payload in execute_run(owner_id=owner_id, run_id=run.id):
+    async for event, payload in execute_run(owner_id=owner_id, run_id=run_id):
         if event == "step_end" and payload.get("error"):
             logger.info(
-                "workflow %s step %s failed: %s", slug, payload.get("key"), payload["error"]
+                "workflow %s step %s failed: %s",
+                run.workflow_slug,
+                payload.get("key"),
+                payload["error"],
             )
 
-    finished = workflows.get_run(run.id)
+    finished = workflows.get_run(run_id)
     if finished.status != RUN_SUCCEEDED:
         raise RuntimeError(finished.error_msg or "工作流执行失败")
 
-    rows = [row for row in workflows.run_steps(run.id) if row.status == STEP_SUCCEEDED]
+    rows = [row for row in workflows.run_steps(run_id) if row.status == STEP_SUCCEEDED]
     step = next(
         (row for row in reversed(rows) if step_key is None or row.key == step_key), None
     )
     if step is None:
-        raise RuntimeError(f"工作流 {slug} 没有产出可用的结果")
+        raise RuntimeError(f"工作流 {finished.workflow_slug} 没有产出可用的结果")
     return step.output or ""
 

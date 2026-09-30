@@ -279,7 +279,7 @@ CREATE TABLE IF NOT EXISTS interview_record (
   round          VARCHAR(32)  NULL COMMENT '一面/二面/HR面 等，自由文本',
   result         VARCHAR(16)  NOT NULL DEFAULT 'pending' COMMENT 'pending | passed | failed | offer',
   notes          MEDIUMTEXT   NULL COMMENT '整场面试的复盘备注',
-  questions      JSON         NOT NULL COMMENT '[{qid, question, my_answer, note, ref_answer, ref_status, ref_error}]',
+  questions      JSON         NOT NULL COMMENT '[{qid, question, my_answer, note, ref_answer}]，参考答案的进度/失败原因在 workflow_run（subject_kind=interview-question, subject_ref=qid）',
   created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_owner (owner_id)
@@ -296,12 +296,10 @@ CREATE TABLE IF NOT EXISTS slide_deck (
   theme       JSON         NOT NULL COMMENT '{preset, ratio, accent}，合法值由 services/slides_html.py 白名单把关',
   slides      JSON         NOT NULL COMMENT '[{sid, layout, title, subtitle, bullets, asset_id, notes}]，唯一事实源',
   html        MEDIUMTEXT   NULL     COMMENT '派生物：每次写 slides/theme/assets 时由服务端重渲染，预览/放映/导出共用',
-  status      VARCHAR(16)  NOT NULL DEFAULT 'analyzing' COMMENT 'analyzing | ready | error',
-  error_msg   VARCHAR(512) NULL,
   created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_owner (owner_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='智能应用 · 幻灯片（AI 生成的结构化页面 + 渲染出的 HTML）';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='智能应用 · 幻灯片（AI 生成的结构化页面 + 渲染出的 HTML）；生成进度在 workflow_run（subject_kind=slide-deck）';
 
 
 -- ---------------------------------------------------------------------------
@@ -432,6 +430,8 @@ CREATE TABLE IF NOT EXISTS workflow_run (
   workflow_id   BIGINT       NOT NULL COMMENT 'workflow.id',
   workflow_slug VARCHAR(64)  NOT NULL COMMENT '定义可能被改名或删除，历史列表要能看懂当时跑的是哪条',
   inputs        JSON         NOT NULL COMMENT '发起时的变量快照，来源数据删了现场仍可回看',
+  subject_kind  VARCHAR(32)  NULL COMMENT '认领的业务对象类型：resume | resume-comparison | resume-toolkit | slide-deck | interview-question',
+  subject_ref   VARCHAR(64)  NULL COMMENT '该对象的主键，整数 id 转字符串存；面试题用它的 qid',
   status        VARCHAR(16)  NOT NULL DEFAULT 'pending' COMMENT 'pending | running | succeeded | failed | cancelled',
   error_msg     VARCHAR(512) NULL,
   elapsed_ms    BIGINT       NULL,
@@ -440,8 +440,9 @@ CREATE TABLE IF NOT EXISTS workflow_run (
   created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_run_owner (owner_id),
-  KEY idx_run_workflow (workflow_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一次工作流执行';
+  KEY idx_run_workflow (workflow_id),
+  KEY idx_run_subject (owner_id, subject_kind, subject_ref)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一次工作流执行；subject_* 让它兼任业务对象的进度事实源';
 
 CREATE TABLE IF NOT EXISTS workflow_run_step (
   id              BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -510,3 +511,19 @@ CREATE TABLE IF NOT EXISTS workflow_run_step (
 --    SET status = 'expired', resolved_at = NOW()
 --  WHERE status = 'pending'
 --    AND created_at < NOW() - INTERVAL 180 SECOND;
+
+-- 运行记录兼任进度事实源（subject_* 两列由 migrate_schema() 自动补，索引同上）：
+-- ALTER TABLE workflow_run
+--   ADD COLUMN subject_kind VARCHAR(32) NULL COMMENT '认领的业务对象类型',
+--   ADD COLUMN subject_ref  VARCHAR(64) NULL COMMENT '该对象主键的字符串形式，面试题用 qid',
+--   ADD KEY idx_run_subject (owner_id, subject_kind, subject_ref);
+--
+-- 业务表上的进度列退役：status / error_msg（以及面试问题 JSON 里的 ref_status /
+-- ref_error）改由最近一次认领的运行翻译出来。这些列在库里是 NOT NULL 且没有 DB
+-- 默认值（ORM 的 default= 只写在 Python 侧），插入不再提及它们就会报错，所以
+-- migrate_schema() 会在启动时删掉——先查列存在，重复执行是空操作。删列不可逆：
+-- 历史行「当时卡在哪个状态」随之消失，产物与运行现场都不受影响。
+-- ALTER TABLE resume               DROP COLUMN status, DROP COLUMN error_msg;
+-- ALTER TABLE resume_comparison    DROP COLUMN status, DROP COLUMN error_msg;
+-- ALTER TABLE resume_toolkit_task  DROP COLUMN status, DROP COLUMN error_msg;
+-- ALTER TABLE slide_deck           DROP COLUMN status, DROP COLUMN error_msg;

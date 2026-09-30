@@ -4,16 +4,19 @@
 :meth:`InterviewService._scope`，handler 不直接接触 session。
 
 参考答案生成是后台任务，与简历分析同一理由：一次模型调用远超 SPA 的 30s axios
-超时。接口只负责把对应题目的 ``ref_status`` 置为 analyzing，真正的模型调用在
+超时。接口只建一条认领这道题（``subject_ref`` = qid）的运行，真正的模型调用在
 ``BackgroundTasks`` 里跑，前端轮询详情感知进度。
 
 questions 是记录上的 JSON 子列表，写它的一共有三条路径，靠「各自只管各自的字
 段」避开并发互相覆盖，不需要锁：
 
 - ``PUT /interviews/{id}`` 只改元数据，根本不接收 questions；
-- ``PUT .../questions/{qid}`` 只改 question/my_answer/note，ref_* 原样保留；
-- 后台任务 :meth:`InterviewService.run_answer` 只改对应 qid 的 ref_* 三键，
+- ``PUT .../questions/{qid}`` 只改 question/my_answer/note；
+- 后台任务 :meth:`InterviewService.run_answer` 只按 qid 写那一题的 ``ref_answer``，
   且提交前 refresh 一次记录，把别人的改动先合并进来。
+
+每题「生成到哪了/为什么失败」不在 JSON 里：那是认领它的那次运行的事，序列化时
+翻译回 ``ref_status`` / ``ref_error`` 两个字段返回给前端。
 """
 from __future__ import annotations
 
@@ -27,7 +30,7 @@ from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import ObjectDeletedError
 
-from app.models.entities import InterviewRecord, ModelConfig
+from app.models.entities import InterviewRecord, ModelConfig, WorkflowRun
 from app.models.schemas import (
     InterviewCreate,
     InterviewDetail,
@@ -41,7 +44,16 @@ from app.services.agent_run import (
     model_error_text,
     require_chat_model,
 )
-from app.services.workflows import run_builtin
+from app.services.workflows import (
+    SUBJECT_INTERVIEW_QUESTION,
+    fail_run,
+    finish_builtin,
+    latest_run,
+    latest_runs,
+    running_subjects,
+    start_builtin,
+    subject_state,
+)
 
 logger = logging.getLogger("yangvis.interview")
 
@@ -49,13 +61,9 @@ logger = logging.getLogger("yangvis.interview")
 # 这里只留「哪条流程」。
 WORKFLOW_ANSWER = "interview-answer"
 
-# 每题 AI 参考答案的状态值。不用 Enum：questions 里存的是裸 JSON。
+# 参考答案在接口上的状态词表（取值与改造前一致，前端不用跟着改）。这里只是**取值**
+# 而不是存储：进度由认领该题的运行翻译出来，一题没有运行时才是 none。
 REF_NONE = "none"
-REF_ANALYZING = "analyzing"
-REF_READY = "ready"
-REF_ERROR = "error"
-
-STALE_ANSWER_ERROR = "服务重启导致生成中断，请重新生成"
 
 
 # ---- 纯函数（questions JSON 的读写都过这里，方便单测）--------------------------
@@ -72,8 +80,6 @@ def _new_question(payload: InterviewQuestionIn) -> dict:
         "my_answer": (payload.my_answer or "").strip() or None,
         "note": (payload.note or "").strip() or None,
         "ref_answer": None,
-        "ref_status": REF_NONE,
-        "ref_error": None,
     }
 
 
@@ -84,39 +90,15 @@ def _find_question(questions: list, qid: str) -> Optional[dict]:
     return None
 
 
-def _merge_ref_fields(
-    questions: list,
-    qid: str,
-    *,
-    status: str,
-    answer: Optional[str],
-    error: Optional[str],
-) -> list:
-    """按 qid 只改一题的 ref_* 三键，返回新列表（调用方负责整体重赋值）。
+def _merge_ref_answer(questions: list, qid: str, answer: str) -> list:
+    """按 qid 只改一题的 ``ref_answer``，返回新列表（调用方负责整体重赋值）。
 
     qid 已不存在（生成期间被用户删掉）时原样返回——结果无处安放，丢弃。
     """
-    merged = []
-    for item in questions:
-        if item.get("qid") == qid:
-            item = {**item, "ref_status": status, "ref_answer": answer, "ref_error": error}
-        merged.append(item)
-    return merged
-
-
-def _reset_stale_questions(questions: list) -> tuple[list, int]:
-    """把残留的 analyzing 题目标记为失败，返回（新列表, 修复数）。
-
-    后台任务活在 web worker 里，进程一重启它们就没了；不收拾的话这些题目会
-    永远停在 analyzing，前端按钮一直转圈，用户也删不掉这条记录。
-    """
-    fixed, count = [], 0
-    for item in questions:
-        if item.get("ref_status") == REF_ANALYZING:
-            item = {**item, "ref_status": REF_ERROR, "ref_error": STALE_ANSWER_ERROR}
-            count += 1
-        fixed.append(item)
-    return fixed, count
+    return [
+        {**item, "ref_answer": answer} if item.get("qid") == qid else item
+        for item in questions
+    ]
 
 
 def _answer_inputs(record: InterviewRecord, question: dict) -> dict:
@@ -210,7 +192,7 @@ class InterviewService:
 
     def delete_record(self, record_id: int) -> None:
         record = self.get_record(record_id)
-        if any(q.get("ref_status") == REF_ANALYZING for q in record.questions or []):
+        if self._analyzing(record):
             raise ValueError("有题目正在生成参考答案，请稍后再删")
         self._db.delete(record)
         self._db.commit()
@@ -220,6 +202,17 @@ class InterviewService:
             record_id,
             record.company,
             record.position,
+        )
+
+    def _analyzing(self, record: InterviewRecord) -> bool:
+        """这场面试里还有题目在生成吗——删除的闸门读的是运行，不是 JSON 里的标记。"""
+        return bool(
+            running_subjects(
+                self._db,
+                self._owner_id,
+                SUBJECT_INTERVIEW_QUESTION,
+                [str(q.get("qid") or "") for q in record.questions or []],
+            )
         )
 
     # -- 题目 CRUD（都返回整条记录，handler 序列化成详情直接回传）--------------------
@@ -239,7 +232,8 @@ class InterviewService:
         target = _find_question(questions, qid)
         if target is None:
             raise LookupError("问题不存在")
-        # ref_* 原样保留：这条写路径只负责用户手填的三个字段。
+        # ref_answer 原样保留：这条写路径只负责用户手填的三个字段，生成结果另有
+        # 一条写路径（run_answer），两边各改各的键。
         updated = {
             **target,
             "question": payload.question.strip(),
@@ -256,7 +250,7 @@ class InterviewService:
         target = _find_question(record.questions or [], qid)
         if target is None:
             raise LookupError("问题不存在")
-        if target.get("ref_status") == REF_ANALYZING:
+        if running_subjects(self._db, self._owner_id, SUBJECT_INTERVIEW_QUESTION, [qid]):
             raise ValueError("该题正在生成参考答案，请稍后再删")
         record.questions = [q for q in record.questions or [] if q.get("qid") != qid]
         self._db.commit()
@@ -266,28 +260,40 @@ class InterviewService:
     # -- AI 参考答案 -------------------------------------------------------------
 
     def start_answer(self, record_id: int, qid: str) -> InterviewRecord:
-        """把指定题目标记为生成中。真正的模型调用由后台任务完成。"""
+        """为这道题建一条认领它的运行；模型调用由后台任务完成。
+
+        以前这里写的是 JSON 里的 ``ref_status``，前端据此转圈；现在同一件事只有
+        运行记录一份，``ref_status`` 是序列化时从它翻译出来的。
+        """
         record = self.get_record(record_id)
         target = _find_question(record.questions or [], qid)
         if target is None:
             raise LookupError("问题不存在")
-        if target.get("ref_status") == REF_ANALYZING:
+        if running_subjects(self._db, self._owner_id, SUBJECT_INTERVIEW_QUESTION, [qid]):
             raise ValueError("该题正在生成中，请勿重复触发")
-        record.questions = _merge_ref_fields(
-            record.questions or [], qid, status=REF_ANALYZING, answer=None, error=None
+        start_builtin(
+            self._db,
+            self._owner_id,
+            WORKFLOW_ANSWER,
+            _answer_inputs(record, target),
+            subject=(SUBJECT_INTERVIEW_QUESTION, qid),
         )
-        self._db.commit()
         self._db.refresh(record)
         return record
 
     async def run_answer(self, record_id: int, qid: str) -> None:
-        """后台任务体：调模型、回写 ref_*。任何异常都落到题目状态上而不是抛出去。"""
+        """后台任务体：跑发起时建好的那条运行，只写 ``ref_answer``。"""
         started = time.monotonic()
         record = self.get_record(record_id)
+        run = latest_run(self._db, self._owner_id, SUBJECT_INTERVIEW_QUESTION, qid)
+        if run is None:
+            logger.error("interview answer has no run to execute: record=%s qid=%s", record_id, qid)
+            return
         logger.info(
-            "interview answer started: record=%s qid=%s owner=%s company=%r",
+            "interview answer started: record=%s qid=%s run=%s owner=%s company=%r",
             record_id,
             qid,
+            run.id,
             self._owner_id,
             record.company,
         )
@@ -296,21 +302,16 @@ class InterviewService:
             if target is None:
                 logger.info("interview answer skipped: record=%s qid=%s deleted", record_id, qid)
                 return
-            answer = (
-                await run_builtin(
-                    self._db, self._owner_id, WORKFLOW_ANSWER, _answer_inputs(record, target)
-                )
-            ).strip()
+            answer = (await finish_builtin(self._db, self._owner_id, run.id)).strip()
             if not answer:
                 raise RuntimeError("模型返回了空回答")
 
-            # 生成期间用户可能改过别的题或元数据：先 refresh 合并，再只动 ref_*。
-            # 记录也可能已被整条删除——删了就到此为止，状态没有地方可写。
+            # 生成期间用户可能改过别的题或元数据：先 refresh 合并，再只动 ref_answer。
+            # 记录也可能已被整条删除——删了就到此为止，结果没有地方可写。
             if not self._refresh_alive(record, record_id, qid):
                 return
-            record.questions = _merge_ref_fields(
-                record.questions or [], qid, status=REF_READY, answer=answer, error=None
-            )
+            record.questions = _merge_ref_answer(record.questions or [], qid, answer)
+            self._db.commit()
             logger.info(
                 "interview answer finished: record=%s qid=%s answer_chars=%s elapsed=%.1fs",
                 record_id,
@@ -318,7 +319,7 @@ class InterviewService:
                 len(answer),
                 time.monotonic() - started,
             )
-        except Exception as exc:  # noqa: BLE001 - 状态字段就是这类错误的归宿
+        except Exception as exc:  # noqa: BLE001 - 失败写在运行上，不留到这里抛出
             logger.warning(
                 "interview answer failed: record=%s qid=%s elapsed=%.1fs error=%s",
                 record_id,
@@ -327,16 +328,7 @@ class InterviewService:
                 exc,
                 exc_info=True,
             )
-            if not self._refresh_alive(record, record_id, qid):
-                return
-            record.questions = _merge_ref_fields(
-                record.questions or [],
-                qid,
-                status=REF_ERROR,
-                answer=None,
-                error=model_error_text(exc),
-            )
-        self._db.commit()
+            fail_run(self._db, self._owner_id, run.id, model_error_text(exc))
 
     def _refresh_alive(self, record: InterviewRecord, record_id: int, qid: str) -> bool:
         """refresh 合并并发改动；记录在生成期间被删除时返回 False，调用方直接收工。"""
@@ -369,34 +361,33 @@ class InterviewService:
         )
 
     def to_detail(self, record: InterviewRecord) -> InterviewDetail:
-        questions = [
-            InterviewQuestion(
-                qid=str(q.get("qid") or ""),
-                question=str(q.get("question") or ""),
-                my_answer=q.get("my_answer"),
-                note=q.get("note"),
-                ref_answer=q.get("ref_answer"),
-                ref_status=str(q.get("ref_status") or REF_NONE),
-                ref_error=q.get("ref_error"),
-            )
-            for q in record.questions or []
-        ]
-        return InterviewDetail(**self.to_item(record).model_dump(), questions=questions)
+        questions = record.questions or []
+        # 一次查询取回这些题各自最近一次运行，再逐题翻译成状态。
+        runs = latest_runs(
+            self._db,
+            self._owner_id,
+            SUBJECT_INTERVIEW_QUESTION,
+            [str(q.get("qid") or "") for q in questions],
+        )
+        return InterviewDetail(
+            **self.to_item(record).model_dump(),
+            questions=[
+                self._question_of(question, runs.get(str(question.get("qid") or "")))
+                for question in questions
+            ],
+        )
 
-
-def reset_stale_answers(db: Session) -> None:
-    """把上一个进程遗留的「生成中」题目标记为失败。
-
-    不在 SQL 层筛：JSON 在不同方言里的文本化写法不一致（MySQL 的 CAST AS
-    CHAR、SQLite 的原生 TEXT），为启动时跑一次的任务维护方言分支不值得——
-    面试记录是人均几十条的小表，全量扫一遍就行。
-    """
-    total = 0
-    for record in db.scalars(select(InterviewRecord)).all():
-        questions, count = _reset_stale_questions(record.questions or [])
-        if count:
-            record.questions = questions
-            total += count
-    if total:
-        db.commit()
-        logger.warning("reset stale interview answer jobs after restart: questions=%s", total)
+    @staticmethod
+    def _question_of(question: dict, run: Optional[WorkflowRun]) -> InterviewQuestion:
+        ref_status, ref_error = subject_state(
+            run, has_product=bool(question.get("ref_answer")), idle=REF_NONE
+        )
+        return InterviewQuestion(
+            qid=str(question.get("qid") or ""),
+            question=str(question.get("question") or ""),
+            my_answer=question.get("my_answer"),
+            note=question.get("note"),
+            ref_answer=question.get("ref_answer"),
+            ref_status=ref_status,
+            ref_error=ref_error,
+        )

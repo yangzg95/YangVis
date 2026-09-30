@@ -22,15 +22,18 @@ from app.services import slides_html
 from app.services import slides_store as store
 from app.services.agent_run import model_error_text
 from app.services.slides import (
-    STATUS_ANALYZING,
-    STATUS_ERROR,
-    STATUS_READY,
     SlideService,
     _generate_inputs,
     _json_candidate,
     _parse_deck_output,
     _truncate,
-    reset_stale_slides,
+)
+from app.services.workflows import (
+    RUN_SUCCEEDED,
+    SUBJECT_ANALYZING,
+    SUBJECT_SLIDE_DECK,
+    latest_run,
+    seed_builtin_workflows,
 )
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
@@ -423,11 +426,13 @@ def test_task_error_text_explains_timeout():
 @pytest.fixture()
 def db():
     # StaticPool + 单连接：内存库默认每个连接各有一份数据，测试会看不到自己写的行。
+    # 这里只建运行、不跑运行（跑的那几条在 test_workflow_flows.py），所以内存库够用。
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )
     Base.metadata.create_all(bind=engine)
     session = sessionmaker(bind=engine, future=True)()
+    seed_builtin_workflows(session)
     try:
         yield session
     finally:
@@ -448,10 +453,15 @@ def _deck(db) -> SlideDeck:
     )
 
 
-def _finished(db, **kwargs) -> SlideDeck:
-    """造一份已经生成完的 deck：create_deck 落的是 analyzing。"""
-    deck = _deck(db)
-    deck.status = STATUS_READY
+def _finished(db, deck: SlideDeck | None = None) -> SlideDeck:
+    """造一份已经生成完的 deck：把创建时那条运行就地改成成功。
+
+    状态列退役之后，「生成完了」这件事只存在于 ``workflow_run`` 上，测试要造这个
+    现场也只能改它。
+    """
+    deck = deck or _deck(db)
+    run = latest_run(db, OWNER, SUBJECT_SLIDE_DECK, deck.id)
+    run.status = RUN_SUCCEEDED
     db.commit()
     return deck
 
@@ -467,8 +477,9 @@ def test_create_deck_requires_title(db):
 
 
 def test_create_deck_starts_analyzing_with_cover_html(db):
+    service = _service(db)
     deck = _deck(db)
-    assert deck.status == STATUS_ANALYZING
+    assert service.to_item(deck).status == SUBJECT_ANALYZING, "创建时建好的那条运行就是它的进度"
     assert deck.slides == []
     assert _page_layouts(deck.html) == ["cover"], "先渲染一张封面，未生成完也能打开预览"
 
@@ -627,17 +638,9 @@ def test_start_generation_blocks_double_trigger(db):
     deck = _finished(db)
     service.start_generation(deck.id, "只要三页")
     assert deck.requirement == "只要三页"
-    assert deck.status == STATUS_ANALYZING
+    assert service.to_item(deck).status == SUBJECT_ANALYZING
     with pytest.raises(ValueError):
         service.start_generation(deck.id)
-
-
-def test_reset_stale_slides_marks_interrupted(db):
-    deck = _deck(db)
-    reset_stale_slides(db)
-    db.expire_all()  # 批量 update 不会刷新 session 里的旧对象
-    assert db.get(SlideDeck, deck.id).status == STATUS_ERROR
-    assert "重启" in db.get(SlideDeck, deck.id).error_msg
 
 
 def test_deck_html_backfills_missing_document(db):

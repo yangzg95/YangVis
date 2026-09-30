@@ -10,11 +10,8 @@ from app.config import Settings
 from app.database import Base, SessionLocal, engine
 from app.models.entities import KbProject, KnowledgeType, SysUser
 from app.services.agents import seed_builtin_agents
-from app.services.interview import reset_stale_answers
 from app.services.knowledge import reset_stale_indexing
 from app.services.ops_actions import reset_stale_ops_actions
-from app.services.resume import reset_stale_analysis
-from app.services.slides import reset_stale_slides
 from app.services.workflows import reset_stale_runs, seed_builtin_workflows
 from app.security import hash_password
 
@@ -91,6 +88,19 @@ def create_tables() -> None:
 # 在「项目」这个概念出现之前创建的知识类型最终会落到这里。
 DEFAULT_PROJECT_NAME = "默认项目"
 
+# 状态列退役之后留在库里的孤儿列。进度与失败原因现在只在 ``workflow_run`` 上，
+# 业务行的 ``status`` / ``error_msg`` 再没有读者，但也没有人能给它们赋值——
+# ``create_all`` 建出来的是 NOT NULL 且**没有 DB 默认值**（ORM 的 ``default=``
+# 只作用于 Python 侧），插入一旦不再提及它们就会直接报错，所以只能删。
+# 面试记录不在这张表里：它的 ref_status / ref_error 长在 questions JSON 内部，
+# 旧键只是不再被读写，不需要 DDL。
+RETIRED_STATUS_COLUMNS = {
+    "resume": ("status", "error_msg"),
+    "resume_comparison": ("status", "error_msg"),
+    "resume_toolkit_task": ("status", "error_msg"),
+    "slide_deck": ("status", "error_msg"),
+}
+
 
 def _column_names(table: str) -> set[str]:
     """返回 ``table`` 的列名集合；表不存在时返回空集合。"""
@@ -100,12 +110,23 @@ def _column_names(table: str) -> set[str]:
     return {column["name"] for column in inspector.get_columns(table)}
 
 
+def _index_names(table: str) -> set[str]:
+    """返回 ``table`` 的索引名集合；表不存在时返回空集合。"""
+    inspector = inspect(engine)
+    if table not in inspector.get_table_names():
+        return set()
+    return {index["name"] for index in inspector.get_indexes(table)}
+
+
 def migrate_schema() -> None:
-    """补上 ``create_all`` 无法添加的列，然后回填数据。
+    """补上 ``create_all`` 无法添加的列，删掉退役的列，然后回填数据。
 
     ``create_all`` 只会创建缺失的*表*；已存在的表上新增一列，它是看不见的。
     这些 ALTER 语句被写成可以在每次启动时安全重复执行：每一条都先查询当前的列做
     判断，回填也只会动那些仍然保留占位值的行。
+
+    删列同样先看当前有没有这一列，所以重复执行是空操作；它是这里唯一的破坏性动作，
+    范围锁在 :data:`RETIRED_STATUS_COLUMNS` 那份清单上。
     """
     type_columns = _column_names("knowledge_type")
     if type_columns and "project_id" not in type_columns:
@@ -195,6 +216,37 @@ def migrate_schema() -> None:
                 conn.execute(text(f"ALTER TABLE resume {ddl}"))
             logger.info("added resume.%s", column)
 
+    # 运行认领业务对象：状态从 workflow_run 翻译出来。
+    run_columns = _column_names("workflow_run")
+    if run_columns:
+        for column, ddl in (
+            ("subject_kind", "ADD COLUMN subject_kind VARCHAR(32) NULL"),
+            ("subject_ref", "ADD COLUMN subject_ref VARCHAR(64) NULL"),
+        ):
+            if column in run_columns:
+                continue
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE workflow_run {ddl}"))
+            logger.info("added workflow_run.%s", column)
+        if "idx_run_subject" not in _index_names("workflow_run"):
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "CREATE INDEX idx_run_subject ON workflow_run "
+                        "(owner_id, subject_kind, subject_ref)"
+                    )
+                )
+            logger.info("added workflow_run.idx_run_subject")
+
+    for table, retired in RETIRED_STATUS_COLUMNS.items():
+        existing = _column_names(table)
+        for column in retired:
+            if column not in existing:
+                continue
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+            logger.info("dropped retired column %s.%s", table, column)
+
     _backfill_default_projects()
 
 
@@ -260,17 +312,16 @@ def reset_stale_jobs() -> None:
     后台任务与待确认项都活在 Gunicorn worker 内部，因此一次重启会悄悄把它们
     丢掉：文档永远停在 ``indexing`` 状态，待确认命令永远等不到回答。在启动时
     把这些情况转成明确的终态，至少能让它们暴露出来并且可以重试。
+
+    简历、面试题、幻灯片这些 AI 生成任务以前各自在业务行上留一份「生成中」，
+    也就各自要有一份收尾；它们的状态现在长在 ``workflow_run`` 上，统一交给
+    :func:`reset_stale_runs`。
     """
     with SessionLocal() as db:
         reset_stale_indexing(db)
-        reset_stale_analysis(db)
-        # 面试题的「生成中」标记同样活在 worker 内存里，进程重启后统一转 error。
-        reset_stale_answers(db)
         # 进程重启同样会丢下「等用户确认」的运维写命令——发起它们的 SSE 流
         # 已经断了，统一物化为 expired。
         reset_stale_ops_actions(db)
-        # 幻灯片的整份生成同样是 worker 里的一次非流式模型调用，重启即丢。
-        reset_stale_slides(db)
         # 工作流跑在请求进程里，重启会把它连同正在执行的步骤一起丢掉。
         reset_stale_runs(db)
 

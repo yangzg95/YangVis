@@ -648,6 +648,11 @@ class Resume(Base):
 
     ``content`` 持久保留提取出的全文：重新分析和简历对比都要用到原文，
     如果只存上传时的临时文件，每次分析都得重新解析一遍 PDF/DOCX。
+
+    「分析跑到哪了、成功还是失败」不在这一行上：那是 ``workflow_run`` 的事
+    （``subject_kind='resume'`` 关联过来），接口返回的 ``status`` 由最近一次运行
+    翻译而成。这里只存**产物**——报告与改进意见是业务数据，要能导出、要长期留着，
+    而运行记录是执行现场。
     """
 
     __tablename__ = "resume"
@@ -662,10 +667,6 @@ class Resume(Base):
     mime: Mapped[str | None] = mapped_column(String(128), nullable=True)
     size: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     content: Mapped[str] = mapped_column(_LONG_TEXT, nullable=False)
-
-    # uploaded（已上传，未分析）| analyzing（分析中）| ready（分析完成）| error（分析失败）
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="uploaded")
-    error_msg: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     # 原文件在用户百度网盘里的位置。NULL 表示未同步——用户没绑定网盘，
     # 或上传时同步失败（同步失败不阻塞简历保存）。
@@ -686,7 +687,7 @@ class Resume(Base):
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"<Resume id={self.id} owner={self.owner_id} status={self.status!r}>"
+        return f"<Resume id={self.id} owner={self.owner_id} title={self.title!r}>"
 
 
 class ResumeComparison(Base):
@@ -694,6 +695,9 @@ class ResumeComparison(Base):
 
     ``resume_ids`` 只是当时的快照：之后删掉某份简历，这份历史对比报告
     依然成立、可以回看。
+
+    进度与失败原因同 :class:`Resume`：只在 ``workflow_run`` 上（``subject_kind``
+    为 ``resume-comparison``），这里只存报告正文。
     """
 
     __tablename__ = "resume_comparison"
@@ -704,9 +708,6 @@ class ResumeComparison(Base):
     title: Mapped[str | None] = mapped_column(String(128), nullable=True)
     resume_ids: Mapped[list] = mapped_column(JSON, nullable=False)
 
-    # analyzing（分析中）| ready（完成）| error（失败）
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="analyzing")
-    error_msg: Mapped[str | None] = mapped_column(String(512), nullable=True)
     report: Mapped[str | None] = mapped_column(_LONG_TEXT, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -714,7 +715,7 @@ class ResumeComparison(Base):
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"<ResumeComparison id={self.id} owner={self.owner_id} status={self.status!r}>"
+        return f"<ResumeComparison id={self.id} owner={self.owner_id} resumes={len(self.resume_ids)}>"
 
 
 class ResumeToolkitTask(Base):
@@ -722,6 +723,9 @@ class ResumeToolkitTask(Base):
 
     ``inputs`` 是提交时的入参快照：简历来源存的是 id 与标题，原文不进快照——
     原文体量大且生成时已经直接喂给模型了，历史记录只需要能看懂「当时用了哪份」。
+
+    进度与失败原因同 :class:`Resume`：只在 ``workflow_run`` 上（``subject_kind``
+    为 ``resume-toolkit``），这里只存报告正文。
     """
 
     __tablename__ = "resume_toolkit_task"
@@ -735,9 +739,6 @@ class ResumeToolkitTask(Base):
     title: Mapped[str] = mapped_column(String(128), nullable=False)
     inputs: Mapped[dict] = mapped_column(JSON, nullable=False)
 
-    # analyzing（生成中）| ready（完成）| error（失败）
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="analyzing")
-    error_msg: Mapped[str | None] = mapped_column(String(512), nullable=True)
     report: Mapped[str | None] = mapped_column(_LONG_TEXT, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -745,7 +746,7 @@ class ResumeToolkitTask(Base):
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"<ResumeToolkitTask id={self.id} owner={self.owner_id} kind={self.kind!r} status={self.status!r}>"
+        return f"<ResumeToolkitTask id={self.id} owner={self.owner_id} kind={self.kind!r}>"
 
 
 class InterviewRecord(Base):
@@ -756,8 +757,11 @@ class InterviewRecord(Base):
     个服务端生成的 ``qid``，题目级的增删改和 AI 参考答案回写都按 qid 寻址，
     不依赖数组下标——下标在「删题的同时另一题正在生成答案」时会发生漂移。
 
-    每题的 ``ref_status``：none（未生成）| analyzing（生成中）| ready（已生成）
-    | error（生成失败，原因在 ref_error）。
+    每题只存 ``ref_answer``（参考答案正文）。生成进度与失败原因在
+    ``workflow_run`` 上（``subject_kind`` 为 ``interview-question``、
+    ``subject_ref`` 为 qid），序列化时按题的最近一次运行翻译成 ``ref_status`` /
+    ``ref_error``——以前 JSON 里的 ``ref_status`` 与运行记录各写一份状态，
+    一次生成两个事实源，重启时两边还要各自收尾。
     """
 
     __tablename__ = "interview_record"
@@ -776,7 +780,7 @@ class InterviewRecord(Base):
     # 整场面试的复盘备注。
     notes: Mapped[str | None] = mapped_column(_LONG_TEXT, nullable=True)
 
-    # [{qid, question, my_answer, note, ref_answer, ref_status, ref_error}]
+    # [{qid, question, my_answer, note, ref_answer}]
     questions: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -804,6 +808,9 @@ class SlideDeck(Base):
     ``source_text``，重新生成只读这份快照。配图则落在服务器本地磁盘
     （``services/slides_store.py``），这里只存相对路径与对外 URL，所以数据库不
     跟着图片一起膨胀，网页上的图片也能直接用 ``<img>`` 浏览。
+
+    生成进度与失败原因在 ``workflow_run`` 上（``subject_kind`` 为 ``slide-deck``），
+    与 :class:`Resume` 同一取舍：这一行只存产物。
     """
 
     __tablename__ = "slide_deck"
@@ -826,10 +833,6 @@ class SlideDeck(Base):
     slides: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     html: Mapped[str | None] = mapped_column(_LONG_TEXT, nullable=True)
 
-    # analyzing（生成中）| ready（已生成）| error（失败）
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="analyzing")
-    error_msg: Mapped[str | None] = mapped_column(String(512), nullable=True)
-
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )
@@ -838,7 +841,7 @@ class SlideDeck(Base):
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"<SlideDeck id={self.id} owner={self.owner_id} status={self.status!r}>"
+        return f"<SlideDeck id={self.id} owner={self.owner_id} title={self.title!r}>"
 
 
 class NetdiskAccount(Base):
@@ -1143,15 +1146,28 @@ class WorkflowRun(Base):
 
     ``inputs`` 是发起时的变量快照，之后即使来源数据（简历、材料）被删，这次运行
     的现场仍然可回看——与 ``resume_toolkit_task.inputs`` 同一个取舍。
+
+    ``subject_kind`` / ``subject_ref`` 让一次运行认领一个业务对象：简历、对比、
+    求职助手任务、幻灯片 deck、面试题的 ``qid`` 都同样寻址。**业务行的状态就是它
+    最近一次运行的状态**，两边不再各写一份（以前 ``resume.status`` 与 ``run.status``
+    并存，重启时两套收尾逻辑互不知情）。
     """
 
     __tablename__ = "workflow_run"
+    __table_args__ = (Index("idx_run_subject", "owner_id", "subject_kind", "subject_ref"),)
 
     id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
     owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     workflow_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     # 定义可能被改名或删除，历史列表要能看懂当时跑的是哪条。
     workflow_slug: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # 这次运行是为哪个业务对象跑的（合法值见 services/workflows.py 的 SUBJECT_*）。
+    # 在「工作流」页面上手动跑一次是 NULL——那次运行不属于任何业务对象。
+    subject_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 业务对象的主键：整数 id 转字符串存，面试题用它的 qid。用字符串而不是
+    # BIGINT，是为了让「一张表上的行」和「JSON 子列表里的一项」同一套寻址。
+    subject_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     inputs: Mapped[dict] = mapped_column(JSON, nullable=False)
 
