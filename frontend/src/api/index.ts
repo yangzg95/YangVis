@@ -527,11 +527,32 @@ export interface WorkflowPayload {
 export type RunStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 export type RunStepStatus = RunStatus | 'skipped'
 
+/** 一次运行认领的业务对象类型，与后端 services/workflows.py 的 SUBJECT_* 一致。 */
+export type WorkflowSubjectKind =
+  | 'resume'
+  | 'resume-comparison'
+  | 'resume-toolkit'
+  | 'slide-deck'
+  | 'interview-question'
+
+/** 抽屉按业务对象过滤时的一次入参；label 是列表标题用的名字。 */
+export interface WorkflowRunSubject {
+  kind: WorkflowSubjectKind
+  ref: string | number
+  /** 后端有 subject_label 快照，调用方手上有更准的名字时可以直接给。 */
+  label?: string
+}
+
 export interface WorkflowRun {
   id: number
   workflow_id: number
   /** 定义可能已改名或删除，历史列表靠这一列认得出当时跑的是哪条。 */
   workflow_slug: string
+  /** 这次运行是为哪个业务对象跑的；工作流页面上手动跑的那几次是 null。 */
+  subject_kind?: WorkflowSubjectKind | null
+  subject_ref?: string | null
+  /** 发起时抄下的对象名字：业务行删了、改了名，运行记录仍说得出当时给谁跑。 */
+  subject_label?: string | null
   status: RunStatus
   error_msg?: string | null
   elapsed_ms?: number | null
@@ -576,11 +597,15 @@ export const workflowsApi = {
   remove: (id: number) => request<null>({ url: `/workflows/${id}`, method: 'DELETE' }),
   duplicate: (id: number) =>
     request<Workflow>({ url: `/workflows/${id}/duplicate`, method: 'POST' }),
-  listRuns: (params: { workflowId?: number; limit?: number } = {}) =>
+  listRuns: (params: { workflowId?: number; limit?: number; subject?: [WorkflowSubjectKind, string | number] } = {}) =>
     request<{ items: WorkflowRun[]; total: number }>({
       url: '/workflows/runs',
       params: {
         workflow_id: params.workflowId,
+        // kind 与 ref 成对：整数 id 在各张表上各自编号，只给 ref 会把
+        // 「简历 3」和「deck 3」混进同一页，后端会直接 400。
+        subject_kind: params.subject?.[0],
+        subject_ref: params.subject?.[1],
         limit: params.limit ?? 20,
       },
     }),
@@ -2406,6 +2431,9 @@ export interface DashboardSummary {
   resume_count: number
   slide_count: number
   interview_count: number
+  workflow_count: number
+  /** 今天发起过的运行次数：流水线的存在感不在「有几条定义」，在「今天跑过没有」。 */
+  run_count_today: number
   server_count: number
   database_count: number
   /** 网关是平台级共享资产，只对管理员出数；null 表示无权查看而非「一个都没有」。 */

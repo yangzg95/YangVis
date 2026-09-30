@@ -34,6 +34,7 @@ from app.services.workflows import (
     RUN_RUNNING,
     RUN_SUCCEEDED,
     STALE_RUN_ERROR,
+    SUBJECT_LABEL_MAX,
     STEP_FAILED,
     STEP_PENDING,
     STEP_SKIPPED,
@@ -320,6 +321,44 @@ def test_create_run_creates_every_step_row_as_pending(db):
     assert all(row.status == STEP_PENDING for row in rows)
     assert all(row.owner_id == OWNER for row in rows)
     assert run.inputs == {"topic": "编排"}
+
+
+def test_run_subject_label_is_a_truncated_snapshot(db):
+    """归属名字是发起时抄下的快照：超长截到列宽，空串归一成「没有归属」。
+
+    各功能的标题字段长度谁也没保证（面试题的题干拼在名字后面），集中在这儿截，
+    调用方才不会漏一份而把插入撞成 MySQL 的长度错误。
+    """
+    workflow = _two_step_workflow(db)
+    service = WorkflowService(db, OWNER)
+
+    run = service.create_run(
+        workflow.id,
+        {"topic": "编排"},
+        subject_kind="resume",
+        subject_ref=7,
+        subject_label=f"  {'长' * (SUBJECT_LABEL_MAX + 40)}  ",
+    )
+    assert (run.subject_kind, run.subject_ref) == ("resume", "7")
+    assert len(run.subject_label) == SUBJECT_LABEL_MAX
+
+    blank = service.create_run(workflow.id, {"topic": "编排"}, subject_label="   ")
+    assert blank.subject_label is None
+
+
+def test_list_runs_filters_by_subject_pair(db):
+    """整数 id 在各张表上各自编号：只按 ref 筛会把两个对象混到一起。"""
+    workflow = _two_step_workflow(db)
+    service = WorkflowService(db, OWNER)
+    resume_run = service.create_run(
+        workflow.id, {"topic": "编排"}, subject_kind="resume", subject_ref=1
+    )
+    service.create_run(workflow.id, {"topic": "编排"}, subject_kind="slide-deck", subject_ref=1)
+    service.create_run(workflow.id, {"topic": "编排"})
+
+    assert [run.id for run in service.list_runs(subject=("resume", 1))] == [resume_run.id]
+    # 不传 subject 时仍是跨对象的流水，工作流页面用得上。
+    assert len(service.list_runs()) == 3
 
 
 # ---- 定义编辑 ---------------------------------------------------------------

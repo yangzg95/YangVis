@@ -95,6 +95,10 @@ SUBJECT_RESUME_TOOLKIT = "resume-toolkit"
 SUBJECT_SLIDE_DECK = "slide-deck"
 SUBJECT_INTERVIEW_QUESTION = "interview-question"
 
+# subject_label 的列宽，与实体定义一致：业务标题再长也只存到这儿，超长由
+# create_run 统一截，调用方不必各自防着 MySQL 的长度错误。
+SUBJECT_LABEL_MAX = 128
+
 # 业务行的状态词表：以前直接长在业务表上，现在由最近一次运行翻译出来。
 # 取值一个都没改——前端那几套 statusText 映射不用跟着动。
 SUBJECT_UPLOADED = "uploaded"  # 还没有过任何运行
@@ -939,6 +943,7 @@ class WorkflowService:
         *,
         subject_kind: Optional[str] = None,
         subject_ref: Optional[object] = None,
+        subject_label: Optional[str] = None,
     ) -> WorkflowRun:
         """校验输入、落一条运行与每步的 ``pending`` 行。
 
@@ -948,7 +953,8 @@ class WorkflowService:
 
         ``subject_kind`` / ``subject_ref`` 把这次运行认领给一个业务对象（见
         :func:`subject_state`）：功能侧发起的流水线都该带上，否则业务行的状态
-        没有出处。
+        没有出处。``subject_label`` 是那个对象当时叫什么——运行记录要能自己说清
+        「这次是给谁跑的」，业务行删了也还得看得懂。
         """
         workflow = self.get(workflow_id)
         # 与内置智能体同一条规则：内置流程是功能自己的流水线，用户把它从界面上
@@ -989,6 +995,9 @@ class WorkflowService:
             subject_kind=subject_kind,
             # 业务主键统一按字符串存：整数 id 与面试题的 qid 走同一个索引。
             subject_ref=None if subject_ref is None else str(subject_ref),
+            # 空串归一成 NULL（「没有归属」），超长截到列宽：各功能的标题字段
+            # 长度谁也没保证，集中在这儿截比每个调用方各写一份可靠。
+            subject_label=(subject_label or "").strip()[:SUBJECT_LABEL_MAX] or None,
             inputs=given,
             status=RUN_PENDING,
         )
@@ -1019,10 +1028,24 @@ class WorkflowService:
 
     # -- 运行记录 -------------------------------------------------------------
 
-    def list_runs(self, workflow_id: Optional[int] = None, limit: int = 20) -> List[WorkflowRun]:
+    def list_runs(
+        self,
+        workflow_id: Optional[int] = None,
+        limit: int = 20,
+        *,
+        subject: Optional[Tuple[str, object]] = None,
+    ) -> List[WorkflowRun]:
         stmt = select(WorkflowRun).where(WorkflowRun.owner_id == self._owner_id)
         if workflow_id is not None:
             stmt = stmt.where(WorkflowRun.workflow_id == workflow_id)
+        # 按业务对象收敛：功能页面的「运行记录」入口要的是「这份简历跑过哪几次」，
+        # 不是全站流水。kind 与 ref 必须成对——整数 id 在各张表上是各自编号的，
+        # 只按 ref 筛会把「简历 3」和「deck 3」的运行混到一起。
+        if subject is not None:
+            stmt = stmt.where(
+                WorkflowRun.subject_kind == subject[0],
+                WorkflowRun.subject_ref == str(subject[1]),
+            )
         return list(
             self._db.scalars(stmt.order_by(WorkflowRun.id.desc()).limit(limit)).all()
         )
@@ -1065,6 +1088,9 @@ class WorkflowService:
             id=run.id,
             workflow_id=run.workflow_id,
             workflow_slug=run.workflow_slug,
+            subject_kind=run.subject_kind,
+            subject_ref=run.subject_ref,
+            subject_label=run.subject_label,
             status=run.status,
             error_msg=run.error_msg,
             elapsed_ms=run.elapsed_ms,
@@ -1493,6 +1519,7 @@ def start_builtin(
     inputs: Dict[str, str],
     *,
     subject: Tuple[str, object],
+    subject_label: Optional[str] = None,
 ) -> WorkflowRun:
     """功能侧发起一条内置流程：在请求里把运行建出来，交给后台任务去跑。
 
@@ -1500,11 +1527,18 @@ def start_builtin(
     已经落库：以前 ``start_analysis`` 往业务行写一个 ``analyzing``、后台任务再往
     运行表写一份，两边各是各的事实源。现在认领了这个业务对象（``subject``）的运行
     就是它的状态本身，重启后的收尾也只有 ``reset_stale_runs`` 一处。
+
+    ``subject_label`` 带上那个对象当时叫什么，运行记录才在「工作流 → 运行」的
+    流水里也说得出自己是给谁跑的。
     """
     workflows = WorkflowService(db, owner_id)
     workflow = workflows.require_by_slug(slug)
     return workflows.create_run(
-        workflow.id, inputs, subject_kind=subject[0], subject_ref=subject[1]
+        workflow.id,
+        inputs,
+        subject_kind=subject[0],
+        subject_ref=subject[1],
+        subject_label=subject_label,
     )
 
 

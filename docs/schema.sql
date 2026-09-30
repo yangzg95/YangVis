@@ -432,6 +432,7 @@ CREATE TABLE IF NOT EXISTS workflow_run (
   inputs        JSON         NOT NULL COMMENT '发起时的变量快照，来源数据删了现场仍可回看',
   subject_kind  VARCHAR(32)  NULL COMMENT '认领的业务对象类型：resume | resume-comparison | resume-toolkit | slide-deck | interview-question',
   subject_ref   VARCHAR(64)  NULL COMMENT '该对象的主键，整数 id 转字符串存；面试题用它的 qid',
+  subject_label VARCHAR(128) NULL COMMENT '发起时抄下的对象名字（简历标题 / 「公司 · 岗位 · 题干」），对象删了也看得懂这次是给谁跑的',
   status        VARCHAR(16)  NOT NULL DEFAULT 'pending' COMMENT 'pending | running | succeeded | failed | cancelled',
   error_msg     VARCHAR(512) NULL,
   elapsed_ms    BIGINT       NULL,
@@ -512,10 +513,11 @@ CREATE TABLE IF NOT EXISTS workflow_run_step (
 --  WHERE status = 'pending'
 --    AND created_at < NOW() - INTERVAL 180 SECOND;
 
--- 运行记录兼任进度事实源（subject_* 两列由 migrate_schema() 自动补，索引同上）：
+-- 运行记录兼任进度事实源（subject_* 三列由 migrate_schema() 自动补，索引同上）：
 -- ALTER TABLE workflow_run
---   ADD COLUMN subject_kind VARCHAR(32) NULL COMMENT '认领的业务对象类型',
---   ADD COLUMN subject_ref  VARCHAR(64) NULL COMMENT '该对象主键的字符串形式，面试题用 qid',
+--   ADD COLUMN subject_kind  VARCHAR(32)  NULL COMMENT '认领的业务对象类型',
+--   ADD COLUMN subject_ref   VARCHAR(64)  NULL COMMENT '该对象主键的字符串形式，面试题用 qid',
+--   ADD COLUMN subject_label VARCHAR(128) NULL COMMENT '发起时抄下的对象名字',
 --   ADD KEY idx_run_subject (owner_id, subject_kind, subject_ref);
 --
 -- 业务表上的进度列退役：status / error_msg（以及面试问题 JSON 里的 ref_status /

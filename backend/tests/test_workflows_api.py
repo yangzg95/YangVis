@@ -20,7 +20,7 @@ from app.models.schemas import CurrentUser, ModelPurpose
 from app.routers import workflows as workflows_router
 from app.services import workflows as workflows_module
 from app.services.agents import seed_builtin_agents
-from app.services.workflows import seed_builtin_workflows
+from app.services.workflows import WorkflowService, seed_builtin_workflows
 
 OWNER = 1
 
@@ -119,6 +119,41 @@ def test_runs_route_is_not_shadowed_by_workflow_id(env):
     response = client.get("/api/workflows/runs")
     assert response.status_code == 200
     assert response.json()["data"]["items"] == []
+
+
+def test_runs_filter_by_business_subject(env):
+    """按业务对象收敛运行记录：功能页面的入口要的是「这个对象跑过哪几次」。
+
+    kind 与 ref 必须成对——简历 3 与 deck 3 的 id 字符串一样，只按 ref 筛会把
+    两个对象的运行混在同一页里。
+    """
+    client, Session = env
+    with Session() as db:
+        service = WorkflowService(db, OWNER)
+        workflow_id = db.scalar(select(Workflow).where(Workflow.slug == "resume-analysis")).id
+        for kind, ref, label in (
+            ("resume", 1, "张三的简历"),
+            ("resume", 2, "李四的简历"),
+            ("slide-deck", 1, "季度复盘"),
+        ):
+            service.create_run(
+                workflow_id,
+                {"resume_content": "x"},
+                subject_kind=kind,
+                subject_ref=ref,
+                subject_label=label,
+            )
+
+    items = client.get(
+        "/api/workflows/runs", params={"subject_kind": "resume", "subject_ref": "1"}
+    ).json()["data"]["items"]
+    assert [(item["subject_kind"], item["subject_ref"], item["subject_label"]) for item in items] == [
+        ("resume", "1", "张三的简历")
+    ]
+
+    assert client.get(
+        "/api/workflows/runs", params={"subject_ref": "1"}
+    ).status_code == 400
 
 
 # ---- 定义编辑 ---------------------------------------------------------------

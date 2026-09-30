@@ -589,6 +589,10 @@ class WorkflowRunItem(BaseModel):
     id: int
     workflow_id: int
     workflow_slug: str
+    # 这次运行为哪个业务对象跑的；手动跑的流水没有归属，三个字段都是 None。
+    subject_kind: Optional[str] = None
+    subject_ref: Optional[str] = None
+    subject_label: Optional[str] = None
     status: str
     error_msg: Optional[str] = None
     elapsed_ms: Optional[int] = None
@@ -1895,6 +1899,10 @@ class DashboardSummary(BaseModel):
     resume_count: int = 0
     slide_count: int = 0
     interview_count: int = 0
+    workflow_count: int = 0
+    # 调用方今天发起过的运行次数：工作流是「流水线定义」，光数条数说明不了有没有
+    # 在用，配上当天的执行次数才看得出这是不是一条活着的链路。
+    run_count_today: int = 0
     server_count: int = 0
     database_count: int = 0
 

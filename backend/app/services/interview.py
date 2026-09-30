@@ -277,6 +277,8 @@ class InterviewService:
             WORKFLOW_ANSWER,
             _answer_inputs(record, target),
             subject=(SUBJECT_INTERVIEW_QUESTION, qid),
+            # 题干存在记录行的 JSON 里，运行记录按 qid 反查不到它，发起时抄一份。
+            subject_label=f"{record.company} · {record.position} · {target.get('question') or ''}",
         )
         self._db.refresh(record)
         return record

@@ -320,6 +320,7 @@ class SlideService:
                 asset_names=asset_names,
             ),
             subject=(SUBJECT_SLIDE_DECK, deck.id),
+            subject_label=deck.title,
         )
 
     def start_generation(self, deck_id: int, requirement: Optional[str] = None) -> SlideDeck:

@@ -25,6 +25,8 @@ from app.models.entities import (
     OpsServer,
     Resume,
     SlideDeck,
+    Workflow,
+    WorkflowRun,
 )
 from app.services.dashboard import DashboardService
 
@@ -49,6 +51,7 @@ def db():
 
 def _mine(db, owner_id: int = OWNER) -> None:
     """给某个 owner 铺一套各模块一行数据。"""
+    workflow = Workflow(owner_id=owner_id, slug=f"w{owner_id}", name="流水线")
     db.add_all(
         [
             Agent(owner_id=owner_id, slug=f"a{owner_id}", name="自建", system_prompt="p"),
@@ -60,7 +63,19 @@ def _mine(db, owner_id: int = OWNER) -> None:
             InterviewRecord(owner_id=owner_id, company="c", position="p"),
             OpsServer(owner_id=owner_id, name=f"s{owner_id}", host="1.1.1.1", username="root"),
             OpsDatabase(owner_id=owner_id, name=f"d{owner_id}", host="1.1.1.1"),
+            workflow,
         ]
+    )
+    db.commit()
+    db.add(
+        WorkflowRun(
+            owner_id=owner_id,
+            workflow_id=workflow.id,
+            workflow_slug=workflow.slug,
+            inputs={},
+            status="succeeded",
+            created_at=datetime.now(),
+        )
     )
     db.commit()
 
@@ -80,6 +95,61 @@ def test_counts_are_scoped_to_owner(db):
     # 会话按 owner 隔离；内置智能体（owner_id=0）对所有人可用，算进每个人的计数。
     assert data.conversation_count == 1
     assert data.agent_count == 1
+    assert data.workflow_count == 1
+    assert data.run_count_today == 1
+
+
+def test_builtin_workflows_counted_but_disabled_excluded(db):
+    db.add_all(
+        [
+            Workflow(owner_id=0, slug="builtin", name="内置"),
+            Workflow(owner_id=0, slug="off", name="停用", enabled=False),
+        ]
+    )
+    db.commit()
+
+    data = DashboardService(db, OWNER).summary(is_admin=False)
+    # 内置流程对所有人可用（与智能体同一口径），停用的不算。
+    assert data.workflow_count == 1
+
+
+def test_run_count_today_excludes_yesterday(db):
+    workflow = Workflow(owner_id=OWNER, slug="w", name="流水线")
+    db.add(workflow)
+    db.commit()
+    db.add_all(
+        [
+            WorkflowRun(
+                owner_id=OWNER,
+                workflow_id=workflow.id,
+                workflow_slug="w",
+                inputs={},
+                status="succeeded",
+                created_at=datetime.now(),
+            ),
+            WorkflowRun(
+                owner_id=OWNER,
+                workflow_id=workflow.id,
+                workflow_slug="w",
+                inputs={},
+                status="succeeded",
+                created_at=datetime.now() - timedelta(days=1),
+            ),
+            # 别人今天的运行不进我的口径。
+            WorkflowRun(
+                owner_id=OTHER,
+                workflow_id=workflow.id,
+                workflow_slug="w",
+                inputs={},
+                status="succeeded",
+                created_at=datetime.now(),
+            ),
+        ]
+    )
+    db.commit()
+
+    data = DashboardService(db, OWNER).summary(is_admin=False)
+    assert data.run_count_today == 1
 
 
 def test_builtin_agents_counted_but_disabled_excluded(db):

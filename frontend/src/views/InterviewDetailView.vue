@@ -183,6 +183,15 @@
                   : '生成参考答案'
             }}
           </a-button>
+          <!-- 生成过才谈得上现场：这道题的进度本来就是那次运行翻译出来的。 -->
+          <a-button
+            v-if="q.ref_status !== 'none'"
+            size="small"
+            type="link"
+            @click="openRuns(q)"
+          >
+            运行记录
+          </a-button>
         </div>
       </div>
     </main>
@@ -228,6 +237,8 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <WorkflowRunsDrawer v-model:open="runsOpen" :workflow="null" :subject="runsSubject" />
   </div>
 </template>
 
@@ -248,8 +259,10 @@ import {
   type InterviewDetail,
   type InterviewQuestion,
   type InterviewResult,
+  type WorkflowRunSubject,
 } from '@/api'
 import { createMarkdown } from '@/utils/markdown'
+import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
 
 /** 面试记录详情的整页展示：/office/interview/<id>，由列表页新开标签页打开。 */
 
@@ -442,6 +455,24 @@ async function onGenerate(q: InterviewQuestion) {
 
 function hasAnalyzing(): boolean {
   return Boolean(record.value?.questions.some((q) => q.ref_status === 'analyzing'))
+}
+
+// ---- 运行记录入口 -------------------------------------------------------------
+// 这道题没有自己的行，认领它靠的是 qid；题干在记录行的 JSON 里，所以标题在这儿
+// 现拼（后端也抄了一份 subject_label，运行流水里靠那个名字认人）。
+
+const runsOpen = ref(false)
+const runsSubject = ref<WorkflowRunSubject | null>(null)
+
+function openRuns(q: InterviewQuestion) {
+  const detail = record.value
+  if (!detail) return
+  runsSubject.value = {
+    kind: 'interview-question',
+    ref: q.qid,
+    label: `${detail.company} · ${detail.position} · ${q.question}`,
+  }
+  runsOpen.value = true
 }
 
 async function refreshDetail() {

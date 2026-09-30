@@ -56,8 +56,13 @@
               <span class="muted">{{ record.description || '—' }}</span>
             </template>
             <template v-else-if="column.key === 'status'">
-              <a-tooltip :title="record.status === 'error' ? record.error_msg : ''">
-                <a-tag :color="statusColor(record.status)">
+              <!-- 状态是从认领这份简历的运行翻译出来的，点标签直接看那次运行的现场。 -->
+              <a-tooltip :title="statusHint(record.status, record.error_msg)">
+                <a-tag
+                  :color="statusColor(record.status)"
+                  class="run-tag"
+                  @click="openResumeRuns(record)"
+                >
                   <LoadingOutlined v-if="record.status === 'analyzing'" />
                   {{ statusText(record.status) }}
                 </a-tag>
@@ -143,8 +148,12 @@
               <div class="cell-sub">{{ record.resume_titles.join(' vs ') }}</div>
             </template>
             <template v-else-if="column.key === 'status'">
-              <a-tooltip :title="record.status === 'error' ? record.error_msg : ''">
-                <a-tag :color="statusColor(record.status)">
+              <a-tooltip :title="statusHint(record.status, record.error_msg)">
+                <a-tag
+                  :color="statusColor(record.status)"
+                  class="run-tag"
+                  @click="openComparisonRuns(record)"
+                >
                   <LoadingOutlined v-if="record.status === 'analyzing'" />
                   {{ statusText(record.status) }}
                 </a-tag>
@@ -221,8 +230,12 @@
               <span class="cell-title">{{ record.title }}</span>
             </template>
             <template v-else-if="column.key === 'status'">
-              <a-tooltip :title="record.status === 'error' ? record.error_msg : ''">
-                <a-tag :color="statusColor(record.status)">
+              <a-tooltip :title="statusHint(record.status, record.error_msg)">
+                <a-tag
+                  :color="statusColor(record.status)"
+                  class="run-tag"
+                  @click="openToolkitRuns(record)"
+                >
                   <LoadingOutlined v-if="record.status === 'analyzing'" />
                   {{ statusText(record.status) }}
                 </a-tag>
@@ -452,6 +465,9 @@
     </a-drawer>
 
     <!-- 报告不再用抽屉看：「查看报告」统一新开标签页进 /office/report/...（见 ReportView）。 -->
+
+    <!-- 状态标签点开的运行现场：列表上那个「分析中/失败」到底是哪次运行、跑了什么。 -->
+    <WorkflowRunsDrawer v-model:open="runsOpen" :workflow="null" :subject="runsSubject" />
   </div>
 </template>
 
@@ -482,11 +498,13 @@ import {
   type ResumeToolkitCreate,
   type ResumeToolkitItem,
   type ToolkitKind,
+  type WorkflowRunSubject,
 } from '@/api'
 import { saveBlobResponse } from '@/utils/download'
 import { fmtSize } from '@/utils/format'
 import { useIsMobile } from '@/utils/useIsMobile'
 import InterviewRecords from '@/components/InterviewRecords.vue'
+import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
 
 const simpleEmpty = Empty.PRESENTED_IMAGE_SIMPLE
 const router = useRouter()
@@ -1124,6 +1142,39 @@ function statusColor(status: ResumeStatus | string): string {
 
 function formatTime(value: string | null): string {
   return value ? new Date(value).toLocaleString() : '—'
+}
+
+// ---- 运行记录入口 -------------------------------------------------------------
+// 列表上的状态标签就是那次运行翻译出来的，点它看当时的现场：模型收到了什么
+// prompt、哪一步挂了、挂在哪。发起入口不在这儿——那是功能自己在发起时做的事。
+
+const runsOpen = ref(false)
+const runsSubject = ref<WorkflowRunSubject | null>(null)
+
+function openRuns(subject: WorkflowRunSubject) {
+  runsSubject.value = subject
+  runsOpen.value = true
+}
+
+/** 状态标签的悬浮说明：失败时先给原因，再告诉这点会开什么。 */
+function statusHint(status: string, errorMsg: string | null): string {
+  return status === 'error' && errorMsg ? `${errorMsg} · 点击查看运行记录` : '点击查看运行记录'
+}
+
+function openResumeRuns(record: ResumeItem) {
+  openRuns({ kind: 'resume', ref: record.id, label: record.title })
+}
+
+function openComparisonRuns(record: ResumeComparisonItem) {
+  openRuns({
+    kind: 'resume-comparison',
+    ref: record.id,
+    label: record.title || `对比 #${record.id}`,
+  })
+}
+
+function openToolkitRuns(record: ResumeToolkitItem) {
+  openRuns({ kind: 'resume-toolkit', ref: record.id, label: record.title })
 }
 
 function errorText(err: unknown, fallback: string): string {

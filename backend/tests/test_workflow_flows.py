@@ -197,6 +197,8 @@ def test_created_deck_belongs_to_its_run(db, model_call):
 
     run = _run(db, "slide-generation")
     assert (run.subject_kind, run.subject_ref) == (SUBJECT_SLIDE_DECK, str(deck.id))
+    # 归属带着名字：运行流水里也得说得出「这次是给哪份 deck 跑的」。
+    assert run.subject_label == "季度复盘"
     assert service.to_item(deck).status == SUBJECT_ANALYZING
     with pytest.raises(ValueError):
         service.delete_deck(deck.id)
@@ -301,6 +303,8 @@ def test_interview_answer_runs_through_the_workflow(db, model_call):
     # 一道题没有自己的行，认领它靠的是 qid 字符串。
     run = _run(db, "interview-answer")
     assert (run.subject_kind, run.subject_ref) == (SUBJECT_INTERVIEW_QUESTION, qid)
+    # 题干在记录行的 JSON 里，反查不到，所以发起时把它抄成归属名字。
+    assert run.subject_label == "示例科技 · 高级后端工程师 · 讲讲你做过的高并发优化"
 
     step = _only_step(db, "interview-answer")
     assert step.key == "answer" and step.prompt == calls[0][1]
@@ -394,6 +398,7 @@ def test_toolkit_task_runs_through_its_workflow(db, model_call, kind):
 
     run = _run(db, f"toolkit-{kind}")
     assert (run.subject_kind, run.subject_ref) == (SUBJECT_RESUME_TOOLKIT, str(task.id))
+    assert run.subject_label == task.title
 
     step = _only_step(db, f"toolkit-{kind}")
     assert step.key == "report" and step.prompt == calls[0][1]

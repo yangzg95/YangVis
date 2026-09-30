@@ -48,11 +48,27 @@ def get_service(
 @router.get("/runs", response_model=APIResponse[ListResponse[WorkflowRunItem]])
 async def list_runs(
     workflow_id: Optional[int] = Query(default=None),
+    subject_kind: Optional[str] = Query(default=None),
+    subject_ref: Optional[str] = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
     service: WorkflowService = Depends(get_service),
 ) -> APIResponse[ListResponse[WorkflowRunItem]]:
-    """调用方最近的运行，新的在前。不带 ``workflow_id`` 就是跨流程的一趟清单。"""
-    items = [service.to_run_item(run) for run in service.list_runs(workflow_id, limit)]
+    """调用方最近的运行，新的在前。不带 ``workflow_id`` 就是跨流程的一趟清单。
+
+    ``subject_kind`` + ``subject_ref`` 换成按业务对象收敛——功能页面上的「运行记录」
+    要的是「这份简历跑过哪几次」。两个参数成对出现：整数 id 在各张表上各自编号，
+    只给 ref 会把「简历 3」和「deck 3」混进同一页。
+    """
+    if (subject_kind is None) != (subject_ref is None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="subject_kind 与 subject_ref 要一起给",
+        )
+    subject = None if subject_kind is None else (subject_kind, subject_ref)
+    items = [
+        service.to_run_item(run)
+        for run in service.list_runs(workflow_id, limit, subject=subject)
+    ]
     return APIResponse(data=ListResponse(items=items, total=len(items)))
 
 

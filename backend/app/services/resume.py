@@ -428,6 +428,7 @@ class ResumeService:
             WORKFLOW_ANALYZE,
             self._analysis_inputs(resume),
             subject=(SUBJECT_RESUME, resume.id),
+            subject_label=resume.title,
         )
         self._db.refresh(resume)
         return resume
@@ -513,6 +514,7 @@ class ResumeService:
             WORKFLOW_COMPARE,
             self._comparison_inputs(resumes),
             subject=(SUBJECT_RESUME_COMPARISON, comparison.id),
+            subject_label=comparison.title or f"{len(resume_ids)} 份简历对比",
         )
         logger.info(
             "owner %s created resume comparison %s over %d resume(s)",
@@ -641,6 +643,7 @@ class ResumeService:
             spec.workflow_slug,
             _toolkit_inputs(payload.kind, snapshot),
             subject=(SUBJECT_RESUME_TOOLKIT, task.id),
+            subject_label=task.title,
         )
         logger.info(
             "toolkit task created: id=%s kind=%s owner=%s title=%r",

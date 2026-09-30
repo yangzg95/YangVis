@@ -22,6 +22,8 @@ from app.models.entities import (
     OpsServer,
     Resume,
     SlideDeck,
+    Workflow,
+    WorkflowRun,
 )
 from app.models.schemas import DashboardSummary
 
@@ -65,6 +67,32 @@ class DashboardService:
             or 0
         )
 
+        # 工作流与智能体同一口径：内置的挂在 owner_id=0 上、对所有人可用，
+        # 停用的不算——界面上看不到它，数出来只对不上号。
+        workflow_count = int(
+            self._db.scalar(
+                select(func.count(Workflow.id)).where(
+                    Workflow.owner_id.in_([0, self._owner_id]),
+                    Workflow.enabled.is_(True),
+                )
+            )
+            or 0
+        )
+
+        # 今天发起过的运行次数：功能侧每次分析/生成都在这一张表上留一次，
+        # 它才是「这套流水线真的在跑」的证据。按 created_at（发起时刻）算，
+        # 跨天跑完的不重复计入完成那天。
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        run_count_today = int(
+            self._db.scalar(
+                select(func.count(WorkflowRun.id)).where(
+                    WorkflowRun.owner_id == self._owner_id,
+                    WorkflowRun.created_at >= today_start,
+                )
+            )
+            or 0
+        )
+
         summary = DashboardSummary(
             agent_count=agent_count,
             knowledge_project_count=owned_count(KbProject),
@@ -73,6 +101,8 @@ class DashboardService:
             resume_count=owned_count(Resume),
             slide_count=owned_count(SlideDeck),
             interview_count=owned_count(InterviewRecord),
+            workflow_count=workflow_count,
+            run_count_today=run_count_today,
             server_count=owned_count(OpsServer),
             database_count=owned_count(OpsDatabase),
         )
@@ -83,7 +113,6 @@ class DashboardService:
             summary.ai_channel_count = int(
                 self._db.scalar(select(func.count(AiChannel.id))) or 0
             )
-            today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
             window = AiCallLog.created_at >= today_start
             summary.ai_call_count_today = int(
                 self._db.scalar(select(func.count(AiCallLog.id)).where(window)) or 0

@@ -42,8 +42,9 @@
           </div>
         </template>
         <template v-else-if="column.key === 'status'">
-          <a-tooltip :title="record.status === 'error' ? record.error_msg : ''">
-            <a-tag :color="statusColor(record.status)">
+          <!-- 状态就是从这次运行翻译出来的，点它直接看那次运行的现场。 -->
+          <a-tooltip :title="statusHint(record.status, record.error_msg)">
+            <a-tag :color="statusColor(record.status)" class="run-tag" @click="openRuns(record)">
               <LoadingOutlined v-if="record.status === 'analyzing'" />
               {{ statusText(record.status) }}
             </a-tag>
@@ -155,6 +156,9 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <!-- 进度与失败原因都长在这条 deck 的运行记录上，这里就是它的入口。 -->
+    <WorkflowRunsDrawer v-model:open="runsOpen" :workflow="null" :subject="runsSubject" />
   </div>
 </template>
 
@@ -168,7 +172,9 @@ import {
   settingsApi,
   type SlideDeckItem,
   type SlideStatus,
+  type WorkflowRunSubject,
 } from '@/api'
+import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
 
 // 智能应用 · 幻灯片列表：材料进来 → 后台生成 → 进工作台改 → 新开窗口放映。
 // 生成本身不在本页等（一次要读完全部材料再产出整份结构，远超 axios 超时），
@@ -187,6 +193,19 @@ const columns = [
   { key: 'updated_at', title: '更新时间', dataIndex: 'updated_at', width: 180 },
   { key: 'actions', title: '操作', width: 260 },
 ]
+
+const runsOpen = ref(false)
+const runsSubject = ref<WorkflowRunSubject | null>(null)
+
+function openRuns(record: SlideDeckItem) {
+  runsSubject.value = { kind: 'slide-deck', ref: record.id, label: record.title }
+  runsOpen.value = true
+}
+
+/** 状态标签的悬浮说明：失败时先给原因，再告诉这点会开什么。 */
+function statusHint(status: SlideStatus, errorMsg: string | null): string {
+  return status === 'error' && errorMsg ? `${errorMsg} · 点击查看运行记录` : '点击查看运行记录'
+}
 
 const createModal = reactive<{
   open: boolean

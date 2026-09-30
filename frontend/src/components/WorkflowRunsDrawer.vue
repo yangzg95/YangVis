@@ -1,7 +1,7 @@
 <template>
   <a-drawer
     :open="open"
-    :title="`运行 · ${workflow?.name ?? ''}`"
+    :title="drawerTitle"
     placement="right"
     :width="860"
     :mask-closable="false"
@@ -11,8 +11,9 @@
       <a-button size="small" :loading="loading" @click="loadRuns">刷新</a-button>
     </template>
 
-    <!-- 发起：填这条流程声明的输入变量。 -->
-    <div v-if="!composerOpen" class="toolbar-top">
+    <!-- 发起：填这条流程声明的输入变量。业务对象模式下不出这一栏——那条流水线
+         是功能自己在发起时跑的，这里只回看它跑过的现场。 -->
+    <div v-if="!subject && !composerOpen" class="toolbar-top">
       <a-button type="primary" size="small" :disabled="!workflow?.steps.length" @click="openComposer">
         <PlayCircleOutlined /> 发起一次运行
       </a-button>
@@ -21,7 +22,7 @@
       </span>
     </div>
 
-    <div v-else class="composer">
+    <div v-else-if="!subject && composerOpen" class="composer">
       <a-form layout="vertical">
         <a-form-item
           v-for="field in workflow?.inputs ?? []"
@@ -74,10 +75,10 @@
       </a-space>
     </div>
 
-    <a-divider style="margin: 16px 0">最近运行</a-divider>
+    <a-divider style="margin: 16px 0">{{ subject ? '历次运行' : '最近运行' }}</a-divider>
 
     <a-spin :spinning="loading">
-      <a-empty v-if="!runs.length" description="还没有运行记录" />
+      <a-empty v-if="!runs.length" :description="subject ? '这个对象还没有运行记录' : '还没有运行记录'" />
       <a-collapse v-else v-model:active-key="expanded" @change="onExpand">
         <a-collapse-panel v-for="run in runs" :key="run.id" :header="runTitle(run)">
           <template #extra>
@@ -132,9 +133,15 @@ import {
   type Workflow,
   type WorkflowRun,
   type WorkflowRunDetail,
+  type WorkflowRunSubject,
 } from '@/api'
 
-const props = defineProps<{ open: boolean; workflow: Workflow | null }>()
+const props = defineProps<{
+  open: boolean
+  workflow: Workflow | null
+  /** 业务对象模式：列「这个对象跑过的哪几次」，不提供发起入口。 */
+  subject?: WorkflowRunSubject | null
+}>()
 
 const emit = defineEmits<{ 'update:open': [value: boolean] }>()
 
@@ -170,6 +177,12 @@ const groupCount = computed(
   () => new Set((props.workflow?.steps ?? []).map((step) => step.group_key)).size,
 )
 
+const drawerTitle = computed(() =>
+  props.subject
+    ? `运行记录 · ${props.subject.label ?? props.subject.ref}`
+    : `运行 · ${props.workflow?.name ?? ''}`,
+)
+
 const STATUS_TEXT: Record<string, string> = {
   pending: '待运行',
   running: '执行中',
@@ -195,7 +208,10 @@ function statusColor(status: string) {
 }
 function runTitle(run: WorkflowRun) {
   const started = run.started_at || run.created_at
-  return `#${run.id} · ${started ? new Date(started).toLocaleString() : '—'}`
+  // 跨流程的流水里得说得出这次是给谁跑的；业务对象模式下整列都是同一个对象，
+  // 标题已经写了名字，就不再重复。
+  const suffix = !props.subject && run.subject_label ? ` · ${run.subject_label}` : ''
+  return `#${run.id} · ${started ? new Date(started).toLocaleString() : '—'}${suffix}`
 }
 function inputPairs(run: WorkflowRun): [string, string][] {
   const detail = details[run.id]
@@ -217,11 +233,20 @@ watch(
 )
 
 async function loadRuns() {
-  if (!props.workflow) return
+  if (!props.workflow && !props.subject) return
   loading.value = true
   try {
-    const data = await workflowsApi.listRuns({ workflowId: props.workflow.id, limit: 20 })
+    const data = await workflowsApi.listRuns(
+      props.subject
+        ? { subject: [props.subject.kind, props.subject.ref] }
+        : { workflowId: props.workflow?.id, limit: 20 },
+    )
     runs.value = data.items
+    // 业务对象模式下点开就是最近那次的现场，不必再手翻一次折叠面板。
+    if (props.subject && runs.value.length) {
+      expanded.value = [runs.value[0].id]
+      await onExpand(expanded.value)
+    }
   } finally {
     loading.value = false
   }

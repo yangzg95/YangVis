@@ -107,6 +107,7 @@ import {
   DatabaseOutlined,
   FundProjectionScreenOutlined,
   MessageOutlined,
+  PartitionOutlined,
   ProfileOutlined,
   RobotOutlined,
   UploadOutlined,
@@ -186,6 +187,15 @@ const modules = computed<HomeModule[]>(() => {
       icon: RobotOutlined,
       unit: '个智能体',
       value: s?.agent_count ?? null,
+    },
+    {
+      path: '/workflows',
+      name: '工作流',
+      desc: '一次功能调用的流水线，步骤与提示词可改',
+      icon: PartitionOutlined,
+      unit: '条流程',
+      value: s?.workflow_count ?? null,
+      extra: s ? `今日 ${s.run_count_today} 次运行` : undefined,
     },
     {
       path: '/office/resume',

@@ -222,6 +222,7 @@ def migrate_schema() -> None:
         for column, ddl in (
             ("subject_kind", "ADD COLUMN subject_kind VARCHAR(32) NULL"),
             ("subject_ref", "ADD COLUMN subject_ref VARCHAR(64) NULL"),
+            ("subject_label", "ADD COLUMN subject_label VARCHAR(128) NULL"),
         ):
             if column in run_columns:
                 continue

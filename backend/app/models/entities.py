@@ -1151,6 +1151,11 @@ class WorkflowRun(Base):
     求职助手任务、幻灯片 deck、面试题的 ``qid`` 都同样寻址。**业务行的状态就是它
     最近一次运行的状态**，两边不再各写一份（以前 ``resume.status`` 与 ``run.status``
     并存，重启时两套收尾逻辑互不知情）。
+
+    ``subject_label`` 是发起时快照下来的业务对象名字：运行列表要能说出「这次是给
+    哪份简历跑的」。它存快照而不是去 join 业务表，一来面试题的题干在 JSON 数组里
+    （按 qid 反查得扫遍整张表），二来对象删了以后历史还得看得懂——与 ``inputs``
+    同一个取舍。
     """
 
     __tablename__ = "workflow_run"
@@ -1168,6 +1173,9 @@ class WorkflowRun(Base):
     # 业务对象的主键：整数 id 转字符串存，面试题用它的 qid。用字符串而不是
     # BIGINT，是为了让「一张表上的行」和「JSON 子列表里的一项」同一套寻址。
     subject_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 发起时抄下来的对象名字（简历标题 / deck 标题 / 「公司 · 岗位 · 题干」）。
+    # 超长在 create_run 里统一截断，调用方不用各写一份。
+    subject_label: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     inputs: Mapped[dict] = mapped_column(JSON, nullable=False)
 
