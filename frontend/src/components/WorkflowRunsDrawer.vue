@@ -69,7 +69,7 @@
         <span v-if="step.optional" class="muted">可选</span>
         <span class="spacer" />
         <span v-if="step.output_chars" class="muted">{{ step.output_chars }} 字</span>
-        <span v-if="step.elapsed_ms != null" class="muted">{{ step.elapsed_ms }} ms</span>
+        <span v-if="step.elapsed_ms != null" class="muted">{{ elapsedText(step.elapsed_ms) }}</span>
         <span v-if="step.error" class="danger">{{ step.error }}</span>
       </div>
       <a-alert
@@ -153,7 +153,8 @@
                 <span class="muted">{{ step.agent_name || step.agent_slug }}</span>
                 <span v-if="step.optional" class="muted">可选</span>
                 <span class="spacer" />
-                <span v-if="step.elapsed_ms != null" class="muted">{{ step.elapsed_ms }} ms</span>
+                <span v-if="step.model_name" class="muted">{{ step.model_name }}</span>
+                <span v-if="step.elapsed_ms != null" class="muted">{{ elapsedText(step.elapsed_ms) }}</span>
                 <a-tooltip
                   title="用流程当前定义里的这一步重跑一次，上游产物按当时落库的结果喂。跑通这一步不会重写业务结果——要新产物请回功能页面重新发起。"
                 >

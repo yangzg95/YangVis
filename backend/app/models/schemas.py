@@ -585,6 +585,9 @@ class WorkflowRunStepItem(BaseModel):
     parsed: Optional[Dict[str, Any]] = None
     error_msg: Optional[str] = None
     model_config_id: Optional[int] = None
+    # 这一步当时用的模型（``model_name``）：按步骤覆盖与默认模型可能混在同一条流程里，
+    # 行级的聚合说不清是哪一步用的，现场按步给。
+    model_name: Optional[str] = None
     elapsed_ms: Optional[int] = None
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None

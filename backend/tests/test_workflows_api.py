@@ -316,6 +316,7 @@ def test_stream_run_emits_progress_and_persists_the_scene(env, monkeypatch):
 
     # 列表行上直接给出这次用的哪个模型：不展开逐步骤也认得出来。
     assert detail["model_names"] == ["unit-test"]
+    assert detail["steps"][0]["model_name"] == "unit-test"
     listed = client.get(
         "/api/workflows/runs", params={"workflow_id": workflow_id}
     ).json()["data"]["items"][0]

@@ -1234,18 +1234,18 @@ class WorkflowService:
             ).all()
         )
 
-    def run_model_names(self, run_ids: Sequence[int]) -> Dict[int, List[str]]:
-        """这批运行各步用到的模型，按步骤顺序去重。
+    def step_models(self, run_ids: Sequence[int]) -> List[Tuple[int, int, str]]:
+        """这些运行的每一步实际用到的模型，形状是 ``(run_id, step.id, 模型名)``。
 
         一次问完整页：列表一页 20 次运行，按行逐条查就是 20 次往返，而这就是
         「运行记录打开慢」的全部原因。没跑到的步骤没有模型可报，配置在跑完后被
-        删掉的也报不出名字，两种都跳过。
+        删掉的也报不出名字，两种都不出现在结果里。
         """
         ids = list(run_ids)
         if not ids:
-            return {}
+            return []
         rows = self._db.execute(
-            select(WorkflowRunStep.run_id, ModelConfig.model_name)
+            select(WorkflowRunStep.run_id, WorkflowRunStep.id, ModelConfig.model_name)
             .outerjoin(ModelConfig, ModelConfig.id == WorkflowRunStep.model_config_id)
             .where(
                 WorkflowRunStep.owner_id == self._owner_id,
@@ -1253,14 +1253,16 @@ class WorkflowService:
             )
             .order_by(WorkflowRunStep.run_id, WorkflowRunStep.sort_order, WorkflowRunStep.id)
         ).all()
-        names: Dict[int, List[str]] = {}
-        for run_id, model_name in rows:
-            if not model_name:
-                continue
-            bucket = names.setdefault(run_id, [])
-            if model_name not in bucket:
-                bucket.append(model_name)
-        return names
+        return [(run_id, step_id, name) for run_id, step_id, name in rows if name]
+
+    def run_model_names(self, run_ids: Sequence[int]) -> Dict[int, List[str]]:
+        """按运行聚合 :meth:`step_models`：各步用到的模型，按步骤顺序去重。"""
+        grouped: Dict[int, List[str]] = {}
+        for run_id, _, model_name in self.step_models(run_ids):
+            grouped.setdefault(run_id, []).append(model_name)
+        return {
+            run_id: list(dict.fromkeys(names)) for run_id, names in grouped.items()
+        }
 
     @staticmethod
     def to_run_item(run: WorkflowRun, model_names: Sequence[str] = ()) -> WorkflowRunItem:
@@ -1290,10 +1292,11 @@ class WorkflowService:
         rows = self.run_steps(run.id)
         definitions = {step.key: step for step in self.steps_of(run.workflow_id)}
         agent_names = self._agent_names(row.agent_slug for row in rows)
+        # 模型一次查出两种用法：行上给的是去重后的聚合，现场里按步给各自用的那个。
+        used = self.step_models([run.id])
+        model_names = {step_id: name for _, step_id, name in used}
         return WorkflowRunDetail(
-            **self.to_run_item(
-                run, self.run_model_names([run.id]).get(run.id, [])
-            ).model_dump(),
+            **self.to_run_item(run, list(dict.fromkeys(name for _, _, name in used))).model_dump(),
             inputs=dict(run.inputs or {}),
             steps=[
                 WorkflowRunStepItem(
@@ -1310,6 +1313,9 @@ class WorkflowService:
                     parsed=row.parsed,
                     error_msg=row.error_msg,
                     model_config_id=row.model_config_id,
+                    # 这一步当时用的是哪个模型：现场里每一步各用自己的（按步骤覆盖
+                    # 与默认模型混着跑的流程，只有行级聚合说不清）。
+                    model_name=model_names.get(row.id),
                     elapsed_ms=row.elapsed_ms,
                     started_at=row.started_at,
                     finished_at=row.finished_at,

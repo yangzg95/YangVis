@@ -579,6 +579,8 @@ export interface WorkflowRunStep {
   parsed?: Record<string, unknown> | null
   error_msg?: string | null
   model_config_id?: number | null
+  /** 这一步当时用的模型：按步骤覆盖与默认模型可能混在同一条流程里，按步才说得清。 */
+  model_name?: string | null
   elapsed_ms?: number | null
   started_at?: string | null
   finished_at?: string | null

@@ -1021,6 +1021,12 @@ def test_run_model_names_reports_the_models_each_step_used(db, monkeypatch):
         "unit-test",
         "second-unit-test",
     ]
+    # 现场按步给各自用的模型：混着跑的流程只有聚合说不清是哪一步换的模型。
+    detail = service.to_run_detail(service.get_run(mixed.id))
+    assert [(step.key, step.model_name) for step in detail.steps] == [
+        ("draft", "unit-test"),
+        ("score", "second-unit-test"),
+    ]
 
 
 def test_run_model_names_skips_the_steps_that_never_ran(db, monkeypatch):
