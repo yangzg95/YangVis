@@ -141,7 +141,7 @@ const conversations = ref<Conversation[]>([])
 const convsLoaded = ref(false)
 const chatReady = ref(true)
 
-const RECENT_LIMIT = 6
+const RECENT_LIMIT = 10
 
 const greeting = computed(() => {
   const hour = new Date().getHours()

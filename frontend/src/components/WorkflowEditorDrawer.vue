@@ -137,7 +137,15 @@
             class="w-agent"
             :disabled="readonly"
             :status="hasProblem(`step${index}.agent`) ? 'error' : undefined"
-          />
+          >
+            <!-- 下拉里带一句人设描述：选之前就知道这是位干什么的，不用凭名字猜。 -->
+            <template #option="opt">
+              <div class="agent-opt">
+                <span>{{ opt.label }}</span>
+                <span class="agent-opt-desc">{{ opt.agent?.description || '无描述' }}</span>
+              </div>
+            </template>
+          </a-select>
           <a-tag class="group-tag">{{ step.group_key.trim() || '未分组' }}</a-tag>
           <span class="spacer" />
           <a-button
@@ -173,6 +181,28 @@
           >
             <DeleteOutlined />
           </a-button>
+        </div>
+
+        <!-- 选中后把这个人设是谁、管什么摆在手边；点开能看全系统提示词，
+             配下游引用时不用切去智能体页对照。 -->
+        <div v-if="agentOf(step.agent_slug)" class="agent-hint">
+          <span class="muted">{{ agentOf(step.agent_slug)?.description || '这个人设没有描述' }}</span>
+          <a-popover placement="left" trigger="click" title="人设（系统提示词）">
+            <template #content>
+              <pre
+                style="
+                  max-width: 420px;
+                  max-height: 320px;
+                  overflow: auto;
+                  white-space: pre-wrap;
+                  word-break: break-word;
+                  font-size: 12px;
+                  margin: 0;
+                "
+              >{{ agentOf(step.agent_slug)?.system_prompt }}</pre>
+            </template>
+            <a-button size="small" type="link">查看人设</a-button>
+          </a-popover>
         </div>
 
         <a-form-item label="Prompt 模板" class="tight">
@@ -268,6 +298,15 @@
             :disabled="readonly"
           />
           <a-checkbox v-model:checked="step.optional" :disabled="readonly">可选步骤</a-checkbox>
+        </div>
+
+        <!-- 「格式字段」的心结说破：字段不是智能体定义的，是这一步的模板要的。
+             v-pre 挂内层：挂自身会把 v-if 一起跳过编译。 -->
+        <div v-if="showAdvanced(index) && step.output_kind === 'json'" class="hint block keys-hint">
+          <span v-pre>
+            期望字段不由智能体决定——人设只管口吻与立场；模型输出哪些 JSON 键，取决于你在
+            Prompt 模板里怎么要求。这里写的键，就是声明那份契约，下游 {{产物.字段}} 引用的也是它们。
+          </span>
         </div>
       </div>
 
@@ -417,8 +456,11 @@ const groupCount = computed(
   () => new Set(form.steps.map((step) => step.group_key.trim() || '(未命名)')).size,
 )
 const agentOptions = computed(() =>
-  agents.value.map((agent) => ({ value: agent.slug, label: agent.name })),
+  agents.value.map((agent) => ({ value: agent.slug, label: agent.name, agent })),
 )
+function agentOf(slug: string) {
+  return agents.value.find((agent) => agent.slug === slug) ?? null
+}
 const modelOptions = computed(() =>
   chatModels.value
     .filter((config) => config.last_test_ok)
@@ -459,13 +501,18 @@ function stepProblem(index: number) {
   return false
 }
 
+/** 高级折叠的摊开状态整体清一次，换入另一批步骤时不残留旧下标。 */
+function clearAdvanced() {
+  for (const index of Object.keys(advancedOpen)) delete advancedOpen[Number(index)]
+}
+
 watch(
   () => props.open,
   async (open) => {
     if (!open) return
     showProblems.value = false
     closeCompletion()
-    for (const index of Object.keys(advancedOpen)) delete advancedOpen[Number(index)]
+    clearAdvanced()
     const source = props.workflow
     presetId.value = undefined
     form.slug = source?.slug ?? ''
@@ -502,13 +549,23 @@ function addStep(parallel: boolean) {
 /** 从内置流程起步：整份搬来输入与步骤，名字带「副本」，标识留空必须自己起。 */
 function onPresetChange(value: number | undefined) {
   const source = (props.presets ?? []).find((workflow) => workflow.id === value)
-  if (!source) return
+  if (!source) {
+    // 清空起步选择 = 回到空白新建：选择器与表单内容必须同进同退，
+    // 不然显示「空白工作流」、底下还留着刚才那份，比从零配更容易出错。
+    form.slug = ''
+    form.name = ''
+    form.description = ''
+    form.inputs = []
+    form.steps = [emptyStep('g1')]
+    clearAdvanced()
+    return
+  }
   form.slug = ''
   form.name = `${source.name} 副本`
   form.description = source.description ?? ''
   form.inputs = source.inputs.map((field) => ({ ...field }))
   form.steps = source.steps.map(toStepForm)
-  for (const index of Object.keys(advancedOpen)) delete advancedOpen[Number(index)]
+  clearAdvanced()
   autoExpandAdvanced(form.steps)
 }
 
@@ -796,6 +853,31 @@ async function submit() {
 /* 分组名是高级项，但它是执行语义的一部分，卡片头上至少让人看见现状。 */
 .group-tag {
   margin-inline-end: 0;
+}
+/* 人设下拉项：名字下面跟一行小字描述。 */
+.agent-opt {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.4;
+  padding: 2px 0;
+}
+.agent-opt-desc {
+  color: var(--text-3);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 选中人设后的说明行：描述 + 展开系统提示词的入口。 */
+.agent-hint {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: -2px 0 8px 28px;
+  font-size: 12px;
+}
+.keys-hint {
+  margin-top: 4px;
 }
 .prompt-wrap {
   position: relative;
