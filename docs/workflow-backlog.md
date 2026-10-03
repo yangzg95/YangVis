@@ -2,7 +2,8 @@
 
 ## 当前状态
 
-- 分支 `main`，HEAD `add582b`（那个提交只加了本文件，代码没动），**1/2/3 三项已实施完、尚未提交**。
+- 分支 `main`，HEAD `40b9b36 feat(workflows): 卡片显示最近一次运行，实时进度逐步骤报出所用模型`，已推到 `origin/main`（gitee），**工作树干净**。下面 1/2/3 三项就是那个提交的内容，不用再碰。
+- 线上**还没部署**：`deploy.sh` 在 nanwa-gateway 仓库里靠 `git pull`，要上线得另外走那一步。
 - 门槛已重跑，两套环境都可用（`.venv` 与 `frontend/node_modules` 都在）：
   - `cd backend && PYTHONIOENCODING=utf-8 ../.venv/Scripts/python.exe -m pytest -q` → **388 passed**（原 385 + 3 条新用例）
   - `cd frontend && npm run type-check` → 干净
