@@ -108,8 +108,23 @@
       />
     </div>
 
+    <!-- 拉列表失败不能只靠拦截器的一次 toast：错过就静默留空，所以占位＋重试。
+         已有旧数据时警告条压在列表上方，刷新失败不至于把记录变没。 -->
+    <a-alert
+      v-if="runsError"
+      type="error"
+      show-icon
+      class="load-error"
+      message="运行记录加载失败"
+      :description="runsError"
+    >
+      <template #action>
+        <a-button size="small" danger @click="loadRuns">重试</a-button>
+      </template>
+    </a-alert>
+
     <a-spin :spinning="loading">
-      <a-empty v-if="!runs.length" :description="emptyText" />
+      <a-empty v-if="!runs.length && !runsError" :description="emptyText" />
       <a-collapse v-else v-model:active-key="expanded" @change="onExpand">
         <a-collapse-panel v-for="run in runs" :key="run.id">
           <template #header>
@@ -239,6 +254,7 @@ interface LiveStep {
 
 const runs = ref<WorkflowRun[]>([])
 const loading = ref(false)
+const runsError = ref('')
 /** 后端按条件算好的总条数：界面上的「共 N 次」和翻页都靠它。 */
 const total = ref(0)
 const PAGE_SIZE = 20
@@ -355,6 +371,7 @@ watch(
     // 点击更容易看错。
     page.value = 1
     statusFilter.value = undefined
+    runsError.value = ''
     void loadRuns()
   },
 )
@@ -373,6 +390,7 @@ async function loadRuns() {
     })
     runs.value = data.items
     total.value = data.total
+    runsError.value = ''
     if (props.subject && runs.value.length) {
       // 业务对象模式下点开就是最近那次的现场，不必再手翻一次折叠面板。
       expanded.value = [runs.value[0].id]
@@ -385,9 +403,16 @@ async function loadRuns() {
     if (!liveBusy.value && newest && (newest.status === 'pending' || newest.status === 'running')) {
       attachFollow(newest.id)
     }
+  } catch (err) {
+    runsError.value = errorText(err, '请检查网络后重试')
   } finally {
     loading.value = false
   }
+}
+
+function errorText(err: unknown, fallback: string): string {
+  const envelope = err as { message?: string } | undefined
+  return envelope?.message || fallback
 }
 
 async function onExpand(keys: number | number[]) {
@@ -456,6 +481,19 @@ async function settleLive(status: string, error: string | null | undefined, runI
   emit('changed')
 }
 
+/**
+ * 流错误的统一收口：发起与跟随两条流的 onError 形状一致，都要停下过程、
+ * 亮出失败态。流的错误没有 axios 拦截器兜底，这里必须自己提示，
+ * 否则界面只是停住不动。
+ */
+function onStreamError(data: { message: string }) {
+  running.value = false
+  following.value = false
+  live.status = 'failed'
+  live.error = data.message
+  message.error(data.message)
+}
+
 function startRun() {
   const workflow = props.workflow
   if (!workflow) return
@@ -483,13 +521,7 @@ function startRun() {
     onStepStart: applyStepStart,
     onStepEnd: applyStepEnd,
     onRunEnd: (data) => void settleLive(data.status, data.error, data.run_id),
-    onError: (data) => {
-      running.value = false
-      live.status = 'failed'
-      live.error = data.message
-      // 流的错误没有 axios 拦截器兜底，这里必须自己提示，否则界面只是停住不动。
-      message.error(data.message)
-    },
+    onError: onStreamError,
   })
 }
 
@@ -521,12 +553,7 @@ function attachFollow(runId: number) {
     onStepStart: applyStepStart,
     onStepEnd: applyStepEnd,
     onRunEnd: (data) => void settleLive(data.status, data.error, data.run_id),
-    onError: (data) => {
-      following.value = false
-      live.status = 'failed'
-      live.error = data.message
-      message.error(data.message)
-    },
+    onError: onStreamError,
   })
 }
 
@@ -662,6 +689,10 @@ async function onRerun(run: WorkflowRun, step: WorkflowRunStep) {
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
+}
+/* 加载失败警告条：与筛选栏、列表拉开一点距离。 */
+.load-error {
+  margin-bottom: 12px;
 }
 .runs-filter {
   width: 112px;

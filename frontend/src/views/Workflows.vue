@@ -40,6 +40,20 @@
       </a-card>
     </div>
     <template v-else>
+      <!-- 拉清单失败不能只靠拦截器的一次 toast：错过就静默留空，所以占位＋重试。
+           已有旧数据时警告条压在卡片上方，刷新失败不至于把清单变没。 -->
+      <a-alert
+        v-if="loadError"
+        type="error"
+        show-icon
+        class="load-error"
+        message="工作流列表加载失败"
+        :description="loadError"
+      >
+        <template #action>
+          <a-button size="small" danger @click="load">重试</a-button>
+        </template>
+      </a-alert>
       <div class="workflow-grid">
         <a-card v-for="workflow in workflows" :key="workflow.id" size="small" class="workflow-card">
           <div class="wf-head">
@@ -101,13 +115,14 @@
         </a-card>
       </div>
 
-      <a-empty v-if="!workflows.length" description="还没有工作流" />
+      <a-empty v-if="!workflows.length && !loadError" description="还没有工作流" />
     </template>
 
     <WorkflowEditorDrawer
       v-model:open="editorOpen"
       :workflow="current"
       :readonly="readonly"
+      :presets="builtinPresets"
       @saved="onSaved"
     />
     <WorkflowRunsDrawer v-model:open="runsOpen" :workflow="current" @changed="load" />
@@ -115,7 +130,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { PlusOutlined } from '@ant-design/icons-vue'
 import { workflowsApi, type Workflow, type WorkflowStep } from '@/api'
@@ -125,12 +140,16 @@ import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
 
 const workflows = ref<Workflow[]>([])
 const loading = ref(false)
+const loadError = ref('')
 const current = ref<Workflow | null>(null)
 const editorOpen = ref(false)
 const readonly = ref(false)
 const runsOpen = ref(false)
 /** 清理窗口：与后端启动时那次的默认口径一致，界面上可以临时收紧。 */
 const keepDays = ref(30)
+
+/** 内置流程都是调通的完整定义，给新建抽屉当起步模板。 */
+const builtinPresets = computed(() => workflows.value.filter((workflow) => workflow.is_builtin))
 
 interface StepGroup {
   name: string
@@ -169,9 +188,17 @@ async function load() {
   try {
     const data = await workflowsApi.list()
     workflows.value = data.items
+    loadError.value = ''
+  } catch (err) {
+    loadError.value = errorText(err, '请检查网络后重试')
   } finally {
     loading.value = false
   }
+}
+
+function errorText(err: unknown, fallback: string): string {
+  const envelope = err as { message?: string } | undefined
+  return envelope?.message || fallback
 }
 
 function openCreate() {
@@ -224,8 +251,12 @@ async function onDelete(workflow: Workflow) {
 }
 
 async function pruneRuns() {
-  const result = await workflowsApi.pruneRuns(keepDays.value)
-  message.success(`已清理 ${result.deleted_runs} 次运行`)
+  try {
+    const result = await workflowsApi.pruneRuns(keepDays.value)
+    message.success(`已清理 ${result.deleted_runs} 次运行`)
+  } catch {
+    return // 拦截器已弹 toast。
+  }
 }
 
 onMounted(load)
@@ -258,6 +289,10 @@ onMounted(load)
   /* 步骤链比智能体卡片宽，最小列也相应放宽；超小屏用 min() 兜住不横向溢出。 */
   grid-template-columns: repeat(auto-fill, minmax(min(420px, 100%), 1fr));
   gap: 16px;
+}
+/* 加载失败警告条：与下方卡片列表拉开一点距离。 */
+.load-error {
+  margin-bottom: 16px;
 }
 .wf-head {
   display: flex;
