@@ -68,8 +68,9 @@
         <span class="muted">{{ step.agent_name || step.agent_slug }}</span>
         <span v-if="step.optional" class="muted">可选</span>
         <span class="spacer" />
+        <span v-if="step.model_name" class="muted">{{ step.model_name }}</span>
         <span v-if="step.output_chars" class="muted">{{ step.output_chars }} 字</span>
-        <span v-if="step.elapsed_ms != null" class="muted">{{ elapsedText(step.elapsed_ms) }}</span>
+        <span v-if="step.elapsed_ms != null" class="muted">{{ fmtElapsed(step.elapsed_ms) }}</span>
         <span v-if="step.error" class="danger">{{ step.error }}</span>
       </div>
       <a-alert
@@ -127,7 +128,7 @@
                 @click.stop
               >{{ subjectLinks.get(run.id)?.text }}</a>
               <span class="spacer" />
-              <span v-if="run.elapsed_ms != null" class="muted">{{ elapsedText(run.elapsed_ms) }}</span>
+              <span v-if="run.elapsed_ms != null" class="muted">{{ fmtElapsed(run.elapsed_ms) }}</span>
               <span v-if="run.model_names?.length" class="muted run-models">
                 {{ run.model_names.join('、') }}
               </span>
@@ -154,7 +155,7 @@
                 <span v-if="step.optional" class="muted">可选</span>
                 <span class="spacer" />
                 <span v-if="step.model_name" class="muted">{{ step.model_name }}</span>
-                <span v-if="step.elapsed_ms != null" class="muted">{{ elapsedText(step.elapsed_ms) }}</span>
+                <span v-if="step.elapsed_ms != null" class="muted">{{ fmtElapsed(step.elapsed_ms) }}</span>
                 <a-tooltip
                   title="用流程当前定义里的这一步重跑一次，上游产物按当时落库的结果喂。跑通这一步不会重写业务结果——要新产物请回功能页面重新发起。"
                 >
@@ -204,6 +205,12 @@ import {
   type WorkflowRunStep,
   type WorkflowRunSubject,
 } from '@/api'
+// 状态文案与颜色在 utils/format，工作流卡片上那行「最近一次运行」用的是同一份口径。
+import {
+  fmtElapsed,
+  runStatusColor as statusColor,
+  runStatusText as statusText,
+} from '@/utils/format'
 
 const props = defineProps<{
   open: boolean
@@ -226,6 +233,8 @@ interface LiveStep {
   elapsed_ms?: number | null
   output_chars?: number
   error?: string | null
+  /** 这一步跑完后实际用的模型；还没跑到的步骤是 null。 */
+  model_name?: string | null
 }
 
 const runs = ref<WorkflowRun[]>([])
@@ -314,33 +323,9 @@ const liveCaption = computed(() => {
   return `运行 #${live.runId ?? '—'} 的进度`
 })
 
-const STATUS_TEXT: Record<string, string> = {
-  pending: '待运行',
-  running: '执行中',
-  succeeded: '成功',
-  failed: '失败',
-  cancelled: '已取消',
-  skipped: '未执行',
-}
-const STATUS_COLOR: Record<string, string> = {
-  pending: 'default',
-  running: 'processing',
-  succeeded: 'success',
-  failed: 'error',
-  cancelled: 'warning',
-  skipped: 'default',
-}
-
-function statusText(status: string) {
-  return STATUS_TEXT[status] ?? status
-}
-function statusColor(status: string) {
-  return STATUS_COLOR[status] ?? 'default'
-}
-
 /** 筛选器只给运行会有的状态：``skipped`` 是步骤的「没轮到」，运行本身不存在这个值。 */
 const statusOptions = (['pending', 'running', 'succeeded', 'failed', 'cancelled'] as RunStatus[]).map(
-  (value) => ({ value, label: STATUS_TEXT[value] }),
+  (value) => ({ value, label: statusText(value) }),
 )
 
 function onFilterChange() {
@@ -350,18 +335,6 @@ function onFilterChange() {
 function startedText(run: WorkflowRun) {
   const started = run.started_at || run.created_at
   return started ? new Date(started).toLocaleString() : '—'
-}
-/**
- * 一次运行总共跑了多久。
- *
- * 后端存的是整条运行的墙上时间，不是各步之和——并行组里两步同时在跑，加起来的
- * 数比实际等待的长，报出来只会让人多等一会儿以为哪里卡住了。
- */
-function elapsedText(ms: number) {
-  if (ms < 1000) return `${ms} ms`
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} 秒`
-  const minutes = Math.floor(ms / 60_000)
-  return `${minutes} 分 ${Math.round((ms % 60_000) / 1000)} 秒`
 }
 function inputPairs(run: WorkflowRun): [string, string][] {
   const detail = details[run.id]
@@ -459,6 +432,7 @@ function applyStepEnd(data: {
   error?: string | null
   output_chars?: number
   elapsed_ms?: number | null
+  model_name?: string | null
 }) {
   const step = live.steps.find((item) => item.key === data.key)
   if (!step) return
@@ -466,6 +440,7 @@ function applyStepEnd(data: {
   step.elapsed_ms = data.elapsed_ms
   step.output_chars = data.output_chars
   step.error = data.error
+  step.model_name = data.model_name
 }
 
 /** 跑完了：换回列表和那次的现场，并让调用方刷新它自己的业务列表。 */
@@ -540,6 +515,7 @@ function attachFollow(runId: number) {
         agent_name: step.agent_name,
         optional: step.optional,
         status: step.status || 'pending',
+        model_name: step.model_name,
       }))
     },
     onStepStart: applyStepStart,

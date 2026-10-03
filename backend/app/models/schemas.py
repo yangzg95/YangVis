@@ -505,6 +505,16 @@ class WorkflowStepItem(BaseModel):
     optional: bool
 
 
+class WorkflowLastRun(BaseModel):
+    """一条流程最近一次运行的摘要：清单页卡片上那一行。"""
+
+    id: int
+    status: str
+    elapsed_ms: Optional[int] = None
+    # 结束 / 开始 / 创建依次取的时间，pending 的运行只有创建时间。
+    at: Optional[datetime] = None
+
+
 class WorkflowItem(BaseModel):
     id: int
     slug: str
@@ -515,6 +525,8 @@ class WorkflowItem(BaseModel):
     is_builtin: bool
     enabled: bool
     sort_order: int
+    # 从没跑过就是 None：站点没上线，界面上不为它留「从未运行」的占位。
+    last_run: Optional[WorkflowLastRun] = None
     created_at: datetime
     updated_at: datetime
 

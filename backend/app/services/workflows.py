@@ -57,6 +57,7 @@ from app.models.schemas import (
     WorkflowDefinition,
     WorkflowInputField,
     WorkflowItem,
+    WorkflowLastRun,
     WorkflowRunDetail,
     WorkflowRunItem,
     WorkflowRunStepItem,
@@ -766,9 +767,50 @@ class WorkflowService:
             ).all()
         )
 
-    def to_item(self, workflow: Workflow) -> WorkflowItem:
+    def last_runs(self, workflow_ids: Sequence[int]) -> Dict[int, WorkflowRun]:
+        """每条流程的**最近一次**运行，按 ``workflow_id`` 取；口径同 :func:`latest_runs`。
+
+        清单页要在一屏里说出每条流程跑没跑、什么状态，按行逐条查就是每行一次往返。
+        """
+        ids = list(workflow_ids)
+        if not ids:
+            return {}
+        newest = (
+            select(WorkflowRun.workflow_id, func.max(WorkflowRun.id).label("run_id"))
+            .where(
+                WorkflowRun.owner_id == self._owner_id,
+                WorkflowRun.workflow_id.in_(ids),
+            )
+            .group_by(WorkflowRun.workflow_id)
+            .subquery()
+        )
+        rows = self._db.scalars(
+            select(WorkflowRun).join(newest, WorkflowRun.id == newest.c.run_id)
+        ).all()
+        return {row.workflow_id: row for row in rows}
+
+    @staticmethod
+    def _to_last_run(run: WorkflowRun) -> WorkflowLastRun:
+        """卡片上那一行的摘要。
+
+        时间只报一个：结束 / 开始 / 创建依次取，pending 的运行前两个都还没写下。
+        """
+        return WorkflowLastRun(
+            id=run.id,
+            status=run.status,
+            elapsed_ms=run.elapsed_ms,
+            at=run.finished_at or run.started_at or run.created_at,
+        )
+
+    def to_item(
+        self, workflow: Workflow, last_run: Optional[WorkflowRun] = None
+    ) -> WorkflowItem:
         steps = self.steps_of(workflow.id)
         agent_names = self._agent_names(step.agent_slug for step in steps)
+        if last_run is None:
+            # 单对象端点（取一条、创建、更新、复制）各自只有一行，就地查一次；
+            # 列表端点批量查完传进来，别让它退化成每行一次。
+            last_run = self.last_runs([workflow.id]).get(workflow.id)
         return WorkflowItem(
             id=workflow.id,
             slug=workflow.slug,
@@ -794,6 +836,7 @@ class WorkflowService:
             is_builtin=workflow.is_builtin,
             enabled=workflow.enabled,
             sort_order=workflow.sort_order,
+            last_run=self._to_last_run(last_run) if last_run is not None else None,
             created_at=workflow.created_at,
             updated_at=workflow.updated_at,
         )
@@ -1493,12 +1536,14 @@ async def _execute_step(
         except ValueError as exc:
             return await _finish_step(db, row, step, queue, str(exc), started)
 
+        model_name: Optional[str] = None
         try:
             # 落这一步**实际**用的模型：定义里的 model_config_id 只写按步骤的覆盖，
             # 空着的是运行时的默认对话模型。历史行只存前者的话，绝大多数运行在
             # 界面上就是「没用什么模型」。
             config = require_chat_model(db, owner_id, step.model_config_id)
             row.model_config_id = config.id
+            model_name = config.model_name
             db.commit()
             text = await run_agent(
                 db,
@@ -1512,10 +1557,13 @@ async def _execute_step(
             logger.warning(
                 "workflow step %s of run %s failed: %s", step.key, run_id, exc, exc_info=True
             )
-            return await _finish_step(db, row, step, queue, model_error_text(exc), started)
+            return await _finish_step(
+                db, row, step, queue, model_error_text(exc), started, model_name=model_name
+            )
 
         return await _finish_step(
-            db, row, step, queue, None, started, output=plain, parsed=parsed
+            db, row, step, queue, None, started,
+            output=plain, parsed=parsed, model_name=model_name,
         )
 
 
@@ -1529,6 +1577,7 @@ async def _finish_step(
     *,
     output: Optional[str] = None,
     parsed: Optional[dict] = None,
+    model_name: Optional[str] = None,
 ) -> _StepOutcome:
     """写终态并补一条 ``step_end`` 事件。"""
     elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -1549,12 +1598,17 @@ async def _finish_step(
         parsed=parsed,
         error=error,
     )
-    await queue.put(("step_end", _step_event(outcome, elapsed_ms=elapsed_ms, parsed=parsed)))
+    event = _step_event(outcome, elapsed_ms=elapsed_ms, parsed=parsed, model_name=model_name)
+    await queue.put(("step_end", event))
     return outcome
 
 
 def _step_event(
-    outcome: _StepOutcome, *, elapsed_ms: Optional[int] = None, parsed: Optional[dict] = None
+    outcome: _StepOutcome,
+    *,
+    elapsed_ms: Optional[int] = None,
+    parsed: Optional[dict] = None,
+    model_name: Optional[str] = None,
 ) -> dict:
     return {
         "key": outcome.key,
@@ -1565,6 +1619,9 @@ def _step_event(
         "output_chars": len(outcome.output or ""),
         "elapsed_ms": elapsed_ms,
         "parsed": parsed,
+        # 跑完才说得出用了谁：这一步的模型是运行时才解析出来的（定义里空着就是
+        # 当时的默认对话模型），不带上就得等整条跑完展开现场才知道。
+        "model_name": model_name,
     }
 
 
@@ -1758,6 +1815,8 @@ def _follow_state(
     )
     if run is None:
         return None, {}
+    # 模型名长在配置上，步骤行只存 id：口径与 ``step_models`` 一致，配置被删掉的
+    # 历史行这里就是 None。
     steps = {
         row.key: {
             "status": row.status,
@@ -1766,9 +1825,11 @@ def _follow_state(
             "error": row.error_msg,
             "output_chars": len(row.output or ""),
             "elapsed_ms": row.elapsed_ms,
+            "model_name": model_name,
         }
-        for row in db.scalars(
-            select(WorkflowRunStep)
+        for row, model_name in db.execute(
+            select(WorkflowRunStep, ModelConfig.model_name)
+            .outerjoin(ModelConfig, ModelConfig.id == WorkflowRunStep.model_config_id)
             .where(
                 WorkflowRunStep.owner_id == owner_id, WorkflowRunStep.run_id == run_id
             )
@@ -1833,6 +1894,7 @@ async def follow_run(
                     "output_kind": definitions[key].output_kind if key in definitions else None,
                     "optional": definitions[key].optional if key in definitions else False,
                     "status": info["status"],
+                    "model_name": info["model_name"],
                 }
                 for key, info in steps.items()
             ],
@@ -1858,6 +1920,7 @@ async def follow_run(
                         "error": info["error"],
                         "output_chars": info["output_chars"],
                         "elapsed_ms": info["elapsed_ms"],
+                        "model_name": info["model_name"],
                     }
                 else:
                     # pending / running 都算「这一步没定下来」。重跑会把已经跑完的

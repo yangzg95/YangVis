@@ -206,7 +206,10 @@ async def list_workflows(
     service: WorkflowService = Depends(get_service),
 ) -> APIResponse[ListResponse[WorkflowItem]]:
     """内置工作流加上调用方自己的，按展示顺序排列。"""
-    items = [service.to_item(row) for row in service.list(enabled_only=enabled_only)]
+    rows = service.list(enabled_only=enabled_only)
+    # 最近一次运行一次查完再逐行分派：交给 to_item 自己查就是每行一次往返。
+    last_runs = service.last_runs([row.id for row in rows])
+    items = [service.to_item(row, last_runs.get(row.id)) for row in rows]
     return APIResponse(data=ListResponse(items=items, total=len(items)))
 
 

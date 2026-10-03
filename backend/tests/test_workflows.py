@@ -971,6 +971,13 @@ def test_execute_run_streams_and_persists_each_step(db, monkeypatch):
     # 第二步的模板里出现的是第一步的输出：变量确实是跨步传递的。
     assert calls == [("writer", "就编排写一段话"), ("scorer", "给这篇打分：一段初稿")]
 
+    # 事件当场就说得出这一步用了谁：不带上就得等整条跑完展开现场才知道。
+    ends = [data for name, data in events if name == "step_end"]
+    assert [(data["key"], data["model_name"]) for data in ends] == [
+        ("draft", "unit-test"),
+        ("score", "unit-test"),
+    ]
+
     rows = {row.key: row for row in WorkflowService(db, OWNER).run_steps(run.id)}
     assert rows["draft"].output == "一段初稿"
     assert rows["draft"].prompt == "就编排写一段话"
@@ -1286,6 +1293,7 @@ def test_follow_run_streams_only_what_the_client_missed(db):
     workflow = _two_step_workflow(db)
     run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
     run_id = run.id
+    model = _chat_model(db)
     _scene(
         db,
         run_id,
@@ -1296,7 +1304,14 @@ def test_follow_run_streams_only_what_the_client_missed(db):
 
     def worker() -> None:
         time.sleep(0.05)
-        _write_step(run_id, "score", status=STEP_SUCCEEDED, output="8 分", elapsed_ms=12)
+        _write_step(
+            run_id,
+            "score",
+            status=STEP_SUCCEEDED,
+            output="8 分",
+            elapsed_ms=12,
+            model_config_id=model.id,
+        )
         _write_run(run_id, status=RUN_SUCCEEDED, elapsed_ms=40)
 
     events = _follow_all(db, run_id, worker)
@@ -1307,6 +1322,8 @@ def test_follow_run_streams_only_what_the_client_missed(db):
     assert {row["status"] for row in events[0][1]["steps"] if row["key"] == "draft"} == {
         STEP_SUCCEEDED
     }
+    # 接上时还没写下模型的步骤没有名字可报。
+    assert [row["model_name"] for row in events[0][1]["steps"]] == [None, None]
     assert [payload for name, payload in events if name == "step_end"] == [
         {
             "key": "score",
@@ -1314,6 +1331,8 @@ def test_follow_run_streams_only_what_the_client_missed(db):
             "error": None,
             "output_chars": 3,
             "elapsed_ms": 12,
+            # 跟随流的载荷与发起那条同形：客户端不用为「中途接上」少显示一栏。
+            "model_name": "unit-test",
         }
     ]
     assert events[-1][1]["status"] == RUN_SUCCEEDED
@@ -1730,6 +1749,46 @@ def test_to_item_exposes_steps_and_agent_names(db):
     assert [field.name for field in item.inputs] == ["resume_content", "description_note"]
     assert item.steps[0].agent_name == "简历分析师"
     assert item.steps[0].output_keys == ["report", "suggestions"]
+
+
+def test_last_runs_takes_the_newest_run_of_each_workflow(db):
+    """清单页卡片上那行「最近一次运行」：每条流程 id 最大的那次，没跑过的没有。
+
+    口径与业务对象那边的 :func:`latest_runs` 一致——重新发起是新起一行，旧行只做历史。
+    """
+    _agents_named(db, "writer")
+    service = WorkflowService(db, OWNER)
+    used = service.create(_create_payload())
+    never = service.create(_create_payload(slug="another", name="另一条"))
+    first = service.create_run(used.id, {"topic": "编排"})
+    second = service.create_run(used.id, {"topic": "编排"})
+    db.execute(
+        update(WorkflowRun)
+        .where(WorkflowRun.id == second.id)
+        .values(status=RUN_FAILED, error_msg="上游 502", elapsed_ms=74_000)
+    )
+    db.commit()
+
+    assert set(service.last_runs([used.id, never.id])) == {used.id}
+    assert service.last_runs([]) == {}
+
+    item = service.to_item(used, service.last_runs([used.id])[used.id])
+    assert item.last_run.id == second.id > first.id
+    assert (item.last_run.status, item.last_run.elapsed_ms) == (RUN_FAILED, 74_000)
+    # 结束 / 开始 / 创建依次取：pending 的行前两个都还是空的。
+    assert item.last_run.at == second.created_at
+    # 从没跑过的流程不在结果里，卡片上那一行整行不渲染。
+    assert service.to_item(never).last_run is None
+
+
+def test_to_item_looks_up_the_last_run_when_not_given(db):
+    """单对象端点不必各自记得先查：``to_item`` 不传就自己取一条。"""
+    _agents_named(db, "writer")
+    service = WorkflowService(db, OWNER)
+    workflow = service.create(_create_payload())
+    run = service.create_run(workflow.id, {"topic": "编排"})
+
+    assert service.to_item(workflow).last_run.id == run.id
 
 
 def test_to_run_detail_labels_steps_from_the_current_definition(db, monkeypatch):

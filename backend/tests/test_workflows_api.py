@@ -102,6 +102,30 @@ def test_list_workflows_returns_builtins_with_steps(env):
     assert [field["name"] for field in analysis["inputs"]] == ["resume_content", "description_note"]
 
 
+def test_list_workflows_carries_each_workflows_own_last_run(env):
+    """清单一次把每条流程各自的最近运行带出来：按行逐条查就是每行一次往返。"""
+    client, Session = env
+    ids = {
+        slug: client.post("/api/workflows", json=_body(slug=slug, name=slug)).json()["data"]["id"]
+        for slug in ("first-flow", "second-flow", "never-run")
+    }
+    with Session() as db:
+        service = WorkflowService(db, OWNER)
+        newest = {}
+        for slug in ("first-flow", "second-flow"):
+            service.create_run(ids[slug], {"topic": "编排"})
+            # 重新发起是新起一行，最近一次取的就是 id 最大的那条。
+            newest[slug] = service.create_run(ids[slug], {"topic": "编排"}).id
+
+    items = {item["slug"]: item for item in client.get("/api/workflows").json()["data"]["items"]}
+
+    for slug in ("first-flow", "second-flow"):
+        assert items[slug]["last_run"]["id"] == newest[slug]
+    # 从没跑过的、以及内置的那几条都是 null：字段恒在，界面不为它留占位。
+    assert items["never-run"]["last_run"] is None
+    assert items["resume-analysis"]["last_run"] is None
+
+
 def test_get_workflow_by_id_and_missing_id_is_404(env):
     client, Session = env
     with Session() as db:

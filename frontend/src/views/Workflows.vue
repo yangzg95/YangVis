@@ -71,6 +71,15 @@
             </template>
           </div>
 
+          <!-- 最近一次运行：不点开抽屉也说得出跑没跑、什么状态、多久。
+               没跑过就整行不出现——站点还没上线，宁缺毋滥。 -->
+          <div v-if="workflow.last_run" class="wf-last-run">
+            <a-tag :color="runStatusColor(workflow.last_run.status)">
+              {{ runStatusText(workflow.last_run.status) }}
+            </a-tag>
+            <span class="muted">{{ lastRunText(workflow) }}</span>
+          </div>
+
           <div class="wf-tags">
             <a-tag>{{ workflow.steps.length }} 步</a-tag>
             <a-tag>{{ chainOf(workflow).length }} 个分组</a-tag>
@@ -110,6 +119,7 @@ import { onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { PlusOutlined } from '@ant-design/icons-vue'
 import { workflowsApi, type Workflow, type WorkflowStep } from '@/api'
+import { fmtElapsed, runStatusColor, runStatusText } from '@/utils/format'
 import WorkflowEditorDrawer from '@/components/WorkflowEditorDrawer.vue'
 import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
 
@@ -144,6 +154,14 @@ function chainOf(workflow: Workflow): StepGroup[] {
   }
   for (const group of groups) group.parallel = group.steps.length > 1
   return groups
+}
+
+/** 「什么时候跑的 · 跑了多久」：耗时只在跑完那次才有。 */
+function lastRunText(workflow: Workflow) {
+  const run = workflow.last_run
+  if (!run?.at) return ''
+  const at = new Date(run.at).toLocaleString()
+  return run.elapsed_ms == null ? at : `${at} · ${fmtElapsed(run.elapsed_ms)}`
 }
 
 async function load() {
@@ -306,6 +324,18 @@ onMounted(load)
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 8px;
+}
+/* 最近一次运行：状态标签 + 一行紧凑的时间与耗时。 */
+.wf-last-run {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+/* 间距交给 gap，标签自带的外边距会让它和后面的时间错开。 */
+.wf-last-run :deep(.ant-tag) {
+  margin-inline-end: 0;
 }
 .spacer {
   flex: 1;

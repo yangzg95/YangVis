@@ -500,6 +500,14 @@ export interface WorkflowStep {
   optional: boolean
 }
 
+export interface WorkflowLastRun {
+  id: number
+  status: RunStatus
+  elapsed_ms?: number | null
+  /** 结束时间，没结束就是开始时间，pending 的行只有创建时间。 */
+  at?: string | null
+}
+
 export interface Workflow {
   id: number
   slug: string
@@ -510,6 +518,8 @@ export interface Workflow {
   is_builtin: boolean
   enabled: boolean
   sort_order: number
+  /** 最近一次运行的摘要；从没跑过是 null，卡片上整行不渲染。 */
+  last_run?: WorkflowLastRun | null
   created_at: string
   updated_at: string
 }
@@ -799,6 +809,8 @@ export interface StreamHandlers {
       optional: boolean
       /** 跟随流接上时这一步已经跑到哪了；发起流里全是 pending。 */
       status?: string
+      /** 跟随流接上时这一步已经用过的模型；发起流里还没跑，为 null。 */
+      model_name?: string | null
     }[]
   }) => void
   onStepStart?: (data: { key: string; group_key: string; status?: string }) => void
@@ -808,6 +820,8 @@ export interface StreamHandlers {
     error?: string | null
     output_chars: number
     elapsed_ms?: number | null
+    /** 这一步实际用的模型：跑完才说得出，没跑到的步骤为 null。 */
+    model_name?: string | null
   }) => void
   onRunEnd?: (data: {
     run_id: number
