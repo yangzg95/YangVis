@@ -168,6 +168,7 @@
               style="width: 150px"
               :options="agentOptions"
               :disabled="streaming"
+              @change="onAgentChange"
             />
             <a-select
               v-model:value="activeModelConfigId"
@@ -749,8 +750,8 @@ async function handleReportDiscuss() {
   }
 
   // 报告讨论默认用「求职顾问」：要在 canSend 判断之前切换，gate 检查
-  // （比如知识库项目）针对的才是这场对话真正要用的智能体。messages 还是空的，
-  // watch(activeAgentId) 的 startNew 保护不会误触发。
+  // （比如知识库项目）针对的才是这场对话真正要用的智能体。这里是程序改写
+  // 选择器，不走下拉框的 change，onAgentChange 的 startNew 保护不会误触发。
   const advisor = agents.value.find(
     (a) => a.slug === REPORT_DISCUSS_AGENT_SLUG && a.chat_visible,
   )
@@ -1110,10 +1111,13 @@ async function saveDiagram(msg: Bubble, segIndex: number, newSource: string) {
   toast.success('已保存，后续对话将基于你修改后的图')
 }
 
-watch(activeAgentId, () => {
-  // 聊到一半换智能体，会让两个人设的发言混在同一段历史里。
+// 聊到一半换智能体，会让两个人设的发言混在同一段历史里，所以开一条新会话。
+// 挂在下拉框的 change 上而不是 watch(activeAgentId)：selectConversation 恢复
+// 会话自带的智能体时也写这个 ref，watch 会把那次写入当成用户换人设，
+// 刚拉到的消息立刻被清空——表现为「要点两次才显示」。
+function onAgentChange() {
   if (!streaming.value && messages.value.length) startNew()
-})
+}
 
 onMounted(async () => {
   try {
