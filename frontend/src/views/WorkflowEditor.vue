@@ -1,12 +1,22 @@
 <template>
-  <a-drawer
-    :open="open"
-    :title="title"
-    placement="right"
-    :width="960"
-    :mask-closable="false"
-    @update:open="(value: boolean) => emit('update:open', value)"
-  >
+  <div class="page-card">
+    <div class="page-title">{{ title }}</div>
+
+    <!-- 打开页面要拉智能体/模型/工作流三份数据，任何一份失败下拉与回填都是空的：
+         与列表页同一口径，警告条＋重试，不静默。 -->
+    <a-alert
+      v-if="loadError"
+      type="error"
+      show-icon
+      class="load-error"
+      message="配置页数据加载失败"
+      :description="loadError"
+    >
+      <template #action>
+        <a-button size="small" danger @click="boot">重试</a-button>
+      </template>
+    </a-alert>
+
     <a-form layout="vertical">
       <!-- 起步方式：内置流程都是调通过的完整骨架，复制来改远比从零敲字段省心。
            只在新建时出现；标识必须自己起，因为功能在代码里按标识调用这条流程。 -->
@@ -320,24 +330,23 @@
       </a-space>
     </a-form>
 
-    <template #footer>
-      <div class="footer">
-        <span class="muted">
-          {{
-            readonly
-              ? '内置流程由代码维护，需要改动请先「复制」成自己的版本。'
-              : '保存即整份替换：步骤之间引用关系已闭合才能存下。'
-          }}
-        </span>
-        <a-button @click="emit('update:open', false)">{{ readonly ? '关闭' : '取消' }}</a-button>
-        <a-button v-if="!readonly" type="primary" :loading="saving" @click="submit">保存</a-button>
-      </div>
-    </template>
-  </a-drawer>
+    <div class="footer">
+      <span class="muted">
+        {{
+          readonly
+            ? '内置流程由代码维护，需要改动请先在列表页「复制」成自己的版本。'
+            : '保存即整份替换：步骤之间引用关系已闭合才能存下。'
+        }}
+      </span>
+      <a-button @click="back">{{ readonly ? '关闭' : '取消' }}</a-button>
+      <a-button v-if="!readonly" type="primary" :loading="saving" @click="submit">保存</a-button>
+    </div>
+  </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import {
   ArrowDownOutlined,
@@ -356,19 +365,9 @@ import {
   type WorkflowPayload,
   type WorkflowStep,
 } from '@/api'
+import { editorTarget, type EditorTarget } from '@/stores/workflowEditor'
 
-const props = defineProps<{
-  open: boolean
-  workflow: Workflow | null
-  readonly?: boolean
-  /** 起步模板：通常是全部内置工作流（带完整步骤），只在新建时用。 */
-  presets?: Workflow[]
-}>()
-
-const emit = defineEmits<{
-  'update:open': [value: boolean]
-  saved: [workflow: Workflow]
-}>()
+const router = useRouter()
 
 interface InputFieldForm {
   name: string
@@ -425,14 +424,20 @@ const form = reactive({
 })
 
 const saving = ref(false)
+const loadError = ref('')
 const agents = ref<Agent[]>([])
 const chatModels = ref<ModelConfig[]>([])
+const workflows = ref<Workflow[]>([])
 const presetId = ref<number | undefined>(undefined)
+
+/** 当前在编辑谁：null = 新建。跳来时由列表页写进 store，这里只认最近一次请求。 */
+const current = ref<Workflow | null>(null)
+const readonly = ref(false)
 
 /** 步骤卡片的「高级」折叠：只读展示时整摊开，不然看不到分组与输出契约。 */
 const advancedOpen = reactive<Record<number, boolean>>({})
 function showAdvanced(index: number) {
-  return !!props.readonly || !!advancedOpen[index]
+  return readonly.value || !!advancedOpen[index]
 }
 
 /** 打开或换入一批步骤时，把配过高级项的步骤直接摊开，免得藏住 JSON 契约与模型选择。 */
@@ -447,10 +452,10 @@ function autoExpandAdvanced(steps: StepForm[]) {
 /** 校验红框：点保存才亮灯，之后随填随灭（problemIds 是响应式算出来的）。 */
 const showProblems = ref(false)
 
-const editing = computed(() => !!props.workflow)
+const editing = computed(() => !!current.value)
 const title = computed(() => {
-  if (props.readonly) return `查看工作流 · ${props.workflow?.name ?? ''}`
-  return editing.value ? `编辑工作流 · ${props.workflow?.name ?? ''}` : '新建工作流'
+  if (readonly.value) return `查看工作流 · ${current.value?.name ?? ''}`
+  return editing.value ? `编辑工作流 · ${current.value?.name ?? ''}` : '新建工作流'
 })
 const groupCount = computed(
   () => new Set(form.steps.map((step) => step.group_key.trim() || '(未命名)')).size,
@@ -466,75 +471,80 @@ const modelOptions = computed(() =>
     .filter((config) => config.last_test_ok)
     .map((config) => ({ value: config.id, label: config.title })),
 )
+/** 内置流程都是调通的完整定义，给新建当起步模板。 */
 const presetOptions = computed(() =>
-  (props.presets ?? []).map((workflow) => ({ value: workflow.id, label: workflow.name })),
+  workflows.value
+    .filter((workflow) => workflow.is_builtin)
+    .map((workflow) => ({ value: workflow.id, label: workflow.name })),
 )
 
 /**
- * 必填缺口的单一事实源：界面标红、保存拦截、滚动定位都从这里算。
- * id 形状是 ``step3.key``，卡片按前缀认领自己那几步。
+ * 装载：每次进入本页（含切标签回来）都重取三份数据——编辑期间新建的智能体应该
+ * 马上能选到。表单只在 store 里出现了新请求（nonce 变了）时才整份重灌，
+ * 切标签来回不动用户的草稿。
  */
-const problemIds = computed(() => {
-  const ids = new Set<string>()
-  if (!form.name.trim()) ids.add('name')
-  if (!editing.value && !/^[a-z0-9][a-z0-9-]*$/.test(form.slug.trim())) ids.add('slug')
-  form.inputs.forEach((field, index) => {
-    if (!field.name.trim()) ids.add(`input${index}.name`)
-  })
-  form.steps.forEach((step, index) => {
-    if (!step.key.trim()) ids.add(`step${index}.key`)
-    if (!step.group_key.trim()) ids.add(`step${index}.group`)
-    if (!step.agent_slug) ids.add(`step${index}.agent`)
-    if (!step.prompt_tpl.trim()) ids.add(`step${index}.prompt`)
-  })
-  return ids
+let appliedNonce = 0
+
+async function boot() {
+  try {
+    const [agentData, modelData, wfData] = await Promise.all([
+      agentsApi.list(),
+      settingsApi.listModels('chat'),
+      workflowsApi.list(),
+    ])
+    agents.value = agentData.items
+    chatModels.value = modelData.items
+    workflows.value = wfData.items
+    loadError.value = ''
+  } catch (err) {
+    loadError.value = errorText(err, '请检查网络后重试')
+    return
+  }
+  const target = editorTarget.value
+  if (!target || target.nonce === appliedNonce) return
+  appliedNonce = target.nonce
+  fillForm(target)
+}
+
+function fillForm(target: EditorTarget) {
+  showProblems.value = false
+  closeCompletion()
+  clearAdvanced()
+  presetId.value = undefined
+  readonly.value = target.readonly
+  const source = target.id == null ? null : workflows.value.find((w) => w.id === target.id) ?? null
+  current.value = source
+  form.slug = source?.slug ?? ''
+  form.name = source?.name ?? ''
+  form.description = source?.description ?? ''
+  form.enabled = source?.enabled ?? true
+  form.inputs = (source?.inputs ?? []).map((field) => ({ ...field }))
+  form.steps = source ? source.steps.map(toStepForm) : [emptyStep('g1')]
+  autoExpandAdvanced(form.steps)
+}
+
+function errorText(err: unknown, fallback: string): string {
+  const envelope = err as { message?: string } | undefined
+  return envelope?.message || fallback
+}
+
+// keep-alive 下首次挂载会连着触发 mounted 与 activated，第二次的 boot 跳过。
+let justMounted = false
+onMounted(() => {
+  justMounted = true
+  void boot()
+})
+onActivated(() => {
+  if (justMounted) {
+    justMounted = false
+    return
+  }
+  void boot()
 })
 
-function hasProblem(id: string) {
-  return showProblems.value && problemIds.value.has(id)
+function back() {
+  router.push('/workflows')
 }
-
-function stepProblem(index: number) {
-  if (!showProblems.value) return false
-  const prefix = `step${index}.`
-  for (const id of problemIds.value) if (id.startsWith(prefix)) return true
-  return false
-}
-
-/** 高级折叠的摊开状态整体清一次，换入另一批步骤时不残留旧下标。 */
-function clearAdvanced() {
-  for (const index of Object.keys(advancedOpen)) delete advancedOpen[Number(index)]
-}
-
-watch(
-  () => props.open,
-  async (open) => {
-    if (!open) return
-    showProblems.value = false
-    closeCompletion()
-    clearAdvanced()
-    const source = props.workflow
-    presetId.value = undefined
-    form.slug = source?.slug ?? ''
-    form.name = source?.name ?? ''
-    form.description = source?.description ?? ''
-    form.enabled = source?.enabled ?? true
-    form.inputs = (source?.inputs ?? []).map((field) => ({ ...field }))
-    form.steps = source ? source.steps.map(toStepForm) : [emptyStep('g1')]
-    autoExpandAdvanced(form.steps)
-    // 每次打开都重取：编辑期间新建的智能体应该马上能选到。
-    try {
-      const [agentData, modelData] = await Promise.all([
-        agentsApi.list(),
-        settingsApi.listModels('chat'),
-      ])
-      agents.value = agentData.items
-      chatModels.value = modelData.items
-    } catch {
-      // 拦截器已提示；下拉为空时保存会被后端的引用检查挡住。
-    }
-  },
-)
 
 function addInput() {
   form.inputs.push({ name: '', label: '', required: true })
@@ -548,7 +558,7 @@ function addStep(parallel: boolean) {
 
 /** 从内置流程起步：整份搬来输入与步骤，名字带「副本」，标识留空必须自己起。 */
 function onPresetChange(value: number | undefined) {
-  const source = (props.presets ?? []).find((workflow) => workflow.id === value)
+  const source = workflows.value.find((workflow) => workflow.id === value && workflow.is_builtin)
   if (!source) {
     // 清空起步选择 = 回到空白新建：选择器与表单内容必须同进同退，
     // 不然显示「空白工作流」、底下还留着刚才那份，比从零配更容易出错。
@@ -576,18 +586,23 @@ function move(index: number, delta: number) {
   form.steps.splice(target, 0, step)
 }
 
+/** 高级折叠的摊开状态整体清一次，换入另一批步骤时不残留旧下标。 */
+function clearAdvanced() {
+  for (const index of Object.keys(advancedOpen)) delete advancedOpen[Number(index)]
+}
+
 /** 每一步属于第几个并行组：分组名与上一步相同就是同一组（后端同一套口径）。 */
 const groupSequence = computed(() => {
   const sequences: number[] = []
-  let current = -1
+  let currentGroup = -1
   let previous: string | null = null
   for (const step of form.steps) {
     const key = step.group_key.trim()
     if (key !== previous) {
-      current += 1
+      currentGroup += 1
       previous = key
     }
-    sequences.push(current)
+    sequences.push(currentGroup)
   }
   return sequences
 })
@@ -671,7 +686,7 @@ let completionTo = 0
 
 function onPromptInput(index: number, event: Event) {
   const area = event.target as HTMLTextAreaElement | null
-  if (!area || props.readonly) return
+  if (!area || readonly.value) return
   completionArea = area
   const caret = area.selectionStart ?? area.value.length
   const match = /\{\{([^{}]*)$/.exec(area.value.slice(0, caret))
@@ -733,8 +748,39 @@ function onPromptKeydown(index: number, event: KeyboardEvent) {
   }
 }
 
+/**
+ * 必填缺口的单一事实源：界面标红、保存拦截、滚动定位都从这里算。
+ * id 形状是 ``step3.key``，卡片按前缀认领自己那几步。
+ */
+const problemIds = computed(() => {
+  const ids = new Set<string>()
+  if (!form.name.trim()) ids.add('name')
+  if (!editing.value && !/^[a-z0-9][a-z0-9-]*$/.test(form.slug.trim())) ids.add('slug')
+  form.inputs.forEach((field, index) => {
+    if (!field.name.trim()) ids.add(`input${index}.name`)
+  })
+  form.steps.forEach((step, index) => {
+    if (!step.key.trim()) ids.add(`step${index}.key`)
+    if (!step.group_key.trim()) ids.add(`step${index}.group`)
+    if (!step.agent_slug) ids.add(`step${index}.agent`)
+    if (!step.prompt_tpl.trim()) ids.add(`step${index}.prompt`)
+  })
+  return ids
+})
+
+function hasProblem(id: string) {
+  return showProblems.value && problemIds.value.has(id)
+}
+
+function stepProblem(index: number) {
+  if (!showProblems.value) return false
+  const prefix = `step${index}.`
+  for (const id of problemIds.value) if (id.startsWith(prefix)) return true
+  return false
+}
+
 async function submit() {
-  if (props.readonly) return
+  if (readonly.value) return
   if (problemIds.value.size) {
     showProblems.value = true
     message.warning('先把标红的必填项补完')
@@ -767,25 +813,24 @@ async function submit() {
       optional: step.optional,
     })),
   }
-  if (props.workflow) payload.enabled = form.enabled
+  if (current.value) payload.enabled = form.enabled
 
   saving.value = true
   try {
-    const saved = props.workflow
-      ? await workflowsApi.update(props.workflow.id, payload)
-      : await workflowsApi.create(payload)
-    message.success('已保存')
-    emit('saved', saved)
-    emit('update:open', false)
+    if (current.value) await workflowsApi.update(current.value.id, payload)
+    else await workflowsApi.create(payload)
   } catch {
     return // 拦截器已把后端的校验原因弹出来了。
   } finally {
     saving.value = false
   }
+  message.success('已保存')
+  back() // 列表页在 onActivated 里重取，回到那一标签就是新数据。
 }
 </script>
 
 <style scoped>
+/* 页内布局沿用原抽屉：分组、卡片、芯片那套观感保持一致。 */
 .row {
   display: flex;
   gap: 12px;
@@ -1002,11 +1047,18 @@ async function submit() {
 .field-problem {
   border-color: #ff4d4f;
 }
+/* 数据没到位就先把话说清楚，别让空下拉看起来像「没有智能体可用」。 */
+.load-error {
+  margin-bottom: 16px;
+}
 .footer {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hairline);
 }
 .footer .muted {
   margin-right: auto;

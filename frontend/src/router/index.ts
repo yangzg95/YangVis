@@ -29,6 +29,15 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '工作流'},
     },
     {
+        // 工作流配置页：列表页「新建 / 编辑 / 查看」跳到这里，在顶栏占一个标签
+        // （见 App.vue 的 EXTRA_TABS）。不加 bare——保留主布局外壳，切去别的标签
+        // 再切回来，填了一半的草稿还在。
+        path: '/workflows/editor',
+        name: 'WorkflowEditor',
+        component: () => import('@/views/WorkflowEditor.vue'),
+        meta: {title: '工作流配置'},
+    },
+    {
         path: '/chat',
         name: 'Chat',
         component: () => import('@/views/Chat.vue'),

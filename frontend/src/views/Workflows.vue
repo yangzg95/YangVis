@@ -118,38 +118,29 @@
       <a-empty v-if="!workflows.length && !loadError" description="还没有工作流" />
     </template>
 
-    <WorkflowEditorDrawer
-      v-model:open="editorOpen"
-      :workflow="current"
-      :readonly="readonly"
-      :presets="builtinPresets"
-      @saved="onSaved"
-    />
     <WorkflowRunsDrawer v-model:open="runsOpen" :workflow="current" @changed="load" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { onActivated, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { PlusOutlined } from '@ant-design/icons-vue'
 import { workflowsApi, type Workflow, type WorkflowStep } from '@/api'
 import { fmtElapsed, runStatusColor, runStatusText } from '@/utils/format'
-import WorkflowEditorDrawer from '@/components/WorkflowEditorDrawer.vue'
+import { requestEditor } from '@/stores/workflowEditor'
 import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
+
+const router = useRouter()
 
 const workflows = ref<Workflow[]>([])
 const loading = ref(false)
 const loadError = ref('')
 const current = ref<Workflow | null>(null)
-const editorOpen = ref(false)
-const readonly = ref(false)
 const runsOpen = ref(false)
 /** 清理窗口：与后端启动时那次的默认口径一致，界面上可以临时收紧。 */
 const keepDays = ref(30)
-
-/** 内置流程都是调通的完整定义，给新建抽屉当起步模板。 */
-const builtinPresets = computed(() => workflows.value.filter((workflow) => workflow.is_builtin))
 
 interface StepGroup {
   name: string
@@ -201,33 +192,26 @@ function errorText(err: unknown, fallback: string): string {
   return envelope?.message || fallback
 }
 
+// 编辑器是顶栏上的独立标签页：把「打开谁」写进 store 再切过去，
+// 页面自己拉数据，列表这边不用再把整份定义传下去。
 function openCreate() {
-  current.value = null
-  readonly.value = false
-  editorOpen.value = true
+  requestEditor(null)
+  router.push('/workflows/editor')
 }
 
 function openEdit(workflow: Workflow) {
-  current.value = workflow
-  readonly.value = false
-  editorOpen.value = true
+  requestEditor(workflow.id)
+  router.push('/workflows/editor')
 }
 
 function openView(workflow: Workflow) {
-  current.value = workflow
-  readonly.value = true
-  editorOpen.value = true
+  requestEditor(workflow.id, true)
+  router.push('/workflows/editor')
 }
 
 function openRuns(workflow: Workflow) {
   current.value = workflow
   runsOpen.value = true
-}
-
-async function onSaved(saved: Workflow) {
-  // 抽屉里改完直接换清单：抽屉绑的是旧对象，不刷新的话第二次保存会拿旧定义覆盖。
-  current.value = saved
-  await load()
 }
 
 async function onDuplicate(workflow: Workflow) {
@@ -260,6 +244,17 @@ async function pruneRuns() {
 }
 
 onMounted(load)
+
+// 页面在 keep-alive 里：编辑器标签保存后切回来，清单得跟着换一份。
+// 首次激活紧接 onMounted，那一次跳过，不重复请求。
+let firstActivate = true
+onActivated(() => {
+  if (firstActivate) {
+    firstActivate = false
+    return
+  }
+  load()
+})
 </script>
 
 <style scoped>

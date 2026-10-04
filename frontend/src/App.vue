@@ -256,6 +256,13 @@ const LEAVES: MenuLeaf[] = MENU.flatMap((node) =>
 )
 const DEFAULT_TAB_PATH = LEAVES[0].path
 
+// 不在侧栏菜单里、但要在顶栏占标签的页面：工作流配置页从列表页点进来，
+// 与「对话」同排一个标签。只进标签体系（TAB_LEAVES），不进 MENU，侧栏看不到。
+const EXTRA_TABS: MenuLeaf[] = [
+  { path: '/workflows/editor', title: '工作流配置', icon: PartitionOutlined },
+]
+const TAB_LEAVES: MenuLeaf[] = [...LEAVES, ...EXTRA_TABS]
+
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
@@ -308,7 +315,7 @@ function restoreOpenTabs(): string[] {
   try {
     const raw: unknown = JSON.parse(localStorage.getItem(OPEN_TABS_KEY) ?? '[]')
     if (Array.isArray(raw)) {
-      const known = new Set(LEAVES.map((leaf) => leaf.path))
+      const known = new Set(TAB_LEAVES.map((leaf) => leaf.path))
       // 只恢复还认识的菜单路径（菜单调整后旧路径直接丢弃），并去重。
       const paths = [
         ...new Set(raw.filter((p): p is string => typeof p === 'string' && known.has(p))),
@@ -334,17 +341,17 @@ watch(openTabPaths, (paths) => {
 })
 const openTabs = computed(() =>
   openTabPaths.value
-    .map((path) => LEAVES.find((leaf) => leaf.path === path))
+    .map((path) => TAB_LEAVES.find((leaf) => leaf.path === path))
     .filter((leaf): leaf is MenuLeaf => Boolean(leaf)),
 )
 const activeTabKey = computed(() =>
-  LEAVES.some((leaf) => leaf.path === route.path) ? route.path : DEFAULT_TAB_PATH,
+  TAB_LEAVES.some((leaf) => leaf.path === route.path) ? route.path : DEFAULT_TAB_PATH,
 )
 
 watch(
   () => route.path,
   (path) => {
-    if (LEAVES.some((leaf) => leaf.path === path) && !openTabPaths.value.includes(path)) {
+    if (TAB_LEAVES.some((leaf) => leaf.path === path) && !openTabPaths.value.includes(path)) {
       openTabPaths.value = [...openTabPaths.value, path]
     }
   },
