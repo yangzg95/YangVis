@@ -916,7 +916,7 @@ async function onAnalyze(record: ResumeItem) {
 }
 
 // ---- 网盘原件下载 -------------------------------------------------------------
-// 绑定/解绑统一在「通用设置 → 百度网盘」里做；这里只消费行上的 has_netdisk 标记。
+// 绑定/解绑统一在「模型与集成 → 百度网盘」里做；这里只消费行上的 has_netdisk 标记。
 
 async function onDownload(record: ResumeItem) {
   downloadingId.value = record.id

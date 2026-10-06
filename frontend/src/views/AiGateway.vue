@@ -29,6 +29,11 @@
               当前已关闭正文留存（AI_GATEWAY_LOG_PAYLOAD=false），调用日志只记指标不记内容。
             </template>
           </div>
+          <!-- 与「模型与集成」互为反向指路：两个入口一个对外供给、一个站内自用。 -->
+          <div class="hint">
+            这里只管对外供给。控制台自己要用的对话与向量模型不在这儿，是每个账号在「模型与集成」页各自配置的。
+            <a-button size="small" type="link" @click="goModels()">去配置站内模型</a-button>
+          </div>
         </div>
 
         <div class="stat-row">
@@ -541,6 +546,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { Empty, message } from 'ant-design-vue'
 import { PlusOutlined } from '@ant-design/icons-vue'
 import {
@@ -557,9 +563,12 @@ import { copyText } from '@/utils/clipboard'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
+const router = useRouter()
 
 const tab = ref('overview')
 const forbidden = ref(false)
+
+const goModels = () => router.push('/system/settings')
 
 const overview = ref<AiGatewayOverview | null>(null)
 const channels = ref<AiChannelItem[]>([])

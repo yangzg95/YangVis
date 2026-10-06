@@ -1,10 +1,23 @@
 <template>
   <div class="page-card">
-    <div class="page-title">通用设置</div>
+    <div class="page-title">模型与集成</div>
 
     <a-tabs v-model:activeKey="activeTab">
       <!-- ================= 模型管理 ================= -->
       <a-tab-pane key="models" tab="模型管理">
+        <!-- 模型配置有两个入口，容易找错：这里是站内自用模型，AI 网关是对外供给。
+             两边各自指路，省得用户在两个页面之间来回翻。 -->
+        <a-alert type="info" show-icon class="gate-alert">
+          <template #message>这一页配的是站内自用模型</template>
+          <template #description>
+            控制台里的对话、简历、幻灯片与知识库检索都从这里取模型，每个账号各配各的。
+            如果你要找的是「把本站当成 OpenAI 接口给别人调用」，那是管理员在「AI 网关」维护的上游通道、模型路由与统一密钥。
+          </template>
+          <template #action>
+            <a-button v-if="auth.isAdmin" size="small" @click="goGateway">前往 AI 网关</a-button>
+          </template>
+        </a-alert>
+
         <a-alert
           v-if="!loading && !status.embedding.ready"
           type="warning"
@@ -283,6 +296,7 @@
 
 <script setup lang="ts">
 import { onMounted, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import { CloudOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import {
@@ -295,8 +309,14 @@ import {
   type NetdiskStatus,
   type ReadinessStatus,
 } from '@/api'
+import { useAuthStore } from '@/stores/auth'
+
+const router = useRouter()
+const auth = useAuthStore()
 
 const activeTab = ref('models')
+
+const goGateway = () => router.push('/system/ai-gateway')
 
 const models = ref<ModelConfig[]>([])
 const loading = ref(false)

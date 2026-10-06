@@ -131,6 +131,7 @@ import {
   ApiOutlined,
   AppstoreOutlined,
   BookOutlined,
+  BuildOutlined,
   CloseOutlined,
   CloudServerOutlined,
   DatabaseOutlined,
@@ -159,30 +160,31 @@ interface MenuLeaf {
   icon: unknown
 }
 
-// 分组按功能口径划：问答（问东西/查东西）与办公（投料→产出）分开，
-// 一级标题不带「智能」前缀——它描述的是能力而不是归属；「智能体」是名词，例外。
-// 智能体单独一级——它同时被对话、简历、幻灯片、数据库问答用（Agent 上的
-// use_knowledge/use_ops/use_memory 开关），挂在任何业务组里都会误导。
-// 工作流紧挨着智能体：它把智能体串成流水线，两者是一组配置项，都不属于某个业务页。
-// 分组的 path 只当 a-menu 的 key 用，永远不会被导航；/qa 因此不是路由。
+// 分组按「配置侧 / 使用侧」划：AI 构建装的是每个业务页都要先备好的原料与编排
+// （智能体的人设与工具开关、工作流的流水线、知识库的文档与索引），AI 应用装的是
+// 选一个智能体跑出结果的业务页。智能体不再单列一级——它和知识库、工作流同属配置侧，
+// 放在一起反而更容易看懂它为什么被所有业务页复用。
+// 分组的 path 只当 a-menu 的 key 用，永远不会被导航；/build、/apps 因此不是路由。
+// 注意：叶子仍保留各自的历史前缀（/knowledge、/office/*），组 key 不再与路由前缀
+// 一一对应，SidebarNav 的手风琴与图标回退都只读 MENU，不依赖前缀。
 const MENU: MenuNode[] = [
   { path: '/', title: '首页', icon: HomeOutlined },
-  { path: '/agents', title: '智能体', icon: RobotOutlined },
-  { path: '/workflows', title: '工作流', icon: PartitionOutlined },
   {
-    path: '/qa',
-    title: '问答',
-    icon: MessageOutlined,
+    path: '/build',
+    title: 'AI 构建',
+    icon: BuildOutlined,
     children: [
-      { path: '/chat', title: '对话', icon: MessageOutlined },
+      { path: '/agents', title: '智能体', icon: RobotOutlined },
+      { path: '/workflows', title: '工作流', icon: PartitionOutlined },
       { path: '/knowledge', title: '知识库', icon: BookOutlined },
     ],
   },
   {
-    path: '/office',
-    title: '办公',
+    path: '/apps',
+    title: 'AI 应用',
     icon: AppstoreOutlined,
     children: [
+      { path: '/chat', title: '对话', icon: MessageOutlined },
       { path: '/office/resume', title: '简历', icon: ProfileOutlined },
       { path: '/office/slides', title: '幻灯片', icon: FundProjectionScreenOutlined },
     ],
@@ -201,7 +203,7 @@ const MENU: MenuNode[] = [
     title: '系统设置',
     icon: SettingOutlined,
     children: [
-      { path: '/system/settings', title: '通用设置' },
+      { path: '/system/settings', title: '模型与集成' },
       { path: '/system/ai-gateway', title: 'AI 网关', icon: ApiOutlined, adminOnly: true },
       { path: '/system/users', title: '用户管理', icon: TeamOutlined, adminOnly: true },
     ],

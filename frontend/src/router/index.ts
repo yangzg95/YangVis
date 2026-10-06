@@ -14,8 +14,9 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/Home.vue'),
         meta: {title: '首页'},
     },
-    // 以下顺序就是侧栏菜单顺序：智能体 / 工作流 / 问答 / 办公 / 运维 / 系统设置。
-    // 菜单分组 key 与路由前缀一一对应，不再有 /settings 挂在 /system 组下的错位。
+    // 以下顺序就是侧栏菜单的叶子顺序：智能体 / 工作流 / 知识库 / 对话 / 简历 / 幻灯片 /
+    // 服务器 / 数据库 / 系统。分组 key（/build、/apps）只是 a-menu 的标识、不是路由，
+    // 也不要求与叶子前缀一致——/knowledge 与 /office/* 各自带历史前缀，保持不动。
     {
         path: '/agents',
         name: 'Agents',
@@ -38,16 +39,16 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '工作流配置'},
     },
     {
-        path: '/chat',
-        name: 'Chat',
-        component: () => import('@/views/Chat.vue'),
-        meta: {title: '对话'},
-    },
-    {
         path: '/knowledge',
         name: 'Knowledge',
         component: () => import('@/views/Knowledge.vue'),
         meta: {title: '知识库'},
+    },
+    {
+        path: '/chat',
+        name: 'Chat',
+        component: () => import('@/views/Chat.vue'),
+        meta: {title: '对话'},
     },
     {
         path: '/office',
@@ -134,7 +135,7 @@ const routes: RouteRecordRaw[] = [
         path: '/system/settings',
         name: 'Settings',
         component: () => import('@/views/Settings.vue'),
-        meta: {title: '通用设置'},
+        meta: {title: '模型与集成'},
     },
     {
         path: '/system/ai-gateway',
