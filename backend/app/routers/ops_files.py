@@ -160,7 +160,7 @@ async def download_file(
     # 连接和 sftp 客户端交给流生成器持有，生成器的 finally 里关——
     # handler 在第一个字节产出前就返回了，不能在这里 close。
     try:
-        sftp = await conn.start_sftp_client()
+        sftp = await ops_sftp.open_session(conn)
         home = await ops_sftp.home_of(sftp)
         target = ops_sftp.normalize_path(path, home)
         attrs = await sftp.stat(target)
@@ -182,6 +182,7 @@ async def download_file(
                     attrs.size,
                     chunk_size=settings.OPS_SFTP_CHUNK_SIZE,
                     max_requests=settings.OPS_SFTP_PIPELINE_REQUESTS,
+                    stall_timeout=settings.OPS_SFTP_STALL_TIMEOUT,
                 ):
                     yield chunk
             elapsed = time.monotonic() - started
@@ -194,7 +195,9 @@ async def download_file(
                 _mb_per_sec(attrs.size or 0, elapsed),
             )
             _audit(db, user.user_id, server, f"sftp download {target}", True)
-        except (asyncssh.Error, OSError) as exc:
+        except (asyncssh.Error, OSError, ops_sftp.SftpError) as exc:
+            # SftpError 在这里基本只有停顿看门狗一种：响应已经开始吐字节了，
+            # 错误没法再变成 JSON，只能就地收尾——浏览器会按「下载被截断」报错。
             _audit(db, user.user_id, server, f"sftp download {target}", False, str(exc))
             logger.warning("sftp download %s on server %s failed: %s", target, server.id, exc)
         except (asyncio.CancelledError, GeneratorExit):
@@ -224,16 +227,21 @@ class _UploadTooLarge(Exception):
 
 
 async def _iter_body_chunks(
-    file: UploadFile, limit: int, chunk_size: int
+    file: UploadFile,
+    limit: int,
+    chunk_size: int,
+    stall_timeout: float = settings.OPS_SFTP_STALL_TIMEOUT,
 ) -> AsyncIterator[bytes]:
     """按块读上传体并累计字节数，超限抛 ``_UploadTooLarge``。
 
     Starlette 对超 1MB 的 multipart 自动落临时盘，这里读的是 spool，内存有界。
     提成模块级函数是为了能直接单测（任何有 ``async read(n)`` 的对象都能喂）。
+    每块读取过停顿看门狗：页面被关而连接没散之类的停顿，不掐就是这条请求一直
+    吊着；抛出的 ``SftpError`` 由 upload_stream 原样透传，半截文件在那边清掉。
     """
     sent = 0
     while True:
-        chunk = await file.read(chunk_size)
+        chunk = await ops_sftp.stall_guard(file.read(chunk_size), stall_timeout)
         if not chunk:
             break
         sent += len(chunk)
@@ -283,8 +291,11 @@ async def upload_file(
         written = await ops_sftp.upload_stream(
             conn,
             target,
-            _iter_body_chunks(file, limit, settings.OPS_SFTP_CHUNK_SIZE),
+            _iter_body_chunks(
+                file, limit, settings.OPS_SFTP_CHUNK_SIZE, settings.OPS_SFTP_STALL_TIMEOUT
+            ),
             max_requests=settings.OPS_SFTP_PIPELINE_REQUESTS,
+            stall_timeout=settings.OPS_SFTP_STALL_TIMEOUT,
         )
     except _UploadTooLarge:
         # 半截文件已由 upload_stream 清掉；和改动前一样，超限不记审计。
@@ -296,6 +307,7 @@ async def upload_file(
         )
         return APIResponse(code=-1, message=oversize_message)
     except ops_sftp.SftpError as exc:
+        # 停顿看门狗到点也走这里（body 读取侧和 SFTP 写入侧都是 SftpError）。
         _audit(db, user.user_id, server, f"sftp upload {path}/{name}", False, str(exc))
         logger.warning("sftp upload %s on server %s failed: %s", f"{path}/{name}", server.id, exc)
         return APIResponse(code=-1, message=str(exc))

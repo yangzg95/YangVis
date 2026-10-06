@@ -112,7 +112,9 @@ class Settings(BaseSettings):
     # SFTP 远程文件浏览器。上传按块流式读入（Starlette 对超 1MB 的 multipart
     # 自动落临时盘），这个上限是边传边计数的字节上限，不再是内存上限；
     # 单请求内存占用约为 OPS_SFTP_CHUNK_SIZE × OPS_SFTP_PIPELINE_REQUESTS。
-    OPS_SFTP_MAX_UPLOAD_BYTES: int = 2 * 1024 * 1024 * 1024
+    # 500MB 也是网关的放行口径（nginx 侧 client_max_body_size 要略大于它，
+    # multipart 信封本身还要占一点），改这里记得同步网关。
+    OPS_SFTP_MAX_UPLOAD_BYTES: int = 500 * 1024 * 1024
     # 单次列目录的条目上限，超出截断并标记 truncated，防止巨型目录拖垮面板。
     OPS_SFTP_LIST_LIMIT: int = 2000
     # 上传/下载流式传输的块大小。不得调大：OpenSSH 收到超过 256KB 的单条
@@ -122,6 +124,13 @@ class Settings(BaseSettings):
     # SFTP 读写窗口内的并发请求数。和 CHUNK_SIZE 一起决定单条传输的内存上界
     # （默认 8 × 256KB = 2MB），也决定高延迟链路下的吞吐。
     OPS_SFTP_PIPELINE_REQUESTS: int = 8
+    # 打开 SFTP 会话的等待上限。SSH 建连那一步自有 OPS_SSH_TIMEOUT 兜底，但这
+    # 一步没有：对端会话数打满（OpenSSH 的 MaxSessions）时新通道请求会被静默
+    # 丢弃，没有超时就是一次「点一下转圈转到天荒地老」。
+    OPS_SFTP_OP_TIMEOUT: float = 30.0
+    # 上传/下载的停顿看门狗：连续这么久没有新字节进出，判定这条传输已经死了。
+    # 掐的是「不动」，慢但在动的长传输不受影响——大文件本来就该跑几十分钟。
+    OPS_SFTP_STALL_TIMEOUT: float = 60.0
 
     # 智能办公 · 百度网盘（xpan 开放平台）。三项任一为空白 = 网盘功能未启用，
     # 前端会隐藏绑定入口。AppKey/SecretKey 在开放平台控制台申请；APP_NAME 是

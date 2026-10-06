@@ -11,12 +11,17 @@
           <div class="trp-name" :title="item.remotePath">{{ item.name }}</div>
           <div class="trp-bar">
             <div
-              :class="['trp-bar-inner', item.status, { indeterminate: item.status === 'running' && !item.total }]"
+              :class="[
+                'trp-bar-inner',
+                item.status,
+                { indeterminate: item.status === 'running' && (!item.total || store.inServerTail(item)) },
+              ]"
               :style="{ width: barWidth(item) }"
             />
           </div>
           <div class="trp-meta">
             <span>{{ progressText(item) }}</span>
+            <span v-if="rateText(item)" class="trp-rate">{{ rateText(item) }}</span>
             <span :class="['trp-status', item.status]">{{ statusText(item) }}</span>
           </div>
         </div>
@@ -68,6 +73,23 @@ function progressText(item: TransferItem): string {
   return fmtSize(item.loaded)
 }
 
+/** 速率与预估剩余。只在跑动且样本够用时出现，不做「正在传但其实没动」的假承诺。 */
+function rateText(item: TransferItem): string {
+  if (item.status !== 'running' || !item.speed) return ''
+  const rest = remainingText(item)
+  return rest ? `${fmtSize(item.speed)}/s · ${rest}` : `${fmtSize(item.speed)}/s`
+}
+
+function remainingText(item: TransferItem): string {
+  if (!item.total || item.loaded >= item.total || !item.speed) return ''
+  // 尾段用「剩」而不是「预计」：上传到 100% 后剩下的时间不由浏览器这一跳决定，
+  // 按当前速率算出来的数只是参考。
+  const seconds = Math.ceil((item.total - item.loaded) / item.speed)
+  if (seconds < 60) return `剩 ${seconds} 秒`
+  if (seconds < 3600) return `剩 ${Math.floor(seconds / 60)} 分`
+  return `剩 ${Math.floor(seconds / 3600)} 小时 ${Math.floor(((seconds % 3600) / 60))} 分`
+}
+
 const STATUS_TEXT: Record<TransferItem['status'], string> = {
   running: '传输中',
   done: '已完成',
@@ -76,7 +98,15 @@ const STATUS_TEXT: Record<TransferItem['status'], string> = {
 }
 
 function statusText(item: TransferItem): string {
-  return item.status === 'error' && item.error ? item.error : STATUS_TEXT[item.status]
+  if (item.status === 'error' && item.error) return item.error
+  if (item.status === 'running') {
+    const idle = store.stallSeconds(item)
+    // 上传交完数据后网关和后端还在写盘，这一段浏览器量不出来，讲清楚比让
+    // 进度条停在 100% 转圈好。
+    if (store.inServerTail(item)) return `服务器写入中${idle ? ` · ${idle}s` : ''}`
+    if (idle) return `已 ${idle}s 无进展`
+  }
+  return STATUS_TEXT[item.status]
 }
 </script>
 
@@ -179,16 +209,21 @@ function statusText(item: TransferItem): string {
 
 .trp-meta {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 8px;
   color: #5f6b78;
   font-family: var(--font-mono);
   font-size: 11px;
 }
 
+.trp-rate {
+  color: #8b98a5;
+}
+
 .trp-status {
   flex-shrink: 0;
+  margin-left: auto;
   max-width: 55%;
   overflow: hidden;
   text-overflow: ellipsis;

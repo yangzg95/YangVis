@@ -1375,6 +1375,9 @@ class SftpListResult(BaseModel):
     path: str
     items: List[SftpEntry]
     truncated: bool = False
+    # 后端允许的上传上限（字节）。跟着列目录一起下发，面板就能在选文件的当下
+    # 拒绝超限，而不是让用户白传一整轮。
+    max_upload_bytes: int = 0
 
 
 class SftpMkdirRequest(BaseModel):

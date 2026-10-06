@@ -112,6 +112,19 @@
     <div v-if="busy || dropping" class="sfp-foot">
       {{ dropping ? `正在上传 ${dropDone} / ${dropTotal} …` : busyText }}
     </div>
+    <!-- 上传/下载在「传输」标签页里跑，这一行让用户在文件列表上也知道有事在跑，
+         点一下跳过去看细节，不用先猜进度在哪。 -->
+    <button
+      v-else-if="activeTransfer"
+      type="button"
+      class="sfp-foot sfp-foot-link"
+      @click="emit('showTransfers')"
+    >
+      <span class="sfp-foot-text">{{ activeText }}</span>
+      <span class="sfp-foot-join">
+        {{ moreRunning ? `还有 ${moreRunning} 条` : '查看' }}
+      </span>
+    </button>
 
     <a-modal
       v-model:open="mkdirOpen"
@@ -150,6 +163,8 @@ import { useTransfersStore } from '@/stores/transfers'
 import { fmtSize } from '@/utils/format'
 
 const props = defineProps<{ serverId: number }>()
+// 传输列表在父页面的另一个标签里，这里只负责跳过去。
+const emit = defineEmits<{ showTransfers: [] }>()
 const transfers = useTransfersStore()
 const auth = useAuthStore()
 // 只读账号能浏览和下载，写操作全部置灰（后端 upload/mkdir/delete 同样 403）。
@@ -206,6 +221,8 @@ async function load(path?: string) {
     currentPath.value = res.path
     entries.value = res.items
     truncated.value = res.truncated
+    // 上传上限随列目录下发，选完文件就能当场拒绝超限的那些。
+    transfers.noteUploadLimit(res.max_upload_bytes ?? 0)
     selected.value = null
   } catch (err: any) {
     errorMsg.value = err?.message || '加载失败'
@@ -351,6 +368,23 @@ async function onDelete() {
 }
 
 // ---- 展示格式 -----------------------------------------------------------------
+
+/** 最新发起的那条在跑的任务（列表头一个 running）。 */
+const activeTransfer = computed(() => transfers.items.find((t) => t.status === 'running') ?? null)
+
+const moreRunning = computed(() => Math.max(0, transfers.runningCount - (activeTransfer.value ? 1 : 0)))
+
+const activeText = computed(() => {
+  const item = activeTransfer.value
+  if (!item) return ''
+  const verb = item.kind === 'upload' ? '上传' : '下载'
+  const done = item.total
+    ? `${Math.min(100, Math.round((item.loaded / item.total) * 100))}%`
+    : fmtSize(item.loaded)
+  // 上传到 100% 还在跑，是网关和后端在写盘，这里别写成「100%」让人以为完了。
+  const tail = transfers.inServerTail(item) ? '写入中' : item.speed ? `${fmtSize(item.speed)}/s` : ''
+  return [`${verb} ${item.name}`, done, tail].filter(Boolean).join(' · ')
+})
 
 function fmtTime(mtime: number): string {
   if (!mtime) return ''
@@ -619,5 +653,40 @@ onMounted(() => load(''))
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 传输中的可点击一行：外观沿用 .sfp-foot，只在需要时抢一下注意力。 */
+.sfp-foot-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 10px;
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: transparent;
+  color: #3ad6de;
+  font: inherit;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sfp-foot-link:hover {
+  background: rgba(58, 214, 222, 0.08);
+}
+
+.sfp-foot-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfp-foot-join {
+  flex-shrink: 0;
+  color: #5f6b78;
 }
 </style>

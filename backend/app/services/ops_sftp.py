@@ -24,6 +24,11 @@ class SftpError(RuntimeError):
     """已翻译成用户可读消息的 SFTP 失败。"""
 
 
+def _stalled(timeout: float) -> SftpError:
+    """停顿看门狗到点。用 SftpError 是为了让路由层现成的分支接住它。"""
+    return SftpError(f"传输停顿超过 {timeout:.0f} 秒，已中断")
+
+
 def map_sftp_error(exc: BaseException) -> SftpError:
     if isinstance(exc, SftpError):
         return exc
@@ -53,6 +58,22 @@ def normalize_path(path: Optional[str], home: str) -> str:
     return path
 
 
+async def open_session(
+    conn: asyncssh.SSHClientConnection, timeout: Optional[float] = None
+) -> asyncssh.SFTPClient:
+    """``conn.start_sftp_client()`` 加超时。
+
+    SSH 建连那步由 ``ops_server.connect`` 管，这一步以前没人管：对端的会话数打满
+    或 sshd 卡住时，新通道请求会被静默丢弃，调用方永远等不到回复——面板上就是
+    一次点击、转圈转到用户怀疑人生。超时只是止损，会话本身交给调用方
+    ``async with`` 收尾。
+    """
+    if timeout is None:
+        timeout = get_settings().OPS_SFTP_OP_TIMEOUT
+    message = f"服务器无响应：打开 SFTP 会话超过 {timeout:.0f} 秒，请稍后重试"
+    return await stall_guard(conn.start_sftp_client(), timeout, message)
+
+
 async def home_of(sftp: asyncssh.SFTPClient) -> str:
     """登录用户的 home。SFTP 会话的起始工作目录就是 home。"""
     cwd = await sftp.getcwd()
@@ -64,7 +85,7 @@ async def home_of(sftp: asyncssh.SFTPClient) -> str:
 async def resolve_path(conn: asyncssh.SSHClientConnection, path: Optional[str]) -> str:
     """短开一条 SFTP 会话，把 path 规整成绝对路径（空 → home）。"""
     try:
-        async with conn.start_sftp_client() as sftp:
+        async with await open_session(conn) as sftp:
             return normalize_path(path, await home_of(sftp))
     except (asyncssh.Error, OSError) as exc:
         raise map_sftp_error(exc) from exc
@@ -75,7 +96,7 @@ async def list_dir(
 ) -> SftpListResult:
     settings = get_settings()
     try:
-        async with conn.start_sftp_client() as sftp:
+        async with await open_session(conn) as sftp:
             target = normalize_path(path, await home_of(sftp))
             names = await sftp.readdir(target)
     except (asyncssh.Error, OSError) as exc:
@@ -102,6 +123,9 @@ async def list_dir(
         path=target,
         items=items[: settings.OPS_SFTP_LIST_LIMIT] if truncated else items,
         truncated=truncated,
+        # 顺手把上传上限带给面板：它是这个页面的第一个请求，前端拿到上限就能在
+        # 用户选完文件的那一刻拒绝，而不是让他传完一整颗心再收一张 413。
+        max_upload_bytes=settings.OPS_SFTP_MAX_UPLOAD_BYTES,
     )
 
 
@@ -111,7 +135,7 @@ def _is_dir(attrs: asyncssh.SFTPAttrs) -> bool:
 
 async def make_dir(conn: asyncssh.SSHClientConnection, path: str) -> None:
     try:
-        async with conn.start_sftp_client() as sftp:
+        async with await open_session(conn) as sftp:
             target = normalize_path(path, await home_of(sftp))
             await sftp.mkdir(target)
     except (asyncssh.Error, OSError) as exc:
@@ -151,12 +175,36 @@ def _raise_first(tasks: set[asyncio.Task]) -> None:
         raise error
 
 
+async def stall_guard(awaitable, timeout: float, stall_message: Optional[str] = None):
+    """给一次 SFTP 等待套上停顿看门狗，到点抛出可读的 ``SftpError``。
+
+    只对「没有新字节进出」敏感：慢但在动的传输不会被误杀，真正 wedge 住的
+    （对端进程被 OOM 掉、SSH 通道半死）才会——那种情况不掐就是前端一个永远
+    停在「传输中」的僵尸任务。
+
+    不直接用 ``asyncio.wait_for``：3.12 起它只在外层抛超时，被等的那件事如果
+    自己吞掉 CancelledError 并「正常完成」，``wait_for`` 会把那个结果返回给你
+    而不是报超时（本机 3.13.2 实测）。看护不该赌第三方库怎么响应取消，所以这里
+    显式 wait → cancel → 回收：超时就一定抛错，在途任务也一定收干净。
+    """
+    task = asyncio.ensure_future(awaitable)
+    done, _ = await asyncio.wait({task}, timeout=timeout)
+    if not done:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if stall_message:
+            raise SftpError(stall_message)
+        raise _stalled(timeout)
+    return task.result()
+
+
 async def iter_file_chunks(
     remote: asyncssh.SFTPClientFile,
     size: Optional[int],
     *,
     chunk_size: int,
     max_requests: int = 8,
+    stall_timeout: Optional[float] = None,
 ) -> AsyncIterator[bytes]:
     """按序产出远程文件内容。
 
@@ -165,10 +213,16 @@ async def iter_file_chunks(
     边界的 RTT 空等。读取总量钳制在 size 内（响应带 Content-Length，多读
     会破坏 HTTP 响应）；中途读到空块说明文件被截断，停。``size`` 未知时
     没法排偏移，退化为顺序读。
+
+    两条路径都受 ``stall_timeout`` 看护：到点抛出 ``SftpError``，响应随之提前
+    结束，浏览器按「下载被截断」报错——比永远吊着一个不吐字节的响应好。
     """
+    if stall_timeout is None:
+        stall_timeout = get_settings().OPS_SFTP_STALL_TIMEOUT
+
     if size is None:
         while True:
-            chunk = await remote.read(chunk_size)
+            chunk = await stall_guard(remote.read(chunk_size), stall_timeout)
             if not chunk:
                 break
             yield chunk
@@ -187,7 +241,7 @@ async def iter_file_chunks(
                 next_offset += block_size
             if not pending:
                 break
-            block = await pending.pop(0)
+            block = await stall_guard(pending.pop(0), stall_timeout)
             if not block:
                 # 文件在下载途中被截断：提前结束（HTTP 侧响应随之变短，
                 # 浏览器报下载失败，和改动前的行为一致）。
@@ -209,20 +263,26 @@ async def upload_stream(
     chunks: AsyncIterator[bytes],
     *,
     max_requests: int = 8,
+    stall_timeout: Optional[float] = None,
 ) -> int:
     """流式上传：按到达顺序为每块分配递增 offset，窗口内并发 ``remote.write``。
 
     失败时尽力删除远端留下的半截文件。返回写入的字节数（审计用）。
     ``(asyncssh.Error, OSError)`` 翻译成 ``SftpError``；``CancelledError``
     和 chunks 迭代器自己抛的异常（比如路由层的大小超限）原样透传。
+
+    窗口回收与收尾各受 ``stall_timeout`` 看护：对端不再收字节就判死，走同一条
+    失败清理路径，半截文件不会留在服务器上。
     """
+    if stall_timeout is None:
+        stall_timeout = get_settings().OPS_SFTP_STALL_TIMEOUT
     offset = 0
     completed = False
     opened = False
     pending: set[asyncio.Task] = set()
     sftp: Optional[asyncssh.SFTPClient] = None
     try:
-        sftp = await conn.start_sftp_client()
+        sftp = await open_session(conn)
         # open 保持默认参数：写路径由 asyncssh 按服务端 write_len 自动切分，
         # 传大块 block_size 会让不广播 limits 的 OpenSSH 服务端直接断连。
         async with sftp.open(remote_path, "wb") as remote:
@@ -232,11 +292,15 @@ async def upload_stream(
                 offset += len(chunk)
                 if len(pending) >= max_requests:
                     done, pending = await asyncio.wait(
-                        pending, return_when=asyncio.FIRST_COMPLETED
+                        pending, return_when=asyncio.FIRST_COMPLETED, timeout=stall_timeout
                     )
+                    if not done:
+                        raise _stalled(stall_timeout)
                     _raise_first(done)
             if pending:
-                done, _ = await asyncio.wait(pending)
+                done, pending = await asyncio.wait(pending, timeout=stall_timeout)
+                if not done:
+                    raise _stalled(stall_timeout)
                 _raise_first(done)
         completed = True
         return offset
@@ -262,7 +326,7 @@ async def upload_stream(
 async def remove(conn: asyncssh.SSHClientConnection, path: str) -> None:
     """删除文件或目录。目录走 ``rmtree`` 递归——前端弹确认时已明示这一点。"""
     try:
-        async with conn.start_sftp_client() as sftp:
+        async with await open_session(conn) as sftp:
             target = normalize_path(path, await home_of(sftp))
             if await sftp.isdir(target):
                 await sftp.rmtree(target)

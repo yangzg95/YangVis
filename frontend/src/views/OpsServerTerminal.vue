@@ -83,7 +83,12 @@
             </button>
           </a-tooltip>
         </div>
-        <ServerFilePanel v-if="server" v-show="leftTab === 'files'" :server-id="serverId" />
+        <ServerFilePanel
+          v-if="server"
+          v-show="leftTab === 'files'"
+          :server-id="serverId"
+          @show-transfers="leftTab = 'transfer'"
+        />
         <TransferPanel v-show="leftTab === 'transfer'" />
       </aside>
 

@@ -12,7 +12,13 @@ from typing import Optional
 import pytest
 
 from app.routers.ops_files import _UploadTooLarge, _iter_body_chunks
-from app.services.ops_sftp import SftpError, iter_file_chunks, upload_stream
+from app.services.ops_sftp import (
+    SftpError,
+    iter_file_chunks,
+    open_session,
+    stall_guard,
+    upload_stream,
+)
 
 
 def run(coro):
@@ -41,6 +47,7 @@ class FakeRemote:
     - ``short_read``：单次 read 最多返回的字节数（模拟服务端合法短读）。
     - ``fail_read_at`` / ``fail_write_at``：到这个 offset 就抛 OSError。
     - ``truncated_at``：声称的 size 之外实际只有这么多数据（之后 read 返回空）。
+    - ``hang_from``：从这个 offset 起的读写永不返回（模拟对端 wedge 住）。
     - 每次 I/O 前睡随机小时长，打乱并发任务的完成顺序。
     """
 
@@ -52,6 +59,7 @@ class FakeRemote:
         fail_read_at: Optional[int] = None,
         fail_write_at: Optional[int] = None,
         truncated_at: Optional[int] = None,
+        hang_from: Optional[int] = None,
         seed: int = 42,
     ):
         self._data = data
@@ -59,6 +67,7 @@ class FakeRemote:
         self._fail_read_at = fail_read_at
         self._fail_write_at = fail_write_at
         self._truncated_at = truncated_at
+        self._hang_from = hang_from
         self._rng = random.Random(seed)
         self.written = bytearray()
         self.writes = []  # (offset, len(data))，记录落笔顺序
@@ -74,7 +83,12 @@ class FakeRemote:
     async def _settle(self):
         self.inflight -= 1
 
+    async def _maybe_hang(self, offset: int):
+        if self._hang_from is not None and offset >= self._hang_from:
+            await asyncio.sleep(3600)
+
     async def read(self, size: int = -1, offset: Optional[int] = None) -> bytes:
+        await self._maybe_hang(self._pos if offset is None else offset)
         await self._jitter()
         try:
             if offset is None:
@@ -94,6 +108,7 @@ class FakeRemote:
             await self._settle()
 
     async def write(self, data: bytes, offset: Optional[int] = None) -> int:
+        await self._maybe_hang(self._pos if offset is None else offset)
         await self._jitter()
         try:
             if offset is None:
@@ -304,13 +319,16 @@ def test_upload_empty_file_creates_no_writes_and_returns_zero():
 
 
 class FakeUpload:
-    """只有 ``async read(n)`` 的上传体。"""
+    """只有 ``async read(n)`` 的上传体。``hang_after`` 之后的读取永不返回。"""
 
-    def __init__(self, data: bytes):
+    def __init__(self, data: bytes, hang_after: Optional[int] = None):
         self._data = data
+        self._hang_after = hang_after
         self._pos = 0
 
     async def read(self, n: int = -1) -> bytes:
+        if self._hang_after is not None and self._pos >= self._hang_after:
+            await asyncio.sleep(3600)
         end = len(self._data) if n < 0 else self._pos + n
         chunk = self._data[self._pos : end]
         self._pos += len(chunk)
@@ -328,3 +346,112 @@ def test_body_chunks_over_limit_raises():
 
     with pytest.raises(_UploadTooLarge):
         run(collect(_iter_body_chunks(FakeUpload(data), len(data) - 1, 64 * 1024)))
+
+
+# ---- 停顿看门狗 / 会话打开超时 --------------------------------------------------
+# 这一组守的是「不再有任何进展」的传输：不掐的话前端任务永远停在「传输中」，
+# 用户只能靠手动取消，而串行队列里后面每个文件都排在它后面。
+
+
+def test_iter_pipelined_read_stall_trips_watchdog():
+    remote = FakeRemote(SOURCE, hang_from=128 * 1024)
+
+    async def main():
+        baseline = len(asyncio.all_tasks())
+        with pytest.raises(SftpError, match="传输停顿超过"):
+            await collect(
+                iter_file_chunks(
+                    remote,
+                    len(SOURCE),
+                    chunk_size=64 * 1024,
+                    max_requests=4,
+                    stall_timeout=0.05,
+                )
+            )
+        # 在途读任务全部取消并回收，不留僵尸请求。
+        assert len(asyncio.all_tasks()) == baseline
+
+    run(main())
+
+
+def test_iter_sequential_read_stall_trips_watchdog():
+    remote = FakeRemote(SOURCE, hang_from=64 * 1024)
+
+    async def main():
+        baseline = len(asyncio.all_tasks())
+        with pytest.raises(SftpError, match="传输停顿超过"):
+            await collect(
+                iter_file_chunks(
+                    remote, None, chunk_size=64 * 1024, max_requests=4, stall_timeout=0.05
+                )
+            )
+        assert len(asyncio.all_tasks()) == baseline
+
+    run(main())
+
+
+def test_upload_write_stall_trips_watchdog_and_removes_partial():
+    remote = FakeRemote(hang_from=128 * 1024)
+    conn, sftp = make_conn(remote)
+
+    async def main():
+        baseline = len(asyncio.all_tasks())
+        with pytest.raises(SftpError, match="传输停顿超过"):
+            await upload_stream(
+                conn,
+                "/tmp/f",
+                chunk_iterator(SOURCE, 64 * 1024),
+                max_requests=4,
+                stall_timeout=0.05,
+            )
+        assert len(asyncio.all_tasks()) == baseline
+
+    run(main())
+    assert sftp.removed == ["/tmp/f"]
+    assert sftp.exited
+
+
+def test_body_chunks_stall_raises_readable_error():
+    upload = FakeUpload(b"y" * (300 * 1024), hang_after=128 * 1024)
+
+    with pytest.raises(SftpError, match="传输停顿超过"):
+        run(collect(_iter_body_chunks(upload, 10**9, 64 * 1024, 0.05)))
+
+
+def test_open_session_timeout_is_reported_not_hung():
+    class WedgedConn:
+        """``start_sftp_client()`` 永不返回：对端会话数打满时就是这个表现。"""
+
+        async def start_sftp_client(self):
+            await asyncio.sleep(3600)
+
+    async def main():
+        baseline = len(asyncio.all_tasks())
+        with pytest.raises(SftpError, match="打开 SFTP 会话超过"):
+            await open_session(WedgedConn(), timeout=0.05)
+        assert len(asyncio.all_tasks()) == baseline
+
+    run(main())
+
+
+def test_stall_guard_ignores_a_task_that_swallows_cancellation():
+    """被等的 coroutine 吞掉 CancelledError 假装成功，看护也必须抛。
+
+    ``asyncio.wait_for``（3.12+）在这种情况下会把结果正常返回，等于看门狗形同
+    虚设——这正是本函数不直接用它的理由。
+    """
+    exited = []
+
+    async def stubborn():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            exited.append("swallowed")
+            return "假装成功"
+
+    async def main():
+        with pytest.raises(SftpError, match="传输停顿超过"):
+            await stall_guard(stubborn(), 0.05)
+
+    run(main())
+    assert exited == ["swallowed"]

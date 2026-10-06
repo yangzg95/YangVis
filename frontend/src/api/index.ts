@@ -1501,6 +1501,8 @@ export interface SftpListResult {
   path: string
   items: SftpEntry[]
   truncated: boolean
+  /** 后端允许的上传上限（字节），0 表示没告知。 */
+  max_upload_bytes?: number
 }
 
 /** SFTP 下载地址。流式落盘走 fetch（不经 axios），URL 在这里集中拼。 */

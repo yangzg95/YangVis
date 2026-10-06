@@ -176,13 +176,42 @@ npm run dev                   # http://localhost:5173，/api 与网关的 /v1 �
 | `OPS_OUTPUT_LIMIT` `OPS_SQL_ROW_LIMIT` | 8192 / 200 | 回传模型的输出/行数上限 |
 | `OPS_EXPORT_MAX_ROWS` | 200000 | 数据页「导出全部」的单次行数上限，超了直接拒 |
 | `OPS_CONFIRM_TIMEOUT` | 180 | 写操作确认等待时长（秒） |
-| `OPS_SFTP_MAX_UPLOAD_BYTES` `OPS_SFTP_LIST_LIMIT` | 50MB / 2000 | SFTP 面板限制 |
+| `OPS_SFTP_MAX_UPLOAD_BYTES` `OPS_SFTP_LIST_LIMIT` | 500MB / 2000 | SFTP 面板的单文件大小上限与单次列目录条数 |
+| `OPS_SFTP_OP_TIMEOUT` `OPS_SFTP_STALL_TIMEOUT` | 30 / 60 | 打开 SFTP 会话的等待上限、传输连续这么久没有新字节进出就判死（秒） |
 | `BAIDU_NETDISK_APP_KEY/SECRET_KEY/APP_NAME` | 空 | 任一为空则网盘功能整体隐藏 |
 | `MODEL_HTTP_TIMEOUT` | 30 | 调用户模型服务的出站超时 |
 | `AI_GATEWAY_CONNECT_TIMEOUT` `AI_GATEWAY_READ_TIMEOUT` | 10 / 300 | 网关转发上游的连接/读取超时（秒） |
 | `AI_GATEWAY_LOG_PAYLOAD` `AI_GATEWAY_LOG_MAX_CHARS` | true / 8000 | 是否把请求响应正文写进审计日志、单条正文截断字符数 |
 | `AI_GATEWAY_MAX_ATTEMPTS` | 3 | 单次调用最多尝试几条上游通道 |
 | `AI_GATEWAY_PUBLIC_ORIGIN` | 空 | 对外公布的站点 origin（如 `https://ai.nanwa.xyz`），概览页据此显示接入地址；留空则按打开控制台时的 origin 推导。`/v1` 由程序拼接 |
+
+### 上传上限与反代配合
+
+SFTP 文件面板的单文件大小上限由三处共同决定，**改一边必须同步改另一边**，否则超限的传输会以看不懂的姿势失败：
+
+| 位置 | 作用 |
+| --- | --- |
+| `OPS_SFTP_MAX_UPLOAD_BYTES`（默认 500MB） | 后端真正的字节上限，边读边计数，超限即断 |
+| 反代 `client_max_body_size`（略大于它，如 512m） | 网关的放行口径，multipart 信封本身还要占一点 |
+| 列表接口回传的 `max_upload_bytes` | 前端选文件时本地预检，超限直接报错、不发请求 |
+
+反代必须为这条通道关掉**请求体缓冲**，否则上传进度条是假的：
+
+```nginx
+location ^~ /api/ops/servers/ {
+    proxy_pass http://127.0.0.1:18099;
+    proxy_http_version 1.1;
+    client_max_body_size 512m;        # 略大于 OPS_SFTP_MAX_UPLOAD_BYTES
+    proxy_request_buffering off;      # 关键：不关就没有真实上传进度
+    proxy_buffering off;              # 下载同理，边读边发
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+}
+```
+
+默认 `proxy_request_buffering on` 会让 nginx 先把整个请求体吸进自己的临时盘再转给后端，浏览器几秒内就把数据全交完，进度条从此停在 100% 干等几分钟——看着就是卡死。在一套与线上一致的配置下实测（`http2 on`、20MB 请求体、后端固定 2MB/s 消费）：缓冲开时请求体 0.12 秒交给 nginx、之后空等 10.16 秒才拿到响应；缓冲关时 nginx 按后端真实速率反压浏览器，交数据本身就耗时 5.49 秒，浏览器看到的就是端到端速率。
+
+超时给到 1 小时：慢但仍在动的长传输不该由 nginx 掐断，真正断流的由后端停顿看门狗（`OPS_SFTP_STALL_TIMEOUT`，60 秒没有新字节进出就判死）负责报错。前缀写成 `^~` 是为了压过可能更短的 `location /api/`；这条只管文件通道，终端 WebSocket 走 `/api/ops/terminal`，不受它影响。站点其它 location 里已有的通用反代头（`Host` / `X-Forwarded-*`）照抄一份即可。
 
 ## API 概览
 
