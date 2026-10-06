@@ -48,7 +48,7 @@
           <PlayCircleOutlined /> 开始运行
         </a-button>
         <a-button v-if="!running" size="small" @click="resetComposer">收起</a-button>
-        <span v-if="running" class="muted">关掉抽屉不会中断已跑完的步骤，进度随时回来接着看。</span>
+        <span v-if="running" class="muted">关掉抽屉不会中断运行，进度随时回来接着看。</span>
       </a-space>
     </div>
 
@@ -264,6 +264,8 @@ const composerOpen = ref(false)
 const running = ref(false)
 /** 在跟随一条**别人发起**的流（功能页面的生成、或刚重跑完的那一步）。 */
 const following = ref(false)
+/** 本次打开里用户明点过「停止跟随」：不再自动接回还在跑的那次。 */
+let followSuppressed = false
 /** 正在等后端受理的重跑，形状是 ``运行 id:步骤 key``，用来只转那一颗按钮。 */
 const rerunning = ref<string | null>(null)
 const inputs = reactive<Record<string, string>>({})
@@ -366,6 +368,7 @@ watch(
       return
     }
     resetComposer()
+    followSuppressed = false
     expanded.value = []
     // 每次打开都回默认视图：上次筛的是「失败」，这次进来却显示全部，比多一次
     // 点击更容易看错。
@@ -398,9 +401,15 @@ async function loadRuns() {
     }
     // 最新那次还在跑就接上它的进度——功能页面发起的生成本来就不在任何流里跑，
     // 而从这一页发起的那次，关掉再重开也早就断了流。不接的话这里只能看到打开
-    // 抽屉那一刻的快照，得手动刷新才知道跑完了。
+    // 抽屉那一刻的快照，得手动刷新才知道跑完了。用户明点过停止跟随的例外：
+    // 那一手是「别跟了」，不是「换个姿势接着跟」。
     const newest = runs.value[0]
-    if (!liveBusy.value && newest && (newest.status === 'pending' || newest.status === 'running')) {
+    if (
+      !liveBusy.value &&
+      !followSuppressed &&
+      newest &&
+      (newest.status === 'pending' || newest.status === 'running')
+    ) {
       attachFollow(newest.id)
     }
   } catch (err) {
@@ -563,26 +572,17 @@ function stopFollow() {
 }
 
 /**
- * 停止跟随。两种情况不一样：发起的那次一断流，执行器就在下一个组边界收手，
- * 这次运行会变成「已取消」；而只是接上的那条流断了不动运行本身，清掉面板、
- * 回列表看刷新后的状态。
+ * 停止跟随。执行挂在后端自己的任务上：断这条流不会让运行停下来，
+ * 发起的那次也一样——这里只是收起面板、回列表看刷新后的状态，
+ * 本次打开里不再自动接回；想看进度，重开抽屉会接上还在跑的那次。
  */
 function stopLive() {
-  const startedHere = running.value
+  followSuppressed = true
   stopFollow()
-  if (!startedHere) {
-    following.value = false
-    clearLive()
-    void loadRuns()
-    return
-  }
   running.value = false
-  live.status = 'cancelled'
-  live.steps = live.steps.map((step) =>
-    step.status === 'pending' || step.status === 'running' ? { ...step, status: 'skipped' } : step,
-  )
+  following.value = false
+  clearLive()
   void loadRuns()
-  emit('changed')
 }
 
 function clearLive() {

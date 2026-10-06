@@ -31,8 +31,8 @@ from app.models.schemas import ModelPurpose, WorkflowCreate, WorkflowUpdate
 from app.services import workflows as workflows_module
 from app.services.workflows import (
     BUILTIN_WORKFLOWS,
-    RUN_CANCELLED,
     RUN_FAILED,
+    RUN_PENDING,
     RUN_RUNNING,
     RUN_SUCCEEDED,
     STALE_RUN_ERROR,
@@ -51,6 +51,7 @@ from app.services.workflows import (
     prepare_step_rerun,
     prune_runs,
     render_prompt,
+    stream_run,
     rerun_step,
     reset_stale_runs,
     seed_builtin_workflows,
@@ -125,7 +126,7 @@ def _stub_model(monkeypatch, reply_for):
     return calls
 
 
-def _run_all(db, owner_id: int, run_id: int, **kwargs) -> list[tuple[str, dict]]:
+def _run_all(db, owner_id: int, run_id: int) -> list[tuple[str, dict]]:
     """跑完一次运行并返回事件列表。
 
     结束前后各 rollback 一次：步骤写的是另一条连接，而 SQLite 的读事务从第一次
@@ -134,7 +135,7 @@ def _run_all(db, owner_id: int, run_id: int, **kwargs) -> list[tuple[str, dict]]
     async def collect():
         return [
             (event, payload)
-            async for event, payload in execute_run(owner_id=owner_id, run_id=run_id, **kwargs)
+            async for event, payload in execute_run(owner_id=owner_id, run_id=run_id)
         ]
 
     events = asyncio.run(collect())
@@ -1197,22 +1198,49 @@ def test_execute_run_fails_json_step_on_missing_contract_field(db, monkeypatch):
     assert "suggestions" in events[-1][1]["error"]
 
 
-def test_execute_run_cancels_when_client_leaves(db, monkeypatch):
+def test_stream_run_finishes_the_run_when_the_consumer_leaves(db, monkeypatch):
+    """断流只关转发流：执行在自己的任务上跑完，运行行必须进终态。
+
+    旧实现把执行生成器直接挂在 SSE 响应上，客户端一断，取消打在建到一半的
+    生成器上，步骤各自跑完了、运行的终态却没人写——界面上永远「执行中」。
+    """
     _chat_model(db)
     workflow = _two_step_workflow(db)
     run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
     _stub_model(monkeypatch, {"writer": "初稿", "scorer": "8 分"}.get)
 
-    async def disconnected():
-        return True
+    async def drive():
+        stream = stream_run(OWNER, run.id)
+        assert (await stream.__anext__())[0] == "run_start"
+        await stream.aclose()  # 相当于页面被关掉：这条流不接了
+        for _ in range(500):
+            await asyncio.sleep(0.01)
+            db.rollback()
+            status = WorkflowService(db, OWNER).get_run(run.id).status
+            if status not in (RUN_PENDING, RUN_RUNNING):
+                return status
+        return status
 
-    events = _run_all(db, OWNER, run.id, is_disconnected=disconnected)
+    db.rollback()
+    assert asyncio.run(drive()) == RUN_SUCCEEDED
 
-    assert [name for name, _ in events] == ["run_start"]
-    assert WorkflowService(db, OWNER).get_run(run.id).status == RUN_CANCELLED
-    assert all(
-        row.status == STEP_SKIPPED for row in WorkflowService(db, OWNER).run_steps(run.id)
-    )
+
+def test_stream_run_fails_the_run_when_executor_crashes(db, monkeypatch):
+    """执行体在第一步之前就炸（没配对话模型）：运行落成失败，不能停在 pending 空挂。"""
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _stub_model(monkeypatch, {"writer": "x", "scorer": "y"}.get)
+
+    async def collect():
+        return [(event, payload) async for event, payload in stream_run(OWNER, run.id)]
+
+    db.rollback()
+    events = asyncio.run(collect())
+    db.rollback()
+    assert events[-1][0] == "error"
+    finished = WorkflowService(db, OWNER).get_run(run.id)
+    assert finished.status == RUN_FAILED
+    assert finished.error_msg
 
 
 def test_execute_run_requires_a_chat_model_before_any_event(db, monkeypatch):
@@ -1287,6 +1315,29 @@ def test_follow_run_replays_the_scene_and_closes_a_settled_run(db):
         "error": "上游 502",
         "elapsed_ms": None,
     }
+
+
+def test_follow_run_heals_a_run_stuck_at_running(db):
+    """僵尸修复：每一步都定了、运行行还停在跑。
+
+    旧实现把执行挂在发起的 SSE 上，断流时终态落库那段没跑到，留下的就是这种行。
+    跟随要先按步骤行重算再收流——不修的话它会永远转圈，界面永远「执行中」。
+    """
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _scene(
+        db,
+        run.id,
+        RUN_RUNNING,
+        draft=(STEP_SUCCEEDED, "初稿"),
+        score=(STEP_SUCCEEDED, "8 分"),
+    )
+
+    events = _follow_all(db, run.id, lambda: None)
+
+    assert events[-1][0] == "run_end"
+    assert events[-1][1]["status"] == RUN_SUCCEEDED
+    assert WorkflowService(db, OWNER).get_run(run.id).status == RUN_SUCCEEDED
 
 
 def test_follow_run_streams_only_what_the_client_missed(db):

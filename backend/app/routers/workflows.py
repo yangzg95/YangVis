@@ -32,11 +32,11 @@ from app.models.schemas import (
 )
 from app.services.workflows import (
     WorkflowService,
-    execute_run,
     follow_run,
     prepare_step_rerun,
     prune_runs,
     rerun_step,
+    stream_run,
 )
 from app.sse import SSE_HEADERS, sse_event
 
@@ -136,11 +136,10 @@ async def follow_run_stream(
     request: Request,
     service: WorkflowService = Depends(get_service),
 ) -> StreamingResponse:
-    """接上一次正在跑的运行，把之后的进度以 SSE 推回来。
+    """接上一次已经在跑的运行，把之后的进度以 SSE 推回来。
 
-    与 ``POST /{workflow_id}/runs/stream`` 分工：那条流边跑边报，这条只读已经落库
-    的状态。功能侧发起的生成（简历分析、幻灯片）本来就不在任何流里跑，页面中途
-    打开也要看得见进度，事件形状两边一致。
+    这条流只观察不执行：进度读的是已经落库的步骤行。功能侧发起的生成（简历分析、
+    幻灯片）本来就不在任何流里跑，页面中途打开也要看得见进度，事件形状两边一致。
 
     先查一次归属：404 得发生在响应变成流之前，那时还有状态码可给。
     """
@@ -149,10 +148,16 @@ async def follow_run_stream(
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
+    return _follow_response(service.owner_id, run_id, request)
+
+
+def _follow_response(owner_id: int, run_id: int, request: Request) -> StreamingResponse:
+    """把一次运行的进度以 SSE 观察出去：发起的那条流与中途接上共用这一份。"""
+
     async def stream() -> AsyncIterator[str]:
         try:
             async for event, data in follow_run(
-                owner_id=service.owner_id,
+                owner_id=owner_id,
                 run_id=run_id,
                 is_disconnected=request.is_disconnected,
             ):
@@ -297,10 +302,13 @@ async def duplicate_workflow(
 async def run_workflow_stream(
     workflow_id: int,
     payload: WorkflowRunRequest,
-    request: Request,
     service: WorkflowService = Depends(get_service),
 ) -> StreamingResponse:
     """发起一次运行并把进度以 SSE 推回来。
+
+    执行挂在自己的后台任务上，这条响应只是转发：关掉页面只会断掉流，不会把
+    运行留在「执行中」——旧实现让响应直接消费执行生成器，断流的取消让它跑不到
+    终态落库那一段。
 
     与对话的 ``/chat/completions`` 同一条约定：响应是流，没有单一 JSON 体可套通
     用信封，所以错误也是 ``error`` 事件（这时 200 和它的头多半已经发出去了）。
@@ -316,18 +324,8 @@ async def run_workflow_stream(
         return _error_stream(-1, str(exc))
 
     async def stream() -> AsyncIterator[str]:
-        try:
-            async for event, data in execute_run(
-                owner_id=service.owner_id,
-                run_id=run.id,
-                is_disconnected=request.is_disconnected,
-            ):
-                yield sse_event(event, data)
-        except BusinessError as exc:
-            yield sse_event("error", {"code": exc.code, "message": exc.msg})
-        except Exception as exc:  # noqa: BLE001 - 流不能只停不掉
-            logger.exception("workflow run %s failed to start streaming", run.id)
-            yield sse_event("error", {"code": -1, "message": f"工作流执行失败：{exc}"})
+        async for event, data in stream_run(service.owner_id, run.id):
+            yield sse_event(event, data)
 
     return StreamingResponse(
         stream(),

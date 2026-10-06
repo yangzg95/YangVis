@@ -1629,7 +1629,6 @@ async def execute_run(
     *,
     owner_id: int,
     run_id: int,
-    is_disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
 ) -> AsyncIterator[Tuple[str, object]]:
     """执行一次已经建好的运行，产出 ``(event, payload)`` 供 SSE 转发。
 
@@ -1639,8 +1638,9 @@ async def execute_run(
     每步的写入都是即时提交的，所以进度既不依赖这条流（换设备打开历史详情也
     能看到跑到哪了），也不会因为最后一起提交而整段丢失。
 
-    ``is_disconnected`` 与对话的流式回答同一用法：用户关掉页面就停在这里，
-    已经完成的步骤保留它们的终态，没跑的标成 ``skipped``。
+    调用方必须是**消费到底**的一方（:func:`stream_run` 的后台任务或功能侧的
+    后台任务）：运行的终态在生成器走完时才会落库，半路丢掉生成器会把运行
+    永远留在 running。
     """
     from app.database import SessionLocal
 
@@ -1695,12 +1695,8 @@ async def execute_run(
         queue: asyncio.Queue = asyncio.Queue()
         started = time.monotonic()
         failed: Optional[str] = None
-        aborted = False
 
         for group_key, group in _group_order(steps):
-            if is_disconnected is not None and await is_disconnected():
-                aborted = True
-                break
 
             async def _drive(members: List[WorkflowStep]) -> None:
                 results = await asyncio.gather(
@@ -1770,20 +1766,11 @@ async def execute_run(
         )
 
         run = db.get(WorkflowRun, run_id)
-        run.status = RUN_CANCELLED if aborted else (RUN_FAILED if failed else RUN_SUCCEEDED)
-        if aborted:
-            # 取消也写个原因：业务行的状态现在是从这条运行翻译出来的，一个没有任何
-            # 说明的失败只会让用户看到「失败」两个字。
-            run.error_msg = "页面已关闭，本次运行已中止"
-        else:
-            run.error_msg = failed
+        run.status = RUN_FAILED if failed else RUN_SUCCEEDED
+        run.error_msg = failed
         run.elapsed_ms = int((time.monotonic() - started) * 1000)
         run.finished_at = db_now()
         db.commit()
-
-        if aborted:
-            # 不发 run_end：客户端已经走了，这里的意义就在于把状态收干净。
-            return
 
         yield "run_end", {
             "run_id": run_id,
@@ -1791,6 +1778,63 @@ async def execute_run(
             "error": run.error_msg,
             "elapsed_ms": run.elapsed_ms,
         }
+
+
+# ---- 脱离响应执行运行 --------------------------------------------------------
+
+# asyncio 只对任务持弱引用：没人 await 的分离任务可能跑到一半就被回收，这里吊着它。
+_DETACHED_RUNS: set[asyncio.Task] = set()
+
+# 转发队列的收尾哨兵：执行任务结束（跑完或炸完）后流就到头了。
+_RUN_STREAM_END = object()
+
+
+async def stream_run(
+    owner_id: int, run_id: int
+) -> AsyncIterator[Tuple[str, object]]:
+    """执行一次运行并把事件转发出去，但执行挂在**自己的任务**上。
+
+    旧实现让 SSE 响应直接消费执行生成器，客户端一断流，取消打在建到一半的
+    生成器上——步骤是各自的任务能自己跑完，运行行的终态却没人写了，界面上
+    永远「执行中」。现在断流只是这条转发流停了：后台任务照常跑到底、照常
+    收尾，进度回头用 :func:`follow_run` 接。
+
+    执行体自己没兜住的异常（多半是第一步之前的模型门槛）在这里落终态，
+    运行不会停在跑一半。
+    """
+    from app.database import SessionLocal
+
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def _execute() -> None:
+        try:
+            async for event, payload in execute_run(owner_id=owner_id, run_id=run_id):
+                await queue.put((event, payload))
+        except BusinessError as exc:
+            logger.info("workflow run %s refused before start: %s", run_id, exc.msg)
+            message = exc.msg
+            code = exc.code
+            with SessionLocal() as db:
+                settle_run_status(db, owner_id, run_id, error=message)
+            await queue.put(("error", {"code": code, "message": message}))
+        except Exception as exc:  # noqa: BLE001 - 不能让运行无声地停在跑一半
+            logger.exception("workflow run %s crashed", run_id)
+            message = model_error_text(exc)
+            with SessionLocal() as db:
+                settle_run_status(db, owner_id, run_id, error=message)
+            await queue.put(("error", {"code": -1, "message": f"工作流执行失败：{message}"}))
+        finally:
+            await queue.put(_RUN_STREAM_END)
+
+    task = asyncio.create_task(_execute())
+    _DETACHED_RUNS.add(task)
+    task.add_done_callback(_DETACHED_RUNS.discard)
+
+    while True:
+        item = await queue.get()
+        if item is _RUN_STREAM_END:
+            return
+        yield item
 
 
 # ---- 中途接上正在跑的运行 ----------------------------------------------------
@@ -1861,7 +1905,7 @@ async def follow_run(
     里已经落库的事实，事件名与载荷形状跟 :func:`execute_run` 一致，所以客户端
     不用为「跟着跑」和「中途接上」写两套解析。
 
-    运行进终态就收流；``is_disconnected`` 与 :func:`execute_run` 同一用法。
+    运行进终态就收流；``is_disconnected`` 只管关掉这条观察的流，运行照跑。
     """
     from app.database import SessionLocal
 
@@ -1909,6 +1953,16 @@ async def follow_run(
             if state is None:
                 # 记录被清理掉了：接着转圈只会让界面卡在「执行中」。
                 raise LookupError("运行记录不存在")
+            if state["status"] in (RUN_PENDING, RUN_RUNNING) and steps and all(
+                info["status"] in _STEP_SETTLED for info in steps.values()
+            ):
+                # 每一步都定下来了，运行行却还停在跑：执行体半路没了（旧实现把
+                # 终态落库挂在发起的那条 SSE 上，断流就没人收尾）。按步骤行修
+                # 一次——不修的话这里会永远转圈，界面也永远「执行中」。
+                settle_run_status(db, owner_id, run_id)
+                state, steps = _follow_state(db, owner_id, run_id)
+                if state is None:
+                    raise LookupError("运行记录不存在")
             for key, info in steps.items():
                 if info["status"] == seen.get(key):
                     continue
