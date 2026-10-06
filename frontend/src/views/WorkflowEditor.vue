@@ -116,218 +116,61 @@
         <span class="section-title">步骤</span>
         <span class="muted">{{ form.steps.length }} 步 · {{ groupCount }} 个并行组</span>
       </div>
-      <div class="hint block">
-        数组顺序就是执行顺序：相邻且分组名相同的步骤算一组，组内并行、组间顺序执行。
-        分组名不用记：「加一步」自动开新组，「加一个并行步骤」自动并入上一组，要合并再在高级里改成同名。
-      </div>
 
-      <div
-        v-for="(step, index) in form.steps"
-        :key="index"
-        class="step-card"
-        :class="{ 'field-problem': stepProblem(index) }"
-      >
-        <div class="step-head">
-          <span class="step-no">{{ index + 1 }}</span>
-          <a-input
-            v-model:value="step.key"
-            placeholder="步骤标识"
-            size="small"
-            class="w-key"
-            :disabled="readonly"
-            :status="hasProblem(`step${index}.key`) ? 'error' : undefined"
-          />
-          <a-select
-            v-model:value="step.agent_slug"
-            :options="agentOptions"
-            placeholder="选择人设"
-            size="small"
-            show-search
-            option-filter-prop="label"
-            class="w-agent"
-            :disabled="readonly"
-            :status="hasProblem(`step${index}.agent`) ? 'error' : undefined"
-          >
-            <!-- 下拉里带一句人设描述：选之前就知道这是位干什么的，不用凭名字猜。 -->
-            <template #option="opt">
-              <div class="agent-opt">
-                <span>{{ opt.label }}</span>
-                <span class="agent-opt-desc">{{ opt.agent?.description || '无描述' }}</span>
-              </div>
-            </template>
-          </a-select>
-          <a-tag class="group-tag">{{ step.group_key.trim() || '未分组' }}</a-tag>
-          <span class="spacer" />
-          <a-button
-            v-if="!readonly"
-            size="small"
-            type="text"
-            @click="advancedOpen[index] = !advancedOpen[index]"
-          >
-            {{ advancedOpen[index] ? '收起' : '高级' }}
-          </a-button>
-          <a-button
-            size="small"
-            type="text"
-            :disabled="index === 0 || readonly"
-            @click="move(index, -1)"
-          >
-            <ArrowUpOutlined />
-          </a-button>
-          <a-button
-            size="small"
-            type="text"
-            :disabled="index === form.steps.length - 1 || readonly"
-            @click="move(index, 1)"
-          >
-            <ArrowDownOutlined />
-          </a-button>
-          <a-button
-            size="small"
-            type="text"
-            danger
-            :disabled="form.steps.length <= 1 || readonly"
-            @click="form.steps.splice(index, 1)"
-          >
-            <DeleteOutlined />
-          </a-button>
-        </div>
-
-        <!-- 选中后把这个人设是谁、管什么摆在手边；点开能看全系统提示词，
-             配下游引用时不用切去智能体页对照。 -->
-        <div v-if="agentOf(step.agent_slug)" class="agent-hint">
-          <span class="muted">{{ agentOf(step.agent_slug)?.description || '这个人设没有描述' }}</span>
-          <a-popover placement="left" trigger="click" title="人设（系统提示词）">
-            <template #content>
-              <pre
-                style="
-                  max-width: 420px;
-                  max-height: 320px;
-                  overflow: auto;
-                  white-space: pre-wrap;
-                  word-break: break-word;
-                  font-size: 12px;
-                  margin: 0;
-                "
-              >{{ agentOf(step.agent_slug)?.system_prompt }}</pre>
-            </template>
-            <a-button size="small" type="link">查看人设</a-button>
-          </a-popover>
-        </div>
-
-        <a-form-item label="Prompt 模板" class="tight">
-          <div class="prompt-wrap">
-            <a-textarea
-              v-model:value="step.prompt_tpl"
-              :rows="4"
-              placeholder="就{{topic}}写一段话；打 {{ 会弹出可引用的变量"
-              :disabled="readonly"
-              :status="hasProblem(`step${index}.prompt`) ? 'error' : undefined"
-              @input="onPromptInput(index, $event)"
-              @keydown="onPromptKeydown(index, $event)"
-              @blur="closeCompletion"
-            />
-            <!-- 「{{」自动补全：候选就是下面芯片那一份集合，键盘上下选、回车补。 -->
-            <div v-if="completion.step === index && completion.items.length" class="completion">
-              <button
-                v-for="(name, i) in completion.items"
-                :key="name"
-                type="button"
-                :class="{ 'completion-active': i === completion.active }"
-                @mousedown.prevent="applyCompletion(name)"
-              >
-                {{ '{' + '{' + name + '}' + '}' }}
-              </button>
-            </div>
+      <!-- 左边列表是唯一的操作面，右边结构图只用来一眼看清并行关系与引用走向。 -->
+      <div class="step-zone">
+        <div ref="stepListEl" class="step-list" @focusin="onCardFocus">
+          <div class="hint block">
+            数组顺序就是执行顺序：相邻且分组名相同的步骤算一组，组内并行、组间顺序执行。
+            分组名不用记：「加一步」自动开新组，「加一个并行步骤」自动并入上一组，要合并再在高级里改成同名。
           </div>
-          <!-- 引用芯片按来源分组：整段是这一步拿全部产物，带点的是 JSON 步按字段取。
-               列什么是后端说了算——声明过的输入，加上前面并行组的产物；同组并行
-               的那几步这时还没有输出，所以不列（见 _check_template_vars）。 -->
           <div
-            v-for="group in chipGroupsFor(index)"
-            :key="group.label"
-            class="chip-row"
-            :class="{ 'chip-row-step': group.label !== '输入变量' }"
+            v-for="(step, index) in form.steps"
+            :key="index"
+            class="step-item"
+            :class="{ 'step-focus': focused === index }"
+            :data-step-index="index"
           >
-            <span class="chip-from">{{ group.label }}</span>
-            <button
-              v-for="chip in group.chips"
-              :key="chip"
-              type="button"
-              class="chip"
-              :class="{ 'chip-field': chip.includes('.') }"
-              :disabled="readonly"
-              :title="chip.includes('.') ? '插入按字段取值' : '插入整段引用'"
-              v-text="chip"
-              @mousedown.prevent="insertChip(index, chip, $event)"
+            <WorkflowStepForm
+              :step="step"
+              :index="index"
+              :total="form.steps.length"
+              :readonly="readonly"
+              :chips="chipsAll[index] ?? []"
+              :agent="agentOf(step.agent_slug)"
+              :agent-options="agentOptions"
+              :model-options="modelOptions"
+              :problem-ids="problemIds"
+              :show-problems="showProblems"
+              :advanced-open="expanded.has(step)"
+              @move="move(index, $event)"
+              @remove="removeStep(index)"
+              @toggle-advanced="toggleExpanded(index)"
             />
           </div>
-        </a-form-item>
-
-        <div class="step-body">
-          <span class="body-label">产出变量</span>
-          <a-input
-            v-model:value="step.output_var"
-            placeholder="供后续步骤引用，留空则不进上下文"
-            size="small"
-            class="w-var"
-            :disabled="readonly"
-          />
+          <a-space>
+            <a-button size="small" :disabled="readonly" @click="addStep(false)">
+              <PlusOutlined /> 加一步
+            </a-button>
+            <a-button size="small" :disabled="readonly" @click="addStep(true)">
+              <PlusOutlined /> 加一个并行步骤
+            </a-button>
+          </a-space>
         </div>
 
-        <div v-if="showAdvanced(index)" class="step-foot">
-          <a-input
-            v-model:value="step.group_key"
-            placeholder="并行分组"
-            size="small"
-            class="w-key"
-            :disabled="readonly"
-            :status="hasProblem(`step${index}.group`) ? 'error' : undefined"
+        <!-- 窄屏放不下这一列，结构图只给桌面端；列表本来就是全集，缩掉不少功能。 -->
+        <aside v-if="!isMobile" class="step-map">
+          <WorkflowCanvas
+            :steps="form.steps"
+            :active="focused"
+            :input-names="declaredInputs"
+            :agents="agents"
+            :problem-ids="problemIds"
+            :show-problems="showProblems"
+            @locate="locate"
           />
-          <a-radio-group v-model:value="step.output_kind" size="small" button-style="solid" :disabled="readonly">
-            <a-radio-button value="markdown">Markdown</a-radio-button>
-            <a-radio-button value="json">JSON</a-radio-button>
-          </a-radio-group>
-          <a-select
-            v-if="step.output_kind === 'json'"
-            v-model:value="step.output_keys"
-            mode="tags"
-            :open="false"
-            placeholder="期望字段，回车添加"
-            size="small"
-            class="w-keys"
-            :disabled="readonly"
-          />
-          <a-select
-            v-model:value="step.model_config_id"
-            :options="modelOptions"
-            allow-clear
-            placeholder="默认对话模型"
-            size="small"
-            class="w-model"
-            :disabled="readonly"
-          />
-          <a-checkbox v-model:checked="step.optional" :disabled="readonly">可选步骤</a-checkbox>
-        </div>
-
-        <!-- 「格式字段」的心结说破：字段不是智能体定义的，是这一步的模板要的。
-             v-pre 挂内层：挂自身会把 v-if 一起跳过编译。 -->
-        <div v-if="showAdvanced(index) && step.output_kind === 'json'" class="hint block keys-hint">
-          <span v-pre>
-            期望字段不由智能体决定——人设只管口吻与立场；模型输出哪些 JSON 键，取决于你在
-            Prompt 模板里怎么要求。这里写的键，就是声明那份契约，下游 {{产物.字段}} 引用的也是它们。
-          </span>
-        </div>
+        </aside>
       </div>
-
-      <a-space>
-        <a-button size="small" :disabled="readonly" @click="addStep(false)">
-          <PlusOutlined /> 加一步
-        </a-button>
-        <a-button size="small" :disabled="readonly" @click="addStep(true)">
-          <PlusOutlined /> 加一个并行步骤
-        </a-button>
-      </a-space>
     </a-form>
 
     <div class="footer">
@@ -345,16 +188,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onMounted, reactive, ref } from 'vue'
+import {
+  computed,
+  nextTick,
+  onActivated,
+  onBeforeUnmount,
+  onMounted,
+  reactive,
+  ref,
+  watch,
+} from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import {
-  ArrowDownOutlined,
-  ArrowUpOutlined,
-  DeleteOutlined,
-  MinusOutlined,
-  PlusOutlined,
-} from '@ant-design/icons-vue'
+import { MinusOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import {
   agentsApi,
   settingsApi,
@@ -363,56 +209,23 @@ import {
   type ModelConfig,
   type Workflow,
   type WorkflowPayload,
-  type WorkflowStep,
 } from '@/api'
 import { editorTarget, type EditorTarget } from '@/stores/workflowEditor'
+import { useIsMobile } from '@/utils/useIsMobile'
+import WorkflowCanvas from '@/components/workflow/WorkflowCanvas.vue'
+import WorkflowStepForm from '@/components/workflow/WorkflowStepForm.vue'
+import {
+  chipGroupsFor,
+  emptyStep,
+  groupSteps,
+  toStepForm,
+  uniqueGroupName,
+  type InputFieldForm,
+  type StepForm,
+} from '@/components/workflow/workflowLayout'
 
 const router = useRouter()
-
-interface InputFieldForm {
-  name: string
-  label: string
-  required: boolean
-}
-
-interface StepForm {
-  key: string
-  group_key: string
-  agent_slug: string
-  prompt_tpl: string
-  output_kind: string
-  output_keys: string[]
-  output_var: string
-  model_config_id: number | null
-  optional: boolean
-}
-
-const emptyStep = (groupKey = ''): StepForm => ({
-  key: '',
-  group_key: groupKey,
-  agent_slug: '',
-  prompt_tpl: '',
-  output_kind: 'markdown',
-  output_keys: [],
-  output_var: '',
-  model_config_id: null,
-  optional: false,
-})
-
-/** 后端步骤 → 表单行：编辑回填与「从内置起步」共用同一份映射。 */
-function toStepForm(step: WorkflowStep): StepForm {
-  return {
-    key: step.key,
-    group_key: step.group_key,
-    agent_slug: step.agent_slug,
-    prompt_tpl: step.prompt_tpl,
-    output_kind: step.output_kind,
-    output_keys: [...(step.output_keys ?? [])],
-    output_var: step.output_var ?? '',
-    model_config_id: step.model_config_id ?? null,
-    optional: step.optional,
-  }
-}
+const isMobile = useIsMobile()
 
 const form = reactive({
   slug: '',
@@ -420,7 +233,7 @@ const form = reactive({
   description: '',
   enabled: true,
   inputs: [] as InputFieldForm[],
-  steps: [emptyStep()] as StepForm[],
+  steps: [emptyStep('g1')] as StepForm[],
 })
 
 const saving = ref(false)
@@ -434,19 +247,43 @@ const presetId = ref<number | undefined>(undefined)
 const current = ref<Workflow | null>(null)
 const readonly = ref(false)
 
-/** 步骤卡片的「高级」折叠：只读展示时整摊开，不然看不到分组与输出契约。 */
-const advancedOpen = reactive<Record<number, boolean>>({})
-function showAdvanced(index: number) {
-  return readonly.value || !!advancedOpen[index]
+/** 正在看第几步：右侧结构图高亮它。点节点、编辑卡片、滚动都会改这个下标。 */
+const focused = ref<number | null>(0)
+
+/** 结构图上点一下：滚到那张卡片，高亮跟着过去。 */
+function locate(index: number) {
+  focused.value = index
+  void nextTick(() => {
+    document
+      .querySelector<HTMLElement>(`[data-step-index="${index}"]`)
+      ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  })
 }
 
-/** 打开或换入一批步骤时，把配过高级项的步骤直接摊开，免得藏住 JSON 契约与模型选择。 */
+/** 光标落进哪张卡片就高亮哪一步：不用等滚动，改到哪一眼就看得到。 */
+function onCardFocus(event: FocusEvent) {
+  const card = (event.target as HTMLElement | null)?.closest('[data-step-index]') as HTMLElement | null
+  const index = Number(card?.dataset.stepIndex)
+  if (Number.isInteger(index)) focused.value = index
+}
+
+/** 步骤卡片的「高级」折叠：按步骤对象记，重排之后不会串到别的步骤上。 */
+const expanded = reactive(new Set<StepForm>())
+function toggleExpanded(index: number) {
+  const step = form.steps[index]
+  if (!step) return
+  if (expanded.has(step)) expanded.delete(step)
+  else expanded.add(step)
+}
+
+/** 换入一批步骤时，把配过高级项的直接摊开，免得藏住 JSON 契约与模型选择。 */
 function autoExpandAdvanced(steps: StepForm[]) {
-  steps.forEach((step, index) => {
+  expanded.clear()
+  for (const step of steps) {
     if (step.output_kind === 'json' || step.model_config_id != null || step.optional) {
-      advancedOpen[index] = true
+      expanded.add(step)
     }
-  })
+  }
 }
 
 /** 校验红框：点保存才亮灯，之后随填随灭（problemIds 是响应式算出来的）。 */
@@ -457,8 +294,9 @@ const title = computed(() => {
   if (readonly.value) return `查看工作流 · ${current.value?.name ?? ''}`
   return editing.value ? `编辑工作流 · ${current.value?.name ?? ''}` : '新建工作流'
 })
-const groupCount = computed(
-  () => new Set(form.steps.map((step) => step.group_key.trim() || '(未命名)')).size,
+const groupCount = computed(() => groupSteps(form.steps).length)
+const declaredInputs = computed(() =>
+  form.inputs.map((field) => field.name.trim()).filter((name) => name),
 )
 const agentOptions = computed(() =>
   agents.value.map((agent) => ({ value: agent.slug, label: agent.name, agent })),
@@ -476,6 +314,63 @@ const presetOptions = computed(() =>
   workflows.value
     .filter((workflow) => workflow.is_builtin)
     .map((workflow) => ({ value: workflow.id, label: workflow.name })),
+)
+/** 每一步能引用谁：声明的输入加上前面并行组的产物。结构图与列表用的是同一份。 */
+const chipsAll = computed(() =>
+  form.steps.map((_, index) => chipGroupsFor(form.inputs, form.steps, index)),
+)
+
+// ---- 反向同步：列表滚到哪一步，右边结构图就亮哪一个 --------------------------
+
+const stepListEl = ref<HTMLElement | null>(null)
+let cardWatcher: IntersectionObserver | null = null
+
+/** 卡片真正滚起来的那层容器：本页不在 window 上滚，观察带得按它来算。 */
+function scrollRoot(of: HTMLElement | null): HTMLElement | null {
+  let node = of?.parentElement ?? null
+  while (node) {
+    if (/(auto|scroll|overlay)/.test(getComputedStyle(node).overflowY)) return node
+    node = node.parentElement
+  }
+  return null
+}
+
+/** 正在看的是哪一步：顶边已经越过滚动区中线、且离中线最近的那一张。 */
+function syncFocusedFromScroll() {
+  const list = stepListEl.value
+  if (!list) return
+  const scroller = scrollRoot(list)
+  const box = scroller?.getBoundingClientRect()
+  const line = (box?.top ?? 0) + (box?.height ?? window.innerHeight) / 2
+  let pick: number | null = null
+  let pickTop = -Infinity
+  for (const el of Array.from(list.querySelectorAll<HTMLElement>('[data-step-index]'))) {
+    const at = Number(el.dataset.stepIndex)
+    const top = el.getBoundingClientRect().top
+    if (!Number.isInteger(at) || top > line || top <= pickTop) continue
+    pick = at
+    pickTop = top
+  }
+  // 一张都没到中线的（刚进页面、卡片都还在下面）：高亮留在原处，别乱跳。
+  if (pick !== null) focused.value = pick
+}
+
+function watchStepCards() {
+  cardWatcher?.disconnect()
+  const list = stepListEl.value
+  if (!list || typeof IntersectionObserver === 'undefined') return
+  cardWatcher = new IntersectionObserver(() => syncFocusedFromScroll(), {
+    root: scrollRoot(list),
+    // 只关心中线以上那半屏：卡片边跨过中线才算换了正在看的那一步。
+    rootMargin: '0px 0px -50% 0px',
+  })
+  list.querySelectorAll('[data-step-index]').forEach((el) => cardWatcher?.observe(el))
+}
+
+// 增删步骤会换掉卡片那批元素：等 DOM 补齐后重新观察一遍。
+watch(
+  () => form.steps.length,
+  () => void nextTick(watchStepCards),
 )
 
 /**
@@ -508,8 +403,6 @@ async function boot() {
 
 function fillForm(target: EditorTarget) {
   showProblems.value = false
-  closeCompletion()
-  clearAdvanced()
   presetId.value = undefined
   readonly.value = target.readonly
   const source = target.id == null ? null : workflows.value.find((w) => w.id === target.id) ?? null
@@ -519,8 +412,14 @@ function fillForm(target: EditorTarget) {
   form.description = source?.description ?? ''
   form.enabled = source?.enabled ?? true
   form.inputs = (source?.inputs ?? []).map((field) => ({ ...field }))
-  form.steps = source ? source.steps.map(toStepForm) : [emptyStep('g1')]
+  applySteps(source ? source.steps.map(toStepForm) : [emptyStep('g1')])
+}
+
+/** 整份换掉步骤：折叠状态跟着新数组重来，高亮回到第一步。 */
+function applySteps(steps: StepForm[]) {
+  form.steps.splice(0, form.steps.length, ...steps)
   autoExpandAdvanced(form.steps)
+  focused.value = steps.length ? 0 : null
 }
 
 function errorText(err: unknown, fallback: string): string {
@@ -532,7 +431,12 @@ function errorText(err: unknown, fallback: string): string {
 let justMounted = false
 onMounted(() => {
   justMounted = true
+  void nextTick(watchStepCards)
   void boot()
+})
+onBeforeUnmount(() => {
+  cardWatcher?.disconnect()
+  cardWatcher = null
 })
 onActivated(() => {
   if (justMounted) {
@@ -550,10 +454,26 @@ function addInput() {
   form.inputs.push({ name: '', label: '', required: true })
 }
 
+/** 加一步 = 新开一组；加并行 = 并进最后一组。组名一律取没占用过的那个。 */
 function addStep(parallel: boolean) {
   const last = form.steps[form.steps.length - 1]
-  // 并行步骤沿用上一个的分组名；普通步骤开一个新组，默认就是顺序执行。
-  form.steps.push(emptyStep(parallel ? last?.group_key ?? '' : `g${form.steps.length + 1}`))
+  const step = emptyStep(parallel ? last?.group_key ?? '' : uniqueGroupName(form.steps))
+  form.steps.push(step)
+  // 新卡片在列表最底下，多半在屏幕外：跟结构图说一声，滚过去接着填。
+  void nextTick(() => locate(form.steps.length - 1))
+}
+
+function removeStep(index: number) {
+  const [removed] = form.steps.splice(index, 1)
+  if (removed) expanded.delete(removed)
+}
+
+function move(index: number, delta: number) {
+  const target = index + delta
+  if (target < 0 || target >= form.steps.length) return
+  const [step] = form.steps.splice(index, 1)
+  form.steps.splice(target, 0, step)
+  if (focused.value === index) focused.value = target
 }
 
 /** 从内置流程起步：整份搬来输入与步骤，名字带「副本」，标识留空必须自己起。 */
@@ -566,186 +486,14 @@ function onPresetChange(value: number | undefined) {
     form.name = ''
     form.description = ''
     form.inputs = []
-    form.steps = [emptyStep('g1')]
-    clearAdvanced()
+    applySteps([emptyStep('g1')])
     return
   }
   form.slug = ''
   form.name = `${source.name} 副本`
   form.description = source.description ?? ''
   form.inputs = source.inputs.map((field) => ({ ...field }))
-  form.steps = source.steps.map(toStepForm)
-  clearAdvanced()
-  autoExpandAdvanced(form.steps)
-}
-
-function move(index: number, delta: number) {
-  const target = index + delta
-  if (target < 0 || target >= form.steps.length) return
-  const [step] = form.steps.splice(index, 1)
-  form.steps.splice(target, 0, step)
-}
-
-/** 高级折叠的摊开状态整体清一次，换入另一批步骤时不残留旧下标。 */
-function clearAdvanced() {
-  for (const index of Object.keys(advancedOpen)) delete advancedOpen[Number(index)]
-}
-
-/** 每一步属于第几个并行组：分组名与上一步相同就是同一组（后端同一套口径）。 */
-const groupSequence = computed(() => {
-  const sequences: number[] = []
-  let currentGroup = -1
-  let previous: string | null = null
-  for (const step of form.steps) {
-    const key = step.group_key.trim()
-    if (key !== previous) {
-      currentGroup += 1
-      previous = key
-    }
-    sequences.push(currentGroup)
-  }
-  return sequences
-})
-
-interface ChipGroup {
-  label: string
-  chips: string[]
-}
-
-/**
- * 这一步的模板里能引用谁，按来源分组：声明过的输入，加上**前面**并行组的产物。
- *
- * JSON 步骤额外列出按字段取值（``{{产物.字段}}``，字段来自它的期望字段）——后端
- * 只允许 JSON 步这样取，芯片列出的集合必须和校验一致，否则点出来的是一个存不下的
- * 模板。分组名写明来源步骤，用户不必再记「这个名字是哪步来的」。
- */
-function chipGroupsFor(index: number): ChipGroup[] {
-  const own = groupSequence.value[index] ?? 0
-  const groups: ChipGroup[] = []
-  const inputs = form.inputs
-    .map((field) => field.name.trim())
-    .filter((name) => name)
-    .map((name) => `{{${name}}}`)
-  if (inputs.length) groups.push({ label: '输入变量', chips: [...new Set(inputs)] })
-  form.steps.forEach((step, stepIndex) => {
-    if ((groupSequence.value[stepIndex] ?? 0) >= own) return
-    const variable = step.output_var.trim()
-    if (!variable) return
-    const chips = [`{{${variable}}}`]
-    if (step.output_kind === 'json') {
-      for (const key of step.output_keys) {
-        const field = key.trim()
-        if (field) chips.push(`{{${variable}.${field}}}`)
-      }
-    }
-    const label = `第 ${stepIndex + 1} 步 · ${step.key.trim() || variable}`
-    groups.push({ label, chips: [...new Set(chips)] })
-  })
-  return groups
-}
-
-/** 可引用变量全集（芯片集合的拍平版），「{{」自动补全用的是同一份。 */
-function chipsFor(index: number): string[] {
-  return chipGroupsFor(index).flatMap((group) => group.chips)
-}
-
-/** 点芯片：插到光标处，选中的文字被替换；没在用这一步的输入框就 append 到末尾。 */
-function insertChip(index: number, insert: string, event: MouseEvent) {
-  const step = form.steps[index]
-  if (!step) return
-  closeCompletion()
-  const card = (event.currentTarget as HTMLElement).closest('.step-card')
-  const focused = document.activeElement as HTMLTextAreaElement | null
-  const area = card && focused && card.contains(focused) ? focused : null
-  if (!area) {
-    step.prompt_tpl += insert
-    return
-  }
-  const from = area.selectionStart ?? step.prompt_tpl.length
-  const to = area.selectionEnd ?? from
-  step.prompt_tpl = step.prompt_tpl.slice(0, from) + insert + step.prompt_tpl.slice(to)
-  const caret = from + insert.length
-  void nextTick(() => {
-    area.focus()
-    area.setSelectionRange(caret, caret)
-  })
-}
-
-/**
- * 「{{」自动补全：光标前正打着半个变量名时，就地列出可引用的候选。
- * 候选集合与芯片同源，记不住字段名也能顺着敲出来；记住的那位照样直接打字。
- */
-const completion = reactive<{ step: number; items: string[]; active: number }>({
-  step: -1,
-  items: [],
-  active: 0,
-})
-let completionArea: HTMLTextAreaElement | null = null
-let completionFrom = 0
-let completionTo = 0
-
-function onPromptInput(index: number, event: Event) {
-  const area = event.target as HTMLTextAreaElement | null
-  if (!area || readonly.value) return
-  completionArea = area
-  const caret = area.selectionStart ?? area.value.length
-  const match = /\{\{([^{}]*)$/.exec(area.value.slice(0, caret))
-  if (!match) {
-    closeCompletion()
-    return
-  }
-  const prefix = match[1]
-  const items = chipsFor(index)
-    .map((chip) => chip.slice(2, -2))
-    .filter((name) => name.startsWith(prefix))
-    .slice(0, 12)
-  if (!items.length) {
-    closeCompletion()
-    return
-  }
-  completion.step = index
-  completion.items = items
-  completion.active = 0
-  completionFrom = caret - match[0].length
-  completionTo = caret
-}
-
-function closeCompletion() {
-  completion.step = -1
-  completion.items = []
-  completionArea = null
-}
-
-function applyCompletion(name: string) {
-  const step = form.steps[completion.step]
-  const area = completionArea
-  if (!step || !area) return
-  const insert = `{{${name}}}`
-  step.prompt_tpl = step.prompt_tpl.slice(0, completionFrom) + insert + step.prompt_tpl.slice(completionTo)
-  completion.step = -1
-  completion.items = []
-  const caret = completionFrom + insert.length
-  void nextTick(() => {
-    area.focus()
-    area.setSelectionRange(caret, caret)
-  })
-}
-
-function onPromptKeydown(index: number, event: KeyboardEvent) {
-  if (completion.step !== index || !completion.items.length) return
-  const last = completion.items.length - 1
-  if (event.key === 'ArrowDown') {
-    event.preventDefault()
-    completion.active = completion.active >= last ? 0 : completion.active + 1
-  } else if (event.key === 'ArrowUp') {
-    event.preventDefault()
-    completion.active = completion.active <= 0 ? last : completion.active - 1
-  } else if (event.key === 'Enter' || event.key === 'Tab') {
-    event.preventDefault()
-    applyCompletion(completion.items[completion.active])
-  } else if (event.key === 'Escape') {
-    closeCompletion()
-  }
+  applySteps(source.steps.map(toStepForm))
 }
 
 /**
@@ -770,13 +518,6 @@ const problemIds = computed(() => {
 
 function hasProblem(id: string) {
   return showProblems.value && problemIds.value.has(id)
-}
-
-function stepProblem(index: number) {
-  if (!showProblems.value) return false
-  const prefix = `step${index}.`
-  for (const id of problemIds.value) if (id.startsWith(prefix)) return true
-  return false
 }
 
 async function submit() {
@@ -882,172 +623,38 @@ async function submit() {
   flex: 1;
   min-width: 0;
 }
-.step-card {
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-md);
-  padding: 12px;
-  margin-bottom: 12px;
-  background: var(--paper);
-}
-.step-head {
+/* 左列表右结构图：列表吃掉剩余宽度，图那一栏贴着顶部跟着滚。 */
+.step-zone {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
+  align-items: flex-start;
+  gap: 12px;
 }
-/* 分组名是高级项，但它是执行语义的一部分，卡片头上至少让人看见现状。 */
-.group-tag {
-  margin-inline-end: 0;
-}
-/* 人设下拉项：名字下面跟一行小字描述。 */
-.agent-opt {
-  display: flex;
-  flex-direction: column;
-  line-height: 1.4;
-  padding: 2px 0;
-}
-.agent-opt-desc {
-  color: var(--text-3);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-/* 选中人设后的说明行：描述 + 展开系统提示词的入口。 */
-.agent-hint {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin: -2px 0 8px 28px;
-  font-size: 12px;
-}
-.keys-hint {
-  margin-top: 4px;
-}
-.prompt-wrap {
-  position: relative;
-}
-.completion {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  z-index: 20;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 2px;
-  padding: 6px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-}
-.completion button {
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-sm);
-  background: var(--paper);
-  color: var(--text-2);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.6;
-  padding: 0 6px;
-  cursor: pointer;
-}
-.completion-active {
-  border-color: var(--signal-border) !important;
-  background: var(--signal-bg) !important;
-  color: var(--signal-text) !important;
-}
-.chip-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 6px;
-}
-.chip-row-step {
-  margin-top: 4px;
-}
-/* 来源标签：一眼看出这排芯片来自哪一步，不用回想变量名是谁产的。 */
-.chip-from {
-  color: var(--text-3);
-  font-size: 12px;
-  white-space: nowrap;
-}
-.chip {
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--text-2);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.6;
-  padding: 0 6px;
-  cursor: pointer;
-}
-.chip:hover:not(:disabled) {
-  border-color: var(--signal-border);
-  background: var(--signal-bg);
-  color: var(--signal-text);
-}
-.chip:disabled {
-  cursor: default;
-  opacity: 0.6;
-}
-.chip-field {
-  color: var(--text-3);
-}
-.step-no {
-  width: 20px;
-  font-weight: 600;
-  color: var(--text-3);
-}
-.w-key {
-  width: 150px;
-}
-.w-agent {
-  width: 200px;
-}
-.w-var {
-  width: 260px;
-}
-.w-keys {
-  width: 220px;
-}
-.w-model {
-  width: 180px;
-}
-.spacer {
+.step-list {
   flex: 1;
+  min-width: 0;
 }
-.tight {
-  margin-bottom: 8px;
+.step-map {
+  width: 312px;
+  flex: none;
+  position: sticky;
+  top: 12px;
 }
-.step-body {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.step-item {
+  margin-bottom: 12px;
+  /* 结构图点过来时按卡片顶边对齐视口上方：留出这点边距，标题不被上一条卡压住。 */
+  scroll-margin-top: 12px;
 }
-.body-label {
-  color: var(--text-3);
-  font-size: 12px;
-  white-space: nowrap;
+/* 结构图当前亮着的那一步：描一圈光环，与卡片自己的红框（校验缺口）互不遮挡。 */
+.step-focus {
+  outline: 1px solid var(--signal);
+  outline-offset: 2px;
+  border-radius: var(--radius-md);
 }
-.step-foot {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px dashed var(--hairline);
-}
-/* 保存拦下时标出缺口所在：整卡描红，随填随灭。 */
+/* 保存拦下时标出缺口所在：整卡描红，随填随灭；页面也靠它找第一个缺口滚过去。 */
 .field-problem {
   border-color: #ff4d4f;
 }
-/* 数据没到位就先把话说清楚，别让空下拉看起来像「没有智能体可用」。 */
+/* 加载失败警告条：与下方内容拉开一点距离。 */
 .load-error {
   margin-bottom: 16px;
 }

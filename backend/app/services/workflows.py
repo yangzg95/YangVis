@@ -668,16 +668,18 @@ def _stringify(value: object) -> str:
 
 
 def _group_order(steps: Sequence[WorkflowStep]) -> List[Tuple[str, List[WorkflowStep]]]:
-    """按首次出现顺序把步骤分进并行组。"""
+    """把步骤切成并行组：**相邻**且分组名相同的算一组，组序即首次出现的顺序。
+
+    保存时已经拦过「同名组被别的组隔开」（见 ``_validate_steps``），所以这里按
+    相邻切与按 group_key 归并结果相同；用相邻这一套是因为界面也是这个口径，
+    画出来几列就是跑起来几段，两边不必各自解释一次。
+    """
     groups: List[Tuple[str, List[WorkflowStep]]] = []
-    index: Dict[str, int] = {}
     for step in steps:
-        slot = index.get(step.group_key)
-        if slot is None:
-            index[step.group_key] = len(groups)
-            groups.append((step.group_key, [step]))
+        if groups and groups[-1][0] == step.group_key:
+            groups[-1][1].append(step)
         else:
-            groups[slot][1].append(step)
+            groups.append((step.group_key, [step]))
     return groups
 
 

@@ -336,16 +336,20 @@ def test_render_prompt_rejects_unknown_variable():
         render_prompt("{{other.field}}", {"draft": "整段初稿"})
 
 
-def test_group_order_keeps_first_appearance_sequence():
+def test_group_order_splits_repeated_group_name():
     class Step:
         def __init__(self, key, group):
             self.key, self.group_key = key, group
 
+    # 相邻且同名才算一组：被别的组隔开时就是两组，各自顺序执行——
+    # 与界面「画出来几列就是几段」同一口径（保存那边也会拦这种命名）。
     groups = _group_order([Step("a", "g1"), Step("b", "g2"), Step("c", "g1")])
     assert [(name, [s.key for s in members]) for name, members in groups] == [
-        ("g1", ["a", "c"]),
+        ("g1", ["a"]),
         ("g2", ["b"]),
+        ("g1", ["c"]),
     ]
+    assert _group_order([]) == []
 
 
 # ---- seed -------------------------------------------------------------------
