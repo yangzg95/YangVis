@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -235,10 +235,18 @@ async def spa_root() -> FileResponse:
 
 
 @app.get("/{full_path:path}", include_in_schema=False)
-async def spa_fallback(full_path: str) -> FileResponse:
+async def spa_fallback(full_path: str) -> Response:
     # 不覆盖 API 或静态资源路由。
-    if full_path.startswith("api/") or full_path.startswith("assets/") or full_path.startswith("static/"):
-        # FastAPI 的路由优先级应该能处理好，这里只是防御性检查。
+    if full_path.startswith("api/"):
+        # 接口路径没命中路由时只能回统一信封：SPA 拦截器按响应体里的 ``code`` 判
+        # 失败，一套 index.html 顶着 HTTP 200 回去，前端会把整段 HTML 当数据用，
+        # 取到的字段全是 undefined，页面直接崩在渲染里。
+        logger.warning("unmatched api path: %s", full_path)
+        return JSONResponse(
+            status_code=404,
+            content=APIResponse(code=404, message="接口不存在").model_dump(),
+        )
+    if full_path.startswith("assets/") or full_path.startswith("static/"):
         return FileResponse(str(_placeholder()), media_type="text/html")
     # 顶层静态文件（favicon.svg、robots.txt 等）原样返回，其余路径回退到 SPA。
     # resolve + is_relative_to 防 '..' 路径穿越出 STATIC_DIR。

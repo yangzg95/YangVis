@@ -195,9 +195,14 @@ SFTP 文件面板的单文件大小上限由三处共同决定，**改一边必�
 | 反代 `client_max_body_size`（略大于它，如 512m） | 网关的放行口径，multipart 信封本身还要占一点 |
 | 列表接口回传的 `max_upload_bytes` | 前端选文件时本地预检，超限直接报错、不发请求 |
 
-反代必须为这条通道关掉**请求体缓冲**，否则上传进度条是假的：
+反代必须为这条通道关掉**请求体缓冲**，否则上传进度条是假的。另外**必须配一条精确匹配**把它上面的台账接口钉回来：`location` 名以 `/` 结尾时，nginx 会把去掉斜杠的 `/api/ops/servers`（列表与新建）当成它的「父目录」，转发之前就 301 补一个斜杠；浏览器跟到 `/api/ops/servers/` 时后端没有这条路由，只会回 SPA 的 `index.html`（HTTP 200 的 HTML），前端把这段 HTML 当列表数据用，台账页就空掉甚至崩在渲染上。
 
 ```nginx
+location = /api/ops/servers {      # 精确匹配优先，也不构成目录节点，301 不再发生
+    proxy_pass http://127.0.0.1:18099;
+    proxy_http_version 1.1;
+}
+
 location ^~ /api/ops/servers/ {
     proxy_pass http://127.0.0.1:18099;
     proxy_http_version 1.1;
