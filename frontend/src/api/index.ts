@@ -942,6 +942,13 @@ export const chatApi = {
  * 默认 POST（要带请求体的那条对话流就靠它）；工作流的「跟随进度」是纯读，
  * 走 GET。返回一个用于中断的函数。
  */
+/**
+ * 流停顿看门狗：这么久一个字节都没收到就判定假死。
+ * 后端每 15s 发一帧心跳，健康连接在长思考期间也不会触发；放宽到 100s
+ * （约 6 帧心跳余量）是为了容忍网络抖动，也不会误杀合法的长思考。
+ */
+const STREAM_STALL_TIMEOUT = 100_000
+
 function streamSse(
   url: string,
   body: unknown,
@@ -949,9 +956,29 @@ function streamSse(
   method: 'GET' | 'POST' = 'POST',
 ): () => void {
   const controller = new AbortController()
+  // 用户主动中断（停止按钮）与看门狗掐断要分开：前者静默，后者要回调错误。
+  let watchdogFired = false
+  let receivedTerminal = false
+  let watchdog: ReturnType<typeof setTimeout> | undefined
+
+  const clearWatchdog = () => {
+    if (watchdog !== undefined) {
+      clearTimeout(watchdog)
+      watchdog = undefined
+    }
+  }
+  // 收到任何字节都算连接活着——心跳注释帧同样会走到这里重置计时。
+  const armWatchdog = () => {
+    clearWatchdog()
+    watchdog = setTimeout(() => {
+      watchdogFired = true
+      controller.abort()
+    }, STREAM_STALL_TIMEOUT)
+  }
 
   void (async () => {
     try {
+      armWatchdog()
       const response = await fetch(url, {
         method,
         headers: {
@@ -978,6 +1005,7 @@ function streamSse(
       for (;;) {
         const { done, value } = await reader.read()
         if (done) break
+        armWatchdog()
         buffer += decoder.decode(value, { stream: true })
 
         // 事件之间用空行分隔；最后一个空行之后的内容属于还没收完的半个
@@ -987,12 +1015,30 @@ function streamSse(
 
         for (const block of blocks) {
           const event = parseSseBlock(block)
-          if (event) dispatchSse(event, handlers)
+          if (event) {
+            if (event.event === 'done' || event.event === 'run_end' || event.event === 'error') {
+              receivedTerminal = true
+            }
+            dispatchSse(event, handlers)
+          }
         }
       }
+
+      // 流读完了却没见过终止事件：服务端被掐断、代理断连都会这样，
+      // 不补上这一嗓，界面上的「生成中」就永远停在转圈。
+      if (!receivedTerminal) {
+        handlers.onError?.({ code: -1, message: '连接中断，请重试' })
+      }
     } catch (err) {
-      if ((err as Error)?.name === 'AbortError') return
+      if ((err as Error)?.name === 'AbortError') {
+        if (watchdogFired) {
+          handlers.onError?.({ code: -1, message: '连接超时，请重试' })
+        }
+        return
+      }
       handlers.onError?.({ code: -1, message: (err as Error)?.message || '网络错误' })
+    } finally {
+      clearWatchdog()
     }
   })()
 
