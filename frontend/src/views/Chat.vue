@@ -204,7 +204,7 @@
           </a-space>
         </div>
 
-        <div ref="scrollEl" class="messages">
+        <div ref="scrollEl" class="messages" @scroll="onMessagesScroll">
           <div v-if="!messages.length && !streaming" class="empty-state">
             <RobotOutlined class="empty-icon" />
             <div>{{ activeAgent?.description || '开始一个新的对话吧' }}</div>
@@ -286,6 +286,20 @@
               <span v-else class="thinking">正在思考…</span>
             </div>
           </div>
+
+          <!-- 回到底部：内容末尾的 sticky 元素，上翻时钉在滚动区底沿，
+               不随消息滚走。点击后恢复贴底跟随。 -->
+          <transition name="jump-fade">
+            <button
+              v-if="!stickToBottom"
+              type="button"
+              class="jump-bottom"
+              title="回到底部"
+              @click="pinToBottom"
+            >
+              <VerticalAlignBottomOutlined />
+            </button>
+          </transition>
         </div>
 
         <div class="composer">
@@ -328,6 +342,7 @@ import {
   PlusOutlined,
   RobotOutlined,
   SearchOutlined,
+  VerticalAlignBottomOutlined,
 } from '@ant-design/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import MermaidCard from '@/components/MermaidCard.vue'
@@ -486,6 +501,34 @@ const pendingText = ref('')
 // 免得用户对着一个转圈的图标干等，不知道后台在忙什么。
 const currentStep = ref('')
 const scrollEl = ref<HTMLElement | null>(null)
+
+// ---- 贴底滚动 ---------------------------------------------------------------
+// 用户上翻查看历史时，新 token 不该硬把视图拽回底部；只有原本贴着底，
+// 才跟着回答往下滚。
+const STICK_THRESHOLD = 40
+const stickToBottom = ref(true)
+
+function onMessagesScroll() {
+  const el = scrollEl.value
+  if (el) {
+    stickToBottom.value =
+      el.scrollHeight - el.scrollTop - el.clientHeight < STICK_THRESHOLD
+  }
+}
+
+// 流式过程中调用：尊重贴底状态，用户上翻时不动视图。
+function scrollToBottom() {
+  void nextTick(() => {
+    const el = scrollEl.value
+    if (el && stickToBottom.value) el.scrollTop = el.scrollHeight
+  })
+}
+
+// 用户主动动作（发送 / 重试 / 审批 / 切换会话）：强制贴底跟随。
+function pinToBottom() {
+  stickToBottom.value = true
+  scrollToBottom()
+}
 
 // 每种工具调用配一句进度文案。运维工具的关键信息在 input.command / input.statement
 // 里（检索的在 input.query），统一从这里取，别在各处重复 if-else。
@@ -688,7 +731,7 @@ async function selectConversation(id: number) {
     conv?.model_config_id && usableModels.value.some((m) => m.id === conv.model_config_id)
       ? conv.model_config_id
       : defaultModelConfigId.value
-  scrollToBottom()
+  pinToBottom()
 }
 
 function startNew() {
@@ -849,7 +892,7 @@ function send() {
   }
   messages.value.push(userBubble)
   draft.value = ''
-  scrollToBottom()
+  pinToBottom()
 
   streaming.value = true
   pendingText.value = ''
@@ -962,7 +1005,7 @@ function retryMessage(msg: Bubble) {
   const streamActions: OpsAction[] = []
   beginStream(bubble.key)
   streamingBubbleKey.value = bubble.key
-  scrollToBottom()
+  pinToBottom()
 
   abort = chatApi.streamRetry(activeId.value, {
     onCitations: (citations) => {
@@ -1022,7 +1065,7 @@ function approveAction(action: OpsAction) {
   const streamActions: OpsAction[] = []
   beginStream(bubble.key)
   streamingBubbleKey.value = bubble.key
-  scrollToBottom()
+  pinToBottom()
 
   abort = approve(action, {
     onExec: () => {
@@ -1081,13 +1124,6 @@ function finish() {
   streamingBubbleKey.value = null
   // 收尾推一次全量渲染：停止/出错时残文也要以完整 markdown 落定。
   endStream()
-}
-
-function scrollToBottom() {
-  void nextTick(() => {
-    const el = scrollEl.value
-    if (el) el.scrollTop = el.scrollHeight
-  })
 }
 
 async function copyMessage(msg: Bubble) {
@@ -1267,6 +1303,41 @@ onUnmounted(() => abort?.())
   flex: 1;
   overflow-y: auto;
   padding: 4px 4px 12px;
+}
+
+/* 回到底部：sticky 钉在消息区右下角，发丝线 + 浮层阴影与全站口径一致。 */
+.jump-bottom {
+  position: sticky;
+  bottom: 16px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  margin: 0 8px 8px auto;
+  border: 1px solid var(--hairline);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--signal);
+  box-shadow: var(--shadow-overlay);
+  cursor: pointer;
+}
+
+.jump-bottom:hover {
+  border-color: var(--signal);
+  color: var(--signal);
+}
+
+.jump-fade-enter-active,
+.jump-fade-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.jump-fade-enter-from,
+.jump-fade-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
 }
 .empty-state {
   height: 100%;

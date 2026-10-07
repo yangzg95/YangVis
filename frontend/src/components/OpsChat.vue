@@ -44,7 +44,7 @@
       </a-tooltip>
     </div>
 
-    <div ref="scrollEl" class="chat-body" @click="onBodyClick">
+    <div ref="scrollEl" class="chat-body" @click="onBodyClick" @scroll="onBodyScroll">
       <div v-if="!targetId" class="chat-empty">
         {{ emptyHint }}
       </div>
@@ -104,6 +104,20 @@
           <span class="thinking-hint">正在排查…</span>
         </div>
       </div>
+
+      <!-- 上翻查看历史时出现：sticky 钉在底部，点击恢复贴底跟随。 -->
+      <transition name="jump-fade">
+        <button
+          v-if="!stickToBottom"
+          type="button"
+          class="jump-bottom"
+          :class="{ dark }"
+          title="回到底部"
+          @click="pinToBottom"
+        >
+          <VerticalAlignBottomOutlined />
+        </button>
+      </transition>
     </div>
 
     <div class="chat-composer">
@@ -152,6 +166,7 @@ import {
   DeleteOutlined,
   HistoryOutlined,
   PlusOutlined,
+  VerticalAlignBottomOutlined,
 } from '@ant-design/icons-vue'
 import ConfirmCard from '@/components/ConfirmCard.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -277,6 +292,31 @@ const streamingText = ref(false)
 const scrollEl = ref<HTMLElement | null>(null)
 const inputEl = ref<{ focus: () => void } | null>(null)
 
+// ---- 贴底滚动 ---------------------------------------------------------------
+// 与 Chat.vue 同一口径：上翻时流式事件不抢视图，原本贴底才往下跟。
+const STICK_THRESHOLD = 40
+const stickToBottom = ref(true)
+
+function onBodyScroll() {
+  const el = scrollEl.value
+  if (el) {
+    stickToBottom.value =
+      el.scrollHeight - el.scrollTop - el.clientHeight < STICK_THRESHOLD
+  }
+}
+
+function scrollToBottom() {
+  nextTick(() => {
+    const el = scrollEl.value
+    if (el && stickToBottom.value) el.scrollTop = el.scrollHeight
+  })
+}
+
+function pinToBottom() {
+  stickToBottom.value = true
+  scrollToBottom()
+}
+
 // ---- 模型选择 ---------------------------------------------------------------
 // 只把测通过的模型放进下拉；选择存 localStorage，纯查看者偏好，丢了就用默认。
 
@@ -330,13 +370,6 @@ function useSample(text: string) {
 
 let seq = 0
 const nextKey = () => `i${++seq}`
-
-function scrollToBottom() {
-  nextTick(() => {
-    const el = scrollEl.value
-    if (el) el.scrollTop = el.scrollHeight
-  })
-}
 
 function currentAnswer(): TalkItem {
   const last = items.value[items.value.length - 1]
@@ -425,7 +458,7 @@ async function openConversation(id: number) {
       steps: [],
     }))
     actions.value = acts.items
-    scrollToBottom()
+    pinToBottom()
   } catch {
     // 拦截器已提示；窗口保持全新状态，接着提问不受影响。
   }
@@ -617,7 +650,7 @@ async function ask(question: string) {
   items.value.push({ key: nextKey(), kind: 'user', text: question, steps: [] })
   thinking.value = true
   streamingText.value = false
-  scrollToBottom()
+  pinToBottom()
 
   const streamActions: OpsAction[] = []
   abort = chatApi.streamCompletion(
@@ -721,6 +754,52 @@ defineExpose({
   min-height: 0;
   overflow-y: auto;
   padding: 8px 4px;
+}
+
+/* 回到底部：sticky 钉在右下角，口径与 Chat.vue 一致，另补暗色块。 */
+.jump-bottom {
+  position: sticky;
+  bottom: 12px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin: 0 6px 6px auto;
+  border: 1px solid var(--hairline);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--signal);
+  box-shadow: var(--shadow-overlay);
+  cursor: pointer;
+}
+
+.jump-bottom:hover {
+  border-color: var(--signal);
+  color: var(--signal);
+}
+
+.ops-chat.dark .jump-bottom {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: #1b2530;
+  color: #3ad6de;
+}
+
+.ops-chat.dark .jump-bottom:hover {
+  border-color: rgba(58, 214, 222, 0.6);
+  color: #3ad6de;
+}
+
+.jump-fade-enter-active,
+.jump-fade-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.jump-fade-enter-from,
+.jump-fade-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
 }
 
 .chat-empty {
