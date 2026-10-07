@@ -83,6 +83,23 @@
       </a-popover>
     </div>
 
+    <!-- 上一步（紧邻的前一个并行组）产出的变量名直接摆在写模板的位置：
+         不必先开「插入引用」才知道这一步能接什么；芯片与弹层同源，点一下即插入。 -->
+    <div v-if="upstreamGroups.length" class="upstream-hint">
+      <span class="upstream-label">上一步产出</span>
+      <button
+        v-for="group in upstreamGroups"
+        :key="group.label"
+        type="button"
+        class="chip upstream-chip"
+        :title="`${group.label}，点击插入`"
+        :disabled="readonly"
+        @mousedown.prevent="insertChip(group.chips[0])"
+      >
+        {{ group.chips[0] }}
+      </button>
+    </div>
+
     <a-form-item label="Prompt 模板" class="tight">
       <div class="prompt-wrap">
         <a-textarea
@@ -233,6 +250,8 @@ const props = withDefaults(
     readonly: boolean
     /** 这一步能引用谁，由父级按同一份布局算好传进来。 */
     chips: ChipGroup[]
+    /** 紧邻前一个并行组的产出，卡片上常驻展示；第一步为空数组。 */
+    upstreamGroups: ChipGroup[]
     agent: Agent | null
     agentOptions: { value: string; label: string; agent: Agent }[]
     modelOptions: { value: number; label: string }[]
@@ -241,7 +260,7 @@ const props = withDefaults(
     showProblems: boolean
     advancedOpen: boolean
   }>(),
-  { agent: null },
+  { agent: null, upstreamGroups: () => [] },
 )
 
 defineEmits<{
@@ -429,6 +448,19 @@ watch(
 }
 .keys-hint {
   margin-top: 4px;
+}
+/* 上一步产出行：缩进与人设说明对齐，芯片就是可点的引用。 */
+.upstream-hint {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px 28px;
+}
+.upstream-label {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
 }
 .prompt-wrap {
   position: relative;

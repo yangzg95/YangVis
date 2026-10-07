@@ -143,6 +143,7 @@
             :total="form.steps.length"
             :readonly="readonly"
             :chips="chipsAll[index] ?? []"
+            :upstream-groups="upstreamAll[index] ?? []"
             :agent="agentOf(form.steps[index].agent_slug)"
             :agent-options="agentOptions"
             :model-options="modelOptions"
@@ -250,6 +251,7 @@ import {
   groupSteps,
   toStepForm,
   uniqueGroupName,
+  upstreamGroupsFor,
   type InputFieldForm,
   type StepForm,
 } from '@/components/workflow/workflowLayout'
@@ -352,6 +354,10 @@ const presetOptions = computed(() =>
 /** 每一步能引用谁：声明的输入加上前面并行组的产物。节点页与画布用的是同一份。 */
 const chipsAll = computed(() =>
   form.steps.map((_, index) => chipGroupsFor(form.inputs, form.steps, index)),
+)
+/** 每一步的「上一步产出」：紧邻前一个并行组的产物，节点卡片常驻展示。 */
+const upstreamAll = computed(() =>
+  form.steps.map((_, index) => upstreamGroupsFor(form.steps, index)),
 )
 
 /**

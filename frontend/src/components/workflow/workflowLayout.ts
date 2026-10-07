@@ -161,6 +161,31 @@ export function chipsFor(inputs: InputFieldForm[], steps: StepForm[], index: num
 }
 
 /**
+ * 当前步的「上一步」产出：紧邻的前一个并行组里声明了产物的步骤，各列出根变量芯片。
+ *
+ * 只回退一组而不是所有上游——写模板时手边常接的就是这一级，更早的产物仍在
+ * 「插入引用」弹层里完整列着。「上一步」按并行组取：同组内几步并发、彼此不可见，
+ * 按数组下标取会点出一个后端存不下的引用。第一步前面没有组，返回空列表。
+ */
+export function upstreamGroupsFor(steps: StepForm[], index: number): ChipGroup[] {
+  const sequences = groupSequence(steps)
+  const own = sequences[index] ?? 0
+  const target = own - 1
+  if (target < 0) return []
+  const groups: ChipGroup[] = []
+  steps.forEach((step, stepIndex) => {
+    if ((sequences[stepIndex] ?? 0) !== target) return
+    const variable = step.output_var.trim()
+    if (!variable) return
+    groups.push({
+      label: `第 ${stepIndex + 1} 步 · ${step.key.trim() || variable}`,
+      chips: [`{{${variable}}}`],
+    })
+  })
+  return groups
+}
+
+/**
  * 引用线：某步模板里用到的根变量，若来自前面某一组的产物，就从那一步连一条过来。
  *
  * 只连「产物 → 消费者」这一层，输入变量不参与画线：每个步骤都可能用到输入，
