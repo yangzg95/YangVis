@@ -17,4 +17,6 @@ export const storageKeys = {
   opsDbEditorHeight: 'noetix-ops-db-editor-height',
   /** 表格列宽覆盖值：{ 表格标识: { 列key: 宽度 } } 一个 JSON 对象全装下。 */
   opsDbColWidths: 'noetix-ops-db-colwidths',
+  /** 工作流编辑器结构图折叠状态，'1' 折叠 / '0' 展开。 */
+  workflowCanvasCollapsed: 'noetix-workflow-canvas-collapsed',
 } as const

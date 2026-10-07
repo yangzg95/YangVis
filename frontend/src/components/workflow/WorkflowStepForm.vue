@@ -94,9 +94,9 @@
           :status="bad(`step${index}.prompt`) ? 'error' : undefined"
           @input="onPromptInput"
           @keydown="onPromptKeydown"
-          @blur="closeCompletion"
+          @blur="onPromptBlur"
         />
-        <!-- 「{{」自动补全：候选就是下面芯片那一份集合，键盘上下选、回车补。 -->
+        <!-- 「{{」自动补全：候选就是插入引用弹层里那一份集合，键盘上下选、回车补。 -->
         <div v-if="completionItems.length" class="completion">
           <button
             v-for="(name, i) in completionItems"
@@ -109,28 +109,46 @@
           </button>
         </div>
       </div>
-      <!-- 引用芯片按来源分组：整段是这一步拿全部产物，带点的是 JSON 步按字段取。
+
+      <!-- 引用芯片按来源分组收进弹层：整段是这一步拿全部产物，带点的是 JSON 步按字段取。
            列什么是后端说了算——声明过的输入，加上前面并行组的产物；同组并行
-           的那几步这时还没有输出，所以不列（见后端 _check_template_vars）。 -->
-      <div
-        v-for="group in chips"
-        :key="group.label"
-        class="chip-row"
-        :class="{ 'chip-row-step': group.label !== '输入变量' }"
+           的那几步这时还没有输出，所以不列（见后端 _check_template_vars）。
+           触发按钮 mousedown.prevent：弹层照开，但 textarea 不丢焦点与选区。 -->
+      <a-popover
+        trigger="click"
+        placement="bottomLeft"
+        overlay-class-name="ref-popover"
+        title="插入引用（按来源分组）"
       >
-        <span class="chip-from">{{ group.label }}</span>
-        <button
-          v-for="chip in group.chips"
-          :key="chip"
-          type="button"
-          class="chip"
-          :class="{ 'chip-field': chip.includes('.') }"
-          :disabled="readonly"
-          :title="chip.includes('.') ? '插入按字段取值' : '插入整段引用'"
-          v-text="chip"
-          @mousedown.prevent="insertChip(chip)"
-        />
-      </div>
+        <template #content>
+          <div class="ref-pop">
+            <div v-for="group in chips" :key="group.label" class="ref-pop-group">
+              <div class="ref-pop-label">{{ group.label }}</div>
+              <div class="ref-pop-chips">
+                <button
+                  v-for="chip in group.chips"
+                  :key="chip"
+                  type="button"
+                  class="chip"
+                  :class="{ 'chip-field': chip.includes('.') }"
+                  :title="chip.includes('.') ? '插入按字段取值' : '插入整段引用'"
+                  v-text="chip"
+                  @mousedown.prevent="insertChip(chip)"
+                />
+              </div>
+            </div>
+          </div>
+        </template>
+        <a-button
+          size="small"
+          class="insert-ref-btn"
+          :disabled="readonly || !hasChips"
+          title="先声明输入变量，或由前面步骤产出变量"
+          @mousedown.prevent
+        >
+          ＋插入引用
+        </a-button>
+      </a-popover>
     </a-form-item>
 
     <div class="step-body">
@@ -260,26 +278,58 @@ let completionFrom = 0
 let completionTo = 0
 
 const allChips = computed(() => props.chips.flatMap((group) => group.chips))
+const hasChips = computed(() => allChips.value.length > 0)
 
 function closeCompletion() {
   completionItems.value = []
 }
 
-/** 点芯片：插到光标处，选中的文字被替换；焦点不在这个输入框就 append 到末尾。 */
+/**
+ * 最后一次在 textarea 里的选区：点「插入引用」开弹层后焦点可能已经离开框，
+ * 芯片得知道往哪儿插。
+ */
+let lastSel: { start: number; end: number } | null = null
+function rememberSel() {
+  const area = textarea()
+  if (area && document.activeElement === area) {
+    lastSel = {
+      start: area.selectionStart ?? area.value.length,
+      end: area.selectionEnd ?? area.value.length,
+    }
+  }
+}
+
+/** 失焦：先存住选区再收自动补全，弹层里点芯片时才插得回原位。 */
+function onPromptBlur() {
+  rememberSel()
+  closeCompletion()
+}
+
+/**
+ * 点芯片：① 框还拿着焦点 → 用实时选区；② 焦点已在弹层/别处 → 用 lastSel；
+ * ③ 从没进过框 → append 到末尾。splice 后焦点会回到 textarea。
+ */
 function insertChip(insert: string) {
   closeCompletion()
   const area = textarea()
-  if (!area || document.activeElement !== area) {
-    props.step.prompt_tpl += insert
+  if (!area) return
+  if (document.activeElement === area) {
+    const start = area.selectionStart ?? area.value.length
+    splice(area, start, area.selectionEnd ?? start, insert)
     return
   }
-  splice(area, area.selectionStart ?? area.value.length, area.selectionEnd ?? 0, insert)
+  if (lastSel) {
+    splice(area, lastSel.start, lastSel.end, insert)
+    return
+  }
+  props.step.prompt_tpl += insert
 }
 
 function onPromptInput() {
   const area = textarea()
   if (!area || props.readonly) return
   const caret = area.selectionStart ?? area.value.length
+  rememberSel() // 边打字边刷新：之后开弹层拿到的就是最新光标。
   const match = /\{\{([^{}]*)$/.exec(area.value.slice(0, caret))
   if (!match) {
     closeCompletion()
@@ -306,6 +356,7 @@ function applyCompletion(name: string) {
 function splice(area: HTMLTextAreaElement, from: number, to: number, insert: string) {
   props.step.prompt_tpl = props.step.prompt_tpl.slice(0, from) + insert + props.step.prompt_tpl.slice(to)
   const caret = from + insert.length
+  lastSel = { start: caret, end: caret }
   void nextTick(() => {
     area.focus()
     area.setSelectionRange(caret, caret)
@@ -414,21 +465,32 @@ watch(
   background: var(--signal-bg) !important;
   color: var(--signal-text) !important;
 }
-.chip-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
+/* 打开引用弹层的入口：芯片按来源分组都在弹层里。 */
+.insert-ref-btn {
   margin-top: 6px;
 }
-.chip-row-step {
-  margin-top: 4px;
+.ref-pop {
+  max-width: 360px;
+  max-height: 320px;
+  overflow: auto;
+}
+.ref-pop-group {
+  margin-bottom: 8px;
+}
+.ref-pop-group:last-child {
+  margin-bottom: 0;
 }
 /* 来源标签：一眼看出这排芯片来自哪一步，不用回想变量名是谁产的。 */
-.chip-from {
+.ref-pop-label {
   color: var(--text-3);
   font-size: var(--fs-xs);
   white-space: nowrap;
+  margin-bottom: 4px;
+}
+.ref-pop-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 .chip {
   border: 1px solid var(--hairline);
@@ -501,5 +563,11 @@ watch(
 /* 保存拦下时标出缺口所在：整卡描红，随填随灭。 */
 .field-problem {
   border-color: var(--danger);
+}
+/* 窄屏卡头控件太多：允许折行，别把卡撑出横向滚动。 */
+@media (max-width: 480px) {
+  .step-head {
+    flex-wrap: wrap;
+  }
 }
 </style>
