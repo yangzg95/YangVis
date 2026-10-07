@@ -90,7 +90,13 @@
               </div>
 
               <template v-for="(group, gi) in groups" :key="gi">
-                <div v-if="gi || inputNames.length" class="flow-arrow">↓</div>
+                <!-- 该组间已有引用线经过（在正中走线）时不再画 ↓，避免叠在走线上。 -->
+                <div
+                  v-if="(gi || inputNames.length) && !linkedBuses.has(gi - 1)"
+                  class="flow-arrow"
+                >
+                  ↓
+                </div>
 
                 <div class="group-row">
                   <div class="group-head">
@@ -457,6 +463,21 @@ const size = ref({ w: 0, h: 0 })
 const stepGroupSeq = computed(() => groupSequence(props.steps))
 
 /**
+ * 存在相邻组引用线的组间序号（g 与 g+1 之间记 g）：转弯移到间隙正中后，
+ * 水平走线会经过中心线的 ↓ 箭头，这些组间就不再画箭头——引用线已经说了流向。
+ */
+const linkedBuses = computed(() => {
+  const set = new Set<number>()
+  const seqs = stepGroupSeq.value
+  for (const link of links.value) {
+    const from = seqs[link.from] ?? 0
+    const to = seqs[link.to] ?? 0
+    if (to === from + 1) set.add(from)
+  }
+  return set
+})
+
+/**
  * 点序列 → 圆角正交路径：中间拐角用二次贝塞尔收个小圆角，首尾段保持笔直，
  * 让箭头正好落在目标边。
  */
@@ -517,13 +538,12 @@ function measure() {
     }
     return { top: Number.isFinite(top) ? top : 0, bottom }
   })
-  /** 第 g 组与 g+1 组之间的总线 y：贴近下行顶部（留 5px），避开空白里的 ↓ 箭头。 */
+  /** 第 g 组与 g+1 组之间的总线 y：取两组间隙的正中，转弯在中间。 */
   function busY(g: number): number {
     const cur = groupRects[g]
     const next = groupRects[g + 1]
     if (!cur || !next) return cur ? cur.bottom + 12 : 0
-    const gap = next.top - cur.bottom
-    return gap >= 14 ? next.top - 5 : cur.bottom + gap / 2
+    return cur.bottom + (next.top - cur.bottom) / 2
   }
 
   // 出入端口先计数：同一节点有多条边时，端口在底边/顶边均布，不叠在同一点。
@@ -815,9 +835,13 @@ watch(
 
 /* ---- 顺序箭头：只表示组间执行顺序，与走线轨里的引用线分开 ---- */
 .flow-arrow {
-  /* content 中心右移 head 的一半（44px）= 节点区域中心，与居中后的节点对齐。 */
+  /* content 中心右移 head 的一半（44px）= 节点区域中心，与居中后的节点对齐。
+     自身不占高度：间距归 group-row 的 margin 管，箭头只视觉浮在间隙正中。 */
   align-self: center;
-  margin: 24px 0 24px 44px;
+  height: 0;
+  margin-inline-start: 44px;
+  transform: translateY(23px);
+  overflow: visible;
   color: var(--text-3);
   font-size: var(--fs-xs);
   line-height: 1;
@@ -827,6 +851,11 @@ watch(
 .group-row {
   display: flex;
   align-items: flex-start;
+  /* 组间固定间距：不依赖 ↓ 箭头（有引用线的组间箭头不渲染），间距不能塌陷。 */
+  margin-top: 48px;
+}
+.canvas-content > .group-row:first-child {
+  margin-top: 0;
 }
 .group-head {
   width: 88px;
