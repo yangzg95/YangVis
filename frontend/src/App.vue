@@ -47,6 +47,7 @@
               class="header-tablist"
               @change="onTabChange"
               @edit="onTabEdit"
+              @contextmenu="onTabBarContextMenu"
             >
               <a-tab-pane
                 v-for="item in openTabs"
@@ -61,6 +62,14 @@
                 </template>
               </a-tab-pane>
             </a-tabs>
+            <GridContextMenu
+              :open="tabMenu.open"
+              :x="tabMenu.x"
+              :y="tabMenu.y"
+              :entries="tabMenuEntries"
+              @pick="onTabMenuPick"
+              @close="tabMenu.open = false"
+            />
             <div class="topbar-user">
               <a-dropdown placement="bottomRight" :trigger="['click']">
                 <button type="button" class="user-dropdown-trigger">
@@ -149,6 +158,7 @@ import {
 } from '@ant-design/icons-vue'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
 import SidebarNav, { type MenuNode } from '@/components/SidebarNav.vue'
+import GridContextMenu, { type GridMenuEntry } from '@/components/ops/GridContextMenu.vue'
 import { useAuthStore } from '@/stores/auth'
 import { storageKeys } from '@/utils/storage'
 import { useIsMobile } from '@/utils/useIsMobile'
@@ -380,24 +390,99 @@ const onTabChange = (key: string | number) => {
   }
 }
 
+// 关闭一批标签：默认标签不可关；全关完兜底留默认。当前页被关掉时要导航到一个
+// 「活下来」的标签——只能在更新数组前从旧顺序里挑，否则选中一个已被关的路径，
+// 路由监听会把它重新加回去（关闭所有反而又开出一个标签）。
+// 优先落在右键的目标上（浏览器「关闭其他」的语义），否则向左找最近的存活标签，
+// 与点 × 回退到左邻的行为一致。
+const closeTabs = (paths: string[], preferred?: string) => {
+  const closable = paths.filter((p) => p !== DEFAULT_TAB_PATH)
+  if (!closable.some((p) => openTabPaths.value.includes(p))) return
+  const old = openTabPaths.value
+  const kept = old.filter((p) => !closable.includes(p))
+  const targets = kept.length ? kept : [DEFAULT_TAB_PATH]
+  if (closable.includes(route.path)) {
+    let fallback = preferred && targets.includes(preferred) ? preferred : undefined
+    for (let i = old.indexOf(route.path) - 1; i >= 0 && !fallback; i--) {
+      if (targets.includes(old[i])) fallback = old[i]
+    }
+    fallback ??= targets.find((p) => p !== DEFAULT_TAB_PATH) ?? DEFAULT_TAB_PATH
+    if (fallback !== route.path) router.push(fallback)
+  }
+  openTabPaths.value = targets
+}
+
 const onTabEdit = (targetKey: string | number | MouseEvent | KeyboardEvent, action: string) => {
   if (action !== 'remove' || typeof targetKey === 'object') {
     return
   }
-  const path = String(targetKey)
-  if (path === DEFAULT_TAB_PATH) {
+  closeTabs([String(targetKey)])
+}
+
+// 标签右键菜单：复用运维表格那套 GridContextMenu（teleport 到 body，遮罩收点击）。
+const tabMenu = ref<{ open: boolean; x: number; y: number; path: string }>({
+  open: false,
+  x: 0,
+  y: 0,
+  path: DEFAULT_TAB_PATH,
+})
+
+// 右键整枚标签都要出菜单——包括 pill 边缘那圈 padding 和关闭钮，监听只能挂在
+// tabs 根元素上委托：导航条里的标签顺序与 openTabPaths 一一对应。
+const onTabBarContextMenu = (e: MouseEvent) => {
+  const tab = e.target instanceof Element ? e.target.closest('.ant-tabs-tab') : null
+  const list = tab?.parentElement
+  if (!tab || !list) {
     return
   }
-  const index = openTabPaths.value.indexOf(path)
-  if (index < 0) {
+  const index = [...list.children]
+    .filter((el) => el.classList.contains('ant-tabs-tab'))
+    .indexOf(tab)
+  const path = openTabPaths.value[index]
+  if (!path) {
     return
   }
-  const remaining = openTabPaths.value.filter((item) => item !== path)
-  openTabPaths.value = remaining.length ? remaining : [DEFAULT_TAB_PATH]
-  // 关掉当前激活的标签页时回退到它左边那个，和参考实现保持一致。
-  if (route.path === path) {
-    const next = openTabPaths.value[Math.max(0, index - 1)] ?? DEFAULT_TAB_PATH
-    router.push(next)
+  e.preventDefault()
+  tabMenu.value = { open: true, x: e.clientX, y: e.clientY, path }
+}
+
+const tabMenuEntries = computed<GridMenuEntry[]>(() => {
+  const { path } = tabMenu.value
+  const paths = openTabPaths.value
+  const closableOthers = paths.filter((p) => p !== path && p !== DEFAULT_TAB_PATH)
+  const closableAll = paths.filter((p) => p !== DEFAULT_TAB_PATH)
+  return [
+    {
+      key: 'close',
+      label: '关闭当前',
+      disabled: path === DEFAULT_TAB_PATH,
+    },
+    {
+      key: 'close-others',
+      label: '关闭其他',
+      disabled: closableOthers.length === 0,
+    },
+    {
+      key: 'close-all',
+      label: '关闭所有',
+      danger: closableAll.length > 0,
+      disabled: closableAll.length === 0,
+    },
+  ]
+})
+
+const onTabMenuPick = (key: string) => {
+  const { path } = tabMenu.value
+  if (key === 'close') {
+    closeTabs([path])
+    return
+  }
+  if (key === 'close-others') {
+    closeTabs(openTabPaths.value.filter((p) => p !== path), path)
+    return
+  }
+  if (key === 'close-all') {
+    closeTabs(openTabPaths.value)
   }
 }
 
