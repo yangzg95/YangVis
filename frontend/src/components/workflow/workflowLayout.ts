@@ -81,6 +81,23 @@ export function groupSteps(steps: Array<{ group_key: string }>): StepGroup[] {
   return groups
 }
 
+/**
+ * 并行组的展示名：组内各步的步骤标识（key）按顺序拼出来——
+ * 单步组就是那一步的标识，多步并行组形如 ``大纲、配图``；都还没起名则 ``未命名``。
+ *
+ * ``group_key``（默认 g1/g2）只是「相邻同名即同组」的内部凭据，没有信息量，
+ * 界面一律走这里，不直接展示它。
+ */
+export function groupLabel(
+  steps: Array<{ key: string }>,
+  group: { indexes: number[] },
+): string {
+  const names = group.indexes
+    .map((i) => steps[i]?.key.trim())
+    .filter((name): name is string => !!name)
+  return names.length ? names.join('、') : '未命名'
+}
+
 /** 每一步属于第几个并行组，与 ``groupSteps`` 同源。 */
 export function groupSequence(steps: Array<{ group_key: string }>): number[] {
   const sequences: number[] = []

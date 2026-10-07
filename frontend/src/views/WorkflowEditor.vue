@@ -144,6 +144,8 @@
             :readonly="readonly"
             :chips="chipsAll[index] ?? []"
             :upstream-groups="upstreamAll[index] ?? []"
+            :group-label-text="groupLabelByStep[index]"
+            :parallel="groupParallelByStep[index]"
             :agent="agentOf(form.steps[index].agent_slug)"
             :agent-options="agentOptions"
             :model-options="modelOptions"
@@ -252,6 +254,7 @@ import {
   toStepForm,
   uniqueGroupName,
   upstreamGroupsFor,
+  groupLabel,
   type InputFieldForm,
   type StepForm,
 } from '@/components/workflow/workflowLayout'
@@ -291,11 +294,11 @@ const isLastGroup = computed(
   () => wizardPage.value === totalPages.value - 1,
 )
 
-/** 步骤条项：每一步是一个并行组，标题用组名；多节点组标注几步并行。 */
+/** 步骤条项：每一步是一个并行组，标题用组内步骤标识；多节点组标注几步并行。 */
 const stepItems = computed(() => [
   { title: '基本信息' },
   ...wizardGroups.value.map((g) => ({
-    title: g.name || '未分组',
+    title: groupLabel(form.steps, g),
     description: g.indexes.length > 1 ? `${g.indexes.length} 步并行` : undefined,
   })),
 ])
@@ -359,6 +362,19 @@ const chipsAll = computed(() =>
 const upstreamAll = computed(() =>
   form.steps.map((_, index) => upstreamGroupsFor(form.steps, index)),
 )
+/** 每一步所属并行组的展示名（步骤标识拼成）与是否多步并行，给卡片头部用。 */
+const groupLabelByStep = computed(() => {
+  const groups = wizardGroups.value
+  return groupSequence(form.steps).map(
+    (seq) => groupLabel(form.steps, groups[seq] ?? { indexes: [] }),
+  )
+})
+const groupParallelByStep = computed(() => {
+  const groups = wizardGroups.value
+  return groupSequence(form.steps).map(
+    (seq) => (groups[seq]?.indexes.length ?? 0) > 1,
+  )
+})
 
 /**
  * 必填缺口的单一事实源：界面标红、翻页拦截、保存拦截都从这里算。

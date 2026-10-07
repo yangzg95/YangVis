@@ -29,7 +29,11 @@
           </div>
         </template>
       </a-select>
-      <a-tag class="group-tag">{{ step.group_key.trim() || '未分组' }}</a-tag>
+      <!-- 单步组的组名就是步骤标识，与旁边输入框重复，不显示；
+           并行时列出同组各标识，看得出自己跟谁一组。 -->
+      <a-tag v-if="parallel" class="group-tag" :title="`同组并行：${groupLabelText}`">
+        {{ groupLabelText }}
+      </a-tag>
       <span class="spacer" />
       <a-button
         v-if="!readonly"
@@ -221,6 +225,13 @@
       <a-checkbox v-model:checked="step.optional" :disabled="readonly">可选步骤</a-checkbox>
     </div>
 
+    <!-- 高级区露出的 g1/g2 只是「相邻同名即同组」的内部凭据：是否并行由
+         「并行步骤」「下一步·新增组」按钮决定，默认名无需手改。 -->
+    <div v-if="advancedOpen" class="hint block keys-hint">
+      「并行分组」名（默认 g1/g2）只是内部凭据，相邻同名的步骤才算同组并行；
+      一般不用改，加并行用「并行步骤」按钮、进下一组用「下一步」。
+    </div>
+
     <!-- 「格式字段」的心结说破：字段不是智能体定义的，是这一步的模板要的。
          v-pre 挂内层：挂自身会把 v-if 一起跳过编译。 -->
     <div v-if="advancedOpen && step.output_kind === 'json'" class="hint block keys-hint">
@@ -254,6 +265,10 @@ const props = withDefaults(
     chips: ChipGroup[]
     /** 紧邻前一个并行组的产出，卡片上常驻展示；第一步为空数组。 */
     upstreamGroups: ChipGroup[]
+    /** 所属并行组的展示名（同组各步骤标识拼成）。 */
+    groupLabelText: string
+    /** 所属组是否多步并行：单步时不显示组标签。 */
+    parallel: boolean
     agent: Agent | null
     agentOptions: { value: string; label: string; agent: Agent }[]
     modelOptions: { value: number; label: string }[]
@@ -262,7 +277,7 @@ const props = withDefaults(
     showProblems: boolean
     advancedOpen: boolean
   }>(),
-  { agent: null, upstreamGroups: () => [] },
+  { agent: null, upstreamGroups: () => [], groupLabelText: '未命名', parallel: false },
 )
 
 defineEmits<{

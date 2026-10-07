@@ -94,8 +94,8 @@
 
                 <div class="group-row">
                   <div class="group-head">
-                    <span class="group-name" :title="group.name">
-                      {{ group.name || '未分组' }}
+                    <span class="group-name" :title="groupLabels[gi]">
+                      {{ groupLabels[gi] }}
                     </span>
                     <span class="group-meta">
                       {{ group.indexes.length > 1 ? `${group.indexes.length} 步并行` : '1 步' }}
@@ -249,6 +249,7 @@ import type { Agent } from '@/api'
 import { storageKeys } from '@/utils/storage'
 import {
   groupSteps,
+  groupLabel,
   referencedVars,
   stepLinks,
   type StepForm,
@@ -292,6 +293,8 @@ defineEmits<{
 }>()
 
 const groups = computed<StepGroup[]>(() => groupSteps(props.steps))
+/** 组标题用组内步骤标识拼成，不显示 g1/g2 这种内部凭据。 */
+const groupLabels = computed(() => groups.value.map((g) => groupLabel(props.steps, g)))
 const links = computed<StepLink[]>(() => stepLinks(props.steps))
 
 /** 几张画布同时挂载也不能撞 marker id，与 MermaidCard 同一招。 */

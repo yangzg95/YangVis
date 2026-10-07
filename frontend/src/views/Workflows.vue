@@ -82,8 +82,8 @@
             <div class="wf-chain">
               <template v-for="(group, index) in chainOf(record)" :key="index">
                 <span v-if="index" class="wf-arrow">→</span>
+                <!-- 并行组不再显示 g1 这种内部名：∥ 分隔符 + 各步骤标识已说明一切。 -->
                 <span class="wf-group" :class="{ parallel: group.parallel }">
-                  <span v-if="group.parallel" class="wf-group-name">{{ group.name }}</span>
                   <span
                     v-for="(step, stepIndex) in group.steps"
                     :key="step.key"
@@ -359,9 +359,6 @@ onActivated(() => {
 }
 .wf-group.parallel {
   border-style: dashed;
-}
-.wf-group-name {
-  color: var(--text-3);
 }
 .wf-step {
   font-family: var(--font-mono);
