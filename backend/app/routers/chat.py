@@ -26,7 +26,7 @@ from app.models.schemas import (
     OpsConversationRequest,
 )
 from app.services.chat import ROLE_USER, ChatService, derive_title
-from app.sse import SSE_HEADERS, sse_event
+from app.sse import SSE_HEADERS, sse_event, with_heartbeat
 
 logger = logging.getLogger("yangvis.chat")
 
@@ -258,7 +258,7 @@ async def confirm_action(
             yield sse_event("error", {"code": -1, "message": f"命令执行失败：{exc}"})
 
     return StreamingResponse(
-        stream(),
+        with_heartbeat(stream()),
         media_type="text/event-stream",
         headers=SSE_HEADERS,
         status_code=status.HTTP_200_OK,
@@ -375,7 +375,7 @@ async def completions(
             yield sse_event("error", {"code": -1, "message": f"回答生成失败：{exc}"})
 
     return StreamingResponse(
-        stream(),
+        with_heartbeat(stream()),
         media_type="text/event-stream",
         headers=SSE_HEADERS,
         status_code=status.HTTP_200_OK,
@@ -439,7 +439,7 @@ async def retry_last_answer(
             yield sse_event("error", {"code": -1, "message": f"重试失败：{exc}"})
 
     return StreamingResponse(
-        stream(),
+        with_heartbeat(stream()),
         media_type="text/event-stream",
         headers=SSE_HEADERS,
         status_code=status.HTTP_200_OK,

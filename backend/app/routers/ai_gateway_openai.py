@@ -22,6 +22,7 @@ from app.database import get_db
 from app.models.entities import AiApiKey
 from app.services import ai_gateway_proxy as proxy
 from app.services.ai_gateway import extract_bearer_key, find_api_key, list_public_models
+from app.sse import with_byte_heartbeat
 
 logger = logging.getLogger("yangvis.ai_gateway.openai")
 
@@ -156,7 +157,9 @@ async def chat_completions(
 
             record.status_code = status
             return StreamingResponse(
-                proxy.relay_stream(upstream, client, record),
+                with_byte_heartbeat(
+                    proxy.relay_stream(upstream, client, record),
+                ),
                 status_code=status,
                 media_type="text/event-stream",
                 headers={

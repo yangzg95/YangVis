@@ -38,7 +38,7 @@ from app.services.workflows import (
     rerun_step,
     stream_run,
 )
-from app.sse import SSE_HEADERS, sse_event
+from app.sse import SSE_HEADERS, sse_event, with_heartbeat
 
 logger = logging.getLogger("yangvis.workflows")
 
@@ -169,7 +169,7 @@ def _follow_response(owner_id: int, run_id: int, request: Request) -> StreamingR
             yield sse_event("error", {"code": -1, "message": f"跟随进度失败：{exc}"})
 
     return StreamingResponse(
-        stream(),
+        with_heartbeat(stream()),
         media_type="text/event-stream",
         headers=SSE_HEADERS,
         status_code=status.HTTP_200_OK,
@@ -328,7 +328,7 @@ async def run_workflow_stream(
             yield sse_event(event, data)
 
     return StreamingResponse(
-        stream(),
+        with_heartbeat(stream()),
         media_type="text/event-stream",
         headers=SSE_HEADERS,
         status_code=status.HTTP_200_OK,
