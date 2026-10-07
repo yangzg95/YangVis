@@ -658,7 +658,7 @@ onMounted(load)
   font-family: var(--font-mono);
 }
 .key-error {
-  color: #cf1322;
+  color: var(--danger);
   font-size: 12px;
 }
 /* 颜色/字号/行高用全局 .hint（style.css），这里只留本页差异。 */

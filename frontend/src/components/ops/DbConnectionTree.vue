@@ -456,7 +456,7 @@ function onRightClick(info: { event: MouseEvent; node: { dataRef: TreeNode } }) 
 }
 
 .icon.redis {
-  color: #ff4d4f;
+  color: var(--danger);
 }
 
 /* 连接未打开时图标压灰，一眼区分打开状态。 */
@@ -465,11 +465,11 @@ function onRightClick(info: { event: MouseEvent; node: { dataRef: TreeNode } }) 
 }
 
 .icon.schema {
-  color: #faad14;
+  color: var(--warning);
 }
 
 .icon.table {
-  color: #52c41a;
+  color: var(--success);
 }
 
 .icon.view {
@@ -493,11 +493,11 @@ function onRightClick(info: { event: MouseEvent; node: { dataRef: TreeNode } }) 
 }
 
 .dot.ok {
-  background: #52c41a;
+  background: var(--success);
 }
 
 .dot.error {
-  background: #ff4d4f;
+  background: var(--danger);
 }
 
 .count {

@@ -373,7 +373,7 @@ onBeforeUnmount(cancelAutoReconnect)
   height: 100vh;
   height: 100dvh;
   background: #0d141b;
-  color: #d8dee4;
+  color: var(--text-dark);
 }
 
 .term-topbar {
@@ -384,8 +384,8 @@ onBeforeUnmount(cancelAutoReconnect)
   height: 48px;
   flex-shrink: 0;
   padding: 0 16px;
-  background: #11181f;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--ink);
+  border-bottom: 1px solid var(--on-dark-hover);
 }
 
 .topbar-left,
@@ -405,30 +405,30 @@ onBeforeUnmount(cancelAutoReconnect)
 }
 
 .server-name.muted {
-  color: #8b98a5;
+  color: var(--text-dark-2);
   font-weight: 400;
 }
 
 .server-addr {
-  color: #8b98a5;
+  color: var(--text-dark-2);
   font-family: var(--font-mono);
   font-size: 12px;
   white-space: nowrap;
 }
 
 .cred-warning {
-  color: #faad14;
+  color: var(--warning-bright);
 }
 
 /* 深色页上的 ghost 按钮默认样式偏亮，压一压。 */
 .term-topbar :deep(.ant-btn-ghost) {
-  color: #d8dee4;
+  color: var(--text-dark);
   border-color: rgba(255, 255, 255, 0.25);
 }
 
 .term-topbar :deep(.ant-btn-ghost:hover) {
-  color: #3ad6de;
-  border-color: #3ad6de;
+  color: var(--signal-bright);
+  border-color: var(--signal-bright);
 }
 
 .term-main {
@@ -445,7 +445,7 @@ onBeforeUnmount(cancelAutoReconnect)
   width: 44px;
   flex-shrink: 0;
   padding: 10px 0;
-  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  border-right: 1px solid var(--on-dark-hover);
 }
 
 .icon-btn,
@@ -459,7 +459,7 @@ onBeforeUnmount(cancelAutoReconnect)
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: #8b98a5;
+  color: var(--text-dark-2);
   font-size: 15px;
   cursor: pointer;
   transition: all 0.15s;
@@ -467,13 +467,13 @@ onBeforeUnmount(cancelAutoReconnect)
 
 .icon-btn:hover,
 .rail-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #d8dee4;
+  background: var(--on-dark-hover);
+  color: var(--text-dark);
 }
 
 .rail-btn.active {
   background: rgba(58, 214, 222, 0.15);
-  color: #3ad6de;
+  color: var(--signal-bright);
 }
 
 /* AI 面板头部的收起按钮比顶栏的小一号。 */
@@ -490,9 +490,9 @@ onBeforeUnmount(cancelAutoReconnect)
   width: 300px;
   flex-shrink: 0;
   margin: 10px 0 10px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--on-dark-hover);
   border-radius: 6px;
-  background: #11181f;
+  background: var(--ink);
   overflow: hidden;
 }
 
@@ -502,7 +502,7 @@ onBeforeUnmount(cancelAutoReconnect)
   align-items: center;
   flex-shrink: 0;
   padding: 0 6px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--on-dark-hover);
 }
 
 .left-tab {
@@ -513,17 +513,17 @@ onBeforeUnmount(cancelAutoReconnect)
   padding: 9px 10px 8px;
   border: none;
   background: transparent;
-  color: #8b98a5;
+  color: var(--text-dark-2);
   font-size: 13px;
   cursor: pointer;
 }
 
 .left-tab:hover {
-  color: #d8dee4;
+  color: var(--text-dark);
 }
 
 .left-tab.active {
-  color: #3ad6de;
+  color: var(--signal-bright);
 }
 
 .left-tab.active::after {
@@ -534,7 +534,7 @@ onBeforeUnmount(cancelAutoReconnect)
   bottom: -1px;
   height: 2px;
   border-radius: 1px;
-  background: #3ad6de;
+  background: var(--signal-bright);
 }
 
 .tab-badge {
@@ -542,7 +542,7 @@ onBeforeUnmount(cancelAutoReconnect)
   padding: 0 4px;
   border-radius: 8px;
   background: rgba(58, 214, 222, 0.2);
-  color: #3ad6de;
+  color: var(--signal-bright);
   font-size: 10px;
   line-height: 16px;
   text-align: center;
@@ -559,14 +559,14 @@ onBeforeUnmount(cancelAutoReconnect)
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: #8b98a5;
+  color: var(--text-dark-2);
   font-size: 12px;
   cursor: pointer;
 }
 
 .left-tab-close:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #d8dee4;
+  background: var(--on-dark-hover);
+  color: var(--text-dark);
 }
 
 .term-stage {
@@ -588,13 +588,13 @@ onBeforeUnmount(cancelAutoReconnect)
   justify-content: center;
   gap: 12px;
   border-radius: 6px;
-  background: #11181f;
-  color: #8b98a5;
+  background: var(--ink);
+  color: var(--text-dark-2);
 }
 
 .term-error-icon {
   font-size: 36px;
-  color: rgba(255, 255, 255, 0.2);
+  color: var(--on-dark-border-strong);
 }
 
 .term-error-text {
@@ -604,13 +604,13 @@ onBeforeUnmount(cancelAutoReconnect)
 /* 深色页上的桌面端提示：DesktopNotice 默认是浅色 a-result 配色，
    换成终端页的深色族。 */
 .term-notice :deep(.ant-result-icon) {
-  color: rgba(255, 255, 255, 0.2);
+  color: var(--on-dark-border-strong);
 }
 .term-notice :deep(.ant-result-title) {
-  color: #d8dee4;
+  color: var(--text-dark);
 }
 .term-notice :deep(.ant-result-subtitle) {
-  color: #8b98a5;
+  color: var(--text-dark-2);
 }
 
 /* AI 面板收起后的展开入口：右缘一根竖条，悬停时用强调青提示可点。 */
@@ -623,17 +623,17 @@ onBeforeUnmount(cancelAutoReconnect)
   flex-shrink: 0;
   margin: 10px 12px 10px 0;
   padding: 12px 0;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--on-dark-hover);
   border-radius: 6px;
-  background: #11181f;
-  color: #8b98a5;
+  background: var(--ink);
+  color: var(--text-dark-2);
   cursor: pointer;
   transition: all 0.15s;
 }
 
 .ai-rail:hover {
   border-color: rgba(58, 214, 222, 0.45);
-  color: #3ad6de;
+  color: var(--signal-bright);
 }
 
 .ai-rail-text {
@@ -650,9 +650,9 @@ onBeforeUnmount(cancelAutoReconnect)
   flex-direction: column;
   flex-shrink: 0;
   margin: 10px 12px 10px 0;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--on-dark-hover);
   border-radius: 6px;
-  background: #11181f;
+  background: var(--ink);
   overflow: hidden;
 }
 
@@ -688,8 +688,8 @@ body.dragging-col .ai-resizer::after {
   align-items: center;
   justify-content: space-between;
   padding: 8px 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  color: #d8dee4;
+  border-bottom: 1px solid var(--on-dark-hover);
+  color: var(--text-dark);
   font-size: 13px;
   font-weight: 600;
 }
@@ -709,9 +709,9 @@ body.dragging-col .ai-resizer::after {
   height: 26px;
   flex-shrink: 0;
   padding: 0 16px;
-  background: #11181f;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  color: #8b98a5;
+  background: var(--ink);
+  border-top: 1px solid var(--on-dark-hover);
+  color: var(--text-dark-2);
   font-family: var(--font-mono);
   font-size: 11px;
 }
@@ -736,15 +736,15 @@ body.dragging-col .ai-resizer::after {
 }
 
 .conn-dot.connecting {
-  background: #faad14;
+  background: var(--warning-bright);
 }
 
 .conn-dot.connected {
-  background: #3ad6de;
+  background: var(--signal-bright);
 }
 
 .conn-text {
   font-size: 12px;
-  color: #8b98a5;
+  color: var(--text-dark-2);
 }
 </style>

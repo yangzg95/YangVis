@@ -349,7 +349,7 @@ defineExpose({ focus: () => term?.focus(), fit: syncSize, writeAiExec, sendInput
   height: 100%;
   min-height: 0;
   padding: 8px;
-  background: #11181f;
+  background: var(--ink);
   border-radius: 6px;
   overflow: hidden;
 }
@@ -371,7 +371,7 @@ defineExpose({ focus: () => term?.focus(), fit: syncSize, writeAiExec, sendInput
   padding: 4px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 6px;
-  background: #1b2530;
+  background: var(--surface-dark);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 
@@ -381,7 +381,7 @@ defineExpose({ focus: () => term?.focus(), fit: syncSize, writeAiExec, sendInput
   border: none;
   border-radius: 4px;
   background: #0d141b;
-  color: #d8dee4;
+  color: var(--text-dark);
   font-size: 12px;
   outline: none;
 }
@@ -400,14 +400,14 @@ defineExpose({ focus: () => term?.focus(), fit: syncSize, writeAiExec, sendInput
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: #8b98a5;
+  color: var(--text-dark-2);
   font-size: 12px;
   cursor: pointer;
 }
 
 .search-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #d8dee4;
+  background: var(--on-dark-hover);
+  color: var(--text-dark);
 }
 
 .terminal-mask {
@@ -418,7 +418,7 @@ defineExpose({ focus: () => term?.focus(), fit: syncSize, writeAiExec, sendInput
   justify-content: center;
   color: #8c8c8c;
   font-size: 13px;
-  background: #11181f;
+  background: var(--ink);
 }
 
 /* xterm 默认滚动条在白底主题里设计，黑底上白得刺眼：压成一道暗色细条，

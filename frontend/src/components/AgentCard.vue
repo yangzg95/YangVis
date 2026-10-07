@@ -67,6 +67,6 @@ const emit = defineEmits<{
   margin-top: 8px;
 }
 .danger {
-  color: #cf1322;
+  color: var(--danger);
 }
 </style>

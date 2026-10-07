@@ -783,7 +783,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 
 .stmt-error {
   margin-top: 4px;
-  color: #cf1322;
+  color: var(--danger);
   font-size: 12px;
   word-break: break-all;
 }

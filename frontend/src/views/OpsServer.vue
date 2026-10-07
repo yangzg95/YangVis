@@ -537,11 +537,11 @@ onMounted(() => {
 }
 
 .stat-value.ok {
-  color: #52c41a;
+  color: var(--success);
 }
 
 .stat-value.error {
-  color: #ff4d4f;
+  color: var(--danger);
 }
 
 .stat-value.unknown {
@@ -681,11 +681,11 @@ onMounted(() => {
 }
 
 .status-dot.ok {
-  background: #52c41a;
+  background: var(--success);
 }
 
 .status-dot.error {
-  background: #ff4d4f;
+  background: var(--danger);
 }
 
 .server-name {
@@ -724,7 +724,7 @@ onMounted(() => {
 
 .server-error {
   margin-top: 4px;
-  color: #cf1322;
+  color: var(--danger);
   font-size: 12px;
 }
 
@@ -779,15 +779,15 @@ onMounted(() => {
 }
 
 .audit-dot.ok {
-  background: #52c41a;
+  background: var(--success);
 }
 
 .audit-dot.fail {
-  background: #ff4d4f;
+  background: var(--danger);
 }
 
 .audit-dot.manual {
-  background: #8b98a5;
+  background: var(--text-3);
 }
 
 .audit-main {
@@ -811,7 +811,7 @@ onMounted(() => {
 
 .audit-error {
   margin-top: 2px;
-  color: #cf1322;
+  color: var(--danger);
   font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;

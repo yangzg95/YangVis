@@ -302,7 +302,7 @@ watch(() => props.active, () => void nextTick(revealActive))
   box-shadow: 0 0 0 1px var(--signal-border);
 }
 .node-problem {
-  border-color: #ff4d4f;
+  border-color: var(--danger);
 }
 .node-optional .node-key {
   color: var(--text-3);

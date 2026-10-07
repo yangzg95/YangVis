@@ -781,14 +781,14 @@ defineExpose({
 }
 
 .ops-chat.dark .jump-bottom {
-  border-color: rgba(255, 255, 255, 0.14);
-  background: #1b2530;
-  color: #3ad6de;
+  border-color: var(--on-dark-border);
+  background: var(--surface-dark);
+  color: var(--signal-bright);
 }
 
 .ops-chat.dark .jump-bottom:hover {
   border-color: rgba(58, 214, 222, 0.6);
-  color: #3ad6de;
+  color: var(--signal-bright);
 }
 
 .jump-fade-enter-active,
@@ -832,7 +832,7 @@ defineExpose({
   border: 1px solid var(--hairline);
   border-radius: var(--radius-md);
   background: transparent;
-  color: rgba(0, 0, 0, 0.65);
+  color: var(--scrim);
   font-size: 12px;
   text-align: left;
   cursor: pointer;
@@ -989,83 +989,83 @@ defineExpose({
 /* ---- 深色变体（全屏终端页右侧的 AI 面板，与终端 #11181f 同一族） ------------ */
 
 .ops-chat.dark .chat-empty {
-  color: #8b98a5;
+  color: var(--text-dark-2);
 }
 
 .ops-chat.dark .sample {
-  border-color: rgba(255, 255, 255, 0.14);
+  border-color: var(--on-dark-border);
   color: #aab6c2;
 }
 
 .ops-chat.dark .sample:hover {
   border-color: rgba(58, 214, 222, 0.45);
   background: rgba(58, 214, 222, 0.1);
-  color: #3ad6de;
+  color: var(--signal-bright);
 }
 
 .ops-chat.dark .bubble {
-  background: #1b2530;
-  color: #d8dee4;
+  background: var(--surface-dark);
+  color: var(--text-dark);
 }
 
 .ops-chat.dark .msg.user .bubble {
   background: rgba(58, 214, 222, 0.16);
-  color: #d8dee4;
+  color: var(--text-dark);
 }
 
 .ops-chat.dark .thinking-hint {
-  color: #8b98a5;
+  color: var(--text-dark-2);
 }
 
 .ops-chat.dark .copy-btn {
-  color: #8b98a5;
+  color: var(--text-dark-2);
 }
 
 .ops-chat.dark .copy-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #3ad6de;
+  background: var(--on-dark-hover);
+  color: var(--signal-bright);
 }
 
 .ops-chat.dark .chat-toolbar {
-  border-bottom-color: rgba(255, 255, 255, 0.08);
+  border-bottom-color: var(--on-dark-hover);
 }
 
 .ops-chat.dark .tool-btn {
-  color: #8b98a5;
+  color: var(--text-dark-2);
 }
 
 .ops-chat.dark .tool-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
-  color: #3ad6de;
+  background: var(--on-dark-hover);
+  color: var(--signal-bright);
 }
 
 .ops-chat.dark .chat-composer {
-  border-top-color: rgba(255, 255, 255, 0.08);
+  border-top-color: var(--on-dark-hover);
 }
 
 .ops-chat.dark .composer-model :deep(.ant-select-selector) {
   background: #141d26;
-  border-color: rgba(255, 255, 255, 0.14);
-  color: #d8dee4;
+  border-color: var(--on-dark-border);
+  color: var(--text-dark);
 }
 
 .ops-chat.dark .composer-model :deep(.ant-select-selection-item),
 .ops-chat.dark .composer-model :deep(.ant-select-selection-placeholder) {
-  color: #d8dee4;
+  color: var(--text-dark);
 }
 
 .ops-chat.dark .composer-model :deep(.ant-select-arrow) {
-  color: #5f6b78;
+  color: var(--text-dark-2);
 }
 
 .ops-chat.dark .chat-composer :deep(textarea) {
   background: #141d26;
-  border-color: rgba(255, 255, 255, 0.14);
-  color: #d8dee4;
+  border-color: var(--on-dark-border);
+  color: var(--text-dark);
 }
 
 .ops-chat.dark .chat-composer :deep(textarea::placeholder) {
-  color: #5f6b78;
+  color: var(--text-dark-2);
 }
 
 .ops-chat.dark .chat-composer :deep(textarea:hover),
@@ -1124,7 +1124,7 @@ defineExpose({
 
 .ops-history-overlay .history-del:hover {
   background: rgba(255, 77, 79, 0.12);
-  color: #ff4d4f;
+  color: var(--danger-bright);
 }
 
 .ops-history-overlay .history-meta {
@@ -1134,33 +1134,33 @@ defineExpose({
 
 /* 深色变体（全屏终端页的 AI 面板）：菜单底色/文字与面板同族。 */
 .ops-history-overlay.dark .ant-dropdown-menu {
-  background: #1b2530;
+  background: var(--surface-dark);
 }
 
 .ops-history-overlay.dark .ant-dropdown-menu-item {
-  color: #d8dee4;
+  color: var(--text-dark);
 }
 
 .ops-history-overlay.dark .ant-dropdown-menu-item:hover,
 .ops-history-overlay.dark .ant-dropdown-menu-item-selected {
   background: rgba(58, 214, 222, 0.12) !important;
-  color: #3ad6de;
+  color: var(--signal-bright);
 }
 
 .ops-history-overlay.dark .ant-dropdown-menu-item-disabled {
-  color: #5f6b78 !important;
+  color: var(--text-dark-2) !important;
 }
 
 .ops-history-overlay.dark .history-meta {
-  color: #8b98a5;
+  color: var(--text-dark-2);
 }
 
 .ops-history-overlay.dark .history-del {
-  color: #8b98a5;
+  color: var(--text-dark-2);
 }
 
 .ops-history-overlay.dark .history-del:hover {
   background: rgba(255, 77, 79, 0.18);
-  color: #ff7875;
+  color: var(--danger-soft);
 }
 </style>

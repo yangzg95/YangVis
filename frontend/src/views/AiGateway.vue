@@ -1118,7 +1118,7 @@ onMounted(async () => {
   width: 100px;
 }
 .text-danger {
-  color: #cf1322;
+  color: var(--danger);
 }
 
 /* ---- 概览 ---- */

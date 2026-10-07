@@ -127,7 +127,7 @@ function statusText(item: TransferItem): string {
 
 .trp-empty {
   padding: 24px 10px;
-  color: #5f6b78;
+  color: var(--text-dark-2);
   font-size: 12px;
   text-align: center;
 }
@@ -150,7 +150,7 @@ function statusText(item: TransferItem): string {
 }
 
 .trp-kind.upload {
-  color: #3ad6de;
+  color: var(--signal-bright);
 }
 
 .trp-kind.download {
@@ -166,7 +166,7 @@ function statusText(item: TransferItem): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #d8dee4;
+  color: var(--text-dark);
   font-size: 12px;
 }
 
@@ -174,27 +174,27 @@ function statusText(item: TransferItem): string {
   height: 4px;
   margin: 6px 0 4px;
   border-radius: 2px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--on-dark-hover);
   overflow: hidden;
 }
 
 .trp-bar-inner {
   height: 100%;
   border-radius: 2px;
-  background: #3ad6de;
+  background: var(--signal-bright);
   transition: width 0.2s;
 }
 
 .trp-bar-inner.done {
-  background: #52c41a;
+  background: var(--success-bright);
 }
 
 .trp-bar-inner.error {
-  background: #ff7875;
+  background: var(--danger-soft);
 }
 
 .trp-bar-inner.cancelled {
-  background: #5f6b78;
+  background: var(--text-dark-2);
 }
 
 /* 后端没给 Content-Length 时的不确定态：整条呼吸。 */
@@ -212,13 +212,13 @@ function statusText(item: TransferItem): string {
   align-items: baseline;
   flex-wrap: wrap;
   gap: 2px 8px;
-  color: #5f6b78;
+  color: var(--text-dark-2);
   font-family: var(--font-mono);
   font-size: 11px;
 }
 
 .trp-rate {
-  color: #8b98a5;
+  color: var(--text-dark-2);
 }
 
 .trp-status {
@@ -232,11 +232,11 @@ function statusText(item: TransferItem): string {
 }
 
 .trp-status.error {
-  color: #ff7875;
+  color: var(--danger-soft);
 }
 
 .trp-status.done {
-  color: #52c41a;
+  color: var(--success-bright);
 }
 
 .trp-cancel {
@@ -249,25 +249,25 @@ function statusText(item: TransferItem): string {
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: #8b98a5;
+  color: var(--text-dark-2);
   font-size: 11px;
   cursor: pointer;
 }
 
 .trp-cancel:hover {
   background: rgba(255, 77, 79, 0.15);
-  color: #ff7875;
+  color: var(--danger-soft);
 }
 
 .trp-foot {
   padding: 6px 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--on-dark-hover);
   text-align: right;
 }
 
 .trp-clear {
   padding: 2px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--on-dark-border);
   border-radius: 4px;
   background: transparent;
   color: #aab6c2;
@@ -277,7 +277,7 @@ function statusText(item: TransferItem): string {
 
 .trp-clear:hover:not(:disabled) {
   border-color: rgba(58, 214, 222, 0.45);
-  color: #3ad6de;
+  color: var(--signal-bright);
 }
 
 .trp-clear:disabled {

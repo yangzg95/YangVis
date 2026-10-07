@@ -994,7 +994,7 @@ watch(isMobile, (mobile) => {
 
 .col-resizer:hover::after,
 body.dragging-col .col-resizer::after {
-  background: var(--signal-border, #91caff);
+  background: var(--signal-border);
 }
 
 .panel-title {
@@ -1196,7 +1196,7 @@ body.dragging-col .col-resizer::after {
   right: 2px;
   top: 50%;
   height: 1px;
-  background: #ff4d4f;
+  background: var(--danger);
   transform: rotate(-45deg);
 }
 
@@ -1238,7 +1238,7 @@ body.dragging-col .col-resizer::after {
 }
 
 .menu-item.danger {
-  color: #ff4d4f;
+  color: var(--danger);
 }
 
 .menu-item.disabled {

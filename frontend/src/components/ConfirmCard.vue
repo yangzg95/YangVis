@@ -202,7 +202,7 @@ onBeforeUnmount(() => {
 }
 
 .confirm-state.is-failed {
-  color: #cf1322;
+  color: var(--danger-bright);
 }
 
 .confirm-result {
@@ -226,7 +226,7 @@ onBeforeUnmount(() => {
 }
 
 .confirm-card.dark .confirm-title {
-  color: #faad14;
+  color: var(--warning-bright);
 }
 
 .confirm-card.dark .confirm-target,
@@ -236,7 +236,7 @@ onBeforeUnmount(() => {
 
 .confirm-card.dark .confirm-command {
   background: #0d141b;
-  color: #d8dee4;
+  color: var(--text-dark);
 }
 
 .confirm-card.dark .confirm-reason {
@@ -244,19 +244,19 @@ onBeforeUnmount(() => {
 }
 
 .confirm-card.dark .confirm-state {
-  color: #8b98a5;
+  color: var(--text-dark-2);
 }
 
 .confirm-card.dark .confirm-state.is-executed {
-  color: #52c41a;
+  color: var(--success-bright);
 }
 
 .confirm-card.dark .confirm-state.is-failed {
-  color: #ff7875;
+  color: var(--danger-soft);
 }
 
 .confirm-card.dark .confirm-result {
   background: #0d141b;
-  color: #d8dee4;
+  color: var(--text-dark);
 }
 </style>

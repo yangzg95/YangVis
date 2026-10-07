@@ -134,7 +134,7 @@
 }
 
 .db-grid .col-resize:hover {
-  background: var(--signal-border, #91caff);
+  background: var(--signal-border);
 }
 
 /* Navicat 式底部 SQL 栏：展示产生当前网格的那条语句，单行等宽、超出省略，
@@ -181,7 +181,7 @@
   padding: 1px 3px;
   border-radius: 3px;
   background: var(--signal-bg, #e6f4ff);
-  color: var(--signal-text, #1677ff);
+  color: var(--signal-text);
   font-size: 10px;
   cursor: pointer;
 }

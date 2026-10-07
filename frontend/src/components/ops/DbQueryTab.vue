@@ -884,7 +884,7 @@ defineExpose({
 
 .row-resizer:hover::after,
 body.dragging-row .row-resizer::after {
-  background: var(--signal-border, #91caff);
+  background: var(--signal-border);
 }
 
 .error {
@@ -943,11 +943,11 @@ body.dragging-row .row-resizer::after {
 }
 
 .msg-text.ok {
-  color: #52c41a;
+  color: var(--success);
 }
 
 .msg-text.error {
-  color: #ff4d4f;
+  color: var(--danger);
 }
 
 /* 有结果页签可跳的消息行，光标表明可点。 */
@@ -1086,11 +1086,11 @@ body.dragging-row .row-resizer::after {
 }
 
 .his-dot.ok {
-  background: #52c41a;
+  background: var(--success);
 }
 
 .his-dot.fail {
-  background: #ff4d4f;
+  background: var(--danger);
 }
 
 .his-main {
@@ -1114,7 +1114,7 @@ body.dragging-row .row-resizer::after {
 
 .his-flag {
   margin-left: 6px;
-  color: #ff4d4f;
+  color: var(--danger);
 }
 
 .his-flag.write {

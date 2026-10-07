@@ -293,7 +293,7 @@ function onAskAi(payload: { connId: number; sql: string; error?: string; schema?
 
 .col-resizer:hover::after,
 body.dragging-col .col-resizer::after {
-  background: var(--signal-border, #91caff);
+  background: var(--signal-border);
 }
 
 /* 宽度由模板里的内联样式给（可拖拽），这里只定布局。 */

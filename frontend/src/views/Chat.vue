@@ -1231,7 +1231,7 @@ onUnmounted(() => abort?.())
 .send-failed {
   margin-top: 6px;
   font-size: 12px;
-  color: #ff4d4f;
+  color: var(--danger);
   text-align: right;
 }
 /* hover/active 底色用全局 .list-row（style.css），这里只留布局。 */
@@ -1272,7 +1272,7 @@ onUnmounted(() => abort?.())
   color: var(--signal-text);
 }
 .conv-action.danger:hover {
-  color: #ff4d4f;
+  color: var(--danger);
 }
 /* 原地重命名的输入框：与标题同字号同行高，切换时不跳。 */
 .conv-rename {

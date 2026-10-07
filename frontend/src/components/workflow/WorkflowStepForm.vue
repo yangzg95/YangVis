@@ -500,6 +500,6 @@ watch(
 }
 /* 保存拦下时标出缺口所在：整卡描红，随填随灭。 */
 .field-problem {
-  border-color: #ff4d4f;
+  border-color: var(--danger);
 }
 </style>

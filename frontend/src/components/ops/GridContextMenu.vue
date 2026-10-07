@@ -126,7 +126,7 @@ function onPick(entry: GridMenuEntry) {
 }
 
 .gmenu-item.danger {
-  color: #ff4d4f;
+  color: var(--danger);
 }
 
 .gmenu-label {

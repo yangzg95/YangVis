@@ -397,7 +397,7 @@ onMounted(() => load(''))
 </script>
 
 <style scoped>
-/* 与终端页同族的深色面板：底 #11181f，发丝线 rgba(255,255,255,0.08)，
+/* 与终端页同族的深色面板：底 #11181f，发丝线 var(--on-dark-hover)，
    强调青沿用终端光标色 #3ad6de。 */
 
 .sfp {
@@ -422,7 +422,7 @@ onMounted(() => load(''))
   border: 2px dashed rgba(58, 214, 222, 0.6);
   border-radius: 6px;
   background: rgba(17, 24, 31, 0.85);
-  color: #3ad6de;
+  color: var(--signal-bright);
   font-size: 13px;
   pointer-events: none;
 }
@@ -436,7 +436,7 @@ onMounted(() => load(''))
   align-items: center;
   gap: 2px;
   padding: 6px 8px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--on-dark-hover);
 }
 
 /* a-upload 会在 trigger 外包一层 span，让它不产生额外布局影响。 */
@@ -455,20 +455,20 @@ onMounted(() => load(''))
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: #8b98a5;
+  color: var(--text-dark-2);
   font-size: 13px;
   cursor: pointer;
   transition: all 0.15s;
 }
 
 .sfp-icon-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
-  color: #d8dee4;
+  background: var(--on-dark-hover);
+  color: var(--text-dark);
 }
 
 .sfp-icon-btn.danger:hover:not(:disabled) {
   background: rgba(255, 77, 79, 0.15);
-  color: #ff7875;
+  color: var(--danger-soft);
 }
 
 .sfp-icon-btn:disabled {
@@ -481,7 +481,7 @@ onMounted(() => load(''))
   align-items: center;
   flex-wrap: wrap;
   padding: 6px 10px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--on-dark-hover);
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.6;
@@ -492,17 +492,17 @@ onMounted(() => load(''))
   padding: 0 2px;
   border: none;
   background: transparent;
-  color: #8b98a5;
+  color: var(--text-dark-2);
   font: inherit;
   cursor: pointer;
 }
 
 .sfp-path-seg:hover {
-  color: #3ad6de;
+  color: var(--signal-bright);
 }
 
 .sfp-path-seg:last-of-type {
-  color: #d8dee4;
+  color: var(--text-dark);
 }
 
 .sfp-path-sep {
@@ -542,12 +542,12 @@ onMounted(() => load(''))
 
 .sfp-row-icon {
   flex-shrink: 0;
-  color: #8b98a5;
+  color: var(--text-dark-2);
   font-size: 13px;
 }
 
 .sfp-row-icon.dir {
-  color: #3ad6de;
+  color: var(--signal-bright);
 }
 
 .sfp-row-name {
@@ -556,14 +556,14 @@ onMounted(() => load(''))
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #d8dee4;
+  color: var(--text-dark);
   font-size: 12px;
 }
 
 .sfp-row-size {
   flex-shrink: 0;
   width: 48px;
-  color: #8b98a5;
+  color: var(--text-dark-2);
   font-family: var(--font-mono);
   font-size: 11px;
   text-align: right;
@@ -572,7 +572,7 @@ onMounted(() => load(''))
 .sfp-row-time {
   flex-shrink: 0;
   width: 72px;
-  color: #5f6b78;
+  color: var(--text-dark-2);
   font-family: var(--font-mono);
   font-size: 11px;
   text-align: right;
@@ -593,7 +593,7 @@ onMounted(() => load(''))
   border: none;
   border-radius: 4px;
   background: rgba(58, 214, 222, 0.15);
-  color: #3ad6de;
+  color: var(--signal-bright);
   font-size: 12px;
   cursor: pointer;
 }
@@ -605,7 +605,7 @@ onMounted(() => load(''))
 .sfp-empty,
 .sfp-truncated {
   padding: 16px 10px;
-  color: #5f6b78;
+  color: var(--text-dark-2);
   font-size: 12px;
   text-align: center;
 }
@@ -619,12 +619,12 @@ onMounted(() => load(''))
 }
 
 .sfp-error-icon {
-  color: #faad14;
+  color: var(--warning-bright);
   font-size: 20px;
 }
 
 .sfp-error-text {
-  color: #8b98a5;
+  color: var(--text-dark-2);
   font-size: 12px;
   text-align: center;
   word-break: break-all;
@@ -632,7 +632,7 @@ onMounted(() => load(''))
 
 .sfp-retry {
   padding: 2px 14px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--on-dark-border);
   border-radius: 4px;
   background: transparent;
   color: #aab6c2;
@@ -642,13 +642,13 @@ onMounted(() => load(''))
 
 .sfp-retry:hover {
   border-color: rgba(58, 214, 222, 0.45);
-  color: #3ad6de;
+  color: var(--signal-bright);
 }
 
 .sfp-foot {
   padding: 5px 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  color: #8b98a5;
+  border-top: 1px solid var(--on-dark-hover);
+  color: var(--text-dark-2);
   font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -664,9 +664,9 @@ onMounted(() => load(''))
   width: 100%;
   padding: 5px 10px;
   border: none;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--on-dark-hover);
   background: transparent;
-  color: #3ad6de;
+  color: var(--signal-bright);
   font: inherit;
   font-size: 11px;
   font-family: var(--font-mono);
@@ -687,6 +687,6 @@ onMounted(() => load(''))
 
 .sfp-foot-join {
   flex-shrink: 0;
-  color: #5f6b78;
+  color: var(--text-dark-2);
 }
 </style>

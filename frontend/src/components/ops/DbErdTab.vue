@@ -333,7 +333,7 @@ onMounted(load)
 }
 
 .error-text {
-  color: #ff4d4f;
+  color: var(--danger);
 }
 
 .error-source {
@@ -369,7 +369,7 @@ onMounted(load)
 }
 
 .chip:hover {
-  border-color: var(--signal-border, #91caff);
+  border-color: var(--signal-border);
   color: var(--signal-text, #0958d9);
 }
 </style>

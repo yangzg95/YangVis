@@ -928,7 +928,7 @@ function submitCustomFilter() {
 
 .col-sort {
   flex-shrink: 0;
-  color: var(--signal-text, #1677ff);
+  color: var(--signal-text);
   font-size: 11px;
 }
 
@@ -943,6 +943,6 @@ function submitCustomFilter() {
 }
 
 .col-head:hover .col-btn {
-  color: var(--signal-text, #1677ff);
+  color: var(--signal-text);
 }
 </style>

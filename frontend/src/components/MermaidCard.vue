@@ -214,7 +214,7 @@ function downloadSvg() {
   align-items: stretch;
 }
 .error-text {
-  color: #ff4d4f;
+  color: var(--danger);
 }
 .error-source {
   margin: 8px 0 0;
@@ -266,6 +266,6 @@ function downloadSvg() {
 .edit-error {
   margin-right: auto;
   font-size: 12px;
-  color: #ff4d4f;
+  color: var(--danger);
 }
 </style>

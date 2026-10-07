@@ -589,7 +589,7 @@ onMounted(load)
 }
 
 .row-del {
-  color: var(--ant-color-error, #ff4d4f);
+  color: var(--danger);
   cursor: pointer;
 }
 

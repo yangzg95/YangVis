@@ -732,7 +732,7 @@ async function onRerun(run: WorkflowRun, step: WorkflowRunStep) {
   flex: 1;
 }
 .danger {
-  color: #cf1322;
+  color: var(--danger);
   font-size: 13px;
   word-break: break-word;
 }

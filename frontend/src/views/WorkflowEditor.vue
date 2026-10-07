@@ -652,7 +652,7 @@ async function submit() {
 }
 /* 保存拦下时标出缺口所在：整卡描红，随填随灭；页面也靠它找第一个缺口滚过去。 */
 .field-problem {
-  border-color: #ff4d4f;
+  border-color: var(--danger);
 }
 /* 加载失败警告条：与下方内容拉开一点距离。 */
 .load-error {
