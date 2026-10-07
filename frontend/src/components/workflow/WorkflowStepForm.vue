@@ -84,20 +84,22 @@
     </div>
 
     <!-- 上一步（紧邻的前一个并行组）产出的变量名直接摆在写模板的位置：
-         不必先开「插入引用」才知道这一步能接什么；芯片与弹层同源，点一下即插入。 -->
+         不必先开「插入引用」才知道这一步能接什么；芯片与弹层同源，点一下即插入。
+         芯片后面跟来源说明（第几步 · 步骤标识），不用回想这个名字是谁产的。 -->
     <div v-if="upstreamGroups.length" class="upstream-hint">
-      <span class="upstream-label">上一步产出</span>
-      <button
-        v-for="group in upstreamGroups"
-        :key="group.label"
-        type="button"
-        class="chip upstream-chip"
-        :title="`${group.label}，点击插入`"
-        :disabled="readonly"
-        @mousedown.prevent="insertChip(group.chips[0])"
-      >
-        {{ group.chips[0] }}
-      </button>
+      <span class="upstream-label">上一步产出（点击芯片插入）</span>
+      <span v-for="group in upstreamGroups" :key="group.label" class="upstream-item">
+        <button
+          type="button"
+          class="chip upstream-chip"
+          :title="`${group.label}，点击插入`"
+          :disabled="readonly"
+          @mousedown.prevent="insertChip(group.chips[0])"
+        >
+          {{ group.chips[0] }}
+        </button>
+        <span class="upstream-desc">{{ group.label }}</span>
+      </span>
     </div>
 
     <a-form-item label="Prompt 模板" class="tight">
@@ -281,10 +283,22 @@ const cardProblem = computed(() => {
   return false
 })
 
-const areaEl = ref<HTMLTextAreaElement[] | HTMLTextAreaElement | null>(null)
+/**
+ * a-textarea 是组件封装：模板 ref 拿到的是它的公开实例（只 expose 了
+ * focus/blur/resizableTextArea），原生 <textarea> 经组件内部几层 computed
+ * 透传，落在 ``resizableTextArea.textArea`` 上，经 proxy 访问时已自动解包、
+ * 直接就是 DOM 元素。当原生元素用会让下方补全逻辑每键一次静默抛 TypeError。
+ */
+const areaEl = ref<unknown>(null)
 function textarea(): HTMLTextAreaElement | null {
-  const raw = areaEl.value as HTMLTextAreaElement | HTMLTextAreaElement[] | null
-  return Array.isArray(raw) ? (raw[0] ?? null) : raw
+  type MaybeWrap =
+    | { resizableTextArea?: { textArea?: unknown } }
+    | Array<{ resizableTextArea?: { textArea?: unknown } }>
+    | null
+  const raw = areaEl.value as MaybeWrap
+  const first = Array.isArray(raw) ? raw[0] : raw
+  const el = first?.resizableTextArea?.textArea
+  return el instanceof HTMLTextAreaElement ? el : null
 }
 
 /**
@@ -454,10 +468,21 @@ watch(
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 6px 12px;
   margin: 0 0 8px 28px;
 }
 .upstream-label {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+/* 一个来源一组：芯片 + 紧跟的来源说明。 */
+.upstream-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.upstream-desc {
   color: var(--text-3);
   font-size: var(--fs-xs);
   white-space: nowrap;
