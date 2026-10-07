@@ -34,6 +34,30 @@
      用它，页面里不要再写 rgba(0,0,0,0.35/0.45) 这类更浅的灰。 */
   --text-3: #6b7280;
 
+  /* -- 状态色 -------------------------------------------------------------
+     文字/浅底一律用深色档（--danger/--success/--warning），白底都过 AA；
+     旧值 #ff4d4f 只有 3.3:1、#52c41a 2.9:1，小字读不清。*-bright 只在
+     ink 深色表面上用（暗底上浅色才亮），*-soft 是暗底上的弱化文字。 ----- */
+  --danger: #cf1322;
+  --danger-bright: #ff4d4f;
+  --danger-soft: #ff7875;
+  --danger-bg: rgba(207, 19, 34, 0.08);
+  --success: #389e0d;
+  --success-bright: #52c41a;
+  --success-bg: rgba(56, 158, 13, 0.08);
+  --warning: #d48806;
+  --warning-bright: #faad14;
+  --warning-bg: rgba(212, 136, 6, 0.08);
+
+  /* -- 深色表面（ink/终端/运维面板）上的文字与叠加层 --------------------- */
+  --surface-dark: #1b2530;      /* ink 之上的深色卡片/面板 */
+  --text-dark: #d8dee4;          /* 暗底主文字 */
+  --text-dark-2: #8b98a5;        /* 暗底次要文字，~5.2:1 */
+  --on-dark-hover: rgba(255, 255, 255, 0.08);
+  --on-dark-border: rgba(255, 255, 255, 0.14);
+  --on-dark-border-strong: rgba(255, 255, 255, 0.2);
+  --scrim: rgba(0, 0, 0, 0.65);
+
   /* -- 圆角层级：小元素 / 控件 / 卡片；药丸只留给状态标签 --------------- */
   --radius-sm: 4px;
   --radius-md: 8px;
@@ -62,16 +86,6 @@
   --font-mono:
     'IBM Plex Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
 
-  /* -- legacy alias：仅服务 Ops 三件套（OpsDatabase/OpsServer/OpsChat），
-        清理完引用后删除。 */
-  --color-gray-rgb: 17, 24, 31;
-  --color-surface: #ffffff;
-  --color-surface-strong: #ffffff;
-  --color-border-soft: var(--hairline);
-  --color-text-primary: var(--text-1);
-  --color-text-secondary: var(--text-2);
-  --color-text-on-primary: #ffffff;
-  --font-family-base: var(--font-sans);
 }
 
 /* ---- Base ------------------------------------------------------------- */
@@ -90,6 +104,21 @@ body,
 button,
 input {
   font: inherit;
+}
+
+/* 默认 content-box 下加 padding 会把元素撑超宽，很多「差 1px」的错位来自
+   这里。全站统一 border-box（antd 自身也按 border-box 设计）。 */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* 键盘焦点环：只在键盘导航时出现（鼠标点击不亮），信号色 + 2px 偏移。
+   antd 控件自带的 focus box-shadow 是内侧环，这一道在外侧，两者不冲突。 */
+:focus-visible {
+  outline: 2px solid var(--signal-text);
+  outline-offset: 2px;
 }
 
 /* ---- 共享类 ------------------------------------------------------------
@@ -531,20 +560,20 @@ input {
   font-weight: 600;
   font-size: 15px;
   background: var(--ink);
-  color: var(--color-text-on-primary);
+  color: #fff;
 }
 
 .login-submit.ant-btn:hover {
   background: var(--ink-hover);
-  color: var(--color-text-on-primary);
+  color: #fff;
 }
 
 .form-error {
   margin-top: 14px;
   padding: 10px 14px;
   border-radius: var(--radius-md);
-  background: rgba(220, 38, 38, 0.07);
-  color: #b91c1c;
+  background: var(--danger-bg);
+  color: var(--danger);
   font-size: 13px;
 }
 
