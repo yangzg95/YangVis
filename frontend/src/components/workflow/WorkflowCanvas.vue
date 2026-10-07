@@ -249,6 +249,7 @@ import type { Agent } from '@/api'
 import { storageKeys } from '@/utils/storage'
 import {
   groupSteps,
+  groupSequence,
   groupLabel,
   referencedVars,
   stepLinks,
@@ -438,7 +439,7 @@ const holderStyle = computed(() => ({
 }))
 const scaleStyle = computed(() => ({ transform: `scale(${scale.value})` }))
 
-// ---- 引用线：左侧走线轨里的圆角正交线，位置全部从 DOM 量出来 ---------------------
+// ---- 引用线：底出顶入的正交线，横向段走组间空白带，位置从 DOM 量出来 -------------
 
 interface Edge {
   d: string
@@ -452,6 +453,32 @@ interface Edge {
 const edges = ref<Edge[]>([])
 const size = ref({ w: 0, h: 0 })
 
+/** 每个节点属于第几个并行组，端口分组与跳组绕轨都按它判断。 */
+const stepGroupSeq = computed(() => groupSequence(props.steps))
+
+/**
+ * 点序列 → 圆角正交路径：中间拐角用二次贝塞尔收个小圆角，首尾段保持笔直，
+ * 让箭头正好落在目标边。
+ */
+function roundedPath(points: Array<[number, number]>, radius: number): string {
+  if (points.length < 2) return ''
+  let d = `M ${points[0][0]} ${points[0][1]}`
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const [px, py] = points[i - 1]
+    const [x, y] = points[i]
+    const [nx, ny] = points[i + 1]
+    // 沿来向、去向各退一小段，段太短就退一半，拐角不会刺出线段。
+    const backFromX = Math.sign(x - px) * Math.min(radius, Math.abs(x - px) / 2)
+    const backFromY = Math.sign(y - py) * Math.min(radius, Math.abs(y - py) / 2)
+    const backNextX = Math.sign(x - nx) * Math.min(radius, Math.abs(x - nx) / 2)
+    const backNextY = Math.sign(y - ny) * Math.min(radius, Math.abs(y - ny) / 2)
+    d += ` L ${x - backFromX} ${y - backFromY} Q ${x} ${y} ${x - backNextX} ${y - backNextY}`
+  }
+  const last = points[points.length - 1]
+  d += ` L ${last[0]} ${last[1]}`
+  return d
+}
+
 /**
  * 线画在内容的自然坐标系里。
  *
@@ -460,6 +487,9 @@ const size = ref({ w: 0, h: 0 })
  *
  * 节点每次现从 DOM 上按 data-si 找，不缓存元素：加一步、改组名之后同一批 DOM 节点
  * 挂的是哪一步全变了，缓存下来的只会认错人、把线画丢。
+ *
+ * 路由底出顶入：源底边 → 组间空白带（总线）→ 目标顶边。并行组里靠右的节点
+ * 再也不会把线横着拉过同组左节点；相邻组走一条总线，跳组才绕左侧主干轨。
  */
 function measure() {
   const content = contentEl.value
@@ -473,32 +503,89 @@ function measure() {
   content.querySelectorAll<HTMLElement>('.wf-node[data-si]').forEach((el) => {
     elAt.set(Number(el.dataset.si), el)
   })
+
+  // 每个并行组行的顶/底（自然坐标）：总线 y 从相邻两组的行间空白里取。
+  const groupRects = groups.value.map((g) => {
+    let top = Infinity
+    let bottom = 0
+    for (const si of g.indexes) {
+      const el = elAt.get(si)
+      if (!(el instanceof HTMLElement)) continue
+      const r = el.getBoundingClientRect()
+      top = Math.min(top, (r.top - base.top) / s)
+      bottom = Math.max(bottom, (r.bottom - base.top) / s)
+    }
+    return { top: Number.isFinite(top) ? top : 0, bottom }
+  })
+  /** 第 g 组与 g+1 组之间的总线 y：贴近下行顶部（留 5px），避开空白里的 ↓ 箭头。 */
+  function busY(g: number): number {
+    const cur = groupRects[g]
+    const next = groupRects[g + 1]
+    if (!cur || !next) return cur ? cur.bottom + 12 : 0
+    const gap = next.top - cur.bottom
+    return gap >= 14 ? next.top - 5 : cur.bottom + gap / 2
+  }
+
+  // 出入端口先计数：同一节点有多条边时，端口在底边/顶边均布，不叠在同一点。
+  const outCount = new Map<number, number>()
+  const inCount = new Map<number, number>()
+  for (const link of links.value) {
+    outCount.set(link.from, (outCount.get(link.from) ?? 0) + 1)
+    inCount.set(link.to, (inCount.get(link.to) ?? 0) + 1)
+  }
+  const outSeen = new Map<number, number>()
+  const inSeen = new Map<number, number>()
+
   const list: Edge[] = []
   links.value.forEach((link, serial) => {
-    const from = elAt.get(link.from)
-    const to = elAt.get(link.to)
-    if (!from || !to) return
-    const a = from.getBoundingClientRect()
-    const b = to.getBoundingClientRect()
-    // 起点、终点都取节点左边缘中点：线全部收进左侧走线轨，不穿过任何节点。
+    const fromEl = elAt.get(link.from)
+    const toEl = elAt.get(link.to)
+    if (!(fromEl instanceof HTMLElement) || !(toEl instanceof HTMLElement)) return
+    const a = fromEl.getBoundingClientRect()
+    const b = toEl.getBoundingClientRect()
     const x1 = (a.left - base.left) / s
-    const y1 = (a.top + a.height / 2 - base.top) / s
     const x2 = (b.left - base.left) / s
-    const y2 = (b.top + b.height / 2 - base.top) / s
-    // 多条线在 26px 走线槽里错开轨位；rail+r 始终小于 26，不蹭到节点边框。
-    const rail = 8 + (serial % 3) * 4
-    const r = 8
+    const w1 = a.width / s
+    const w2 = b.width / s
+    const y1 = (a.bottom - base.top) / s
+    const y2 = (b.top - base.top) / s
+    // 端口位置：n 条边把边分成 n+1 段，第 i 条取第 i 个分点（单条边即中点）。
+    const pi = outSeen.get(link.from) ?? 0
+    const qi = inSeen.get(link.to) ?? 0
+    outSeen.set(link.from, pi + 1)
+    inSeen.set(link.to, qi + 1)
+    const sx = x1 + (w1 * (pi + 1)) / ((outCount.get(link.from) ?? 1) + 1)
+    const tx = x2 + (w2 * (qi + 1)) / ((inCount.get(link.to) ?? 1) + 1)
+
+    const seqFrom = stepGroupSeq.value[link.from] ?? 0
+    const seqTo = stepGroupSeq.value[link.to] ?? 0
+    const yDown = busY(seqFrom)
+    const yUp = busY(seqTo - 1)
+    let pts: Array<[number, number]>
+    if (seqTo === seqFrom + 1) {
+      // 相邻组：只走中间一条总线；列对齐（sx≈tx）时整条路退化成竖直直线。
+      pts = [[sx, y1], [sx, yDown], [tx, yDown], [tx, y2]]
+    } else {
+      // 跳组：下到源组下总线 → 左侧主干轨纵走 → 从目标组上总线右行进入。
+      const rail = 8 + (serial % 3) * 4
+      pts = [
+        [sx, y1],
+        [sx, yDown],
+        [rail, yDown],
+        [rail, yUp],
+        [tx, yUp],
+        [tx, y2],
+      ]
+    }
     list.push({
-      d:
-        `M ${x1} ${y1} L ${rail + r} ${y1} ` +
-        `Q ${rail} ${y1} ${rail} ${y1 + r} ` +
-        `L ${rail} ${y2 - r} ` +
-        `Q ${rail} ${y2} ${rail + r} ${y2} L ${x2} ${y2}`,
+      d: roundedPath(pts, 6),
       from: link.from,
       to: link.to,
       variable: link.variable,
-      labelX: rail,
-      labelY: (y1 + y2) / 2,
+      // 变量名仅悬停时显示：相邻组标在走线旁空白里，跳组标在主干段中点。
+      labelX:
+        seqTo === seqFrom + 1 ? Math.min(sx, tx) + 6 : 8 + (serial % 3) * 4 + 3,
+      labelY: seqTo === seqFrom + 1 ? (y1 + y2) / 2 : (yDown + yUp) / 2,
     })
   })
   edges.value = list
@@ -650,7 +737,7 @@ watch(
   position: relative;
   display: flex;
   flex-direction: column;
-  /* 左侧 26px 走线槽：引用线全部从这里走；右侧对称留白，居中时视觉不偏。 */
+  /* 左侧 26px：跳组引用的主干轨走这里；右侧对称留白，居中时视觉不偏。 */
   padding-left: 26px;
   padding-right: 26px;
   min-width: max-content;
@@ -711,8 +798,10 @@ watch(
   font-size: var(--fs-xs);
 }
 .io-chips {
+  flex: 1;
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   gap: 6px;
 }
 .input-chip {
@@ -726,8 +815,9 @@ watch(
 
 /* ---- 顺序箭头：只表示组间执行顺序，与走线轨里的引用线分开 ---- */
 .flow-arrow {
-  align-self: flex-start;
-  margin: 12px 0 12px 38px;
+  /* content 中心右移 head 的一半（44px）= 节点区域中心，与居中后的节点对齐。 */
+  align-self: center;
+  margin: 24px 0 24px 44px;
   color: var(--text-3);
   font-size: var(--fs-xs);
   line-height: 1;
@@ -760,8 +850,10 @@ watch(
   white-space: nowrap;
 }
 .group-body {
+  flex: 1;
   display: flex;
   align-items: flex-start;
+  justify-content: center;
   gap: 14px;
 }
 
