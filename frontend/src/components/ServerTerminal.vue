@@ -176,6 +176,43 @@ function sendInput(text: string) {
   }
 }
 
+// ---- 复制 / 粘贴 --------------------------------------------------------------
+// xterm 默认对剪贴板毫无支持：右键没反应、Ctrl+Shift+C/V 原样发给 PTY。
+// 这里补齐终端圈的三套惯例：右键智能动作、Ctrl+Shift 快捷键、选中即复制。
+
+async function copySelection() {
+  const text = term?.getSelection() ?? ''
+  if (text) {
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      // 剪贴板权限被拒（非安全上下文/焦点丢失）：没有安全的提示通道，安静失败。
+    }
+  }
+}
+
+async function pasteClipboard() {
+  if (!term) return
+  try {
+    const text = await navigator.clipboard.readText()
+    // term.paste 会走 onData：socket 发送与 pendingLine 跟踪都不用重复实现。
+    if (text) term.paste(text)
+  } catch {
+    // 同上。
+  }
+}
+
+/** 右键：有选区复制选区（GNOME 终端口径），没选区直接粘贴。 */
+function onContextMenu(event: MouseEvent) {
+  event.preventDefault()
+  if (term?.hasSelection()) void copySelection()
+  else void pasteClipboard()
+}
+
+// 选中即复制（PuTTY 口径）。onSelectionChange 在拖选过程中连续触发，
+// 防抖到鼠标停下 150ms 再写，避免一路狂刷剪贴板。
+let copyOnSelectTimer: ReturnType<typeof setTimeout> | undefined
+
 // ---- 终端内容搜索 -------------------------------------------------------------
 // 只在回滚缓冲里做客户端查找，不发任何请求；大小写不敏感。
 
@@ -228,6 +265,36 @@ onMounted(() => {
   // 输出里的 URL 变成可点链接（默认新窗口打开，与 markdown 链接同一策略）。
   term.loadAddon(new WebLinksAddon())
   term.open(hostEl.value as HTMLElement)
+
+  // 返回 false 就拦下这个按键，xterm 不再发给 PTY。Ctrl+Shift 组合在
+  // 终端里是剪贴板保留键；另补 xterm 世界的 Ctrl+Insert / Shift+Insert。
+  term.attachCustomKeyEventHandler((event) => {
+    if (event.type !== 'keydown') return true
+    const key = event.key.toLowerCase()
+    if (event.ctrlKey && event.shiftKey && (key === 'c' || key === 'v')) {
+      if (key === 'c') void copySelection()
+      else void pasteClipboard()
+      return false
+    }
+    if (event.ctrlKey && !event.shiftKey && key === 'insert') {
+      void copySelection()
+      return false
+    }
+    if (event.shiftKey && !event.ctrlKey && key === 'insert') {
+      void pasteClipboard()
+      return false
+    }
+    return true
+  })
+
+  term.element?.addEventListener('contextmenu', onContextMenu)
+
+  term.onSelectionChange(() => {
+    if (!term?.hasSelection()) return
+    if (copyOnSelectTimer) clearTimeout(copyOnSelectTimer)
+    copyOnSelectTimer = setTimeout(() => void copySelection(), 150)
+  })
+
   term.onData((data) => {
     if (socket?.readyState === WebSocket.OPEN) socket.send(data)
     // 方向键、功能键这类转义序列整体跳过，不影响行缓冲。
@@ -250,6 +317,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   generation += 1
   closeSocket()
+  if (copyOnSelectTimer) clearTimeout(copyOnSelectTimer)
   observer?.disconnect()
   observer = null
   term?.dispose()
