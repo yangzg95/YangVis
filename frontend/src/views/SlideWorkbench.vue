@@ -686,14 +686,14 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
 }
 
 .wb-title-input {
-  font-size: 16px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   max-width: 420px;
 }
 
 .dirty-hint {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .wb-alert {
@@ -726,7 +726,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   align-items: center;
   justify-content: space-between;
   padding: 8px 10px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--text-3);
   border-bottom: 1px solid var(--hairline, rgba(17, 24, 31, 0.09));
@@ -745,7 +745,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   align-items: center;
   gap: 8px;
   padding: 6px 8px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
 }
 
@@ -762,7 +762,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   flex-shrink: 0;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .page-text {
@@ -773,14 +773,14 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
 }
 
 .page-name {
-  font-size: 13px;
+  font-size: var(--fs-sm);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .page-layout {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 
@@ -805,7 +805,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 
@@ -841,7 +841,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
 
 .hint {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .empty-editor {
@@ -859,7 +859,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
 .asset-preview img {
   max-width: 100%;
   max-height: 180px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   display: block;
 }
 
@@ -882,7 +882,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
 .json-area {
   flex: 1;
   font-family: var(--mono, 'IBM Plex Mono', monospace);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
   resize: none;
   overflow: auto !important;
@@ -895,7 +895,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
 
 .source-error {
   color: #d4380d;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .preview-head {
@@ -903,7 +903,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   align-items: center;
   justify-content: space-between;
   padding: 8px 10px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--text-3);
   border-bottom: 1px solid var(--hairline, rgba(17, 24, 31, 0.09));
@@ -942,7 +942,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   width: 100%;
   height: 92px;
   object-fit: cover;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--hairline, rgba(17, 24, 31, 0.09));
   display: block;
 }
@@ -951,7 +951,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   display: flex;
   justify-content: space-between;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .asset-name {

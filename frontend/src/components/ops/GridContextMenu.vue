@@ -87,7 +87,7 @@ function onPick(entry: GridMenuEntry) {
 .gmenu-mask {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: var(--z-overlay);
 }
 
 .gmenu {
@@ -110,7 +110,7 @@ function onPick(entry: GridMenuEntry) {
   gap: var(--tool-gap);
   padding: 5px var(--grid-pad-inline);
   border-radius: var(--radius-sm);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   color: rgba(0, 0, 0, 0.88);
   cursor: pointer;
   white-space: nowrap;
@@ -137,7 +137,7 @@ function onPick(entry: GridMenuEntry) {
 }
 
 .gmenu-arrow {
-  font-size: 10px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 

@@ -74,7 +74,7 @@
               overflow: auto;
               white-space: pre-wrap;
               word-break: break-word;
-              font-size: 12px;
+              font-size: var(--fs-xs);
               margin: 0;
             "
           >{{ agent.system_prompt }}</pre>
@@ -363,7 +363,7 @@ watch(
 }
 .agent-opt-desc {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -374,7 +374,7 @@ watch(
   align-items: center;
   gap: 4px;
   margin: -2px 0 8px 28px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .keys-hint {
   margin-top: 4px;
@@ -387,7 +387,7 @@ watch(
   top: 100%;
   left: 0;
   right: 0;
-  z-index: 20;
+  z-index: var(--z-dropdown);
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
@@ -404,7 +404,7 @@ watch(
   background: var(--paper);
   color: var(--text-2);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
   padding: 0 6px;
   cursor: pointer;
@@ -427,7 +427,7 @@ watch(
 /* 来源标签：一眼看出这排芯片来自哪一步，不用回想变量名是谁产的。 */
 .chip-from {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
 }
 .chip {
@@ -436,7 +436,7 @@ watch(
   background: var(--surface);
   color: var(--text-2);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
   padding: 0 6px;
   cursor: pointer;
@@ -486,7 +486,7 @@ watch(
 }
 .body-label {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
 }
 .step-foot {

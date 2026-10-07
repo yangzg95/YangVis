@@ -494,12 +494,12 @@ onMounted(load)
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 .ttl {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .body {
@@ -536,7 +536,7 @@ onMounted(load)
   border-radius: var(--tool-radius);
   background: var(--chrome);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   white-space: pre-wrap;
   word-break: break-all;
 }
@@ -549,7 +549,7 @@ onMounted(load)
 
 .string-input {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .edit-actions,
@@ -562,7 +562,7 @@ onMounted(load)
 
 .hint {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .add-bar {
@@ -607,6 +607,6 @@ onMounted(load)
 
 .pop-hint {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 </style>

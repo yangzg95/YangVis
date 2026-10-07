@@ -981,7 +981,7 @@ watch(isMobile, (mobile) => {
   display: flex;
   justify-content: center;
   cursor: col-resize;
-  z-index: 5;
+  z-index: var(--z-sticky);
 }
 
 .col-resizer::after {
@@ -1061,7 +1061,7 @@ body.dragging-col .col-resizer::after {
   justify-content: center;
   gap: 8px;
   color: var(--text-3);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   pointer-events: none;
 }
 
@@ -1071,12 +1071,12 @@ body.dragging-col .col-resizer::after {
 }
 
 .empty-hint {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: rgba(0, 0, 0, 0.25);
 }
 
 .writable-hint {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 
@@ -1175,7 +1175,7 @@ body.dragging-col .col-resizer::after {
   height: 22px;
   padding: 0;
   border: 1px solid rgba(0, 0, 0, 0.15);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 
@@ -1210,7 +1210,7 @@ body.dragging-col .col-resizer::after {
 .menu-mask {
   position: fixed;
   inset: 0;
-  z-index: 1050;
+  z-index: var(--z-modal);
 }
 
 .menu {
@@ -1228,7 +1228,7 @@ body.dragging-col .col-resizer::after {
 .menu-item {
   padding: 5px var(--grid-pad-inline);
   border-radius: var(--radius-sm);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   cursor: pointer;
   transition: background 0.15s;
 }

@@ -337,13 +337,13 @@ onActivated(() => {
   padding: 20px 24px;
 }
 .hero-title {
-  font-size: 20px;
+  font-size: var(--fs-2xl);
   font-weight: 600;
   color: var(--text-1);
 }
 .hero-sub {
   margin-top: 4px;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 .hero-actions {
   display: flex;
@@ -386,7 +386,7 @@ onActivated(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  font-size: 15px;
+  font-size: var(--fs-base);
   font-weight: 600;
   color: var(--text-1);
   margin-bottom: 14px;
@@ -396,7 +396,7 @@ onActivated(() => {
   border: none;
   padding: 0;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 400;
   color: var(--signal-text);
   cursor: pointer;
@@ -456,10 +456,10 @@ onActivated(() => {
   border-radius: var(--radius-md);
   background: var(--signal-bg-strong);
   color: var(--signal-text);
-  font-size: 14px;
+  font-size: var(--fs-base);
 }
 .module-name {
-  font-size: 14px;
+  font-size: var(--fs-base);
   font-weight: 600;
   color: var(--text-1);
 }
@@ -469,7 +469,7 @@ onActivated(() => {
   padding-inline-start: 8px;
   display: flex;
   align-items: center;
-  font-size: 20px;
+  font-size: var(--fs-2xl);
   font-weight: 600;
   line-height: 1.1;
   color: var(--text-1);
@@ -477,7 +477,7 @@ onActivated(() => {
 }
 .module-count em {
   font-style: normal;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 400;
   color: var(--text-3);
   margin-left: 5px;
@@ -488,7 +488,7 @@ onActivated(() => {
   margin: 0;
 }
 .module-desc {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.5;
   /* 说明统一收两行，长短不一的文案不会把某一格拉得比别人高。 */
   display: -webkit-box;
@@ -497,7 +497,7 @@ onActivated(() => {
   overflow: hidden;
 }
 .module-extra {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.5;
 }
 .module-open {
@@ -507,12 +507,12 @@ onActivated(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   transition: color 0.15s;
 }
 .module-open .anticon {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   transition: transform 0.15s;
 }
 
@@ -553,10 +553,10 @@ onActivated(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   color: var(--text-1);
 }
 .recent-meta {
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 </style>

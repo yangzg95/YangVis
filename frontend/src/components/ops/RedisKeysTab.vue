@@ -381,7 +381,7 @@ onMounted(() => load(true))
 
 .db-name {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 .pattern {
@@ -391,7 +391,7 @@ onMounted(() => load(true))
 .count {
   margin-left: 4px;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .grid-wrap {
@@ -421,6 +421,6 @@ onMounted(() => load(true))
 
 .form-hint {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 </style>

@@ -200,7 +200,7 @@ watch(() => props.active, () => void nextTick(revealActive))
 <style scoped>
 .canvas-hint {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   margin-bottom: 8px;
 }
 .canvas-scroll {
@@ -221,7 +221,7 @@ watch(() => props.active, () => void nextTick(revealActive))
   position: absolute;
   top: 0;
   left: 0;
-  z-index: 1;
+  z-index: var(--z-base);
   pointer-events: none;
 }
 .edge {
@@ -236,7 +236,7 @@ watch(() => props.active, () => void nextTick(revealActive))
 }
 .lane {
   position: relative;
-  z-index: 2;
+  z-index: var(--z-raised);
   width: 176px;
   flex: none;
   border: 1px dashed var(--hairline);
@@ -246,11 +246,11 @@ watch(() => props.active, () => void nextTick(revealActive))
 }
 .lane-arrow {
   position: relative;
-  z-index: 2;
+  z-index: var(--z-raised);
   flex: none;
   align-self: center;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .lane-head {
   display: flex;
@@ -259,7 +259,7 @@ watch(() => props.active, () => void nextTick(revealActive))
   padding: 2px 4px 6px;
 }
 .lane-name {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--text-2);
   overflow: hidden;
@@ -268,7 +268,7 @@ watch(() => props.active, () => void nextTick(revealActive))
 }
 .lane-count {
   margin-left: auto;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   white-space: nowrap;
 }
@@ -284,7 +284,7 @@ watch(() => props.active, () => void nextTick(revealActive))
   background: var(--surface);
   color: var(--text-2);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   padding: 2px 6px;
 }
 .wf-node {
@@ -313,13 +313,13 @@ watch(() => props.active, () => void nextTick(revealActive))
   gap: 6px;
 }
 .node-no {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--text-3);
 }
 .node-key {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -329,13 +329,13 @@ watch(() => props.active, () => void nextTick(revealActive))
   border: 1px solid var(--hairline);
   border-radius: var(--radius-sm);
   color: var(--text-3);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   line-height: 1.5;
   padding: 0 4px;
 }
 .node-agent {
   color: var(--text-2);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   margin-top: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -344,7 +344,7 @@ watch(() => props.active, () => void nextTick(revealActive))
 .node-var {
   color: var(--text-3);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   margin-top: 2px;
 }
 .node-var-none {

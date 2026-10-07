@@ -658,7 +658,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 .engine {
   margin-left: 8px;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .form-wrap {
@@ -675,7 +675,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 }
 
 .section-title {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 500;
   color: rgba(0, 0, 0, 0.6);
 }
@@ -695,7 +695,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 
 .idx-note {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .table-comment {
@@ -719,7 +719,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 
 .foot-hint {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .warn-alert {
@@ -764,18 +764,18 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 
 .stmt-note {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .stmt-status {
   margin-left: auto;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .stmt-sql {
   display: block;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
@@ -784,12 +784,12 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 .stmt-error {
   margin-top: 4px;
   color: var(--danger);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   word-break: break-all;
 }
 
 .stmt-summary {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 </style>

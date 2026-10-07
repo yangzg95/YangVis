@@ -186,7 +186,7 @@ onMounted(() => {
 .report-header {
   position: sticky;
   top: 0;
-  z-index: 10;
+  z-index: var(--z-header);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -196,7 +196,7 @@ onMounted(() => {
   border-bottom: 1px solid #f0f0f0;
 }
 .report-title {
-  font-size: 16px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -220,10 +220,10 @@ onMounted(() => {
 /* 排版在全局 assets/markdown.css（.markdown），这里只留正文的字号行高。 */
 .report-content .markdown {
   line-height: 1.75;
-  font-size: 14px;
+  font-size: var(--fs-base);
 }
 .section-title {
-  font-size: 15px;
+  font-size: var(--fs-base);
   font-weight: 600;
   margin: 16px 0 8px;
 }
@@ -240,7 +240,7 @@ onMounted(() => {
   border-radius: 50%;
   background: rgba(10, 126, 134, 0.1);
   color: #0a7e86;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   flex: none;
 }
 </style>

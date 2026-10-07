@@ -45,7 +45,7 @@ async function copy() {
   border-radius: var(--radius-md, 6px);
   background: rgba(17, 24, 31, 0.03);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
@@ -60,6 +60,6 @@ async function copy() {
 
 .viewer-meta {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 </style>

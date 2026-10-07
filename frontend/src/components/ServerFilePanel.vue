@@ -413,22 +413,22 @@ onMounted(() => load(''))
 .sfp-drop-mask {
   position: absolute;
   inset: 0;
-  z-index: 20;
+  z-index: var(--z-dropdown);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 8px;
   border: 2px dashed rgba(58, 214, 222, 0.6);
-  border-radius: 6px;
+  border-radius: var(--tool-radius);
   background: rgba(17, 24, 31, 0.85);
   color: var(--signal-bright);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   pointer-events: none;
 }
 
 .sfp-drop-icon {
-  font-size: 28px;
+  font-size: var(--fs-4xl);
 }
 
 .sfp-toolbar {
@@ -453,10 +453,10 @@ onMounted(() => load(''))
   height: 26px;
   padding: 0;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-dark-2);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -483,7 +483,7 @@ onMounted(() => load(''))
   padding: 6px 10px;
   border-bottom: 1px solid var(--on-dark-hover);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
   word-break: break-all;
 }
@@ -543,7 +543,7 @@ onMounted(() => load(''))
 .sfp-row-icon {
   flex-shrink: 0;
   color: var(--text-dark-2);
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 .sfp-row-icon.dir {
@@ -557,7 +557,7 @@ onMounted(() => load(''))
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-dark);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .sfp-row-size {
@@ -565,7 +565,7 @@ onMounted(() => load(''))
   width: 48px;
   color: var(--text-dark-2);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   text-align: right;
 }
 
@@ -574,7 +574,7 @@ onMounted(() => load(''))
   width: 72px;
   color: var(--text-dark-2);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   text-align: right;
 }
 
@@ -591,10 +591,10 @@ onMounted(() => load(''))
   height: 22px;
   padding: 0;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: rgba(58, 214, 222, 0.15);
   color: var(--signal-bright);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   cursor: pointer;
 }
 
@@ -606,7 +606,7 @@ onMounted(() => load(''))
 .sfp-truncated {
   padding: 16px 10px;
   color: var(--text-dark-2);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   text-align: center;
 }
 
@@ -620,12 +620,12 @@ onMounted(() => load(''))
 
 .sfp-error-icon {
   color: var(--warning-bright);
-  font-size: 20px;
+  font-size: var(--fs-2xl);
 }
 
 .sfp-error-text {
   color: var(--text-dark-2);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   text-align: center;
   word-break: break-all;
 }
@@ -633,10 +633,10 @@ onMounted(() => load(''))
 .sfp-retry {
   padding: 2px 14px;
   border: 1px solid var(--on-dark-border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: #aab6c2;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   cursor: pointer;
 }
 
@@ -649,7 +649,7 @@ onMounted(() => load(''))
   padding: 5px 10px;
   border-top: 1px solid var(--on-dark-hover);
   color: var(--text-dark-2);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -668,7 +668,7 @@ onMounted(() => load(''))
   background: transparent;
   color: var(--signal-bright);
   font: inherit;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-family: var(--font-mono);
   text-align: left;
   cursor: pointer;

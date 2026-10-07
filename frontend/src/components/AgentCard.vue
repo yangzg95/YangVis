@@ -52,11 +52,11 @@ const emit = defineEmits<{
 }
 .agent-name {
   font-weight: 600;
-  font-size: 15px;
+  font-size: var(--fs-base);
 }
 .agent-desc {
   color: rgba(0, 0, 0, 0.65);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   min-height: 40px;
   line-height: 1.5;
 }

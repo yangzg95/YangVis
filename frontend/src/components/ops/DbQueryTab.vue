@@ -864,7 +864,7 @@ defineExpose({
    视觉上不占位；gap 一改这里必须跟着改，否则热区会压到邻居身上。 */
 .row-resizer {
   position: relative;
-  z-index: 5;
+  z-index: var(--z-sticky);
   flex-shrink: 0;
   height: var(--tool-gap);
   margin: calc(-1 * var(--tool-gap)) 0;
@@ -939,7 +939,7 @@ body.dragging-row .row-resizer::after {
 
 .msg-sql {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .msg-text.ok {
@@ -963,7 +963,7 @@ body.dragging-row .row-resizer::after {
   justify-content: center;
   gap: 12px;
   color: var(--text-3);
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 .samples {
@@ -981,7 +981,7 @@ body.dragging-row .row-resizer::after {
   background: var(--chrome);
   color: var(--signal-text);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -1028,21 +1028,21 @@ body.dragging-row .row-resizer::after {
 }
 
 .fav-name {
-  font-size: 13px;
+  font-size: var(--fs-sm);
   font-weight: 500;
 }
 
 .fav-tag {
   margin-inline-end: 0;
   line-height: 16px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 
 .fav-preview {
   margin-top: 2px;
   color: var(--text-3);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1100,7 +1100,7 @@ body.dragging-row .row-resizer::after {
 
 .his-sql {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1109,7 +1109,7 @@ body.dragging-row .row-resizer::after {
 .his-meta {
   margin-top: 2px;
   color: var(--text-3);
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 
 .his-flag {

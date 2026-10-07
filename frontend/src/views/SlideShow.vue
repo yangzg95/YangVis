@@ -433,7 +433,7 @@ onUnmounted(() => {
   background: linear-gradient(180deg, rgba(5, 7, 10, 0.78), rgba(5, 7, 10, 0));
   color: rgba(255, 255, 255, 0.85);
   transition: opacity 0.3s ease;
-  z-index: 2;
+  z-index: var(--z-raised);
   flex-wrap: wrap;
 }
 
@@ -451,7 +451,7 @@ onUnmounted(() => {
 }
 
 .bar-title {
-  font-size: 13px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -460,7 +460,7 @@ onUnmounted(() => {
 }
 
 .bar-page {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
   color: rgba(255, 255, 255, 0.7);
   margin-right: 2px;
@@ -486,7 +486,7 @@ onUnmounted(() => {
 }
 
 .editor-page {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 
@@ -505,6 +505,6 @@ onUnmounted(() => {
 
 .muted {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 </style>

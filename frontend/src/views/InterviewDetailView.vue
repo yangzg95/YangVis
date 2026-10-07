@@ -555,7 +555,7 @@ onUnmounted(() => {
   margin-bottom: 16px;
 }
 .interview-title {
-  font-size: 18px;
+  font-size: var(--fs-xl);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -577,7 +577,7 @@ onUnmounted(() => {
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--text-3);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   line-height: 1.7;
   margin-bottom: 4px;
 }
@@ -620,7 +620,7 @@ onUnmounted(() => {
   display: flex;
   gap: 8px;
   margin-top: 8px;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   line-height: 1.7;
 }
 .field-label {
@@ -663,7 +663,7 @@ onUnmounted(() => {
   border: none;
   background: transparent;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   cursor: pointer;
 }
 .ref-answer-title {
@@ -688,7 +688,7 @@ onUnmounted(() => {
 .ref-answer {
   padding: 10px 12px;
   border-top: 1px dashed var(--signal-border);
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 .full-width {
   width: 100%;
@@ -713,7 +713,7 @@ onUnmounted(() => {
     padding: 12px 12px 48px;
   }
   .interview-title {
-    font-size: 16px;
+    font-size: var(--fs-lg);
   }
   .question-card {
     padding: 10px 12px;

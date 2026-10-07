@@ -896,7 +896,7 @@ function submitCustomFilter() {
 
 .cond-bar :deep(input) {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .where-icon {
@@ -929,7 +929,7 @@ function submitCustomFilter() {
 .col-sort {
   flex-shrink: 0;
   color: var(--signal-text);
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 
 .col-btn {
@@ -938,7 +938,7 @@ function submitCustomFilter() {
   height: 18px;
   min-width: 18px;
   padding: 0;
-  font-size: 10px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 

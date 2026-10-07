@@ -451,13 +451,13 @@ onUnmounted(() => {
 
 .cell-sub {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   margin-top: 2px;
 }
 
 .upload-hint {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .create-form :deep(.ant-form-item) {

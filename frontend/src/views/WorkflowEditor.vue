@@ -590,7 +590,7 @@ async function submit() {
   border: 1px dashed var(--hairline);
   border-radius: var(--radius-md);
   background: var(--paper);
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 .preset-label {
   font-weight: 600;

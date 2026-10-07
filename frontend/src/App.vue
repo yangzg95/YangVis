@@ -498,7 +498,7 @@ const onUserMenuClick = async ({ key }: { key: string | number }) => {
   position: absolute;
   top: 16px;
   right: 12px;
-  z-index: 2;
+  z-index: var(--z-raised);
   color: rgba(255, 255, 255, 0.68);
 }
 

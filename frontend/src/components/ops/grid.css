@@ -9,7 +9,7 @@
   background: var(--chrome);
   border-bottom: 1px solid var(--grid-line);
   color: var(--text-2);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   letter-spacing: 0.02em;
 }
@@ -19,7 +19,7 @@
   border-bottom: 1px solid var(--grid-line-soft);
   color: rgba(0, 0, 0, 0.8);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 18px;
   font-variant-numeric: tabular-nums;
 }
@@ -104,7 +104,7 @@
   margin: calc(-1 * var(--grid-pad-block)) calc(-1 * var(--grid-pad-inline));
   width: calc(100% + 2 * var(--grid-pad-inline));
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 /* 列宽硬上限：scroll.x 用 max-content 时 antd 走 table-layout: auto，列的
@@ -128,7 +128,7 @@
   top: 0;
   right: -3px;
   bottom: 0;
-  z-index: 1;
+  z-index: var(--z-base);
   width: 7px;
   cursor: col-resize;
 }
@@ -153,14 +153,14 @@
 .sql-bar-label {
   flex-shrink: 0;
   color: var(--text-3);
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 
 .sql-bar-text {
   flex: 1;
   min-width: 0;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -182,7 +182,7 @@
   border-radius: 3px;
   background: var(--signal-bg, #e6f4ff);
   color: var(--signal-text);
-  font-size: 10px;
+  font-size: var(--fs-xs);
   cursor: pointer;
 }
 

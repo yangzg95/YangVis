@@ -294,7 +294,7 @@ onActivated(() => {
 <style scoped>
 .subtitle {
   color: var(--text-3);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   margin-bottom: 16px;
 }
 /* flex 基底用全局 .toolbar（style.css），这里只留本页差异。 */
@@ -305,7 +305,7 @@ onActivated(() => {
 /* 清理确认框里的那一小块：窗口选择 + 一句保留规则。 */
 .prune-pop {
   width: 250px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .prune-days {
   display: flex;
@@ -328,13 +328,13 @@ onActivated(() => {
 }
 .wf-slug {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 /* 描述只给一行：整段话在编辑器里看，这里截断并用原生 title 兜住。 */
 .wf-desc {
   color: var(--text-2);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   margin-top: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -345,7 +345,7 @@ onActivated(() => {
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
 }
 .wf-group {
@@ -384,7 +384,7 @@ onActivated(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 /* 这两处的间距都交给 gap：标签自带的外边距会让它和后面的文字错开。 */
 .wf-name-line :deep(.ant-tag),

@@ -1230,7 +1230,7 @@ onUnmounted(() => abort?.())
 /* 发送失败的提问下方给重试入口（气泡内，右对齐跟随用户消息）。 */
 .send-failed {
   margin-top: 6px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--danger);
   text-align: right;
 }
@@ -1241,13 +1241,13 @@ onUnmounted(() => abort?.())
   justify-content: space-between;
   gap: 8px;
   padding: 8px 10px;
-  border-radius: 6px;
+  border-radius: var(--tool-radius);
 }
 .conv-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 /* 操作图标（重命名/删除）只在悬停/键盘焦点进入该行时出现：常显的话每行
    都挂一排图标，列表全是噪音。保留占位（不 display:none），避免悬停时
@@ -1280,8 +1280,8 @@ onUnmounted(() => abort?.())
   min-width: 0;
   padding: 0 4px;
   border: 1px solid var(--signal-border);
-  border-radius: 4px;
-  font-size: 13px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
   line-height: inherit;
   outline: none;
 }
@@ -1295,7 +1295,7 @@ onUnmounted(() => abort?.())
 }
 .agent-hint {
   margin-left: 10px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: normal;
   color: var(--text-3);
 }
@@ -1309,7 +1309,7 @@ onUnmounted(() => abort?.())
 .jump-bottom {
   position: sticky;
   bottom: 16px;
-  z-index: 5;
+  z-index: var(--z-sticky);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1351,7 +1351,7 @@ onUnmounted(() => abort?.())
 /* 空态是大片留白里的唯一视觉锚点：放大并给一点信号色，不然在白底上
    完全没存在感。 */
 .empty-icon {
-  font-size: 48px;
+  font-size: var(--fs-6xl);
   color: var(--signal-text);
 }
 .msg {
@@ -1401,10 +1401,10 @@ onUnmounted(() => abort?.())
   height: 24px;
   padding: 0;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-3);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -1420,7 +1420,7 @@ onUnmounted(() => abort?.())
   border-top: 1px dashed var(--hairline);
 }
 .citations-title {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   margin-bottom: 6px;
 }

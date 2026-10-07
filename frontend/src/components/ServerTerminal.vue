@@ -350,7 +350,7 @@ defineExpose({ focus: () => term?.focus(), fit: syncSize, writeAiExec, sendInput
   min-height: 0;
   padding: 8px;
   background: var(--ink);
-  border-radius: 6px;
+  border-radius: var(--tool-radius);
   overflow: hidden;
 }
 
@@ -364,13 +364,13 @@ defineExpose({ focus: () => term?.focus(), fit: syncSize, writeAiExec, sendInput
   position: absolute;
   top: 14px;
   right: 18px;
-  z-index: 10;
+  z-index: var(--z-header);
   display: flex;
   align-items: center;
   gap: 2px;
   padding: 4px;
   border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 6px;
+  border-radius: var(--tool-radius);
   background: var(--surface-dark);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
@@ -379,10 +379,10 @@ defineExpose({ focus: () => term?.focus(), fit: syncSize, writeAiExec, sendInput
   width: 180px;
   padding: 4px 8px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: #0d141b;
   color: var(--text-dark);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   outline: none;
 }
 
@@ -398,10 +398,10 @@ defineExpose({ focus: () => term?.focus(), fit: syncSize, writeAiExec, sendInput
   height: 24px;
   padding: 0;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-dark-2);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   cursor: pointer;
 }
 
@@ -417,7 +417,7 @@ defineExpose({ focus: () => term?.focus(), fit: syncSize, writeAiExec, sendInput
   align-items: center;
   justify-content: center;
   color: #8c8c8c;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   background: var(--ink);
 }
 
@@ -433,7 +433,7 @@ defineExpose({ focus: () => term?.focus(), fit: syncSize, writeAiExec, sendInput
 
 .terminal-wrap :deep(.xterm-viewport)::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 
 .terminal-wrap :deep(.xterm-viewport)::-webkit-scrollbar-thumb:hover {

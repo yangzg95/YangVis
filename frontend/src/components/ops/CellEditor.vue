@@ -69,6 +69,6 @@ function save() {
 
 .editor-meta {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 </style>

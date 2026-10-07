@@ -188,7 +188,7 @@ function downloadSvg() {
 .mermaid-card {
   margin: 8px 0;
   border: 1px solid var(--hairline);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: #fff;
   overflow: hidden;
 }
@@ -207,7 +207,7 @@ function downloadSvg() {
   gap: 8px;
   padding: 16px;
   color: var(--text-3);
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 .state.error {
   flex-direction: column;
@@ -222,8 +222,8 @@ function downloadSvg() {
   max-height: 160px;
   overflow: auto;
   background: var(--paper);
-  border-radius: 4px;
-  font-size: 12px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
   white-space: pre-wrap;
   word-break: break-all;
 }
@@ -231,7 +231,7 @@ function downloadSvg() {
   border: none;
   border-radius: 0;
   font-family: 'IBM Plex Mono', monospace;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 .editor:focus {
   box-shadow: none;
@@ -252,10 +252,10 @@ function downloadSvg() {
   height: 24px;
   padding: 0;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-3);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -265,7 +265,7 @@ function downloadSvg() {
 }
 .edit-error {
   margin-right: auto;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--danger);
 }
 </style>

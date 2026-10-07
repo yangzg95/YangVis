@@ -551,7 +551,7 @@ onMounted(() => {
 .stat-label {
   margin-top: 4px;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 /* ---- 面板 ---------------------------------------------------------------- */
@@ -694,7 +694,7 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 14px;
+  font-size: var(--fs-base);
   font-weight: 500;
 }
 
@@ -713,19 +713,19 @@ onMounted(() => {
   white-space: nowrap;
   color: rgba(0, 0, 0, 0.65);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .server-meta {
   margin-top: 4px;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .server-error {
   margin-top: 4px;
   color: var(--danger);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 /* 备注两行封顶，多了截断——卡片高度不应该被一条长备注带跑偏。 */
@@ -736,7 +736,7 @@ onMounted(() => {
   margin-top: 4px;
   overflow: hidden;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 /* 操作常驻底部右对齐：卡片本来就是独立的操作单元，没必要藏进 hover。
@@ -800,19 +800,19 @@ onMounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .audit-meta {
   margin-top: 2px;
   color: var(--text-3);
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 
 .audit-error {
   margin-top: 2px;
   color: var(--danger);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

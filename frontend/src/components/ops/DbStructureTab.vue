@@ -353,7 +353,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 }
 
 .key-tag {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   line-height: 16px;
   padding: 0 4px;
 }
@@ -365,12 +365,12 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 
 .idx-cols {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .fk-ref {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 500;
 }
 
@@ -378,11 +378,11 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   margin-left: 4px;
   color: var(--text-3);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .rule-tag {
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 
 .ddl-toolbar {
@@ -395,7 +395,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 .ddl-hint {
   margin-left: auto;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .ddl-text {
@@ -405,7 +405,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   border-radius: var(--tool-radius);
   background: var(--chrome);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;

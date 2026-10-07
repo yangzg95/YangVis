@@ -140,7 +140,7 @@ onBeforeUnmount(() => {
   margin-bottom: 10px;
   padding: 10px;
   border: 1px solid #ffd591;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: #fffbe6;
 }
 
@@ -149,13 +149,13 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 6px;
   color: #d46b08;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   font-weight: 600;
 }
 
 .confirm-target {
   margin-left: auto;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 400;
   color: #8c6b1f;
 }
@@ -163,17 +163,17 @@ onBeforeUnmount(() => {
 .confirm-command {
   margin: 8px 0 4px;
   padding: 6px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: var(--ink);
   color: #d4d4d4;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   white-space: pre-wrap;
   word-break: break-all;
 }
 
 .confirm-reason {
   color: #8c6b1f;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .confirm-actions {
@@ -187,13 +187,13 @@ onBeforeUnmount(() => {
 .confirm-countdown {
   margin-right: auto;
   color: #8c6b1f;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .confirm-state {
   margin-top: 6px;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   text-align: right;
 }
 
@@ -210,10 +210,10 @@ onBeforeUnmount(() => {
   padding: 6px 8px;
   max-height: 200px;
   overflow-y: auto;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: var(--ink);
   color: #d4d4d4;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   white-space: pre-wrap;
   word-break: break-all;
 }

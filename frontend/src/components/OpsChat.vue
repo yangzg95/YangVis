@@ -731,10 +731,10 @@ defineExpose({
   gap: 4px;
   padding: 2px 8px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -760,7 +760,7 @@ defineExpose({
 .jump-bottom {
   position: sticky;
   bottom: 12px;
-  z-index: 5;
+  z-index: var(--z-sticky);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -810,12 +810,12 @@ defineExpose({
   gap: 8px;
   height: 100%;
   color: var(--text-3);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   text-align: center;
 }
 
 .empty-icon {
-  font-size: 28px;
+  font-size: var(--fs-4xl);
 }
 
 .samples {
@@ -833,7 +833,7 @@ defineExpose({
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--scrim);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   text-align: left;
   cursor: pointer;
   transition: all 0.15s;
@@ -857,9 +857,9 @@ defineExpose({
 .bubble {
   max-width: 92%;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: #f5f5f5;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
   word-break: break-word;
 }
@@ -901,10 +901,10 @@ defineExpose({
   height: 22px;
   padding: 0;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -927,7 +927,7 @@ defineExpose({
 }
 
 .composer-model :deep(.ant-select-selector) {
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 /* 给右下角的发送键让出位置，否则长文会钻到按钮底下。 */
@@ -948,14 +948,14 @@ defineExpose({
 
 .markdown :deep(pre) {
   padding: 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: var(--ink);
   color: #d4d4d4;
   overflow-x: auto;
 }
 
 .markdown :deep(code) {
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 /* 代码块 + 动作按钮（查询框/终端）：钉在右上角——右下角会跟横向滚动条打架。 */
@@ -973,11 +973,11 @@ defineExpose({
   right: 6px;
   padding: 2px 8px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   /* 代码可能正好写到按钮底下，底色得够实才能读。 */
   background: #3c3c3c;
   color: var(--signal-bright);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   cursor: pointer;
   transition: background 0.15s;
 }
@@ -1104,16 +1104,16 @@ defineExpose({
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 /* 删除图标平时藏着，悬停该条才出现：列表主要还是用来「打开」的。 */
 .ops-history-overlay .history-del {
   flex-shrink: 0;
   padding: 2px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: rgba(0, 0, 0, 0.4);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   opacity: 0;
   transition: all 0.15s;
 }
@@ -1129,7 +1129,7 @@ defineExpose({
 
 .ops-history-overlay .history-meta {
   color: rgba(0, 0, 0, 0.45);
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 
 /* 深色变体（全屏终端页的 AI 面板）：菜单底色/文字与面板同族。 */

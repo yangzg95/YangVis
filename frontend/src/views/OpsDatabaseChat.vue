@@ -207,7 +207,7 @@ function onAskAi(payload: { connId: number; sql: string; error?: string; schema?
 }
 
 .conn-name {
-  font-size: 14px;
+  font-size: var(--fs-base);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -222,7 +222,7 @@ function onAskAi(payload: { connId: number; sql: string; error?: string; schema?
 .conn-addr {
   color: var(--text-3);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
 }
 
@@ -261,12 +261,12 @@ function onAskAi(payload: { connId: number; sql: string; error?: string; schema?
 }
 
 .stage-error-icon {
-  font-size: 36px;
+  font-size: var(--fs-5xl);
   color: rgba(0, 0, 0, 0.15);
 }
 
 .stage-error-text {
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 /* AI 面板收起后的展开入口用全局 .rail / .rail-text（style.css）。 */
@@ -280,7 +280,7 @@ function onAskAi(payload: { connId: number; sql: string; error?: string; schema?
   display: flex;
   justify-content: center;
   cursor: col-resize;
-  z-index: 5;
+  z-index: var(--z-sticky);
 }
 
 .col-resizer::after {
@@ -349,7 +349,7 @@ body.dragging-col .col-resizer::after {
   justify-content: space-between;
   padding: 8px 12px;
   border-bottom: 1px solid var(--hairline);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   font-weight: 600;
 }
 
@@ -371,7 +371,7 @@ body.dragging-col .col-resizer::after {
   background: var(--surface);
   border-top: 1px solid var(--hairline);
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .statusbar-hint {

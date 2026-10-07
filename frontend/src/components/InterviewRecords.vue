@@ -295,7 +295,7 @@ onMounted(loadRecords)
 }
 .cell-sub {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .full-width {
   width: 100%;

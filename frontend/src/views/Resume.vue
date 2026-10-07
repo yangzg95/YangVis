@@ -1242,7 +1242,7 @@ onUnmounted(() => {
 }
 .cell-sub {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .upload-dragger {
   margin-bottom: 16px;
@@ -1300,7 +1300,7 @@ onUnmounted(() => {
   background: transparent;
 }
 .tool-icon {
-  font-size: 22px;
+  font-size: var(--fs-3xl);
   color: var(--signal-text);
 }
 .tool-name {
@@ -1309,7 +1309,7 @@ onUnmounted(() => {
 }
 .tool-desc {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   margin-top: 4px;
   line-height: 1.5;
 }
@@ -1318,7 +1318,7 @@ onUnmounted(() => {
 }
 .tool-modal-desc {
   color: var(--text-3);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   margin-bottom: 16px;
 }
 .resume-source-control {
@@ -1332,13 +1332,13 @@ onUnmounted(() => {
 }
 .preview-meta {
   margin-bottom: 12px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .preview-content {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   line-height: 1.7;
 }
 </style>

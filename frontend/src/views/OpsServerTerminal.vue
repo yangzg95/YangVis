@@ -397,7 +397,7 @@ onBeforeUnmount(cancelAutoReconnect)
 }
 
 .server-name {
-  font-size: 14px;
+  font-size: var(--fs-base);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -412,7 +412,7 @@ onBeforeUnmount(cancelAutoReconnect)
 .server-addr {
   color: var(--text-dark-2);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
 }
 
@@ -457,10 +457,10 @@ onBeforeUnmount(cancelAutoReconnect)
   height: 30px;
   padding: 0;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--tool-radius);
   background: transparent;
   color: var(--text-dark-2);
-  font-size: 15px;
+  font-size: var(--fs-base);
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -480,7 +480,7 @@ onBeforeUnmount(cancelAutoReconnect)
 .icon-btn.light {
   width: 26px;
   height: 26px;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 /* 文件面板在图标栏与终端之间，与 AI 面板同款底色和发丝线。 */
@@ -491,7 +491,7 @@ onBeforeUnmount(cancelAutoReconnect)
   flex-shrink: 0;
   margin: 10px 0 10px 12px;
   border: 1px solid var(--on-dark-hover);
-  border-radius: 6px;
+  border-radius: var(--tool-radius);
   background: var(--ink);
   overflow: hidden;
 }
@@ -514,7 +514,7 @@ onBeforeUnmount(cancelAutoReconnect)
   border: none;
   background: transparent;
   color: var(--text-dark-2);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   cursor: pointer;
 }
 
@@ -540,10 +540,10 @@ onBeforeUnmount(cancelAutoReconnect)
 .tab-badge {
   min-width: 16px;
   padding: 0 4px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: rgba(58, 214, 222, 0.2);
   color: var(--signal-bright);
-  font-size: 10px;
+  font-size: var(--fs-xs);
   line-height: 16px;
   text-align: center;
 }
@@ -557,10 +557,10 @@ onBeforeUnmount(cancelAutoReconnect)
   margin-left: auto;
   padding: 0;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-dark-2);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   cursor: pointer;
 }
 
@@ -587,18 +587,18 @@ onBeforeUnmount(cancelAutoReconnect)
   align-items: center;
   justify-content: center;
   gap: 12px;
-  border-radius: 6px;
+  border-radius: var(--tool-radius);
   background: var(--ink);
   color: var(--text-dark-2);
 }
 
 .term-error-icon {
-  font-size: 36px;
+  font-size: var(--fs-5xl);
   color: var(--on-dark-border-strong);
 }
 
 .term-error-text {
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 /* 深色页上的桌面端提示：DesktopNotice 默认是浅色 a-result 配色，
@@ -624,7 +624,7 @@ onBeforeUnmount(cancelAutoReconnect)
   margin: 10px 12px 10px 0;
   padding: 12px 0;
   border: 1px solid var(--on-dark-hover);
-  border-radius: 6px;
+  border-radius: var(--tool-radius);
   background: var(--ink);
   color: var(--text-dark-2);
   cursor: pointer;
@@ -639,7 +639,7 @@ onBeforeUnmount(cancelAutoReconnect)
 .ai-rail-text {
   writing-mode: vertical-rl;
   letter-spacing: 2px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 /* AI 面板与终端同底 (#11181f)，靠一道发丝线和终端区分开。
@@ -651,7 +651,7 @@ onBeforeUnmount(cancelAutoReconnect)
   flex-shrink: 0;
   margin: 10px 12px 10px 0;
   border: 1px solid var(--on-dark-hover);
-  border-radius: 6px;
+  border-radius: var(--tool-radius);
   background: var(--ink);
   overflow: hidden;
 }
@@ -667,7 +667,7 @@ onBeforeUnmount(cancelAutoReconnect)
   display: flex;
   justify-content: center;
   cursor: col-resize;
-  z-index: 6;
+  z-index: var(--z-sticky);
 }
 
 .ai-resizer::after {
@@ -690,7 +690,7 @@ body.dragging-col .ai-resizer::after {
   padding: 8px 12px;
   border-bottom: 1px solid var(--on-dark-hover);
   color: var(--text-dark);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   font-weight: 600;
 }
 
@@ -713,7 +713,7 @@ body.dragging-col .ai-resizer::after {
   border-top: 1px solid var(--on-dark-hover);
   color: var(--text-dark-2);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 
 .statusbar-addr {
@@ -744,7 +744,7 @@ body.dragging-col .ai-resizer::after {
 }
 
 .conn-text {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-dark-2);
 }
 </style>

@@ -638,14 +638,14 @@ async function onRerun(run: WorkflowRun, step: WorkflowRunStep) {
   align-items: center;
   gap: 8px;
   margin-bottom: 4px;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 .live-step {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 4px 0;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 .live-key {
   font-family: var(--font-mono);
@@ -682,7 +682,7 @@ async function onRerun(run: WorkflowRun, step: WorkflowRunStep) {
   white-space: nowrap;
 }
 .run-jump {
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .runs-bar {
   display: flex;
@@ -708,7 +708,7 @@ async function onRerun(run: WorkflowRun, step: WorkflowRunStep) {
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
 }
 .scene-step {
@@ -726,14 +726,14 @@ async function onRerun(run: WorkflowRun, step: WorkflowRunStep) {
 }
 .scene-label {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .spacer {
   flex: 1;
 }
 .danger {
   color: var(--danger);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   word-break: break-word;
 }
 </style>

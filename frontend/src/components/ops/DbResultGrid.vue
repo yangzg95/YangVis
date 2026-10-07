@@ -315,7 +315,7 @@ function onMenuPick(key: string) {
   padding: var(--grid-pad-inline);
   border-radius: var(--tool-radius);
   background: var(--chrome);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   white-space: pre-wrap;
   word-break: break-all;
   overflow: auto;
@@ -325,6 +325,6 @@ function onMenuPick(key: string) {
   flex-shrink: 0;
   padding-top: 4px;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 </style>

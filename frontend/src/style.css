@@ -63,6 +63,28 @@
   --radius-md: 8px;
   --radius-lg: 10px;
 
+  /* -- 字号阶梯：12/13/14 三档承载 95% 的正文，再小不设 ------------------
+     11px 及以下在密集页面上已经读不清，旧处一律升到 xs。 */
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-base: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 18px;
+  --fs-2xl: 20px;
+  --fs-3xl: 22px;
+  --fs-4xl: 28px;
+  --fs-5xl: 36px;
+  --fs-6xl: 48px;
+
+  /* -- 层级：组件内部 → sticky → 头部 → 下拉 → 浮层 → 模态 -------------- */
+  --z-base: 1;
+  --z-raised: 2;
+  --z-sticky: 5;
+  --z-header: 10;
+  --z-dropdown: 20;
+  --z-overlay: 1000;
+  --z-modal: 1050;
+
   /* -- 工作台密度（智能运维三件套）：DBX 那套「中性底 + 紧凑行」的量纲。
      间距/圆角走 token，页面 scoped 样式引用同一组值，调密度只改这里。
      悬停一律用中性灰底（--grid-hover），强调色只留给选中态——彩色悬停
@@ -133,7 +155,7 @@ input {
 }
 
 .page-title {
-  font-size: 18px;
+  font-size: var(--fs-xl);
   font-weight: 600;
   margin-bottom: 16px;
   color: var(--text-1);
@@ -170,7 +192,7 @@ input {
 
 .tab-page .crumb {
   color: var(--text-2);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   white-space: nowrap;
 }
 
@@ -181,7 +203,7 @@ input {
 
 .tab-page .meta {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .mono {
@@ -255,11 +277,11 @@ input {
    组件需要差异时只写差异属性（等宽字体、margin 等），颜色不要动。 */
 .muted {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .hint {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
 }
 
@@ -292,7 +314,7 @@ input {
 .rail-text {
   writing-mode: vertical-rl;
   letter-spacing: 2px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 /* 纯图标按钮：bare 全屏页的顶栏 / 面板头共用。深色语境（终端页）自行覆盖。 */
@@ -304,10 +326,10 @@ input {
   height: 30px;
   padding: 0;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--tool-radius);
   background: transparent;
   color: var(--text-2);
-  font-size: 15px;
+  font-size: var(--fs-base);
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -439,7 +461,7 @@ input {
 
 .login-brand-sub {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.8;
   color: rgba(255, 255, 255, 0.45);
 }
@@ -474,7 +496,7 @@ input {
   position: absolute;
   top: 50%;
   left: 50%;
-  z-index: 2;
+  z-index: var(--z-raised);
   transform: translate(-50%, -50%);
   width: min(388px, calc(100% - 48px));
   padding: 36px 32px 32px;
@@ -490,14 +512,14 @@ input {
 
 .login-title {
   margin: 0;
-  font-size: 20px;
+  font-size: var(--fs-2xl);
   font-weight: 600;
   color: var(--text-1);
 }
 
 .login-subtitle {
   margin: 6px 0 0;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   color: var(--text-3);
 }
 
@@ -511,7 +533,7 @@ input {
 .login-form .ant-input-affix-wrapper {
   padding: 10px 14px;
   border-radius: var(--radius-md);
-  font-size: 14px;
+  font-size: var(--fs-base);
   transition:
     border-color 140ms ease,
     box-shadow 140ms ease;
@@ -558,7 +580,7 @@ input {
   border: 0;
   border-radius: var(--radius-md);
   font-weight: 600;
-  font-size: 15px;
+  font-size: var(--fs-base);
   background: var(--ink);
   color: #fff;
 }
@@ -574,7 +596,7 @@ input {
   border-radius: var(--radius-md);
   background: var(--danger-bg);
   color: var(--danger);
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 /* 验证码行：输入框 + 可点击刷新的图片。 */
@@ -610,7 +632,7 @@ input {
   align-items: center;
   justify-content: center;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 /* 登录密码框下的大写锁定提示：告警橙，比错误轻一级。 */
@@ -620,7 +642,7 @@ input {
   gap: 5px;
   margin-top: 8px;
   color: #d46b08;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 @media (max-width: 768px) {
@@ -752,7 +774,7 @@ input {
 .sidebar-menu-search {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: var(--z-base);
   padding: 12px 18px 0 10px;
 }
 
@@ -808,7 +830,7 @@ input {
 }
 
 .sidebar-menu.ant-menu-dark .ant-menu-item .ant-menu-item-icon {
-  font-size: 16px;
+  font-size: var(--fs-lg);
   color: rgba(255, 255, 255, 0.52);
   transition: color 150ms ease;
 }
@@ -1050,7 +1072,7 @@ input {
 }
 
 .header-tab-label .anticon {
-  font-size: 14px;
+  font-size: var(--fs-base);
   color: currentColor;
 }
 

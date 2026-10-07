@@ -1070,7 +1070,7 @@ onUnmounted(stopPolling)
   justify-content: space-between;
 }
 .kb-stats {
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 /* hover/active 底色用全局 .list-row；.muted/.hint 用全局共享类（style.css）。 */
 .upload-hint {
@@ -1087,9 +1087,9 @@ onUnmounted(stopPolling)
   gap: 8px;
   margin-bottom: 8px;
   padding: 6px 10px;
-  border-radius: 6px;
+  border-radius: var(--tool-radius);
   background: var(--signal-bg);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .project-form {
   margin-bottom: 12px;
@@ -1103,7 +1103,7 @@ onUnmounted(stopPolling)
   white-space: pre-wrap;
   word-break: break-word;
   color: rgba(0, 0, 0, 0.65);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.7;
 }
 </style>

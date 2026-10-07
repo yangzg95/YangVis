@@ -659,7 +659,7 @@ onMounted(load)
 }
 .key-error {
   color: var(--danger);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 /* 颜色/字号/行高用全局 .hint（style.css），这里只留本页差异。 */
 .hint {

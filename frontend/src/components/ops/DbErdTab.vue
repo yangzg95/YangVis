@@ -324,7 +324,7 @@ onMounted(load)
   gap: 8px;
   padding: 32px 16px;
   color: var(--text-3);
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 .state.error {
@@ -342,8 +342,8 @@ onMounted(load)
   max-height: 200px;
   overflow: auto;
   background: var(--paper, #fafafa);
-  border-radius: 4px;
-  font-size: 12px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
   white-space: pre-wrap;
   word-break: break-all;
 }
@@ -364,7 +364,7 @@ onMounted(load)
   background: #fff;
   color: var(--text-2, rgba(0, 0, 0, 0.65));
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   cursor: pointer;
 }
 

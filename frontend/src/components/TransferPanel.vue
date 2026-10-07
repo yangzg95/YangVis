@@ -128,7 +128,7 @@ function statusText(item: TransferItem): string {
 .trp-empty {
   padding: 24px 10px;
   color: var(--text-dark-2);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   text-align: center;
 }
 
@@ -146,7 +146,7 @@ function statusText(item: TransferItem): string {
 .trp-kind {
   flex-shrink: 0;
   margin-top: 2px;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 .trp-kind.upload {
@@ -167,7 +167,7 @@ function statusText(item: TransferItem): string {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-dark);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .trp-bar {
@@ -214,7 +214,7 @@ function statusText(item: TransferItem): string {
   gap: 2px 8px;
   color: var(--text-dark-2);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 
 .trp-rate {
@@ -247,10 +247,10 @@ function statusText(item: TransferItem): string {
   height: 20px;
   padding: 0;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-dark-2);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   cursor: pointer;
 }
 
@@ -268,10 +268,10 @@ function statusText(item: TransferItem): string {
 .trp-clear {
   padding: 2px 10px;
   border: 1px solid var(--on-dark-border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: #aab6c2;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   cursor: pointer;
 }
 

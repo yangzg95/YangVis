@@ -443,12 +443,12 @@ function onRightClick(info: { event: MouseEvent; node: { dataRef: TreeNode } }) 
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 .icon {
   flex-shrink: 0;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 .icon.mysql {
@@ -503,13 +503,13 @@ function onRightClick(info: { event: MouseEvent; node: { dataRef: TreeNode } }) 
 .count {
   flex-shrink: 0;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .key-tag {
   flex-shrink: 0;
   margin-inline-end: 0;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   line-height: 16px;
   padding: 0 4px;
 }

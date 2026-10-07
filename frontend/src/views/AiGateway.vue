@@ -1139,18 +1139,18 @@ onMounted(async () => {
 }
 .access-label {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   min-width: 132px;
 }
 .access-value {
-  font-size: 13px;
+  font-size: var(--fs-sm);
   background: var(--paper);
   padding: 2px 8px;
   border-radius: var(--radius-sm);
 }
 .access-snippet {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-all;
@@ -1169,13 +1169,13 @@ onMounted(async () => {
   padding: 14px 16px;
 }
 .stat-value {
-  font-size: 22px;
+  font-size: var(--fs-3xl);
   font-weight: 600;
   color: var(--text-1);
 }
 .stat-label {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   margin-top: 4px;
 }
 .trend {
@@ -1209,7 +1209,7 @@ onMounted(async () => {
   transition: height 0.2s ease;
 }
 .trend-label {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 .breakdown {
@@ -1219,7 +1219,7 @@ onMounted(async () => {
   margin-top: 16px;
 }
 .breakdown-title {
-  font-size: 13px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   margin-bottom: 8px;
 }
@@ -1237,12 +1237,12 @@ onMounted(async () => {
   background: var(--paper);
   border-radius: var(--radius-sm);
   word-break: break-all;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 /* ---- 日志抽屉 ---- */
 .drawer-section {
-  font-size: 13px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   margin: 16px 0 8px;
 }
@@ -1251,7 +1251,7 @@ onMounted(async () => {
   padding: 12px;
   background: var(--paper);
   border-radius: var(--radius-md);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
   max-height: 320px;
   overflow: auto;

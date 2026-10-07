@@ -286,7 +286,7 @@ onMounted(load)
 <style scoped>
 .subtitle {
   color: var(--text-3);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   margin-bottom: 16px;
 }
 /* flex 基底用全局 .toolbar（style.css），这里只留本页差异。 */
@@ -313,7 +313,7 @@ onMounted(load)
   font-weight: 400;
 }
 .section-toggle-icon {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   transition: transform 0.2s;
 }
