@@ -515,6 +515,8 @@ export interface Workflow {
   description?: string | null
   inputs: WorkflowInputField[]
   steps: WorkflowStep[]
+  /** 挂载的 MCP 服务 id：运行时所有步骤都能调用这些服务的工具。 */
+  mcp_server_ids: number[]
   is_builtin: boolean
   enabled: boolean
   sort_order: number
@@ -531,6 +533,7 @@ export interface WorkflowPayload {
   description?: string | null
   inputs: WorkflowInputField[]
   steps: Omit<WorkflowStep, 'sort_order' | 'agent_name'>[]
+  mcp_server_ids: number[]
   enabled?: boolean
 }
 
@@ -671,6 +674,63 @@ export const workflowsApi = {
       url: '/workflows/runs/prune',
       method: 'POST',
       data: { keep_days: keepDays },
+    }),
+}
+
+// ---- MCP 服务 ----------------------------------------------------------------
+
+export type McpTransport = 'stdio' | 'sse' | 'streamable_http'
+
+export interface McpServer {
+  id: number
+  owner_id: number
+  name: string
+  transport: McpTransport
+  /** sse / streamable_http 的服务端点。 */
+  url?: string | null
+  /** stdio 的启动命令与参数。 */
+  command?: string | null
+  args: string[]
+  /** 回参的值是掩码（sk-****xxxx），不是明文。 */
+  env: Record<string, string>
+  headers: Record<string, string>
+  enabled: boolean
+  remark?: string | null
+  last_test_at?: string | null
+  last_test_ok?: boolean | null
+  last_test_msg?: string | null
+  created_at: string
+  updated_at: string
+  /** 密文解密失败时为 true，需要重新填写密钥。 */
+  secret_error?: boolean
+}
+
+/** MCP 服务的编辑载荷：env/headers 填明文，掩码或空值的语义见页面说明。 */
+export interface McpServerPayload {
+  name: string
+  transport: McpTransport
+  url?: string | null
+  command?: string | null
+  args?: string[]
+  env?: Record<string, string>
+  headers?: Record<string, string>
+  enabled?: boolean
+  remark?: string | null
+}
+
+export const mcpApi = {
+  list: () => request<{ items: McpServer[]; total: number }>({ url: '/mcp' }),
+  get: (id: number) => request<McpServer>({ url: `/mcp/${id}` }),
+  create: (payload: McpServerPayload) =>
+    request<McpServer>({ url: '/mcp', method: 'POST', data: payload }),
+  update: (id: number, payload: Partial<McpServerPayload>) =>
+    request<McpServer>({ url: `/mcp/${id}`, method: 'PUT', data: payload }),
+  remove: (id: number) => request<null>({ url: `/mcp/${id}`, method: 'DELETE' }),
+  /** 真正建立连接并 initialize：成功报工具数，失败报原因。 */
+  test: (id: number) =>
+    request<{ success: boolean; message: string }>({
+      url: `/mcp/${id}/test`,
+      method: 'POST',
     }),
 }
 

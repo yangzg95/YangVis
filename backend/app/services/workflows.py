@@ -46,6 +46,7 @@ from sqlalchemy.orm import Session
 
 from app.errors import CODE_CHAT_NOT_READY, BusinessError
 from app.models.entities import (
+    McpServer,
     ModelConfig,
     Workflow,
     WorkflowRun,
@@ -73,6 +74,7 @@ from app.services.agent_run import (
     run_agent,
 )
 from app.services.agents import BUILTIN_OWNER_ID, AgentService
+from app.services.mcp_tools import open_bundle, resolve_servers
 from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.workflows")
@@ -819,6 +821,7 @@ class WorkflowService:
             name=workflow.name,
             description=workflow.description,
             inputs=[WorkflowInputField(**field) for field in (workflow.input_schema or [])],
+            mcp_server_ids=list(workflow.mcp_server_ids or []),
             steps=[
                 WorkflowStepItem(
                     key=step.key,
@@ -874,6 +877,7 @@ class WorkflowService:
             name=payload.name,
             description=payload.description,
             input_schema=_input_schema(payload.inputs),
+            mcp_server_ids=list(payload.mcp_server_ids or []),
             is_builtin=False,
             enabled=True,
             sort_order=_USER_SORT_ORDER,
@@ -901,6 +905,7 @@ class WorkflowService:
         workflow.name = payload.name
         workflow.description = payload.description
         workflow.input_schema = _input_schema(payload.inputs)
+        workflow.mcp_server_ids = list(payload.mcp_server_ids or [])
         if payload.enabled is not None:
             workflow.enabled = payload.enabled
 
@@ -955,6 +960,8 @@ class WorkflowService:
             description=source.description,
             # 逐份拷 dict：直接引用同一个 list 实例，两条行的 JSON 会互相影响。
             input_schema=[dict(field) for field in (source.input_schema or [])],
+            # 副本在本人名下，原挂载仍然有效；内置源该列表恒为空。
+            mcp_server_ids=list(source.mcp_server_ids or []),
             is_builtin=False,
             enabled=True,
             sort_order=_USER_SORT_ORDER,
@@ -1005,6 +1012,19 @@ class WorkflowService:
             if field.name in declared:
                 raise ValueError(f"输入变量重复：{field.name}")
             declared.append(field.name)
+
+        # MCP 挂载：保存时只校验「存在且属于本人」（去重）；停用状态放行，
+        # 允许先挂载后启用，运行时 resolve_servers 再挡停用项。
+        mcp_ids = list(dict.fromkeys(payload.mcp_server_ids or []))
+        if mcp_ids:
+            owned = self._db.scalars(
+                select(McpServer.id).where(
+                    McpServer.owner_id == self._owner_id,
+                    McpServer.id.in_(mcp_ids),
+                )
+            ).all()
+            if len(set(owned)) != len(mcp_ids):
+                raise ValueError("挂载了不存在或不属于本人的 MCP 服务，请重新选择")
 
         steps: List[WorkflowStep] = []
         keys: List[str] = []
@@ -1501,6 +1521,7 @@ async def _execute_step(
     step: WorkflowStep,
     context: Dict[str, object],
     queue: asyncio.Queue,
+    tools: Optional[Sequence] = None,
 ) -> _StepOutcome:
     """跑一个步骤：渲染 prompt → 调模型 → 按契约解析 → 落这一行。
 
@@ -1553,6 +1574,7 @@ async def _execute_step(
                 step.agent_slug,
                 prompt,
                 config_id=config.id,
+                tools=tools,
             )
             plain, parsed = parse_output(text, step.output_kind, step.output_keys)
         except Exception as exc:  # noqa: BLE001 - 步骤的失败就是这一步的状态
@@ -1668,118 +1690,132 @@ async def execute_run(
         # 而不是让每个步骤各自失败一遍。按步骤指定的配置在步骤里各自校验。
         require_chat_model(db, owner_id)
 
-        run.status = RUN_RUNNING
-        run.started_at = db_now()
-        run.error_msg = None
-        db.commit()
-
-        agent_names = {
-            agent.slug: agent.name
-            for agent in AgentService(db, owner_id).list()
-        }
-        yield "run_start", {
-            "run_id": run.id,
-            "workflow_slug": run.workflow_slug,
-            "steps": [
-                {
-                    "key": step.key,
-                    "group_key": step.group_key,
-                    "agent_slug": step.agent_slug,
-                    "agent_name": agent_names.get(step.agent_slug),
-                    "output_kind": step.output_kind,
-                    "optional": step.optional,
-                }
-                for step in steps
-            ],
-        }
-
-        context: Dict[str, object] = dict(run.inputs or {})
-        queue: asyncio.Queue = asyncio.Queue()
-        started = time.monotonic()
-        failed: Optional[str] = None
-
-        for group_key, group in _group_order(steps):
-
-            async def _drive(members: List[WorkflowStep]) -> None:
-                results = await asyncio.gather(
-                    *[
-                        _execute_step(
-                            owner_id=owner_id, run_id=run_id, step=member,
-                            context=context, queue=queue,
-                        )
-                        for member in members
-                    ],
-                    # 步骤内部的异常已经在 ``_execute_step`` 里落成状态了；
-                    # return_exceptions 只是最后一道网，免得一个意外把同组的
-                    # 兄弟步骤拖成没人收尸的挂起任务。
-                    return_exceptions=True,
-                )
-                await queue.put((_GROUP_DONE, results))
-
-            task = asyncio.create_task(_drive(group))
-            while True:
-                payload = await queue.get()
-                if isinstance(payload, tuple) and payload[0] == _GROUP_DONE:
-                    results = payload[1]
-                    break
-                yield payload[0], payload[1]
-            await task
-
-            for outcome in results:
-                if isinstance(outcome, _StepOutcome):
-                    if outcome.status == STEP_SUCCEEDED and outcome.output_var:
-                        context[outcome.output_var] = _context_value(
-                            outcome.output, outcome.parsed
-                        )
-                    elif outcome.status == STEP_FAILED and outcome.optional and outcome.output_var:
-                        # 可选步骤挂了不算完：它的产物按空串进上下文，下游那句
-                        # 「如果有配图建议就附上」自然就不附上。不补这一手的话，
-                        # optional 形同虚设——下一步会因为没有定义的元素报错，
-                        # 整条流程照样停摆。
-                        context[outcome.output_var] = ""
-                else:  # 不该发生：_execute_step 自己兜住了异常。
-                    logger.error(
-                        "workflow step of run %s raised outside its own handling: %s",
-                        run_id,
-                        outcome,
-                    )
-
-            broken = [
-                outcome
-                for outcome in results
-                if isinstance(outcome, _StepOutcome)
-                and outcome.status == STEP_FAILED
-                and not outcome.optional
-            ]
-            if broken:
-                failed = broken[0].error or "步骤执行失败"
-                break
-
-        # 剩下的步骤标成 skipped：并行组里「没轮到跑」和「跑挂了」在历史里
-        # 得区分得开，否则一次半途失败看起来像全盘失败。
-        db.execute(
-            update(WorkflowRunStep)
-            .where(
-                WorkflowRunStep.owner_id == owner_id,
-                WorkflowRunStep.run_id == run_id,
-                WorkflowRunStep.status.in_((STEP_PENDING, STEP_RUNNING)),
-            )
-            .values(status=STEP_SKIPPED, finished_at=db_now())
+        # MCP 连接束：工作流挂载的全部服务在这里连接一次、initialize 一次，
+        # 所有步骤共用。连接失败发生在首个事件之前，由 stream_run 的既有
+        # 异常路径把 run 落成 failed（与「模型未就绪」的前置失败同路径）。
+        workflow = db.get(Workflow, run.workflow_id)
+        servers = resolve_servers(
+            db, owner_id, list(workflow.mcp_server_ids or [])
         )
+        bundle = await open_bundle(servers)
 
-        run = db.get(WorkflowRun, run_id)
-        run.status = RUN_FAILED if failed else RUN_SUCCEEDED
-        run.error_msg = failed
-        run.elapsed_ms = int((time.monotonic() - started) * 1000)
-        run.finished_at = db_now()
-        db.commit()
+        try:
+            run.status = RUN_RUNNING
+            run.started_at = db_now()
+            run.error_msg = None
+            db.commit()
 
-        yield "run_end", {
-            "run_id": run_id,
-            "status": run.status,
-            "error": run.error_msg,
-            "elapsed_ms": run.elapsed_ms,
-        }
+            agent_names = {
+                agent.slug: agent.name
+                for agent in AgentService(db, owner_id).list()
+            }
+            yield "run_start", {
+                "run_id": run.id,
+                "workflow_slug": run.workflow_slug,
+                "steps": [
+                    {
+                        "key": step.key,
+                        "group_key": step.group_key,
+                        "agent_slug": step.agent_slug,
+                        "agent_name": agent_names.get(step.agent_slug),
+                        "output_kind": step.output_kind,
+                        "optional": step.optional,
+                    }
+                    for step in steps
+                ],
+            }
+
+            context: Dict[str, object] = dict(run.inputs or {})
+            queue: asyncio.Queue = asyncio.Queue()
+            started = time.monotonic()
+            failed: Optional[str] = None
+
+            for group_key, group in _group_order(steps):
+
+                async def _drive(members: List[WorkflowStep]) -> None:
+                    results = await asyncio.gather(
+                        *[
+                            _execute_step(
+                                owner_id=owner_id, run_id=run_id, step=member,
+                                context=context, queue=queue,
+                                tools=bundle.tools,
+                            )
+                            for member in members
+                        ],
+                        # 步骤内部的异常已经在 ``_execute_step`` 里落成状态了；
+                        # return_exceptions 只是最后一道网，免得一个意外把同组的
+                        # 兄弟步骤拖成没人收尸的挂起任务。
+                        return_exceptions=True,
+                    )
+                    await queue.put((_GROUP_DONE, results))
+
+                task = asyncio.create_task(_drive(group))
+                while True:
+                    payload = await queue.get()
+                    if isinstance(payload, tuple) and payload[0] == _GROUP_DONE:
+                        results = payload[1]
+                        break
+                    yield payload[0], payload[1]
+                await task
+
+                for outcome in results:
+                    if isinstance(outcome, _StepOutcome):
+                        if outcome.status == STEP_SUCCEEDED and outcome.output_var:
+                            context[outcome.output_var] = _context_value(
+                                outcome.output, outcome.parsed
+                            )
+                        elif outcome.status == STEP_FAILED and outcome.optional and outcome.output_var:
+                            # 可选步骤挂了不算完：它的产物按空串进上下文，下游那句
+                            # 「如果有配图建议就附上」自然就不附上。不补这一手的话，
+                            # optional 形同虚设——下一步会因为没有定义的元素报错，
+                            # 整条流程照样停摆。
+                            context[outcome.output_var] = ""
+                    else:  # 不该发生：_execute_step 自己兜住了异常。
+                        logger.error(
+                            "workflow step of run %s raised outside its own handling: %s",
+                            run_id,
+                            outcome,
+                        )
+
+                broken = [
+                    outcome
+                    for outcome in results
+                    if isinstance(outcome, _StepOutcome)
+                    and outcome.status == STEP_FAILED
+                    and not outcome.optional
+                ]
+                if broken:
+                    failed = broken[0].error or "步骤执行失败"
+                    break
+
+            # 剩下的步骤标成 skipped：并行组里「没轮到跑」和「跑挂了」在历史里
+            # 得区分得开，否则一次半途失败看起来像全盘失败。
+            db.execute(
+                update(WorkflowRunStep)
+                .where(
+                    WorkflowRunStep.owner_id == owner_id,
+                    WorkflowRunStep.run_id == run_id,
+                    WorkflowRunStep.status.in_((STEP_PENDING, STEP_RUNNING)),
+                )
+                .values(status=STEP_SKIPPED, finished_at=db_now())
+            )
+
+            run = db.get(WorkflowRun, run_id)
+            run.status = RUN_FAILED if failed else RUN_SUCCEEDED
+            run.error_msg = failed
+            run.elapsed_ms = int((time.monotonic() - started) * 1000)
+            run.finished_at = db_now()
+            db.commit()
+
+            yield "run_end", {
+                "run_id": run_id,
+                "status": run.status,
+                "error": run.error_msg,
+                "elapsed_ms": run.elapsed_ms,
+            }
+        finally:
+            # LIFO：先关各 ClientSession 再关传输，stdio 子进程在此被回收。
+            await bundle.__aexit__(None, None, None)
 
 
 # ---- 脱离响应执行运行 --------------------------------------------------------
@@ -2162,11 +2198,27 @@ async def rerun_step(*, owner_id: int, run_id: int, key: str) -> None:
         context = _rerun_context(db, run, key)
         step = _detach(db, definition)
 
+        # 单步重跑也按工作流**当前**的 MCP 挂载建束。连接失败就地结算运行，
+        # 与 execute_run 的前置失败表现一致。
+        workflow_row = db.get(Workflow, run.workflow_id)
+        servers = resolve_servers(
+            db, owner_id, list(workflow_row.mcp_server_ids or [])
+        )
+        try:
+            bundle = await open_bundle(servers)
+        except Exception as exc:  # noqa: BLE001 - 不能让运行卡在 running
+            settle_run_status(db, owner_id, run_id, error=model_error_text(exc))
+            return
+
     queue: asyncio.Queue = asyncio.Queue()
     try:
-        await _execute_step(
-            owner_id=owner_id, run_id=run_id, step=step, context=context, queue=queue
-        )
+        try:
+            await _execute_step(
+                owner_id=owner_id, run_id=run_id, step=step,
+                context=context, queue=queue, tools=bundle.tools,
+            )
+        finally:
+            await bundle.__aexit__(None, None, None)
     except Exception as exc:  # noqa: BLE001 - 不能让运行卡在 running
         logger.warning("rerun step %s of run %s crashed: %s", key, run_id, exc, exc_info=True)
         with SessionLocal() as db:

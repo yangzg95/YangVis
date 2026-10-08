@@ -390,6 +390,27 @@ CREATE TABLE IF NOT EXISTS ai_call_log (
 -- 每个步骤就是一次智能体调用（见 services/workflows.py）。
 -- ---------------------------------------------------------------------------
 
+CREATE TABLE IF NOT EXISTS mcp_server (
+  id           BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id     BIGINT       NOT NULL,
+  name         VARCHAR(128) NOT NULL,
+  transport    VARCHAR(16)  NOT NULL COMMENT 'stdio | sse | streamable_http',
+  url          VARCHAR(1024) NULL COMMENT 'sse/streamable_http 的服务地址',
+  command      VARCHAR(1024) NULL COMMENT 'stdio 的启动命令',
+  args         JSON         NULL COMMENT 'stdio 启动参数 list[str]',
+  env_enc      VARBINARY(8192) NULL COMMENT 'Fernet 密文 JSON：stdio 子进程环境变量',
+  headers_enc  VARBINARY(8192) NULL COMMENT 'Fernet 密文 JSON：远程请求头',
+  enabled      TINYINT(1)   NOT NULL DEFAULT 1,
+  remark       VARCHAR(512) NULL,
+  last_test_at DATETIME     NULL,
+  last_test_ok TINYINT(1)   NULL,
+  last_test_msg VARCHAR(1024) NULL,
+  created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_mcp_owner_name (owner_id, name),
+  KEY idx_mcp_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='MCP 服务配置（个人资产，无内置项）';
+
 CREATE TABLE IF NOT EXISTS workflow (
   id           BIGINT PRIMARY KEY AUTO_INCREMENT,
   owner_id     BIGINT        NOT NULL DEFAULT 0 COMMENT '0 = 内置，全体可见',
@@ -397,6 +418,7 @@ CREATE TABLE IF NOT EXISTS workflow (
   name         VARCHAR(128)  NOT NULL,
   description  VARCHAR(512)  NULL,
   input_schema JSON          NULL COMMENT '[{name, label, required}]，声明接受哪些变量',
+  mcp_server_ids JSON        NULL COMMENT '挂载的 mcp_server.id 列表，运行时对该流程所有步骤生效',
   is_builtin   TINYINT(1)    NOT NULL DEFAULT 0,
   enabled      TINYINT(1)    NOT NULL DEFAULT 1 COMMENT '只影响界面上的可选性；内置流程被功能自己调用时不看这一位',
   sort_order   INT           NOT NULL DEFAULT 0,

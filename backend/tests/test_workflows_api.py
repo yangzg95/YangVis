@@ -69,7 +69,15 @@ def env(tmp_path, monkeypatch):
 
 def _stub_model(monkeypatch, reply: str):
     async def fake_run_agent(
-        db, owner_id, agent_slug, user_prompt, *, agent=None, config_id=None, timeout=None
+        db,
+        owner_id,
+        agent_slug,
+        user_prompt,
+        *,
+        agent=None,
+        config_id=None,
+        timeout=None,
+        tools=None,
     ):
         return reply
 
@@ -453,7 +461,15 @@ def _recording_model(monkeypatch, reply: str) -> list[str]:
     prompts: list[str] = []
 
     async def fake_run_agent(
-        db, owner_id, agent_slug, user_prompt, *, agent=None, config_id=None, timeout=None
+        db,
+        owner_id,
+        agent_slug,
+        user_prompt,
+        *,
+        agent=None,
+        config_id=None,
+        timeout=None,
+        tools=None,
     ):
         prompts.append(user_prompt)
         return reply

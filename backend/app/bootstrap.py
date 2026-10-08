@@ -243,6 +243,13 @@ def migrate_schema() -> None:
                 )
             logger.info("added workflow_run.idx_run_subject")
 
+    # 工作流挂载的 MCP 服务 id 列表（mcp_server 新表由 create_all 建立）。
+    workflow_columns = _column_names("workflow")
+    if workflow_columns and "mcp_server_ids" not in workflow_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE workflow ADD COLUMN mcp_server_ids JSON NULL"))
+        logger.info("added workflow.mcp_server_ids")
+
     for table, retired in RETIRED_STATUS_COLUMNS.items():
         existing = _column_names(table)
         for column in retired:

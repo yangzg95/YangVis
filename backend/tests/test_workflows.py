@@ -21,6 +21,7 @@ from app.database import Base
 from app.errors import BusinessError
 from app.models.entities import (
     Agent,
+    McpServer,
     ModelConfig,
     Workflow,
     WorkflowRun,
@@ -114,7 +115,15 @@ def _stub_model(monkeypatch, reply_for):
     calls: list[tuple[str, str]] = []
 
     async def fake_run_agent(
-        db, owner_id, agent_slug, user_prompt, *, agent=None, config_id=None, timeout=None
+        db,
+        owner_id,
+        agent_slug,
+        user_prompt,
+        *,
+        agent=None,
+        config_id=None,
+        timeout=None,
+        tools=None,
     ):
         calls.append((agent_slug, user_prompt))
         reply = reply_for(agent_slug)
@@ -539,6 +548,20 @@ def _agents_named(db, *slugs: str) -> None:
     db.commit()
 
 
+def _mcp_server(db, *, owner_id: int = OWNER, enabled: bool = True, name: str = "时间服务") -> McpServer:
+    server = McpServer(
+        owner_id=owner_id,
+        name=name,
+        transport="stdio",
+        command="python",
+        args=[],
+        enabled=enabled,
+    )
+    db.add(server)
+    db.commit()
+    return server
+
+
 def _create_payload(**overrides) -> WorkflowCreate:
     base = {
         "slug": "write-and-score",
@@ -829,6 +852,75 @@ def test_create_validates_a_per_step_model_config(db):
                 ]
             )
         )
+
+
+def test_create_persists_owned_mcp_server_ids(db):
+    _agents_named(db, "writer")
+    server = _mcp_server(db)
+
+    workflow = WorkflowService(db, OWNER).create(
+        _create_payload(mcp_server_ids=[server.id])
+    )
+
+    assert workflow.mcp_server_ids == [server.id]
+    # 默认不挂 MCP：空列表。
+    assert WorkflowService(db, OWNER).create(
+        _create_payload(slug="plain", name="空白流程")
+    ).mcp_server_ids == []
+
+
+def test_create_rejects_foreign_or_missing_mcp_server_id(db):
+    _agents_named(db, "writer")
+    foreign = _mcp_server(db, owner_id=OWNER + 1)
+
+    with pytest.raises(ValueError, match="不存在或不属于本人"):
+        WorkflowService(db, OWNER).create(
+            _create_payload(mcp_server_ids=[foreign.id])
+        )
+    with pytest.raises(ValueError, match="不存在或不属于本人"):
+        WorkflowService(db, OWNER).create(
+            _create_payload(mcp_server_ids=[999999])
+        )
+    # 校验不过不留半成品。
+    assert db.scalar(select(func.count()).select_from(Workflow)) == 0
+
+
+def test_create_allows_a_disabled_mcp_server_at_save_time(db):
+    """允许先挂载后启用：停用项保存时放行，运行时再由 resolve_servers 挡。"""
+    _agents_named(db, "writer")
+    disabled = _mcp_server(db, enabled=False)
+
+    workflow = WorkflowService(db, OWNER).create(
+        _create_payload(mcp_server_ids=[disabled.id])
+    )
+
+    assert workflow.mcp_server_ids == [disabled.id]
+
+
+def test_update_replaces_mcp_server_ids(db):
+    _agents_named(db, "writer")
+    first = _mcp_server(db, name="第一个")
+    second = _mcp_server(db, name="第二个")
+    service = WorkflowService(db, OWNER)
+    workflow = service.create(_create_payload(mcp_server_ids=[first.id]))
+
+    service.update(workflow.id, _update_payload(mcp_server_ids=[second.id]))
+    assert service.get(workflow.id).mcp_server_ids == [second.id]
+
+    service.update(workflow.id, _update_payload(mcp_server_ids=[]))
+    assert service.get(workflow.id).mcp_server_ids == []
+
+
+def test_duplicate_copies_mcp_server_ids(db):
+    _agents_named(db, "writer")
+    server = _mcp_server(db)
+    service = WorkflowService(db, OWNER)
+    workflow = service.create(_create_payload(mcp_server_ids=[server.id]))
+
+    clone = service.duplicate(workflow.id)
+
+    assert clone.mcp_server_ids == [server.id]
+    assert clone.mcp_server_ids is not workflow.mcp_server_ids
 
 
 def test_update_replaces_the_steps_whole(db, monkeypatch):
@@ -1257,6 +1349,117 @@ def test_execute_run_requires_a_chat_model_before_any_event(db, monkeypatch):
     with pytest.raises(BusinessError):
         _run_all(db, OWNER, run.id)
     assert WorkflowService(db, OWNER).get_run(run.id).status == STEP_PENDING
+
+
+def test_execute_run_opens_mcp_bundle_and_passes_tools_to_each_step(db, monkeypatch):
+    """MCP 连接束在第一步之前打开，两个步骤拿到同一组工具，结束后关闭。"""
+    _chat_model(db)
+    server = _mcp_server(db)
+    workflow = _two_step_workflow(db)
+    workflow.mcp_server_ids = [server.id]
+    db.commit()
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+
+    seen_tools: list[list] = []
+
+    async def fake_run_agent(db, owner_id, agent_slug, user_prompt, *, tools=None, **kwargs):
+        seen_tools.append(list(tools or []))
+        return "初稿"
+
+    monkeypatch.setattr(workflows_module, "run_agent", fake_run_agent)
+
+    resolved: dict = {}
+
+    def fake_resolve(db, owner_id, ids):
+        resolved["ids"] = list(ids)
+        return ["server-row"]
+
+    monkeypatch.setattr(workflows_module, "resolve_servers", fake_resolve)
+
+    class _FakeBundle:
+        def __init__(self):
+            self.tools = ["mcp-tool"]
+            self.closed = False
+
+        async def __aexit__(self, *exc_info):
+            self.closed = True
+
+    bundle = _FakeBundle()
+
+    async def fake_open(servers):
+        assert servers == ["server-row"]
+        return bundle
+
+    monkeypatch.setattr(workflows_module, "open_bundle", fake_open)
+
+    events = _run_all(db, OWNER, run.id)
+
+    assert resolved["ids"] == [server.id]
+    assert seen_tools == [["mcp-tool"], ["mcp-tool"]]
+    assert events[-1][1]["status"] == RUN_SUCCEEDED
+    assert bundle.closed, "运行结束必须关连接束，stdio 子进程靠它回收"
+
+
+def test_execute_run_fails_when_mcp_bundle_cannot_open(db, monkeypatch):
+    """挂载的服务在第一步之前解析/连接失败：run 落 failed，不产生任何步骤事件。"""
+    _chat_model(db)
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+
+    def fake_resolve(db, owner_id, ids):
+        raise LookupError("挂载的 MCP 服务不存在或无权访问：9，")
+
+    monkeypatch.setattr(workflows_module, "resolve_servers", fake_resolve)
+    _stub_model(monkeypatch, {"writer": "x", "scorer": "y"}.get)
+
+    # 解析失败发生在首个事件之前：由 stream_run 的既有异常路径落终态，
+    # execute_run 本身则是直接抛出。
+    async def collect():
+        return [
+            (event, payload)
+            async for event, payload in stream_run(owner_id=OWNER, run_id=run.id)
+        ]
+
+    db.rollback()
+    events = asyncio.run(collect())
+    db.rollback()
+
+    assert [name for name, _ in events] == ["error"]
+    finished = WorkflowService(db, OWNER).get_run(run.id)
+    assert finished.status == RUN_FAILED
+    assert "MCP 服务不存在" in finished.error_msg
+
+
+def test_execute_run_with_empty_mcp_mount_skips_the_bundle(db, monkeypatch):
+    """不挂 MCP：仍会走 resolve/open（空操作），行为与接线前一致。"""
+    _chat_model(db)
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+
+    opened: list = []
+
+    def fake_resolve(db, owner_id, ids):
+        assert ids == []
+        return []
+
+    class _FakeEmptyBundle:
+        tools: list = []
+
+        async def __aexit__(self, *exc_info):
+            return None
+
+    async def fake_open(servers):
+        opened.append(servers)
+        return _FakeEmptyBundle()
+
+    monkeypatch.setattr(workflows_module, "resolve_servers", fake_resolve)
+    monkeypatch.setattr(workflows_module, "open_bundle", fake_open)
+    _stub_model(monkeypatch, {"writer": "初稿", "scorer": "8 分"}.get)
+
+    events = _run_all(db, OWNER, run.id)
+
+    assert opened == [[]]
+    assert events[-1][1]["status"] == RUN_SUCCEEDED
 
 
 def test_run_timestamps_are_naive_local_not_utc(db, monkeypatch):

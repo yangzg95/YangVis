@@ -122,6 +122,24 @@
         <a-button size="small" :disabled="readonly" @click="addInput">
           <PlusOutlined /> 加一个变量
         </a-button>
+
+        <div class="section-head mcp-head">
+          <span class="section-title">MCP 服务挂载</span>
+          <span class="muted">{{ form.mcp_server_ids.length }} 个</span>
+        </div>
+        <a-select
+          v-model:value="form.mcp_server_ids"
+          mode="multiple"
+          class="w-mcp"
+          :options="mcpOptions"
+          :disabled="readonly"
+          placeholder="选择要挂载的 MCP 服务"
+          allow-clear
+        />
+        <div class="hint block">
+          挂载后，这条工作流每个步骤的模型在运行时都可以调用这些服务提供的工具；
+          停用的服务不会出现在列表里。
+        </div>
       </section>
 
       <!-- 第 2..G+1 页 · 一个并行组一页：组内多个节点同页配置，v-show 保留 DOM ---- -->
@@ -236,9 +254,11 @@ import { message } from 'ant-design-vue'
 import { EyeOutlined, MinusOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import {
   agentsApi,
+  mcpApi,
   settingsApi,
   workflowsApi,
   type Agent,
+  type McpServer,
   type ModelConfig,
   type Workflow,
   type WorkflowPayload,
@@ -267,6 +287,7 @@ const form = reactive({
   description: '',
   enabled: true,
   inputs: [] as InputFieldForm[],
+  mcp_server_ids: [] as number[],
   steps: [emptyStep('g1')] as StepForm[],
 })
 
@@ -275,6 +296,7 @@ const loadError = ref('')
 const agents = ref<Agent[]>([])
 const chatModels = ref<ModelConfig[]>([])
 const workflows = ref<Workflow[]>([])
+const mcpServers = ref<McpServer[]>([])
 const presetId = ref<number | undefined>(undefined)
 
 /** 当前在编辑谁：null = 新建。跳来时由列表页写进 store，这里只认最近一次请求。 */
@@ -347,6 +369,12 @@ const modelOptions = computed(() =>
   chatModels.value
     .filter((config) => config.last_test_ok)
     .map((config) => ({ value: config.id, label: config.title })),
+)
+/** MCP 挂载下拉：只列启用中的本人服务。 */
+const mcpOptions = computed(() =>
+  mcpServers.value
+    .filter((server) => server.enabled)
+    .map((server) => ({ value: server.id, label: server.name })),
 )
 /** 内置流程都是调通的完整定义，给新建当起步模板。 */
 const presetOptions = computed(() =>
@@ -534,14 +562,16 @@ let appliedNonce = 0
 
 async function boot() {
   try {
-    const [agentData, modelData, wfData] = await Promise.all([
+    const [agentData, modelData, wfData, mcpData] = await Promise.all([
       agentsApi.list(),
       settingsApi.listModels('chat'),
       workflowsApi.list(),
+      mcpApi.list(),
     ])
     agents.value = agentData.items
     chatModels.value = modelData.items
     workflows.value = wfData.items
+    mcpServers.value = mcpData.items
     loadError.value = ''
   } catch (err) {
     loadError.value = errorText(err, '请检查网络后重试')
@@ -564,6 +594,7 @@ function fillForm(target: EditorTarget) {
   form.description = source?.description ?? ''
   form.enabled = source?.enabled ?? true
   form.inputs = (source?.inputs ?? []).map((field) => ({ ...field }))
+  form.mcp_server_ids = [...(source?.mcp_server_ids ?? [])]
   applySteps(source ? source.steps.map(toStepForm) : [emptyStep('g1')])
 }
 
@@ -607,6 +638,7 @@ function onPresetChange(value: number | undefined) {
     form.name = ''
     form.description = ''
     form.inputs = []
+    form.mcp_server_ids = []
     applySteps([emptyStep('g1')])
     return
   }
@@ -614,6 +646,8 @@ function onPresetChange(value: number | undefined) {
   form.name = `${source.name} 副本`
   form.description = source.description ?? ''
   form.inputs = source.inputs.map((field) => ({ ...field }))
+  // 内置流程不挂 MCP，预设不带入挂载。
+  form.mcp_server_ids = []
   applySteps(source.steps.map(toStepForm))
 }
 
@@ -655,6 +689,7 @@ async function submit() {
       label: field.label.trim(),
       required: field.required,
     })),
+    mcp_server_ids: [...form.mcp_server_ids],
     // 不提交 sort_order：后端按数组顺序编号，界面与执行顺序就不会对不上。
     steps: form.steps.map((step) => ({
       key: step.key.trim(),
@@ -749,6 +784,12 @@ const footerHint = computed(() =>
 }
 .hint.block {
   margin-bottom: 8px;
+}
+.mcp-head {
+  margin-top: 20px;
+}
+.w-mcp {
+  width: 100%;
 }
 .field-row {
   display: flex;

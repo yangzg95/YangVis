@@ -154,6 +154,7 @@ import {
   RobotOutlined,
   SettingOutlined,
   TeamOutlined,
+  ToolOutlined,
   UserOutlined,
 } from '@ant-design/icons-vue'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
@@ -186,6 +187,7 @@ const MENU: MenuNode[] = [
     children: [
       { path: '/agents', title: '智能体', icon: RobotOutlined },
       { path: '/workflows', title: '工作流', icon: PartitionOutlined },
+      { path: '/mcp', title: 'MCP 服务', icon: ToolOutlined },
       { path: '/knowledge', title: '知识库', icon: BookOutlined },
     ],
   },

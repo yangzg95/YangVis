@@ -6,7 +6,8 @@ websockets==14.2
 sqlalchemy==2.0.35
 pymysql==1.1.1
 cryptography==43.0.1
-pydantic==2.9.2
+# mcp 1.30 要求较新的 pydantic（2.9 下部分校验 API 不兼容），随 MCP 一并升级。
+pydantic==2.13.5
 pydantic-settings==2.5.2
 python-dotenv==1.0.1
 python-multipart==0.0.12
@@ -17,6 +18,12 @@ langchain-core>=1.6.2
 langchain-openai>=1.6.2
 langchain>=1.4.0
 langgraph>=1.2.11
+# MCP：工作流挂载外部工具。官方适配器（已 archived）要求 mcp<2.0。
+mcp==1.30.0
+langchain-mcp-adapters==0.3.2
+# mcp 传递依赖 sse-starlette，但其 3.x 要求 starlette>=0.49，与 fastapi 0.115
+# 钉死的 starlette<0.39 冲突；我们只用 MCP 客户端、不跑 MCP server，钉在 2.1.3。
+sse-starlette==2.1.3
 # 智能运维：SSH（PTY 终端与命令执行）与 Redis 只读客户端。
 asyncssh==2.18.0
 redis==5.2.1

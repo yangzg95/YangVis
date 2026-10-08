@@ -39,6 +39,12 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '工作流配置'},
     },
     {
+        path: '/mcp',
+        name: 'McpServers',
+        component: () => import('@/views/McpServers.vue'),
+        meta: {title: 'MCP 服务'},
+    },
+    {
         path: '/knowledge',
         name: 'Knowledge',
         component: () => import('@/views/Knowledge.vue'),

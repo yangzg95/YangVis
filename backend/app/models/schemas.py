@@ -522,6 +522,8 @@ class WorkflowItem(BaseModel):
     description: Optional[str] = None
     inputs: List[WorkflowInputField] = Field(default_factory=list)
     steps: List[WorkflowStepItem] = Field(default_factory=list)
+    # 挂载的 MCP 服务 id：运行时所有步骤都能调用这些服务的工具。
+    mcp_server_ids: List[int] = Field(default_factory=list)
     is_builtin: bool
     enabled: bool
     sort_order: int
@@ -569,6 +571,7 @@ class WorkflowDefinition(BaseModel):
     description: Optional[str] = Field(default=None, max_length=512)
     inputs: List[WorkflowInputField] = Field(default_factory=list)
     steps: List[WorkflowStepInput] = Field(..., min_length=1)
+    mcp_server_ids: List[int] = Field(default_factory=list)
 
 
 class WorkflowCreate(WorkflowDefinition):
@@ -649,6 +652,61 @@ class WorkflowRunPruneRequest(BaseModel):
 class WorkflowRunPruneResult(BaseModel):
     deleted_runs: int
     deleted_steps: int
+
+
+# ---- MCP 服务 ---------------------------------------------------------------
+
+McpTransport = Literal["stdio", "sse", "streamable_http"]
+
+
+class McpServerBase(BaseModel):
+    """MCP 服务的可编辑内容。
+
+    跨传输的必填规则（stdio 必须有 ``command``；sse/streamable_http 必须有
+    ``url``）在 service 层校验，不写进 Pydantic——表单中途切换传输类型时
+    字段会短暂全空，硬校验会让界面没法编辑。
+    """
+
+    name: str = Field(..., min_length=1, max_length=128)
+    transport: McpTransport
+    url: Optional[str] = Field(default=None, max_length=1024)
+    command: Optional[str] = Field(default=None, max_length=1024)
+    args: List[str] = Field(default_factory=list)
+    # 入参是明文、回参的值逐个打码（见 McpServerService.to_item）。
+    env: Dict[str, str] = Field(default_factory=dict)
+    headers: Dict[str, str] = Field(default_factory=dict)
+    enabled: bool = True
+    remark: Optional[str] = Field(default=None, max_length=512)
+
+
+class McpServerCreate(McpServerBase):
+    pass
+
+
+class McpServerUpdate(BaseModel):
+    """部分更新：与 ``ModelConfigUpdate`` 同一口径，未传的字段不动。"""
+
+    name: Optional[str] = Field(default=None, max_length=128)
+    transport: Optional[McpTransport] = None
+    url: Optional[str] = Field(default=None, max_length=1024)
+    command: Optional[str] = Field(default=None, max_length=1024)
+    args: Optional[List[str]] = None
+    env: Optional[Dict[str, str]] = None
+    headers: Optional[Dict[str, str]] = None
+    enabled: Optional[bool] = None
+    remark: Optional[str] = Field(default=None, max_length=512)
+
+
+class McpServerItem(McpServerBase):
+    id: int
+    owner_id: int
+    last_test_at: Optional[datetime] = None
+    last_test_ok: Optional[bool] = None
+    last_test_msg: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    # 密钥袋解密失败（密钥轮换或数据损坏）时置 True，界面提示重新填写。
+    secret_error: bool = False
 
 
 # ---- 长期记忆 ---------------------------------------------------------------

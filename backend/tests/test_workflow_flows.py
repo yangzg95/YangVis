@@ -112,7 +112,15 @@ def model_call(monkeypatch):
 
     def stub(reply_for):
         async def fake_run_agent(
-            db, owner_id, agent_slug, user_prompt, *, agent=None, config_id=None, timeout=None
+            db,
+            owner_id,
+            agent_slug,
+            user_prompt,
+            *,
+            agent=None,
+            config_id=None,
+            timeout=None,
+            tools=None,
         ):
             calls.append((agent_slug, user_prompt))
             reply = reply_for() if callable(reply_for) else reply_for

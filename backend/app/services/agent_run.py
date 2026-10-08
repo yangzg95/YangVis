@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -29,6 +29,12 @@ logger = logging.getLogger("yangvis.agent_run")
 # MODEL_HTTP_TIMEOUT（30s，适合对话与连通性测试）几乎必然超时——慢模型、
 # 长 JD 时尤甚——所以这类后台调用给 5 分钟。
 MODEL_TASK_TIMEOUT = 300.0
+
+# MCP 工具调用循环的轮次上限：模型 → 工具 → 模型 算一轮。不设限的话，
+# 模型与工具互相扯皮会一直烧 token，且把上下文撑爆。
+MAX_TOOL_ROUNDS = 8
+# 单个工具结果进上下文的字符上限：检索类工具一次吐几万字是常态。
+TOOL_OUTPUT_LIMIT = 8000
 
 # 工作流步骤的默认输出形态。
 OUTPUT_MARKDOWN = "markdown"
@@ -115,6 +121,8 @@ async def run_agent(
     agent: Optional[Agent] = None,
     config_id: Optional[int] = None,
     timeout: float = MODEL_TASK_TIMEOUT,
+    tools: Optional[Sequence] = None,
+    max_tool_rounds: int = MAX_TOOL_ROUNDS,
 ) -> str:
     """按人设发起一轮非流式调用，返回模型输出的原始文本。
 
@@ -123,26 +131,74 @@ async def run_agent(
 
     ``agent`` 让调用方复用已经取到的人设行——工作流一趟要跑进步骤，每步再查
     一次 agent 表纯属浪费。异常一律外抛，由调用方决定是落状态还是回错误事件。
+
+    传了 ``tools``（工作流挂载的 MCP 工具）时走有界工具调用循环：模型要求
+    调工具 → 执行 → 把结果作为 ``ToolMessage`` 喂回，直到模型不再调工具或
+    达到 ``max_tool_rounds``。不传时就是原来的一次 ``ainvoke``，行为零变化。
     """
-    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
     agent = agent or AgentService(db, owner_id).require_by_slug(agent_slug)
     config = require_chat_model(db, owner_id, config_id)
     logger.info(
-        "calling chat model: agent=%s model=%s base_url=%s prompt_chars=%s owner=%s",
+        "calling chat model: agent=%s model=%s base_url=%s prompt_chars=%s owner=%s tools=%s",
         agent.slug,
         config.model_name,
         config.base_url,
         len(user_prompt),
         owner_id,
+        len(tools) if tools else 0,
     )
     model = build_chat_model(
         config, temperature=agent.temperature / 100, timeout=timeout
     )
-    result = await model.ainvoke(
-        [SystemMessage(content=agent.system_prompt), HumanMessage(content=user_prompt)]
+    messages = [
+        SystemMessage(content=agent.system_prompt),
+        HumanMessage(content=user_prompt),
+    ]
+
+    if not tools:
+        result = await model.ainvoke(messages)
+        return message_text(getattr(result, "content", result))
+
+    by_name = {tool.name: tool for tool in tools}
+    bound = model.bind_tools(list(tools))
+
+    for _round in range(max_tool_rounds):
+        response = await bound.ainvoke(messages)
+        tool_calls = getattr(response, "tool_calls", None)
+        if not tool_calls:
+            return message_text(getattr(response, "content", response))
+
+        # AIMessage 要先入列，再补它点名的 ToolMessage——顺序是工具调用
+        # 协议的一部分，乱了 provider 会直接拒下一轮请求。
+        messages.append(response)
+        for call in tool_calls:
+            name = call.get("name", "")
+            tool = by_name.get(name)
+            if tool is None:
+                output = f"工具 {name} 不存在，请改用其他可用工具"
+            else:
+                try:
+                    output = await tool.ainvoke(call.get("args") or {})
+                except Exception as exc:  # noqa: BLE001 - 错误回灌让模型自纠，不炸步骤
+                    output = f"工具调用失败：{str(exc)[:300]}"
+            output = message_text(output)
+            if len(output) > TOOL_OUTPUT_LIMIT:
+                output = output[:TOOL_OUTPUT_LIMIT] + "\n…（工具输出过长，已截断）"
+            messages.append(
+                ToolMessage(content=output, tool_call_id=call.get("id", ""))
+            )
+
+    # 轮次到顶：换回未绑工具的模型强制收敛，避免它继续空转调工具。
+    messages.append(
+        HumanMessage(
+            content="工具调用次数已达上限。请基于已有信息直接给出最终答案，"
+            "不要再调用任何工具。"
+        )
     )
-    return message_text(getattr(result, "content", result))
+    final = await model.ainvoke(messages)
+    return message_text(getattr(final, "content", final))
 
 
 def model_error_text(exc: Exception) -> str:

@@ -468,6 +468,58 @@ class OpsServer(Base):
         return f"<OpsServer id={self.id} owner={self.owner_id} host={self.host!r}>"
 
 
+class McpServer(Base):
+    """一个可挂载到工作流上的 MCP（Model Context Protocol）服务。
+
+    ``transport`` 决定连接方式：
+    - ``stdio``：在本机起子进程，``command`` / ``args`` 定位可执行文件，
+      ``env_enc`` 里的 JSON 是追加给子进程的环境变量；
+    - ``sse`` / ``streamable_http``：连远端服务，``url`` 是端点，
+      ``headers_enc`` 里的 JSON 是请求头（Authorization 走这里）。
+
+    env / headers 只有 Fernet 密文落库，接口里只回逐值掩码。stdio 配置等同
+    授权以后端进程权限执行命令，所以 MCP 是纯个人资产（没有 owner_id=0 的
+    内置项），与模型配置同一套隔离口径。
+    """
+
+    __tablename__ = "mcp_server"
+    __table_args__ = (UniqueConstraint("owner_id", "name", name="uk_mcp_owner_name"),)
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    # stdio | sse | streamable_http
+    transport: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    # sse / streamable_http 的服务端点。
+    url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # stdio 的启动命令与参数（args 为 list[str]）。
+    command: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    args: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    # 两个密钥袋：Fernet 加密的 JSON 对象。
+    env_enc: Mapped[bytes | None] = mapped_column(LargeBinary(8192), nullable=True)
+    headers_enc: Mapped[bytes | None] = mapped_column(LargeBinary(8192), nullable=True)
+
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    remark: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    last_test_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_test_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    last_test_msg: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<McpServer id={self.id} owner={self.owner_id} transport={self.transport!r}>"
+
+
 class OpsDatabase(Base):
     """一个可被查询的数据库实例。
 
@@ -1073,6 +1125,10 @@ class Workflow(Base):
 
     # [{"name": "resume_content", "label": "简历全文", "required": true}, ...]
     input_schema: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    # 挂载的 MCP 服务 id 列表，如 [3, 7]：运行时对该流程**所有**步骤生效，
+    # 每一步的模型都能调用这些服务暴露的工具。内置工作流恒为空。
+    mcp_server_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     is_builtin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
