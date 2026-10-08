@@ -13,12 +13,18 @@ import json
 import logging
 from typing import Dict, List, Optional
 
+from pydantic import ValidationError
 from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
 from app.crypto import DecryptionError, decrypt, encrypt, is_masked, mask
 from app.models.entities import McpServer
-from app.models.schemas import McpServerCreate, McpServerItem, McpServerUpdate
+from app.models.schemas import (
+    McpImportReport,
+    McpServerCreate,
+    McpServerItem,
+    McpServerUpdate,
+)
 from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.mcp_servers")
@@ -66,6 +72,98 @@ def merge_secret(existing_blob: Optional[bytes], incoming: Dict[str, str]) -> by
         else:
             merged[key] = value
     return encrypt(json.dumps(merged, ensure_ascii=False))
+
+
+# 远端 type 字段（2025-03-26 规约）到内部传输名的映射。
+_REMOTE_TYPE_ALIASES = {
+    "sse": TRANSPORT_SSE,
+    "http": TRANSPORT_HTTP,
+    "streamable-http": TRANSPORT_HTTP,
+    "streamable_http": TRANSPORT_HTTP,
+}
+
+
+def parse_mcp_config(
+    doc: dict,
+) -> tuple[List[McpServerCreate], List[str]]:
+    """把 mcpServers 标准文档解析成一批创建参数。
+
+    单条配置有问题只收集 ``"名称: 原因"`` 错误串、不中断整批；文档整体
+    形态不对（不是对象 / mcpServers 不是对象）才抛 ValueError。
+    顶层是裸的 server dict（没有 mcpServers 包裹）也接受。
+    """
+    if not isinstance(doc, dict):
+        raise ValueError("配置必须是 JSON 对象")
+    servers_doc = doc.get("mcpServers", doc)
+    if not isinstance(servers_doc, dict):
+        raise ValueError("mcpServers 必须是对象")
+
+    entries: List[McpServerCreate] = []
+    errors: List[str] = []
+
+    for raw_name, entry in servers_doc.items():
+        name = str(raw_name or "").strip()
+        label = name or str(raw_name)
+        try:
+            if not name:
+                raise ValueError("服务名称为空")
+            if not isinstance(entry, dict):
+                raise ValueError("配置项必须是对象")
+
+            entry_type = entry.get("type")
+            entry_type_key = str(entry_type).strip().lower() if entry_type is not None else None
+            url = entry.get("url")
+            command = entry.get("command")
+
+            if url is not None:
+                if entry_type is None:
+                    # 缺 type 时按 URL 形态推断：路径含 /sse 视为 SSE，否则按新规约 HTTP。
+                    transport = TRANSPORT_SSE if "/sse" in str(url) else TRANSPORT_HTTP
+                elif entry_type_key in _REMOTE_TYPE_ALIASES:
+                    transport = _REMOTE_TYPE_ALIASES[entry_type_key]
+                else:
+                    raise ValueError(f"不支持的 type：{entry_type}")
+                headers = entry.get("headers", {})
+                if not isinstance(headers, dict):
+                    raise ValueError("headers 必须是对象")
+                payload = McpServerCreate(
+                    name=name,
+                    transport=transport,
+                    url=url,
+                    headers={str(key): str(value) for key, value in headers.items()},
+                )
+            elif command is not None or entry_type_key in (None, "stdio"):
+                if entry_type is not None and entry_type_key != "stdio":
+                    raise ValueError(f"不支持的 type：{entry_type}")
+                if command is None:
+                    # type=stdio 却没有 command。
+                    raise ValueError("缺少 command 或 url")
+                args = entry.get("args", [])
+                if not isinstance(args, list) or not all(
+                    isinstance(arg, (str, int, float)) for arg in args
+                ):
+                    raise ValueError("args 必须是字符串数组")
+                env = entry.get("env", {})
+                if not isinstance(env, dict):
+                    raise ValueError("env 必须是对象")
+                payload = McpServerCreate(
+                    name=name,
+                    transport=TRANSPORT_STDIO,
+                    command=command,
+                    args=[str(arg) for arg in args],
+                    env={str(key): str(value) for key, value in env.items()},
+                )
+            else:
+                raise ValueError(f"不支持的 type：{entry_type}")
+
+            validate_transport_fields(
+                payload.transport, command=payload.command, url=payload.url
+            )
+            entries.append(payload)
+        except (ValueError, ValidationError) as exc:
+            errors.append(f"{label}: {str(exc).splitlines()[0]}")
+
+    return entries, errors
 
 
 class McpServerService:
@@ -196,6 +294,93 @@ class McpServerService:
         self._db.commit()
         logger.info("owner %s deleted mcp server %s (%s)", self._owner_id, name, server_id)
 
+    # -- 导入导出 -----------------------------------------------------------
+
+    def export_rows(self, ids: Optional[List[int]]) -> List[McpServer]:
+        """导出候选行：ids 为空导出全部；否则按入参顺序返回。
+
+        停用的服务允许导出（与运行时的 :func:`resolve_servers` 口径不同）；
+        任意 id 不存在或不属于本人 → LookupError。
+        """
+        if not ids:
+            return self.list()
+        rows = list(
+            self._db.scalars(
+                self._scope(select(McpServer)).where(McpServer.id.in_(ids))
+            ).all()
+        )
+        found = {row.id for row in rows}
+        if len(found) != len(set(ids)) or any(id_ not in found for id_ in ids):
+            raise LookupError("MCP 服务不存在或无权访问")
+        order = {id_: index for index, id_ in enumerate(ids)}
+        rows.sort(key=lambda row: order[row.id])
+        return rows
+
+    def import_config(self, doc: dict, *, conflict: str) -> McpImportReport:
+        """批量导入 mcpServers 文档，按 conflict 策略处理同名服务。
+
+        rename（默认）：现有服务保留，新条目自动改名后创建；
+        skip：同名跳过；overwrite：原地全字段覆盖（保留 id，挂载引用不断）。
+        """
+        entries, parse_errors = parse_mcp_config(doc)
+        report = McpImportReport(errors=list(parse_errors))
+
+        existing = {
+            server.name: server
+            for server in self._db.scalars(self._scope(select(McpServer))).all()
+        }
+        # used 同时覆盖「库里已有」和「本次已建」，保证批量内重名也会被处理。
+        used = set(existing)
+
+        for payload in entries:
+            name = payload.name
+            current = existing.get(name)
+            try:
+                if current is None:
+                    created = self.create(payload)
+                    existing[name] = created
+                    used.add(name)
+                    report.created += 1
+                elif conflict == "skip":
+                    report.skipped += 1
+                elif conflict == "overwrite":
+                    # 覆盖 = 整份替换：先清空两个密钥袋，否则 merge 语义会
+                    # 留下导入文档里不存在的旧键。
+                    current.env_enc = None
+                    current.headers_enc = None
+                    updated = self.update(
+                        current.id,
+                        McpServerUpdate(
+                            name=payload.name,
+                            transport=payload.transport,
+                            url=payload.url,
+                            command=payload.command,
+                            args=payload.args,
+                            env=payload.env,
+                            headers=payload.headers,
+                            enabled=payload.enabled,
+                        ),
+                    )
+                    existing[name] = updated
+                    report.overwritten += 1
+                else:  # rename
+                    new_name = _unique_name(name, used)
+                    payload.name = new_name
+                    created = self.create(payload)
+                    existing[new_name] = created
+                    used.add(new_name)
+                    report.created += 1
+                    report.renamed.append(f"{name} -> {new_name}")
+            except ValueError as exc:
+                report.errors.append(f"{name}: {exc}")
+
+        logger.info(
+            "owner %s imported mcp config: created=%s skipped=%s overwritten=%s errors=%s",
+            self._owner_id, report.created, report.skipped,
+            report.overwritten, len(report.errors),
+        )
+        return report
+
     @staticmethod
     def _set_connection_fields(
         server: McpServer,
@@ -271,6 +456,62 @@ def _dump_secret(values: Dict[str, str]) -> Optional[bytes]:
     if not values:
         return None
     return encrypt(json.dumps(dict(values), ensure_ascii=False))
+
+
+def _unique_name(base: str, used: set) -> str:
+    """在 used 之外找一个 ``base-2``、``base-3``… 的空位。"""
+    index = 2
+    candidate = f"{base}-{index}"
+    while candidate in used:
+        index += 1
+        candidate = f"{base}-{index}"
+    return candidate
+
+
+def _safe_read_secret(
+    blob: Optional[bytes], name: str, what: str, warnings: List[str]
+) -> Dict[str, str]:
+    """读密钥袋；解密失败时不抛出，登记 warning 并按空袋处理。"""
+    try:
+        return read_secret(blob)
+    except DecryptionError:
+        warnings.append(f"{name}: 密钥解密失败，{what}未导出")
+        return {}
+
+
+def export_document(
+    servers: List[McpServer],
+) -> tuple[Dict[str, Dict], List[str]]:
+    """把服务行导出为 mcpServers 标准文档（密钥为明文）。
+
+    - stdio → ``command`` + 可选 ``args`` / ``env``；
+    - sse → ``type: "sse"`` + ``url`` + 可选 ``headers``；
+    - streamable_http → ``type: "streamable-http"`` + ``url`` + 可选 ``headers``。
+    """
+    warnings: List[str] = []
+    doc: Dict[str, Dict] = {}
+
+    for server in servers:
+        if server.transport == TRANSPORT_STDIO:
+            item: Dict[str, object] = {"command": server.command or ""}
+            if server.args:
+                item["args"] = list(server.args)
+            env = _safe_read_secret(server.env_enc, server.name, "环境变量", warnings)
+            if env:
+                item["env"] = env
+        else:
+            type_name = (
+                "sse" if server.transport == TRANSPORT_SSE else "streamable-http"
+            )
+            item = {"type": type_name, "url": server.url or ""}
+            headers = _safe_read_secret(
+                server.headers_enc, server.name, "请求头", warnings
+            )
+            if headers:
+                item["headers"] = headers
+        doc[server.name] = item
+
+    return {"mcpServers": doc}, warnings
 
 
 def _connection_signature(server: McpServer) -> tuple:

@@ -709,6 +709,33 @@ class McpServerItem(McpServerBase):
     secret_error: bool = False
 
 
+# mcpServers 标准格式（Claude Desktop / Cursor 通用）的导入导出。
+McpConflictStrategy = Literal["rename", "skip", "overwrite"]
+
+
+class McpImportRequest(BaseModel):
+    # 原始 {"mcpServers": {...}} 文档；结构宽松校验放 service 层，
+    # 这样单条配置有问题时可以逐条报错而不是整批被 Pydantic 挡下。
+    config: Dict[str, Any]
+    conflict: McpConflictStrategy = "rename"
+
+
+class McpImportReport(BaseModel):
+    created: int = 0
+    skipped: int = 0
+    overwritten: int = 0
+    # 形如 "lark-mcp -> lark-mcp-2"。
+    renamed: List[str] = []
+    # 形如 "lark-mcp: 缺少 command 或 url"。
+    errors: List[str] = []
+
+
+class McpExportResponse(BaseModel):
+    mcpServers: Dict[str, Dict[str, Any]]
+    # 如某条密钥解密失败：连接字段照出，凭据未导出。
+    warnings: List[str] = []
+
+
 # ---- 长期记忆 ---------------------------------------------------------------
 
 class MemoryItem(BaseModel):

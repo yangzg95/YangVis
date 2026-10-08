@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
+from typing import List, Optional
 
 from app.database import get_db
 from app.deps import require_user
@@ -12,12 +13,15 @@ from app.models.schemas import (
     APIResponse,
     CurrentUser,
     ListResponse,
+    McpExportResponse,
+    McpImportReport,
+    McpImportRequest,
     McpServerCreate,
     McpServerItem,
     McpServerUpdate,
     TestResult,
 )
-from app.services.mcp_servers import McpServerService
+from app.services.mcp_servers import McpServerService, export_document
 from app.services.mcp_tools import test_connection
 
 logger = logging.getLogger("yangvis.mcp")
@@ -51,6 +55,36 @@ async def create_mcp_server(
     except ValueError as exc:
         return APIResponse(code=-1, message=str(exc))
     return APIResponse(data=service.to_item(server))
+
+
+@router.get("/export", response_model=APIResponse[McpExportResponse])
+async def export_mcp_config(
+    ids: Optional[List[int]] = Query(default=None),
+    service: McpServerService = Depends(get_service),
+) -> APIResponse[McpExportResponse]:
+    """导出 mcpServers 标准文档：不传 ids 导出全部，传了只导选中条。
+
+    文档内含明文环境变量/请求头，前端会先警告。
+    """
+    try:
+        servers = service.export_rows(ids)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    document, warnings = export_document(servers)
+    return APIResponse(data=McpExportResponse(**document, warnings=warnings))
+
+
+@router.post("/import", response_model=APIResponse[McpImportReport])
+async def import_mcp_config(
+    payload: McpImportRequest,
+    service: McpServerService = Depends(get_service),
+) -> APIResponse[McpImportReport]:
+    """导入 mcpServers 文档批量创建；重名按 conflict 策略处理。"""
+    try:
+        report = service.import_config(payload.config, conflict=payload.conflict)
+    except ValueError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    return APIResponse(data=report)
 
 
 @router.get("/{server_id}", response_model=APIResponse[McpServerItem])

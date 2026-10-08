@@ -718,6 +718,22 @@ export interface McpServerPayload {
   remark?: string | null
 }
 
+/** 导入时的同名处理：rename 自动改名 / skip 跳过 / overwrite 覆盖。 */
+export type McpConflictStrategy = 'rename' | 'skip' | 'overwrite'
+
+export interface McpImportReport {
+  created: number
+  skipped: number
+  overwritten: number
+  renamed: string[]
+  errors: string[]
+}
+
+export interface McpExportResponse {
+  mcpServers: Record<string, Record<string, unknown>>
+  warnings: string[]
+}
+
 export const mcpApi = {
   list: () => request<{ items: McpServer[]; total: number }>({ url: '/mcp' }),
   get: (id: number) => request<McpServer>({ url: `/mcp/${id}` }),
@@ -731,6 +747,21 @@ export const mcpApi = {
     request<{ success: boolean; message: string }>({
       url: `/mcp/${id}/test`,
       method: 'POST',
+    }),
+  /** 导出 mcpServers 标准文档：ids 为空导出全部。 */
+  exportConfig: (ids?: number[]) => {
+    // URLSearchParams 保证序列化成 ids=1&ids=2（而非 ids[]=1）。
+    const params = ids?.length
+      ? new URLSearchParams(ids.map((id) => ['ids', String(id)]))
+      : undefined
+    return request<McpExportResponse>({ url: '/mcp/export', params })
+  },
+  /** 导入 mcpServers 文档批量创建。 */
+  importConfig: (config: Record<string, unknown>, conflict: McpConflictStrategy) =>
+    request<McpImportReport>({
+      url: '/mcp/import',
+      method: 'POST',
+      data: { config, conflict },
     }),
 }
 

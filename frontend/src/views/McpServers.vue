@@ -7,9 +7,17 @@
     </div>
 
     <div class="toolbar">
-      <a-button type="primary" @click="openCreate">
-        <PlusOutlined /> 新建 MCP 服务
-      </a-button>
+      <a-space>
+        <a-button @click="openImport">
+          <UploadOutlined /> 导入
+        </a-button>
+        <a-button @click="onExport">
+          <DownloadOutlined /> 导出
+        </a-button>
+        <a-button type="primary" @click="openCreate">
+          <PlusOutlined /> 新建 MCP 服务
+        </a-button>
+      </a-space>
     </div>
 
     <a-table
@@ -17,6 +25,7 @@
       :loading="loading"
       :pagination="false"
       row-key="id"
+      :row-selection="{ selectedRowKeys, onChange: onSelectionChange }"
     >
       <a-table-column key="name" title="名称" :width="180">
         <template #default="{ record }">
@@ -136,20 +145,95 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <a-modal
+      v-model:open="importModal.open"
+      title="导入 mcpServers 配置"
+      :confirm-loading="importModal.loading"
+      ok-text="导入"
+      cancel-text="关闭"
+      width="680px"
+      @ok="doImport"
+    >
+      <a-alert
+        type="info"
+        show-icon
+        class="import-alert"
+        message="支持 Claude Desktop / Cursor 通用的 mcpServers JSON：可粘贴文本或选择 .json 文件。stdio 条目会在服务器上启动子进程，请确认命令来源可信。"
+      />
+
+      <a-form layout="vertical">
+        <a-form-item label="同名服务处理">
+          <a-radio-group v-model:value="importModal.conflict" button-style="solid">
+            <a-radio-button value="rename">自动改名</a-radio-button>
+            <a-radio-button value="skip">跳过</a-radio-button>
+            <a-radio-button value="overwrite">覆盖</a-radio-button>
+          </a-radio-group>
+        </a-form-item>
+
+        <a-form-item label="配置内容">
+          <div class="import-text-head">
+            <a-button size="small" @click="pickFile">选择文件</a-button>
+            <input
+              ref="fileInput"
+              type="file"
+              accept=".json,application/json"
+              class="hidden-file"
+              @change="onFilePicked"
+            />
+          </div>
+          <a-textarea
+            v-model:value="importModal.text"
+            :rows="9"
+            placeholder='{"mcpServers": {"lark-mcp": {"command": "npx", "args": []}}}'
+          />
+        </a-form-item>
+      </a-form>
+
+      <a-alert
+        v-if="importModal.report"
+        :type="importModal.report.errors.length ? 'warning' : 'success'"
+        class="import-result"
+        show-icon
+        :message="`创建 ${importModal.report.created} 个 · 跳过 ${importModal.report.skipped} 个 · 覆盖 ${importModal.report.overwritten} 个`"
+      >
+        <template #description>
+          <div v-for="line in importModal.report.renamed" :key="line" class="report-line">
+            改名：{{ line }}
+          </div>
+          <div v-for="line in importModal.report.errors" :key="line" class="report-line error">
+            {{ line }}
+          </div>
+        </template>
+      </a-alert>
+    </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
-import { message } from 'ant-design-vue'
-import { PlusOutlined } from '@ant-design/icons-vue'
+import { Modal, message } from 'ant-design-vue'
+import { DownloadOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import dayjs from 'dayjs'
-import { mcpApi, type McpServer, type McpTransport } from '@/api'
+import {
+  mcpApi,
+  type McpConflictStrategy,
+  type McpImportReport,
+  type McpServer,
+  type McpTransport,
+} from '@/api'
 import SecretRows from '@/components/SecretRows.vue'
+import { saveTextFile } from '@/utils/download'
 
 const servers = ref<McpServer[]>([])
 const loading = ref(false)
 const testingId = ref<number | null>(null)
+
+// 导出用的勾选：未勾选时导出按钮导出全部。
+const selectedRowKeys = ref<number[]>([])
+function onSelectionChange(keys: (number | string)[]) {
+  selectedRowKeys.value = keys.map(Number)
+}
 
 interface SecretRow {
   key: string
@@ -299,6 +383,94 @@ async function onDelete(id: number) {
   await load()
 }
 
+// ---- 导出 -------------------------------------------------------------------
+
+function onExport() {
+  const ids = selectedRowKeys.value
+  const scopeText = ids.length ? `选中的 ${ids.length} 个` : '全部'
+  Modal.confirm({
+    title: '导出 MCP 配置',
+    content: `将导出${scopeText}服务为 mcpServers JSON。文件包含明文环境变量/请求头，请妥善保管、不要随意外发。`,
+    okText: '导出',
+    cancelText: '取消',
+    onOk: async () => {
+      const data = await mcpApi.exportConfig(ids.length ? ids : undefined)
+      saveTextFile(
+        `mcp-servers-${dayjs().format('YYYYMMDD-HHmm')}.json`,
+        JSON.stringify({ mcpServers: data.mcpServers }, null, 2),
+        'application/json',
+      )
+      for (const warning of data.warnings) message.warning(warning)
+      message.success('已导出')
+    },
+  })
+}
+
+// ---- 导入 -------------------------------------------------------------------
+
+const fileInput = ref<HTMLInputElement | null>(null)
+const importModal = reactive<{
+  open: boolean
+  loading: boolean
+  text: string
+  conflict: McpConflictStrategy
+  report: McpImportReport | null
+}>({
+  open: false,
+  loading: false,
+  text: '',
+  conflict: 'rename',
+  report: null,
+})
+
+function openImport() {
+  importModal.text = ''
+  importModal.conflict = 'rename'
+  importModal.report = null
+  importModal.loading = false
+  importModal.open = true
+  if (fileInput.value) fileInput.value.value = ''
+}
+
+function pickFile() {
+  fileInput.value?.click()
+}
+
+async function onFilePicked(event: Event) {
+  const file = (event.target as HTMLInputElement).files?.[0]
+  if (!file) return
+  importModal.text = await file.text()
+}
+
+async function doImport() {
+  if (!importModal.text.trim()) {
+    message.warning('请粘贴配置内容或选择文件')
+    return
+  }
+  let config: unknown
+  try {
+    config = JSON.parse(importModal.text)
+  } catch {
+    message.error('JSON 格式不正确，请检查粘贴内容')
+    return
+  }
+
+  importModal.loading = true
+  try {
+    const report = await mcpApi.importConfig(
+      config as Record<string, unknown>,
+      importModal.conflict,
+    )
+    importModal.report = report
+    if (!report.errors.length) {
+      message.success(`成功导入 ${report.created} 个服务`)
+    }
+    await load()
+  } finally {
+    importModal.loading = false
+  }
+}
+
 function transportLabel(transport: McpTransport) {
   if (transport === 'sse') return 'SSE'
   if (transport === 'streamable_http') return 'Streamable HTTP'
@@ -342,5 +514,23 @@ onMounted(load)
 }
 .stdio-alert {
   margin-bottom: 16px;
+}
+.hidden-file {
+  display: none;
+}
+.import-alert {
+  margin-bottom: 16px;
+}
+.import-text-head {
+  margin-bottom: 8px;
+}
+.import-result {
+  margin-top: 8px;
+}
+.report-line {
+  word-break: break-all;
+}
+.report-line.error {
+  color: #cf1322;
 }
 </style>

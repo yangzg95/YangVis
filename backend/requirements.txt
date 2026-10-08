@@ -1,5 +1,6 @@
 fastapi==0.115.0
-uvicorn==0.30.6
+# mcp 1.30 要求 uvicorn>=0.31；与 fastapi 0.115 钉的 starlette<0.39 仍兼容。
+uvicorn==0.34.0
 gunicorn==22.0.0
 # uvicorn 的基础包不含 WebSocket 实现，运维终端要用 WS，必须显式装上。
 websockets==14.2

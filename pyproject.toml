@@ -1,7 +1,7 @@
 [project]
 name = "yangvis"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "asyncssh==2.18.0",
     "cryptography==43.0.1",
@@ -13,7 +13,7 @@ dependencies = [
     "langchain-openai>=1.6.2",
     "langgraph>=1.2.11",
     "pillow==11.3.0",
-    "pydantic==2.9.2",
+    "pydantic==2.13.5",
     "pydantic-settings==2.5.2",
     "pyjwt>=2.13.0",
     "pymysql==1.1.1",
@@ -24,8 +24,13 @@ dependencies = [
     "qdrant-client==1.11.3",
     "redis==5.2.1",
     "sqlalchemy==2.0.35",
-    "uvicorn==0.30.6",
+    # mcp 1.30 要求 uvicorn>=0.31；与 fastapi 0.115 钉的 starlette<0.39 仍兼容。
+    "uvicorn==0.34.0",
     "websockets==14.2",
+    # MCP：官方适配器（已 archived）要求 mcp<2.0；sse-starlette 钉 2.x 避开 starlette 3.x。
+    "mcp==1.30.0",
+    "langchain-mcp-adapters==0.3.2",
+    "sse-starlette==2.1.3",
 ]
 
 [dependency-groups]
