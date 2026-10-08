@@ -38,6 +38,8 @@ from app.models.schemas import (
     CurrentUser,
     SftpListResult,
     SftpMkdirRequest,
+    SftpPasteRequest,
+    SftpPasteResult,
 )
 from app.services import ops_sftp, ops_server as server_ops
 
@@ -329,6 +331,61 @@ async def upload_file(
     )
     _audit(db, user.user_id, server, f"sftp upload {target} ({written} bytes)", True)
     return APIResponse(data=None, message="uploaded")
+
+
+# ---- 服务端复制 / 剪切 ----------------------------------------------------------
+
+
+async def _paste(
+    payload: SftpPasteRequest,
+    server: OpsServer,
+    db: Session,
+    user: CurrentUser,
+    *,
+    move: bool,
+) -> APIResponse[SftpPasteResult]:
+    """复制与剪切共用一条流程，只差 ``move`` 开关和审计里的动词。
+
+    整棵子树在服务端搬运，请求耗时随目录大小线性增长，所以这里同步等完：
+    前端把这一行标成忙态，不做后台任务（传输标签页是给字节流用的）。
+    """
+    verb = "move" if move else "copy"
+    conn = await _connect(server, db)
+    try:
+        target = await ops_sftp.paste(conn, payload.src, payload.dst_dir, move=move)
+    except ops_sftp.SftpError as exc:
+        _audit(db, user.user_id, server, f"sftp {verb} {payload.src} -> {payload.dst_dir}", False, str(exc))
+        return APIResponse(code=-1, message=str(exc))
+    finally:
+        conn.close()
+
+    _audit(db, user.user_id, server, f"sftp {verb} {payload.src} -> {target}", True)
+    return APIResponse(
+        data=SftpPasteResult(
+            path=target,
+            renamed=posixpath.basename(target) != posixpath.basename(payload.src.rstrip("/")),
+        )
+    )
+
+
+@router.post("/{server_id}/files/copy", response_model=APIResponse[SftpPasteResult])
+async def copy_file(
+    payload: SftpPasteRequest,
+    user: CurrentUser = Depends(require_user),
+    ctx: tuple[OpsServer, Session] = Depends(_get_server),
+) -> APIResponse[SftpPasteResult]:
+    _require_ops_write(user)
+    return await _paste(payload, *ctx, user=user, move=False)
+
+
+@router.post("/{server_id}/files/move", response_model=APIResponse[SftpPasteResult])
+async def move_file(
+    payload: SftpPasteRequest,
+    user: CurrentUser = Depends(require_user),
+    ctx: tuple[OpsServer, Session] = Depends(_get_server),
+) -> APIResponse[SftpPasteResult]:
+    _require_ops_write(user)
+    return await _paste(payload, *ctx, user=user, move=True)
 
 
 # ---- 新建目录 -----------------------------------------------------------------

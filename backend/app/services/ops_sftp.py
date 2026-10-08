@@ -19,6 +19,9 @@ from app.models.schemas import SftpEntry, SftpListResult
 
 logger = logging.getLogger("yangvis.ops_sftp")
 
+# 同名粘贴最多试多少个副本名，超过就让用户自己收拾。
+_PASTE_MAX_RENAME = 100
+
 
 class SftpError(RuntimeError):
     """已翻译成用户可读消息的 SFTP 失败。"""
@@ -321,6 +324,78 @@ async def upload_stream(
                 await sftp.exit()
             except Exception as exc:
                 logger.debug("sftp session exit failed: %s", exc)
+
+
+def paste_candidate(name: str, attempt: int) -> str:
+    """``attempt`` 从 1 起：1 → ``x_副本.ext``，2 → ``x_副本2.ext``。
+
+    ``splitext`` 只切最后一段后缀，所以 ``x.tar.gz`` 的副本名落在 ``.gz`` 前——
+    后缀留在末尾才符合直觉；隐藏文件 ``.gitignore`` 整段当主体处理。
+    """
+    stem, ext = posixpath.splitext(name)
+    suffix = "_副本" if attempt <= 1 else f"_副本{attempt}"
+    return f"{stem}{suffix}{ext}"
+
+
+async def unique_target(sftp: asyncssh.SFTPClient, dst_dir: str, name: str) -> str:
+    """目标目录里避开同名：原名可用就用原名，否则依次试 ``_副本``、``_副本2``…"""
+    target = posixpath.join(dst_dir, name)
+    if not await sftp.exists(target):
+        return target
+    for attempt in range(1, _PASTE_MAX_RENAME + 1):
+        candidate = posixpath.join(dst_dir, paste_candidate(name, attempt))
+        if not await sftp.exists(candidate):
+            return candidate
+    raise SftpError(f"目标目录里同名副本过多，先清理 {name} 的副本再粘贴")
+
+
+async def _move(sftp: asyncssh.SFTPClient, src: str, dst: str) -> None:
+    """剪切：先试 rename，被拒（跨文件系统）再退化成复制＋删除。"""
+    try:
+        await sftp.rename(src, dst)
+        return
+    except (asyncssh.SFTPPermissionDenied, asyncssh.SFTPFailure):
+        logger.debug("rename %s -> %s rejected, falling back to copy+remove", src, dst)
+    await sftp.copy(src, dst, recurse=True, preserve=True)
+    try:
+        if await sftp.isdir(src):
+            await sftp.rmtree(src)
+        else:
+            await sftp.remove(src)
+    except (asyncssh.Error, OSError) as exc:
+        # 副本已经落盘，删不掉源只是留了个重复项，不该让这次操作看起来失败。
+        logger.warning("copied %s to %s but failed to remove the source: %s", src, dst, exc)
+
+
+async def paste(
+    conn: asyncssh.SSHClientConnection, src: str, dst_dir: str, *, move: bool
+) -> str:
+    """服务端把 ``src`` 复制/移动到目录 ``dst_dir``，返回实际落地的绝对路径。
+
+    同名不覆盖：目标已被占用时改名成 ``xxx_副本.ext``。``dst_dir`` 必须是目录，
+    不存在就交给 SFTP 报错（权限不足/路径不存在都翻成可读消息）。
+    """
+    try:
+        async with await open_session(conn) as sftp:
+            home = await home_of(sftp)
+            src_path = normalize_path(src, home)
+            base_dir = normalize_path(dst_dir, home)
+            name = posixpath.basename(src_path)
+            if not name:
+                raise SftpError("根目录不能粘贴")
+            if base_dir == src_path or base_dir.startswith(src_path + "/"):
+                raise SftpError("不能把目录粘贴到它自己里面")
+            # 剪切回原目录本来是无操作，但同名检测会把它当成冲突改出个 _副本 来。
+            if move and posixpath.dirname(src_path) == base_dir:
+                raise SftpError("它已经在这个目录里了")
+            target = await unique_target(sftp, base_dir, name)
+            if move:
+                await _move(sftp, src_path, target)
+            else:
+                await sftp.copy(src_path, target, recurse=True, preserve=True)
+            return target
+    except (asyncssh.Error, OSError) as exc:
+        raise map_sftp_error(exc) from exc
 
 
 async def remove(conn: asyncssh.SSHClientConnection, path: str) -> None:

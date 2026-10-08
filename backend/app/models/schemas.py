@@ -1384,6 +1384,20 @@ class SftpMkdirRequest(BaseModel):
     path: str = Field(min_length=1, max_length=1024)
 
 
+class SftpPasteRequest(BaseModel):
+    """服务端复制/剪切：把 ``src`` 落到目录 ``dst_dir`` 里。"""
+
+    src: str = Field(min_length=1, max_length=1024)
+    dst_dir: str = Field(min_length=1, max_length=1024)
+
+
+class SftpPasteResult(BaseModel):
+    """粘贴结果。``path`` 是实际落地的绝对路径——同名时会是 ``xxx_副本.ext``。"""
+
+    path: str
+    renamed: bool
+
+
 class OpsAuditItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

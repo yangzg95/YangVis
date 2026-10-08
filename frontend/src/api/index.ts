@@ -1551,6 +1551,12 @@ export interface SftpListResult {
   max_upload_bytes?: number
 }
 
+/** 服务端粘贴的结果：落地路径与是否被自动改名（同名时后端给 ``xxx_副本.ext``）。 */
+export interface SftpPasteResult {
+  path: string
+  renamed: boolean
+}
+
 /** SFTP 下载地址。流式落盘走 fetch（不经 axios），URL 在这里集中拼。 */
 export function sftpDownloadUrl(id: number, path: string): string {
   return `/api/ops/servers/${id}/files/download?path=${encodeURIComponent(path)}`
@@ -1631,6 +1637,23 @@ export const opsApi = {
       method: 'POST',
       data: { path },
       timeout: 60000,
+      skipErrorToast: true,
+    }),
+  // 服务端复制/剪切：字节不出服务器，但一棵大树可能传很久，和递归删除一样不设超时。
+  sftpCopy: (id: number, src: string, dstDir: string) =>
+    request<SftpPasteResult>({
+      url: `/ops/servers/${id}/files/copy`,
+      method: 'POST',
+      data: { src, dst_dir: dstDir },
+      timeout: 0,
+      skipErrorToast: true,
+    }),
+  sftpMove: (id: number, src: string, dstDir: string) =>
+    request<SftpPasteResult>({
+      url: `/ops/servers/${id}/files/move`,
+      method: 'POST',
+      data: { src, dst_dir: dstDir },
+      timeout: 0,
       skipErrorToast: true,
     }),
   sftpRemove: (id: number, path: string) =>
