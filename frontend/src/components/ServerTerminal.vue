@@ -26,18 +26,36 @@
     <div v-if="!serverId" class="terminal-mask">
       <div>在左侧选中一台服务器并点「连接」</div>
     </div>
+    <!-- 右键菜单：复制 / 粘贴 / 全选 / 清屏，和文件面板共用同一个深色组件。 -->
+    <DarkContextMenu
+      :open="menu.open"
+      :x="menu.x"
+      :y="menu.y"
+      :items="menuItems"
+      @pick="onMenuPick"
+      @close="menu.open = false"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Terminal } from 'xterm'
 import { FitAddon } from 'xterm-addon-fit'
 import { SearchAddon } from 'xterm-addon-search'
 import { WebLinksAddon } from 'xterm-addon-web-links'
 import 'xterm/css/xterm.css'
-import { ArrowDownOutlined, ArrowUpOutlined, CloseOutlined } from '@ant-design/icons-vue'
+import {
+  ArrowDownOutlined,
+  ArrowUpOutlined,
+  ClearOutlined,
+  CloseOutlined,
+  CopyOutlined,
+  SelectOutlined,
+  SnippetsOutlined,
+} from '@ant-design/icons-vue'
 import { opsApi, opsWsUrl } from '@/api'
+import DarkContextMenu, { type DarkMenuItem } from './DarkContextMenu.vue'
 
 const props = defineProps<{ serverId: number | null }>()
 const emit = defineEmits<{
@@ -178,7 +196,7 @@ function sendInput(text: string) {
 
 // ---- 复制 / 粘贴 --------------------------------------------------------------
 // xterm 默认对剪贴板毫无支持：右键没反应、Ctrl+Shift+C/V 原样发给 PTY。
-// 这里补齐终端圈的三套惯例：右键智能动作、Ctrl+Shift 快捷键、选中即复制。
+// 这里补齐终端圈的三套惯例：右键菜单、Ctrl+Shift 快捷键、选中即复制。
 
 async function copySelection() {
   const text = term?.getSelection() ?? ''
@@ -202,11 +220,50 @@ async function pasteClipboard() {
   }
 }
 
-/** 右键：有选区复制选区（GNOME 终端口径），没选区直接粘贴。 */
-function onContextMenu(event: MouseEvent) {
+// ---- 右键菜单 -----------------------------------------------------------------
+// 一律弹菜单，不再做「右键即粘贴」：静默粘贴会把一整段内容直接打进 PTY，
+// 手滑右键就等于执行命令，代价和风险都不该由一次右键承担。
+// hasSelection 是 xterm 的内部状态、不是响应式数据，所以置灰判断在打开那一刻取一次。
+
+const menu = reactive({ open: false, x: 0, y: 0 })
+const menuItems = ref<DarkMenuItem[]>([])
+
+function openMenu(event: MouseEvent) {
   event.preventDefault()
-  if (term?.hasSelection()) void copySelection()
-  else void pasteClipboard()
+  // xterm 自己也绑了 contextmenu（把隐藏 textarea 挪到鼠标下、灌入选中文字），
+  // 但它不动视觉选区，所以这里的 hasSelection 拿到的还是用户刚框住的那段。
+  menuItems.value = [
+    {
+      key: 'copy',
+      label: '复制',
+      icon: CopyOutlined,
+      group: 0,
+      disabled: !term?.hasSelection(),
+      disabledHint: '没有选中内容',
+    },
+    {
+      key: 'paste',
+      label: '粘贴',
+      icon: SnippetsOutlined,
+      group: 0,
+      disabled: socket?.readyState !== WebSocket.OPEN,
+      disabledHint: '终端还没连上',
+    },
+    { key: 'select-all', label: '全选', icon: SelectOutlined, group: 1 },
+    { key: 'clear', label: '清屏', icon: ClearOutlined, group: 1 },
+  ]
+  menu.x = event.clientX
+  menu.y = event.clientY
+  menu.open = true
+}
+
+function onMenuPick(key: string) {
+  menu.open = false
+  if (key === 'copy') void copySelection()
+  else if (key === 'paste') void pasteClipboard()
+  else if (key === 'select-all') term?.selectAll()
+  else if (key === 'clear') term?.clear()
+  // 清屏只清本地缓冲，一个字节都不发给 PTY：远端 shell 的状态不受影响。
 }
 
 // 选中即复制（PuTTY 口径）。onSelectionChange 在拖选过程中连续触发，
@@ -287,7 +344,7 @@ onMounted(() => {
     return true
   })
 
-  term.element?.addEventListener('contextmenu', onContextMenu)
+  term.element?.addEventListener('contextmenu', openMenu)
 
   term.onSelectionChange(() => {
     if (!term?.hasSelection()) return
