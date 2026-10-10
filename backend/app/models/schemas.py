@@ -598,6 +598,8 @@ class WorkflowRunStepItem(BaseModel):
     agent_name: Optional[str] = None
     optional: bool = False
     output_kind: Optional[str] = None
+    # 产物以什么名字进的上下文：前端据此还原「这一步收到了哪些输入」。
+    output_var: Optional[str] = None
     status: str
     prompt: Optional[str] = None
     output: Optional[str] = None
@@ -645,6 +647,16 @@ class WorkflowRunDetail(WorkflowRunItem):
 
     inputs: Dict[str, Any] = Field(default_factory=dict)
     steps: List[WorkflowRunStepItem] = Field(default_factory=list)
+
+
+class WorkflowRerunRequest(BaseModel):
+    """单步重跑 / 断点续跑的请求体：对这次执行的上下文变量的覆盖值。
+
+    只影响这一次执行：运行行上的输入快照不改，上游步骤行也不改，每个被重跑步骤
+    实际收到的 prompt 仍逐行落库可查。JSON 产物的字段校验由服务层按定义完成。
+    """
+
+    inputs: Dict[str, str] = Field(default_factory=dict)
 
 
 class WorkflowRunPruneRequest(BaseModel):

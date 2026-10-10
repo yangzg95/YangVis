@@ -28,14 +28,18 @@ from app.models.schemas import (
     WorkflowRunPruneRequest,
     WorkflowRunPruneResult,
     WorkflowRunRequest,
+    WorkflowRerunRequest,
     WorkflowUpdate,
 )
 from app.services.workflows import (
+    OverrideValidationError,
     WorkflowService,
     follow_run,
+    prepare_resume,
     prepare_step_rerun,
     prune_runs,
     rerun_step,
+    resume_run,
     stream_run,
 )
 from app.sse import SSE_HEADERS, sse_event, with_heartbeat
@@ -176,33 +180,86 @@ def _follow_response(owner_id: int, run_id: int, request: Request) -> StreamingR
     )
 
 
+def _apply_prepare_errors(exc: Exception) -> HTTPException:
+    """prepare_* 准备函数共用的异常映射：404 归属 / 400 请求错误 / 409 冲突。"""
+    if isinstance(exc, LookupError):
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    if isinstance(exc, BusinessError):
+        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.msg)
+    if isinstance(exc, OverrideValidationError):
+        # 覆盖值非法（未知变量名、JSON 解析失败）：请求本身写错了，不是冲突。
+        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+
+
 @router.post("/runs/{run_id}/steps/{key}/rerun", response_model=APIResponse[WorkflowRunItem])
 async def rerun_run_step(
     run_id: int,
     key: str,
     background: BackgroundTasks,
+    payload: Optional[WorkflowRerunRequest] = None,
     db: Session = Depends(get_db),
     service: WorkflowService = Depends(get_service),
 ) -> APIResponse[WorkflowRunItem]:
     """重跑一次运行里的单个步骤，进度用 ``GET /runs/{run_id}/stream`` 接。
 
     用的是流程**当前定义**里的那一步（prompt 模板只存在定义里，运行行只存渲染结果），
-    上游产物的上下文则按当时落库的步骤行重建。跑通这一步不会重写业务行上的产物——
-    后处理在功能侧，那里只认整条流程跑完，要新产物请回功能页面重新发起。
+    上游产物的上下文则按当时落库的步骤行重建。``payload.inputs`` 可覆盖这次重跑
+    收到的上下文变量（只影响这一次，不写回任何行）。跑通这一步不会重写业务行上
+    的产物——后处理在功能侧，那里只认整条流程跑完，要新产物请回功能页面重新发起。
     """
+    overrides = payload.inputs if payload is not None else None
     try:
         # 门槛与简历/幻灯片同一处：配置没就绪就别排队。
         service.require_chat_config()
-        run = prepare_step_rerun(db, service.owner_id, run_id, key)
-    except LookupError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except BusinessError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.msg) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        run = prepare_step_rerun(
+            db, service.owner_id, run_id, key, overrides=overrides
+        )
+    except (LookupError, BusinessError, OverrideValidationError, ValueError) as exc:
+        raise _apply_prepare_errors(exc) from exc
 
-    background.add_task(rerun_step, owner_id=service.owner_id, run_id=run_id, key=key)
+    background.add_task(
+        rerun_step,
+        owner_id=service.owner_id,
+        run_id=run_id,
+        key=key,
+        overrides=overrides,
+    )
     return APIResponse(data=service.to_run_item(run), message="已重新开始这一步")
+
+
+@router.post("/runs/{run_id}/steps/{key}/resume", response_model=APIResponse[WorkflowRunItem])
+async def resume_run_step(
+    run_id: int,
+    key: str,
+    background: BackgroundTasks,
+    payload: Optional[WorkflowRerunRequest] = None,
+    db: Session = Depends(get_db),
+    service: WorkflowService = Depends(get_service),
+) -> APIResponse[WorkflowRunItem]:
+    """从某一步所在的并行组继续跑到结束，进度用 ``GET /runs/{run_id}/stream`` 接。
+
+    目标组及之后各组的步骤行重置后重跑（并行组不可分割），上游组产物按当时
+    落库的行喂；``payload.inputs`` 可覆盖本次续跑起点收到的上下文变量。与单步
+    重跑一样不写回业务行——后处理只认整条流程跑完，要新产物请回功能页面重新发起。
+    """
+    overrides = payload.inputs if payload is not None else None
+    try:
+        service.require_chat_config()
+        run, start_group_index = prepare_resume(
+            db, service.owner_id, run_id, key, overrides=overrides
+        )
+    except (LookupError, BusinessError, OverrideValidationError, ValueError) as exc:
+        raise _apply_prepare_errors(exc) from exc
+
+    background.add_task(
+        resume_run,
+        owner_id=service.owner_id,
+        run_id=run_id,
+        start_group_index=start_group_index,
+        overrides=overrides,
+    )
+    return APIResponse(data=service.to_run_item(run), message="已从该步继续")
 
 
 @router.get("", response_model=APIResponse[ListResponse[WorkflowItem]])

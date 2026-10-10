@@ -171,9 +171,11 @@
             :problem-ids="problemIds"
             :show-problems="showProblems"
             :advanced-open="expanded.has(form.steps[index])"
+            :collapsed="collapsed.has(form.steps[index])"
             @move="onMove(index, $event)"
             @remove="removeStep(index)"
             @toggle-advanced="toggleExpanded(index)"
+            @toggle-collapse="toggleCollapsed(index)"
           />
         </div>
       </section>
@@ -337,9 +339,19 @@ function toggleExpanded(index: number) {
   else expanded.add(step)
 }
 
+/** 整卡折叠状态：与 expanded 同一套记法，重排不串卡。 */
+const collapsed = reactive(new Set<StepForm>())
+function toggleCollapsed(index: number) {
+  const step = form.steps[index]
+  if (!step) return
+  if (collapsed.has(step)) collapsed.delete(step)
+  else collapsed.add(step)
+}
+
 /** 换入一批步骤时，把配过高级项的直接摊开，免得藏住 JSON 契约与模型选择。 */
 function autoExpandAdvanced(steps: StepForm[]) {
   expanded.clear()
+  collapsed.clear()
   for (const step of steps) {
     if (
       step.output_kind === 'json' ||
@@ -525,7 +537,10 @@ function addInput() {
 
 function removeStep(index: number) {
   const [removed] = form.steps.splice(index, 1)
-  if (removed) expanded.delete(removed)
+  if (removed) {
+    expanded.delete(removed)
+    collapsed.delete(removed)
+  }
   // 当前组的最后一个节点被删、整组消失：页码退回最后一个仍存在的组页；
   // 删的是中间组则后面的组前移顶替，页码不动。
   if (wizardPage.value > wizardGroups.value.length) {
@@ -753,6 +768,10 @@ const footerHint = computed(() =>
 .wizard-pane {
   /* 翻页时底部按钮位置不跳动。 */
   min-height: 240px;
+  /* 一页是一个并行组：组内多张步骤卡片之间留间隙，别贴成一整块。 */
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 /* 起步方式：选内置流程的入口，压在基本信息页最顶上先看到。 */
 .preset-bar {

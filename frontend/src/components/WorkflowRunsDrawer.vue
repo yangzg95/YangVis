@@ -162,8 +162,23 @@
             </div>
             <p v-if="run.error_msg" class="danger">{{ run.error_msg }}</p>
 
+            <div class="scene-tools">
+              <span class="muted">每步现场可折叠</span>
+              <span class="spacer" />
+              <a-button size="small" type="link" @click="collapseAll(details[run.id], false)">
+                展开全部
+              </a-button>
+              <a-button size="small" type="link" @click="collapseAll(details[run.id], true)">
+                收起全部
+              </a-button>
+            </div>
+
             <div v-for="step in details[run.id].steps" :key="step.id" class="scene-step">
-              <div class="scene-head">
+              <div class="scene-head" @click="toggleStep(run.id, step)">
+                <span class="scene-caret">
+                  <RightOutlined v-if="isStepCollapsed(run.id, step)" />
+                  <DownOutlined v-else />
+                </span>
                 <a-tag :color="statusColor(step.status)">{{ statusText(step.status) }}</a-tag>
                 <span class="live-key">{{ step.key }}</span>
                 <span class="muted">{{ step.agent_name || step.agent_slug }}</span>
@@ -172,19 +187,44 @@
                 <span v-if="step.model_name" class="muted">{{ step.model_name }}</span>
                 <span v-if="step.elapsed_ms != null" class="muted">{{ fmtElapsed(step.elapsed_ms) }}</span>
                 <a-tooltip
-                  title="用流程当前定义里的这一步重跑一次，上游产物按当时落库的结果喂。跑通这一步不会重写业务结果——要新产物请回功能页面重新发起。"
+                  title="先调整这一步收到的输入变量，再用流程当前定义重跑一次；只重跑这一步，不写回业务结果——要新产物请回功能页面重新发起。"
                 >
                   <a-button
                     size="small"
                     :disabled="!canRerun(run)"
-                    :loading="rerunning === `${run.id}:${step.key}`"
-                    @click="onRerun(run, step)"
+                    @click.stop="openStepModal(run, step, 'rerun')"
                   >
                     重跑这步
                   </a-button>
                 </a-tooltip>
+                <a-tooltip
+                  title="从这一步所在并行组继续跑到结束：本组及之后各组重置重跑，上游产物不变；可先调整输入变量。不写回业务结果——要新产物请回功能页面重新发起。"
+                >
+                  <a-button
+                    size="small"
+                    :disabled="!canRerun(run)"
+                    @click.stop="openStepModal(run, step, 'resume')"
+                  >
+                    从此步继续
+                  </a-button>
+                </a-tooltip>
               </div>
+              <div v-show="!isStepCollapsed(run.id, step)" class="scene-body">
               <div v-if="step.error_msg" class="danger">{{ step.error_msg }}</div>
+              <div v-if="stepInputFields(details[run.id], step).length" class="scene-block">
+                <div class="scene-label">这一步收到的输入（上游产物按当时落库的结果）</div>
+                <div
+                  v-for="field in stepInputFields(details[run.id], step)"
+                  :key="field.name"
+                  class="scene-field"
+                >
+                  <span class="scene-field-name">
+                    {{ field.name }}
+                    <a-tag v-if="field.isJson" color="blue" class="scene-field-tag">JSON</a-tag>
+                  </span>
+                  <pre>{{ field.value }}</pre>
+                </div>
+              </div>
               <div v-if="step.prompt" class="scene-block">
                 <div class="scene-label">发给模型的 prompt</div>
                 <pre>{{ step.prompt }}</pre>
@@ -197,12 +237,51 @@
                 <div class="scene-label">按契约解析出的对象</div>
                 <pre>{{ JSON.stringify(step.parsed, null, 2) }}</pre>
               </div>
+              </div>
             </div>
           </div>
           <a-skeleton v-else active :paragraph="{ rows: 3 }" />
         </a-collapse-panel>
       </a-collapse>
     </a-spin>
+
+    <!-- 重跑这步 / 从此步继续 共用的输入调整弹框：改的是这次执行收到的上下文
+         变量，提交后按当前模板重新渲染，不写回运行输入与任何上游行。 -->
+    <a-modal
+      :open="editModal.open"
+      :title="editModal.mode === 'rerun' ? '重跑这一步 · 调整输入' : '从此步继续 · 调整输入'"
+      ok-text="开始"
+      cancel-text="取消"
+      :confirm-loading="editModal.submitting"
+      :width="620"
+      @ok="confirmStepModal"
+      @update:open="(value: boolean) => { if (!value) editModal.open = false }"
+    >
+      <a-alert
+        type="info"
+        show-icon
+        class="edit-modal-tip"
+        :message="
+          editModal.mode === 'rerun'
+            ? '只重跑这一步：用下面的变量按当前模板重新渲染 prompt，实际 prompt 仍逐行落库；不写回业务结果。'
+            : '将重跑本步所在并行组及之后所有步骤：上游组的产物不变，覆盖只影响这一次执行。'
+        "
+      />
+      <a-form layout="vertical">
+        <a-form-item v-for="field in editModal.fields" :key="field.name">
+          <template #label>
+            {{ field.name }}
+            <a-tag v-if="field.isJson" color="blue">JSON</a-tag>
+          </template>
+          <a-textarea v-model:value="editModal.values[field.name]" :rows="4" />
+        </a-form-item>
+        <a-empty
+          v-if="!editModal.fields.length"
+          description="这一步没有可调整的上下文变量"
+          :image-style="{ height: '40px' }"
+        />
+      </a-form>
+    </a-modal>
   </a-drawer>
 </template>
 
@@ -210,7 +289,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useRouter, type RouteLocationRaw } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { PlayCircleOutlined } from '@ant-design/icons-vue'
+import { DownOutlined, PlayCircleOutlined, RightOutlined } from '@ant-design/icons-vue'
 import {
   workflowsApi,
   type RunStatus,
@@ -266,9 +345,12 @@ const running = ref(false)
 const following = ref(false)
 /** 本次打开里用户明点过「停止跟随」：不再自动接回还在跑的那次。 */
 let followSuppressed = false
-/** 正在等后端受理的重跑，形状是 ``运行 id:步骤 key``，用来只转那一颗按钮。 */
-const rerunning = ref<string | null>(null)
 const inputs = reactive<Record<string, string>>({})
+/**
+ * 每步现场的折叠状态，key 形状 ``运行 id:步骤 key``。只记用户显式动过的：
+ * 没动过的按默认（失败步展开、其余收起）取值。
+ */
+const collapsedSteps = reactive<Record<string, boolean>>({})
 const details = reactive<Record<number, WorkflowRunDetail>>({})
 const expanded = ref<number[]>([])
 const live = reactive<{ runId: number | null; status: string; error: string | null; steps: LiveStep[] }>({
@@ -487,6 +569,8 @@ async function settleLive(status: string, error: string | null | undefined, runI
   // 现场重取：这一步刚写下新的 prompt 与输出，缓存里那份是跑之前的。
   delete details[runId]
   await loadRuns()
+  // 面板还展开着就把新现场取回来：续跑/重跑后直接看到新结果，不用切一下。
+  if (expanded.value.includes(runId)) await onExpand([runId])
   emit('changed')
 }
 
@@ -598,19 +682,129 @@ function canRerun(run: WorkflowRun) {
   return !liveBusy.value
 }
 
-async function onRerun(run: WorkflowRun, step: WorkflowRunStep) {
-  rerunning.value = `${run.id}:${step.key}`
-  try {
-    await workflowsApi.rerunStep(run.id, step.key)
-  } catch {
-    return // 拦截器已提示；409 的原因（还没跑完）就在它的 message 里。
-  } finally {
-    rerunning.value = null
+// ---- 每步现场折叠 ----------------------------------------------------------
+
+function stepCardKey(runId: number, key: string) {
+  return `${runId}:${key}`
+}
+
+/** 这一步现场是否收起：没显式动过就按默认——失败步展开，其余收起。 */
+function isStepCollapsed(runId: number, step: WorkflowRunStep) {
+  const key = stepCardKey(runId, step.key)
+  return key in collapsedSteps ? collapsedSteps[key] : step.status !== 'failed'
+}
+
+function toggleStep(runId: number, step: WorkflowRunStep) {
+  const key = stepCardKey(runId, step.key)
+  collapsedSteps[key] = !isStepCollapsed(runId, step)
+}
+
+/** 展开全部 / 收起全部：把这次现场里每一步都写成显式状态。 */
+function collapseAll(detail: WorkflowRunDetail, collapsed: boolean) {
+  for (const step of detail.steps) {
+    collapsedSteps[stepCardKey(detail.id, step.key)] = collapsed
   }
-  // 后端已把这一步打回 pending、整条运行改回执行中：接上跟随流看它跑完。
-  // 旧的现场先撤下来，跑完再取——留着一屏上一次的输出和新结果分不出。
-  delete details[run.id]
-  attachFollow(run.id)
+}
+
+/** 重跑/续跑受理后清掉这一运行的折叠覆盖，新现场按默认重新展开失败步。 */
+function clearStepCollapse(runId: number) {
+  for (const key of Object.keys(collapsedSteps)) {
+    if (key.startsWith(`${runId}:`)) delete collapsedSteps[key]
+  }
+}
+
+// ---- 每一步收到的输入 --------------------------------------------------------
+
+/** 一步现场里可展示/可覆盖的一个上下文变量。 */
+interface StepField {
+  name: string
+  value: string
+  /** 值是 JSON 步骤的解析产物：弹框里按 JSON 编辑，提交时服务端按 JSON 解析。 */
+  isJson: boolean
+}
+
+/**
+ * 还原某一步实际收到的上下文变量：运行输入 ＋ **严格早于**本步所在组的步骤产物。
+ *
+ * 纯函数，形状与后端 ``_rebuild_context`` / ``_context_fields`` 对齐：同组并行
+ * 步骤的产物不在里面（第一次跑时它们彼此也看不见）；同名变量由产物覆盖输入。
+ */
+function stepInputFields(detail: WorkflowRunDetail, step: WorkflowRunStep): StepField[] {
+  // 组在 steps 里首次出现的次序即执行次序（后端按 sort_order 返回）。
+  const groupOrder = new Map<string, number>()
+  for (const row of detail.steps) {
+    if (!groupOrder.has(row.group_key)) groupOrder.set(row.group_key, groupOrder.size)
+  }
+  const targetGroup = groupOrder.get(step.group_key) ?? 0
+
+  const fields = new Map<string, StepField>()
+  for (const [name, value] of Object.entries(detail.inputs)) {
+    fields.set(name, { name, value, isJson: false })
+  }
+  for (const row of detail.steps) {
+    if ((groupOrder.get(row.group_key) ?? 0) >= targetGroup || !row.output_var) continue
+    const raw: unknown = row.parsed ?? row.output ?? ''
+    fields.set(row.output_var, {
+      name: row.output_var,
+      value: typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2),
+      isJson: row.parsed != null,
+    })
+  }
+  return [...fields.values()]
+}
+
+// ---- 重跑 / 续跑的输入调整弹框 -----------------------------------------------
+
+const editModal = reactive<{
+  open: boolean
+  mode: 'rerun' | 'resume'
+  runId: number
+  key: string
+  fields: StepField[]
+  values: Record<string, string>
+  submitting: boolean
+}>({
+  open: false,
+  mode: 'rerun',
+  runId: 0,
+  key: '',
+  fields: [],
+  values: {},
+  submitting: false,
+})
+
+function openStepModal(run: WorkflowRun, step: WorkflowRunStep, mode: 'rerun' | 'resume') {
+  const detail = details[run.id]
+  if (!detail) return
+  const fields = stepInputFields(detail, step)
+  editModal.mode = mode
+  editModal.runId = run.id
+  editModal.key = step.key
+  editModal.fields = fields
+  editModal.values = Object.fromEntries(fields.map((field) => [field.name, field.value]))
+  editModal.open = true
+}
+
+async function confirmStepModal() {
+  editModal.submitting = true
+  const runId = editModal.runId
+  const inputs = { ...editModal.values }
+  try {
+    if (editModal.mode === 'rerun') {
+      await workflowsApi.rerunStep(runId, editModal.key, inputs)
+    } else {
+      await workflowsApi.resumeFromStep(runId, editModal.key, inputs)
+    }
+  } catch {
+    return // 拦截器已提示：400（未知变量/JSON 非法）、409（还没跑完）原因在 message。
+  } finally {
+    editModal.submitting = false
+  }
+  editModal.open = false
+  // 旧现场先撤：后端已把目标行打回 pending、整条运行改回执行中，跟随流看它跑完。
+  delete details[runId]
+  clearStepCollapse(runId)
+  attachFollow(runId)
 }
 </script>
 
@@ -698,6 +892,7 @@ async function onRerun(run: WorkflowRun, step: WorkflowRunStep) {
   width: 112px;
 }
 .scene-input pre,
+.scene-field pre,
 .scene-block pre {
   margin: 4px 0 0;
   padding: 8px;
@@ -720,6 +915,47 @@ async function onRerun(run: WorkflowRun, step: WorkflowRunStep) {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.scene-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 4px 0 8px;
+  font-size: var(--fs-xs);
+}
+.scene-tools :deep(.ant-btn-link) {
+  padding: 0 4px;
+  height: auto;
+  font-size: var(--fs-xs);
+}
+.scene-caret {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+.scene-body {
+  margin-top: 8px;
+}
+.scene-field {
+  margin-top: 6px;
+}
+.scene-field-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+}
+.scene-field-tag {
+  margin: 0;
+  font-size: 10px;
+  line-height: 14px;
+  padding: 0 3px;
+}
+.edit-modal-tip {
+  margin-bottom: 12px;
 }
 .scene-block {
   margin-top: 8px;

@@ -521,6 +521,60 @@ def test_rerun_step_refuses_a_run_that_is_still_going(env):
     assert client.post(f"/api/workflows/runs/999999/steps/analyze/rerun").status_code == 404
 
 
+# ---- 断点续跑 ---------------------------------------------------------------
+
+
+def test_resume_from_step_restarts_that_group_and_after(env, monkeypatch):
+    client, Session = env
+    _stub_model(
+        monkeypatch, json.dumps({"report": "报告", "suggestions": ["补量化"]}, ensure_ascii=False)
+    )
+    with Session() as db:
+        workflow_id = _analysis_workflow(db)
+
+    with client.stream(
+        "POST",
+        f"/api/workflows/{workflow_id}/runs/stream",
+        json={"inputs": {"resume_content": "十年经验"}},
+    ) as response:
+        run_id = _events(response)[-1][1]["run_id"]
+
+    resumed = client.post(f"/api/workflows/runs/{run_id}/steps/analyze/resume").json()
+    assert resumed["message"] == "已从该步继续"
+    assert resumed["data"]["status"] == "running"
+
+    # 后台任务在同一次请求里跑完（TestClient 等 ASGI 调用返回）：这里直接看终态。
+    detail = client.get(f"/api/workflows/runs/{run_id}").json()["data"]
+    assert detail["status"] == "succeeded"
+    assert detail["steps"][0]["status"] == "succeeded"
+
+    # 终态运行但覆盖了上下文里没有的变量：400 请求错误，不是 409。
+    bad_input = client.post(
+        f"/api/workflows/runs/{run_id}/steps/analyze/resume",
+        json={"inputs": {"ghost": "x"}},
+    )
+    assert bad_input.status_code == 400
+    assert "不在这一步的上下文里" in bad_input.json()["detail"]
+
+
+def test_resume_refuses_a_run_that_is_still_going(env):
+    client, Session = env
+    with Session() as db:
+        run = WorkflowService(db, OWNER).create_run(
+            _analysis_workflow(db), {"resume_content": "x"}
+        )
+        run_id = run.id
+        db.execute(update(WorkflowRun).where(WorkflowRun.id == run_id).values(status="running"))
+        db.commit()
+
+    refused = client.post(f"/api/workflows/runs/{run_id}/steps/analyze/resume")
+
+    # 409 而不是 400：请求本身没错，是当下这个状态不允许；闸门先于覆盖值校验。
+    assert refused.status_code == 409
+    assert "还没结束" in refused.json()["detail"]
+    assert client.post(f"/api/workflows/runs/999999/steps/analyze/resume").status_code == 404
+
+
 # ---- 运行记录清理 -----------------------------------------------------------
 
 

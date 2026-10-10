@@ -38,6 +38,7 @@ from typing import (
     List,
     Optional,
     Sequence,
+    Set,
     Tuple,
 )
 
@@ -1391,6 +1392,8 @@ class WorkflowService:
                     agent_name=agent_names.get(row.agent_slug),
                     output_kind=definitions[row.key].output_kind if row.key in definitions else None,
                     optional=definitions[row.key].optional if row.key in definitions else False,
+                    # 产物以什么名字进的上下文：前端据此还原每一步收到的输入变量。
+                    output_var=definitions[row.key].output_var if row.key in definitions else None,
                     status=row.status,
                     prompt=row.prompt,
                     output=row.output,
@@ -1681,6 +1684,8 @@ async def execute_run(
     *,
     owner_id: int,
     run_id: int,
+    start_group_index: int = 0,
+    overrides: Optional[Dict[str, object]] = None,
 ) -> AsyncIterator[Tuple[str, object]]:
     """执行一次已经建好的运行，产出 ``(event, payload)`` 供 SSE 转发。
 
@@ -1689,6 +1694,10 @@ async def execute_run(
 
     每步的写入都是即时提交的，所以进度既不依赖这条流（换设备打开历史详情也
     能看到跑到哪了），也不会因为最后一起提交而整段丢失。
+
+    ``start_group_index`` > 0 是断点续跑：该下标之前的组既不执行也不发事件，
+    上下文按上游当时落库的产物重建后再叠加 ``overrides``（只影响这一次执行的
+    临时覆盖值）。
 
     调用方必须是**消费到底**的一方（:func:`stream_run` 的后台任务或功能侧的
     后台任务）：运行的终态在生成器走完时才会落库，半路丢掉生成器会把运行
@@ -1714,12 +1723,20 @@ async def execute_run(
         if not steps:
             raise ValueError("该工作流没有可执行的步骤")
 
+        groups = _group_order(steps)
+        if not 0 <= start_group_index < len(groups):
+            raise ValueError("续跑起点超出了这条流程的步骤范围")
+        # 续跑只有起点及之后的组要执行：MCP 节点挂载只解析这些步骤的，不必为
+        # 上游组挂的服务建立连接。
+        active_group_keys = {key for key, _members in groups[start_group_index:]}
+        active_steps = [step for step in steps if step.group_key in active_group_keys]
+
         # 模型门槛提前测：没配好对话模型时，第一条事件就该是明确的「去配置」，
         # 而不是让每个步骤各自失败一遍。按步骤指定的配置在步骤里各自校验。
         require_chat_model(db, owner_id)
 
-        # MCP 连接束：连接集合 = 工作流级挂载 ∪ 全部节点级挂载（并集），在
-        # 这里统一连接、每个服务只 initialize 一次。连接失败发生在首个事件
+        # MCP 连接束：连接集合 = 工作流级挂载 ∪ 待执行步骤的节点级挂载（并集），
+        # 在这里统一连接、每个服务只 initialize 一次。连接失败发生在首个事件
         # 之前，由 stream_run 的既有异常路径把 run 落成 failed（与「模型未
         # 就绪」的前置失败同路径）。
         workflow = db.get(Workflow, run.workflow_id)
@@ -1727,7 +1744,7 @@ async def execute_run(
         # 两级分别解析：节点级的停用/越权错误要带得出处，而不是一句通用提示。
         global_servers = resolve_servers(db, owner_id, global_ids)
         step_servers: List[McpServer] = []
-        for step in steps:
+        for step in active_steps:
             try:
                 step_servers.extend(
                     resolve_servers(db, owner_id, list(step.mcp_server_ids or []))
@@ -1738,11 +1755,13 @@ async def execute_run(
                 ) from exc
         bundle = await open_bundle(_merge_servers(global_servers, step_servers))
         # 预计算每步的工具子集（冲突在同节点生效集合内判），同样在首事件之前。
-        step_tool_plan = plan_step_tools(bundle, global_ids, steps)
+        step_tool_plan = plan_step_tools(bundle, global_ids, active_steps)
 
         try:
             run.status = RUN_RUNNING
-            run.started_at = db_now()
+            if run.started_at is None:
+                # 续跑保留原始开始时间：这条运行确实是从那一刻发起的。
+                run.started_at = db_now()
             run.error_msg = None
             db.commit()
 
@@ -1766,12 +1785,23 @@ async def execute_run(
                 ],
             }
 
-            context: Dict[str, object] = dict(run.inputs or {})
+            context: Dict[str, object] = (
+                # 续跑：上游产物按当时落库的行重建；从头跑：只有运行输入。
+                _rebuild_context(db, run, steps, groups[start_group_index][0])
+                if start_group_index
+                else dict(run.inputs or {})
+            )
+            # 本次执行的临时覆盖：不写回运行输入与上游行，只改变重跑步骤的 prompt。
+            if overrides:
+                context.update(overrides)
             queue: asyncio.Queue = asyncio.Queue()
             started = time.monotonic()
             failed: Optional[str] = None
 
-            for group_key, group in _group_order(steps):
+            for group_index, (group_key, group) in enumerate(groups):
+                if group_index < start_group_index:
+                    # 上游组保持原样：不执行、不发事件、不合并产物。
+                    continue
 
                 async def _drive(members: List[WorkflowStep]) -> None:
                     results = await asyncio.gather(
@@ -1844,7 +1874,9 @@ async def execute_run(
             run = db.get(WorkflowRun, run_id)
             run.status = RUN_FAILED if failed else RUN_SUCCEEDED
             run.error_msg = failed
-            run.elapsed_ms = int((time.monotonic() - started) * 1000)
+            # 续跑把这一段的耗时累加在原来的 elapsed_ms 上：从头跑时原值是 None。
+            segment_elapsed_ms = int((time.monotonic() - started) * 1000)
+            run.elapsed_ms = (run.elapsed_ms or 0) + segment_elapsed_ms
             run.finished_at = db_now()
             db.commit()
 
@@ -2086,11 +2118,20 @@ def _detach(db: Session, obj: object) -> object:
     return obj
 
 
-def prepare_step_rerun(db: Session, owner_id: int, run_id: int, key: str) -> WorkflowRun:
+def prepare_step_rerun(
+    db: Session,
+    owner_id: int,
+    run_id: int,
+    key: str,
+    overrides: Optional[Dict[str, str]] = None,
+) -> WorkflowRun:
     """把一次终态运行里的那一步打回待运行，现场交给调用方的后台任务去跑。
 
     闸门都在这儿：还在跑的运行不能重发（两个执行体会抢同一行），定义里已经没有的
     步骤不能重跑——prompt 模板只存在于定义里，步骤行只存渲染出来的那一份。
+
+    ``overrides`` 是这次重跑对上下文变量的覆盖值，只校验不写库：报错要发生在
+    行被重置**之前**，不留半成品；真正应用由 :func:`rerun_step` 完成。
     """
     run = db.scalar(
         select(WorkflowRun).where(
@@ -2110,13 +2151,14 @@ def prepare_step_rerun(db: Session, owner_id: int, run_id: int, key: str) -> Wor
     )
     if row is None:
         raise ValueError("这次运行里没有这一步")
-    definition = db.scalar(
-        select(WorkflowStep).where(
-            WorkflowStep.workflow_id == run.workflow_id, WorkflowStep.key == key
-        )
-    )
+    definitions = _load_definitions(db, run.workflow_id)
+    definition = next((step for step in definitions if step.key == key), None)
     if definition is None:
         raise ValueError("这条流程的定义里已经没有这一步，没有模板可以重跑")
+
+    # 覆盖值先校验：与重置行同一请求里完成，失败就什么都不改。
+    names, json_names = _context_fields(run, definitions, definition.group_key)
+    _coerce_overrides(overrides, names, json_names)
 
     row.status = STEP_PENDING
     row.prompt = None
@@ -2136,27 +2178,101 @@ def prepare_step_rerun(db: Session, owner_id: int, run_id: int, key: str) -> Wor
     return run
 
 
-def _rerun_context(db: Session, run: WorkflowRun, target_key: str) -> Dict[str, object]:
-    """按当时落库的上游产物重建这一步的上下文。
+def prepare_resume(
+    db: Session,
+    owner_id: int,
+    run_id: int,
+    key: str,
+    overrides: Optional[Dict[str, str]] = None,
+) -> Tuple[WorkflowRun, int]:
+    """把一次终态运行从某一步所在组起重置为待运行，返回 ``(run, 起始组下标)``。
 
-    只带目标步骤**之前**那些组的输出：同组并行步骤第一次跑的时候也看不见彼此的
-    产物，重跑要复刻的就是当时那张 prompt，不能因为这次跑得晚就多喂一段。
+    闸门与单步重跑一致：还在跑的不能续（两个执行体抢行）；定义里已没有的步
+    不能续——模板只存在定义里。重置范围是目标组及之后各组的**全部步骤行**：
+    并行组不可分割，组内多步并行，没法只接其中一步再往下跑。
     """
-    definitions = list(
+    run = db.scalar(
+        select(WorkflowRun).where(
+            WorkflowRun.owner_id == owner_id, WorkflowRun.id == run_id
+        )
+    )
+    if run is None:
+        raise LookupError("运行记录不存在")
+    if run.status in (RUN_PENDING, RUN_RUNNING):
+        raise ValueError("这次运行还没结束，等它跑完再从指定步继续")
+
+    definitions = _load_definitions(db, run.workflow_id)
+    groups = _group_order(definitions)
+    target = next((step for step in definitions if step.key == key), None)
+    if target is None:
+        raise ValueError("这条流程的定义里已经没有这一步，没有模板可以继续")
+    start_group_index = next(
+        index
+        for index, (group_key, _members) in enumerate(groups)
+        if group_key == target.group_key
+    )
+
+    # 覆盖值同样先校验：重置是一条 bulk update，失败得在它之前。
+    names, json_names = _context_fields(run, definitions, target.group_key)
+    _coerce_overrides(overrides, names, json_names)
+
+    reset_group_keys = [group_key for group_key, _members in groups[start_group_index:]]
+    db.execute(
+        update(WorkflowRunStep)
+        .where(
+            WorkflowRunStep.owner_id == owner_id,
+            WorkflowRunStep.run_id == run_id,
+            WorkflowRunStep.group_key.in_(reset_group_keys),
+        )
+        .values(
+            status=STEP_PENDING,
+            prompt=None,
+            output=None,
+            parsed=None,
+            error_msg=None,
+            elapsed_ms=None,
+            started_at=None,
+            finished_at=None,
+            model_config_id=None,
+        )
+    )
+    run.status = RUN_RUNNING
+    run.error_msg = None
+    # started_at 与 elapsed_ms 都保留：续跑是同一条运行的延续，累计耗时更接近事实。
+    run.finished_at = None
+    db.commit()
+    return run, start_group_index
+
+
+def _load_definitions(db: Session, workflow_id: int) -> List[WorkflowStep]:
+    """一条流程当前的步骤定义，按执行顺序排列。"""
+    return list(
         db.scalars(
             select(WorkflowStep)
-            .where(WorkflowStep.workflow_id == run.workflow_id)
+            .where(WorkflowStep.workflow_id == workflow_id)
             .order_by(WorkflowStep.sort_order, WorkflowStep.id)
         ).all()
     )
-    by_key = {step.key: step for step in definitions}
-    target = by_key.get(target_key)
-    earlier = []
-    for group_key, _members in _group_order(definitions):
-        if target is None or group_key == target.group_key:
-            break
-        earlier.append(group_key)
 
+
+def _rebuild_context(
+    db: Session,
+    run: WorkflowRun,
+    definitions: Sequence[WorkflowStep],
+    stop_group_key: str,
+) -> Dict[str, object]:
+    """按当时落库的上游产物重建上下文：运行输入 ＋ 严格早于 ``stop_group_key`` 的各组产物。
+
+    只带目标组**之前**那些组的输出：同组并行步骤第一次跑的时候也看不见彼此的
+    产物，重跑/续跑要复刻的就是当时那张 prompt，不能因为这次跑得晚就多喂一段。
+    """
+    earlier: Set[str] = set()
+    for group_key, _members in _group_order(definitions):
+        if group_key == stop_group_key:
+            break
+        earlier.add(group_key)
+
+    by_key = {step.key: step for step in definitions}
     context: Dict[str, object] = dict(run.inputs or {})
     for row in db.scalars(
         select(WorkflowRunStep)
@@ -2172,6 +2288,72 @@ def _rerun_context(db: Session, run: WorkflowRun, target_key: str) -> Dict[str, 
             # 与执行器同一处理：可选步骤的产物按空串进上下文，下游自己跳过。
             context[step.output_var] = ""
     return context
+
+
+def _context_fields(
+    run: WorkflowRun,
+    definitions: Sequence[WorkflowStep],
+    stop_group_key: str,
+) -> Tuple[Set[str], Set[str]]:
+    """这一步可编辑/可覆盖的上下文变量名，形状 ``(全部名, JSON 产物名)``。
+
+    名字集合＝运行输入 ＋ 严格早于本组的产物名；产物在定义里声明为 JSON 输出时，
+    覆盖值要按 JSON 解析（与执行器放进上下文的形状一致）。
+    """
+    names: Set[str] = set(run.inputs or {})
+    json_names: Set[str] = set()
+    for group_key, members in _group_order(definitions):
+        if group_key == stop_group_key:
+            break
+        for step in members:
+            if not step.output_var:
+                continue
+            names.add(step.output_var)
+            if step.output_kind == OUTPUT_JSON:
+                json_names.add(step.output_var)
+    return names, json_names
+
+
+class OverrideValidationError(ValueError):
+    """覆盖值本身不合法（未知变量名、JSON 解析失败）：是 400 类的请求错误。
+
+    仍是 :class:`ValueError`——后台执行路径（:func:`rerun_step` / :func:`resume_run`）
+    统一按 ValueError 捕获并结算运行，不必为此分流；只有路由需要把它与
+    「运行还在跑」的 409 冲突区分开。
+    """
+
+
+def _coerce_overrides(
+    raw: Optional[Dict[str, str]],
+    names: Set[str],
+    json_names: Set[str],
+) -> Dict[str, object]:
+    """把请求里的覆盖值整理成可进上下文的形状。
+
+    名字不在这一步的上下文里一律拒绝：静默丢掉一个拼错的变量，用户会以为自己
+    改过了，跑出来的 prompt 却还是旧的。JSON 产物的覆盖值在这里解析，格式错误
+    也在请求期报，而不是等步骤跑到一半才失败。空串原样保留——与执行器里可选
+    步骤失败的口径一致，代表「这段没有内容」。
+    """
+    if not raw:
+        return {}
+    overrides: Dict[str, object] = {}
+    for name, value in raw.items():
+        if name not in names:
+            raise OverrideValidationError(
+                f"无法覆盖变量 {name}：它不在这一步的上下文里"
+            )
+        text = value if isinstance(value, str) else str(value)
+        if text.strip() and name in json_names:
+            try:
+                overrides[name] = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise OverrideValidationError(
+                    f"变量 {name} 的覆盖值不是合法 JSON：{exc}"
+                ) from exc
+        else:
+            overrides[name] = text
+    return overrides
 
 
 def settle_run_status(db: Session, owner_id: int, run_id: int, *, error: Optional[str] = None) -> None:
@@ -2211,11 +2393,18 @@ def settle_run_status(db: Session, owner_id: int, run_id: int, *, error: Optiona
     db.commit()
 
 
-async def rerun_step(*, owner_id: int, run_id: int, key: str) -> None:
+async def rerun_step(
+    *,
+    owner_id: int,
+    run_id: int,
+    key: str,
+    overrides: Optional[Dict[str, str]] = None,
+) -> None:
     """重跑一次运行里的单个步骤，跑完按全部步骤行重算运行状态。
 
     由路由的后台任务调用（``prepare_step_rerun`` 已经把它打回 pending 了）。
     进度不在这儿发：步骤状态本来就是一步一提交，客户端用 :func:`follow_run` 接上。
+    ``overrides`` 在这儿按定义重新解析后叠加到上下文，与 prepare 用同一个 helper。
     """
     from app.database import SessionLocal
 
@@ -2228,15 +2417,14 @@ async def rerun_step(*, owner_id: int, run_id: int, key: str) -> None:
         if run is None:
             logger.warning("rerun step %s: run %s has gone", key, run_id)
             return
-        definition = db.scalar(
-            select(WorkflowStep).where(
-                WorkflowStep.workflow_id == run.workflow_id, WorkflowStep.key == key
-            )
-        )
+        definitions = _load_definitions(db, run.workflow_id)
+        definition = next((step for step in definitions if step.key == key), None)
         if definition is None:
             settle_run_status(db, owner_id, run_id, error="这条流程的定义里已经没有这一步")
             return
-        context = _rerun_context(db, run, key)
+        context = _rebuild_context(db, run, definitions, definition.group_key)
+        names, json_names = _context_fields(run, definitions, definition.group_key)
+        context.update(_coerce_overrides(overrides, names, json_names))
         step = _detach(db, definition)
 
         # 单步重跑按「工作流级挂载 ∪ 目标节点挂载」建束——不必为别的节点
@@ -2274,6 +2462,61 @@ async def rerun_step(*, owner_id: int, run_id: int, key: str) -> None:
 
     with SessionLocal() as db:
         settle_run_status(db, owner_id, run_id)
+
+
+async def resume_run(
+    *,
+    owner_id: int,
+    run_id: int,
+    start_group_index: int,
+    overrides: Optional[Dict[str, str]] = None,
+) -> None:
+    """从指定组继续跑完一条运行：驱动 :func:`execute_run` 跑到底，事件丢弃。
+
+    由路由的后台任务调用（``prepare_resume`` 已重置后续行）。正文逐行落库，
+    客户端的 follow 流直接读表观察进度，所以这里不转发事件。整体兜住异常：
+    执行体半路炸了也得给运行一个终态，不能让它永远 running。
+    """
+    from app.database import SessionLocal
+
+    with SessionLocal() as db:
+        run = db.scalar(
+            select(WorkflowRun).where(
+                WorkflowRun.owner_id == owner_id, WorkflowRun.id == run_id
+            )
+        )
+        if run is None:
+            logger.warning("resume run %s has gone", run_id)
+            return
+        definitions = _load_definitions(db, run.workflow_id)
+        groups = _group_order(definitions)
+        if not 0 <= start_group_index < len(groups):
+            settle_run_status(
+                db, owner_id, run_id, error="续跑起点已失效，请重新打开运行记录"
+            )
+            return
+        names, json_names = _context_fields(
+            run, definitions, groups[start_group_index][0]
+        )
+        try:
+            coerced = _coerce_overrides(overrides, names, json_names)
+        except ValueError as exc:
+            settle_run_status(db, owner_id, run_id, error=str(exc))
+            return
+
+    try:
+        async for _event, _payload in execute_run(
+            owner_id=owner_id,
+            run_id=run_id,
+            start_group_index=start_group_index,
+            overrides=coerced,
+        ):
+            # 进度由 follow 流读表：这里的事件只用于驱动执行，不转发。
+            pass
+    except Exception as exc:  # noqa: BLE001 - 不能让运行卡在 running
+        logger.warning("resume run %s crashed: %s", run_id, exc, exc_info=True)
+        with SessionLocal() as db:
+            settle_run_status(db, owner_id, run_id, error=model_error_text(exc))
 
 
 def start_builtin(

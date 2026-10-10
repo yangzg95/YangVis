@@ -587,6 +587,8 @@ export interface WorkflowRunStep {
   /** 这一步挂的人设与要什么格式：来自流程当前的定义，定义改过就对不上，为 null。 */
   agent_name?: string | null
   output_kind?: string | null
+  /** 产物以什么名字进的上下文：据此还原「这一步收到了哪些输入」，定义改过则为 null。 */
+  output_var?: string | null
   optional?: boolean
   /** 渲染后的 prompt：「当时模型到底收到了什么」问得出来。 */
   prompt?: string | null
@@ -665,10 +667,23 @@ export const workflowsApi = {
    * 这一步的产物不会写回业务行——后处理只认整条流程跑完，要新结果请回功能页面
    * 重新发起一次完整任务。
    */
-  rerunStep: (runId: number, key: string) =>
+  rerunStep: (runId: number, key: string, inputs?: Record<string, string>) =>
     request<WorkflowRun>({
       url: `/workflows/runs/${runId}/steps/${encodeURIComponent(key)}/rerun`,
       method: 'POST',
+      data: { inputs: inputs ?? {} },
+    }),
+  /**
+   * 从某一步所在并行组继续跑到结束。接口立刻返回，进度还是走 {@link followRun}。
+   *
+   * 目标组及之后各组重置重跑；inputs 覆盖这次续跑起点收到的上下文变量，不写回
+   * 任何行。与单步重跑一样不写回业务行，要新结果请回功能页面重新发起完整任务。
+   */
+  resumeFromStep: (runId: number, key: string, inputs: Record<string, string>) =>
+    request<WorkflowRun>({
+      url: `/workflows/runs/${runId}/steps/${encodeURIComponent(key)}/resume`,
+      method: 'POST',
+      data: { inputs },
     }),
   /** 清掉早于 keep_days、又不再是谁的当前状态的运行记录。 */
   pruneRuns: (keepDays: number) =>

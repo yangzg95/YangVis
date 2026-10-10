@@ -35,6 +35,10 @@
         {{ groupLabelText }}
       </a-tag>
       <span class="spacer" />
+      <!-- 整卡折叠：并行组里只想留头部（标识/人设/组标签）时用；只读页也允许折叠。 -->
+      <a-button size="small" type="text" @click="$emit('toggle-collapse', index)">
+        {{ collapsed ? '展开' : '折叠' }}
+      </a-button>
       <a-button
         v-if="!readonly"
         size="small"
@@ -65,6 +69,8 @@
       </a-button>
     </div>
 
+    <!-- 卡片主体：折叠时整体隐藏，只留 step-head。 -->
+    <div v-show="!collapsed" class="step-collapse-body">
     <!-- 选中后把这个人设是谁、管什么摆在手边；点开能看全系统提示词，
          配下游引用时不用切去智能体页对照。 -->
     <div v-if="agent" class="agent-hint">
@@ -258,6 +264,7 @@
         Prompt 模板里怎么要求。这里写的键，就是声明那份契约，下游 {{产物.字段}} 引用的也是它们。
       </span>
     </div>
+    </div>
   </div>
 </template>
 
@@ -296,6 +303,8 @@ const props = withDefaults(
     problemIds: Set<string>
     showProblems: boolean
     advancedOpen: boolean
+    /** 整卡是否折叠：只显示头部。 */
+    collapsed: boolean
   }>(),
   {
     agent: null,
@@ -303,6 +312,7 @@ const props = withDefaults(
     groupLabelText: '未命名',
     parallel: false,
     mcpOptions: () => [],
+    collapsed: false,
   },
 )
 
@@ -310,6 +320,7 @@ defineEmits<{
   (e: 'move', delta: number): void
   (e: 'remove'): void
   (e: 'toggle-advanced', index: number): void
+  (e: 'toggle-collapse', index: number): void
 }>()
 
 function bad(id: string) {
