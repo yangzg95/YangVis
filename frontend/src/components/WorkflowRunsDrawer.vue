@@ -156,7 +156,19 @@
           <div v-if="details[run.id]" class="scene">
             <div v-if="inputPairs(run).length" class="scene-inputs">
               <div v-for="[name, value] in inputPairs(run)" :key="name" class="scene-input">
-                <span class="muted">{{ name }}</span>
+                <div class="scene-line">
+                  <span class="muted">{{ name }}</span>
+                  <span class="spacer" />
+                  <a-tooltip title="复制">
+                    <button
+                      type="button"
+                      class="scene-copy"
+                      @click="copyScene(`输入 ${name}`, value)"
+                    >
+                      <CopyOutlined />
+                    </button>
+                  </a-tooltip>
+                </div>
                 <pre>{{ value }}</pre>
               </div>
             </div>
@@ -218,23 +230,71 @@
                   :key="field.name"
                   class="scene-field"
                 >
-                  <span class="scene-field-name">
-                    {{ field.name }}
-                    <a-tag v-if="field.isJson" color="blue" class="scene-field-tag">JSON</a-tag>
-                  </span>
+                  <div class="scene-line">
+                    <span class="scene-field-name">
+                      {{ field.name }}
+                      <a-tag v-if="field.isJson" color="blue" class="scene-field-tag">JSON</a-tag>
+                    </span>
+                    <span class="spacer" />
+                    <a-tooltip title="复制">
+                      <button
+                        type="button"
+                        class="scene-copy"
+                        @click="copyScene(`变量 ${field.name}`, field.value)"
+                      >
+                        <CopyOutlined />
+                      </button>
+                    </a-tooltip>
+                  </div>
                   <pre>{{ field.value }}</pre>
                 </div>
               </div>
               <div v-if="step.prompt" class="scene-block">
-                <div class="scene-label">发给模型的 prompt</div>
+                <div class="scene-line">
+                  <div class="scene-label">发给模型的 prompt</div>
+                  <span class="spacer" />
+                  <a-tooltip title="复制">
+                    <button
+                      type="button"
+                      class="scene-copy"
+                      @click="copyScene('prompt', step.prompt)"
+                    >
+                      <CopyOutlined />
+                    </button>
+                  </a-tooltip>
+                </div>
                 <pre>{{ step.prompt }}</pre>
               </div>
               <div v-if="step.output" class="scene-block">
-                <div class="scene-label">模型原始输出</div>
+                <div class="scene-line">
+                  <div class="scene-label">模型原始输出</div>
+                  <span class="spacer" />
+                  <a-tooltip title="复制">
+                    <button
+                      type="button"
+                      class="scene-copy"
+                      @click="copyScene('输出', step.output)"
+                    >
+                      <CopyOutlined />
+                    </button>
+                  </a-tooltip>
+                </div>
                 <pre>{{ step.output }}</pre>
               </div>
               <div v-if="step.parsed" class="scene-block">
-                <div class="scene-label">按契约解析出的对象</div>
+                <div class="scene-line">
+                  <div class="scene-label">按契约解析出的对象</div>
+                  <span class="spacer" />
+                  <a-tooltip title="复制">
+                    <button
+                      type="button"
+                      class="scene-copy"
+                      @click="copyScene('解析对象', JSON.stringify(step.parsed, null, 2))"
+                    >
+                      <CopyOutlined />
+                    </button>
+                  </a-tooltip>
+                </div>
                 <pre>{{ JSON.stringify(step.parsed, null, 2) }}</pre>
               </div>
               </div>
@@ -289,7 +349,8 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useRouter, type RouteLocationRaw } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { DownOutlined, PlayCircleOutlined, RightOutlined } from '@ant-design/icons-vue'
+import { CopyOutlined, DownOutlined, PlayCircleOutlined, RightOutlined } from '@ant-design/icons-vue'
+import { copyText } from '@/utils/clipboard'
 import {
   workflowsApi,
   type RunStatus,
@@ -440,6 +501,12 @@ function inputPairs(run: WorkflowRun): [string, string][] {
   const detail = details[run.id]
   if (!detail) return []
   return Object.entries(detail.inputs).filter(([, value]) => value)
+}
+
+/** 现场里每一块文本都按原样复制：贴回编辑器或别处都还是落库时的那份内容。 */
+async function copyScene(what: string, text: string) {
+  if (await copyText(text)) message.success(`${what}已复制`)
+  else message.error('复制失败，浏览器拒绝了剪贴板访问')
 }
 
 watch(
@@ -936,6 +1003,25 @@ async function confirmStepModal() {
 }
 .scene-body {
   margin-top: 8px;
+}
+/* 块标题行：变量名/标签靠左，复制入口贴到行尾。 */
+.scene-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.scene-copy {
+  display: inline-flex;
+  padding: 0 2px;
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.scene-copy:hover {
+  color: var(--signal-text);
 }
 .scene-field {
   margin-top: 6px;
