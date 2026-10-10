@@ -57,7 +57,8 @@
         :columns="columns"
         row-key="id"
         size="small"
-        :scroll="{ x: 'max-content' }"
+        table-layout="fixed"
+        :scroll="{ x: 1160 }"
         :pagination="workflows.length > 10 ? { pageSize: 10, size: 'small' } : false"
         :custom-row="customRow"
       >
@@ -79,7 +80,7 @@
 
           <!-- 步骤链：一行看清组间顺序与组内并行。 -->
           <template v-else-if="column.key === 'chain'">
-            <div class="wf-chain">
+            <div class="wf-chain" :title="chainText(record)">
               <template v-for="(group, index) in chainOf(record)" :key="index">
                 <span v-if="index" class="wf-arrow">→</span>
                 <!-- 并行组不再显示 g1 这种内部名：∥ 分隔符 + 各步骤标识已说明一切。 -->
@@ -166,6 +167,7 @@ interface StepGroup {
 
 const columns = [
   { title: '工作流', key: 'name', dataIndex: 'name', width: 260 },
+  // 流水线列故意不写 width：固定布局下由它吃掉剩余宽度，窄到 1160 下限为止。
   { title: '流水线', key: 'chain', dataIndex: 'steps' },
   { title: '规模', key: 'scale', width: 130 },
   { title: '最近运行', key: 'last_run', width: 230 },
@@ -196,6 +198,13 @@ function lastRunText(workflow: Workflow) {
   if (!run?.at) return ''
   const at = new Date(run.at).toLocaleString()
   return run.elapsed_ms == null ? at : `${at} · ${fmtElapsed(run.elapsed_ms)}`
+}
+
+/** 流水线列被夹住时，完整链路只能靠悬浮的纯文本兜住。 */
+function chainText(workflow: Workflow) {
+  return chainOf(workflow)
+    .map((group) => group.steps.map((step) => step.key).join(' ∥ '))
+    .join(' → ')
 }
 
 /** 「3 步 · 2 组 · 1 输入」：没有输入就说 0，省得一排长短不齐。 */
@@ -340,13 +349,17 @@ onActivated(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 步骤链不换行：列宽交给表格的横向滚动，折行会把一行流水线切成两行。 */
+/* 步骤链保持一行：列宽已被表格夹住（见 columns 的 chain），超出就淡出截断，
+   完整链路交给 title 悬浮；折行会把一行流水线切成两行。 */
 .wf-chain {
   display: flex;
   align-items: center;
   gap: 4px;
   font-size: var(--fs-xs);
   white-space: nowrap;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
 }
 .wf-group {
   display: flex;

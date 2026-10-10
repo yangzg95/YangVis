@@ -152,6 +152,10 @@ input {
   border: 1px solid var(--hairline);
   border-radius: var(--radius-lg);
   padding: 24px;
+  /* 列表类页面统一夹一档：超宽屏上一行正文拖到屏幕另一头就没法读，居中留白。
+     运维工作台和对话页不用这个类，它们要的就是铺满。 */
+  max-width: 1440px;
+  margin-inline: auto;
 }
 
 .page-title {
