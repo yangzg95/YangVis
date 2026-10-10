@@ -52,31 +52,7 @@
           <!-- 变换层：origin 左上，内容的布局量不受它影响，量到的永远是自然尺寸。 -->
           <div class="canvas-scale" :style="scaleStyle">
             <div ref="contentEl" class="canvas-content">
-              <svg class="canvas-edges" :width="size.w" :height="size.h" aria-hidden="true">
-                <defs>
-                  <marker :id="markerId" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-                    <path d="M0,0 L6,3 L0,6 z" class="edge-head" />
-                  </marker>
-                </defs>
-                <g v-for="(edge, i) in edges" :key="i">
-                  <path
-                    :d="edge.d"
-                    class="edge"
-                    :class="edgeClass(edge)"
-                    :marker-end="`url(#${markerId})`"
-                  />
-                  <text
-                    :x="edge.labelX"
-                    :y="edge.labelY"
-                    class="edge-label"
-                    :class="edgeClass(edge)"
-                  >
-                    {{ edge.variable }}
-                  </text>
-                </g>
-              </svg>
-
-              <!-- 输入变量行：只读，看一眼这条流程收哪些变量，不参与画线。 -->
+              <!-- 输入变量行：只读，看一眼这条流程收哪些变量，不参与布局。 -->
               <div v-if="inputNames.length" class="io-row">
                 <span class="io-label">输入</span>
                 <div class="io-chips">
@@ -89,141 +65,183 @@
                 </div>
               </div>
 
-              <template v-for="(group, gi) in groups" :key="gi">
-                <!-- 该组间已有引用线经过（在正中走线）时不再画 ↓，避免叠在走线上。 -->
+              <!-- 布局层：卡片坐标、组标签与引用线都由 ELK 算完再绝对定位进来，
+                   尺寸跟着算好的画布写。首轮量卡片高度时先藏起来，免得所有卡片
+                   叠在左上角闪一下。 -->
+              <div
+                class="graph-layer"
+                :class="{ 'graph-measuring': !placed }"
+                :style="graphStyle"
+              >
+                <svg
+                  class="canvas-edges"
+                  :style="edgesStyle"
+                  :width="size.w"
+                  :height="size.h"
+                  aria-hidden="true"
+                >
+                  <defs>
+                    <marker :id="markerId" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+                      <path d="M0,0 L6,3 L0,6 z" class="edge-head" />
+                    </marker>
+                  </defs>
+                  <g v-for="(edge, i) in edges" :key="i">
+                    <path
+                      :d="edge.d"
+                      class="edge"
+                      :class="edgeClass(edge)"
+                      :marker-end="`url(#${markerId})`"
+                    />
+                    <text
+                      :x="edge.labelX"
+                      :y="edge.labelY"
+                      class="edge-label"
+                      :class="edgeClass(edge)"
+                    >
+                      {{ edge.variable }}
+                    </text>
+                  </g>
+                </svg>
+
+                <!-- 组标签固定在最左的标签列，纵向跟着所在行的顶边。 -->
                 <div
-                  v-if="(gi || inputNames.length) && !linkedBuses.has(gi - 1)"
+                  v-for="(group, gi) in groups"
+                  :key="gi"
+                  class="group-head"
+                  :style="groupHeadStyle(gi)"
+                >
+                  <span class="group-name" :title="groupLabels[gi]">
+                    {{ groupLabels[gi] }}
+                  </span>
+                  <span class="group-meta">
+                    {{ group.indexes.length > 1 ? `${group.indexes.length} 步并行` : '1 步' }}
+                  </span>
+                </div>
+
+                <!-- 组间执行顺序：这个间隙已有引用线经过时不再画 ↓，线本身就说了流向。 -->
+                <div
+                  v-for="gi in arrowGaps"
+                  :key="`arrow-${gi}`"
                   class="flow-arrow"
+                  :style="arrowStyle(gi)"
                 >
                   ↓
                 </div>
 
-                <div class="group-row">
-                  <div class="group-head">
-                    <span class="group-name" :title="groupLabels[gi]">
-                      {{ groupLabels[gi] }}
-                    </span>
-                    <span class="group-meta">
-                      {{ group.indexes.length > 1 ? `${group.indexes.length} 步并行` : '1 步' }}
-                    </span>
-                  </div>
+                <a-popover
+                  v-for="si in nodeIndexes"
+                  :key="si"
+                  trigger="hover"
+                  placement="right"
+                  :mouse-enter-delay="0.25"
+                >
+                  <template #content>
+                    <div class="node-detail">
+                      <div class="nd-head">
+                        <span class="nd-key mono">
+                          {{ steps[si].key.trim() || '（未命名）' }}
+                        </span>
+                        <span class="nd-no">第 {{ si + 1 }} 步</span>
+                      </div>
 
-                  <div class="group-body">
-                    <a-popover
-                      v-for="si in group.indexes"
-                      :key="si"
-                      trigger="hover"
-                      placement="right"
-                      :mouse-enter-delay="0.25"
-                    >
-                      <template #content>
-                        <div class="node-detail">
-                          <div class="nd-head">
-                            <span class="nd-key mono">
-                              {{ steps[si].key.trim() || '（未命名）' }}
-                            </span>
-                            <span class="nd-no">第 {{ si + 1 }} 步</span>
-                          </div>
+                      <div class="nd-row">
+                        <span class="nd-k">人设</span>
+                        <span class="nd-v">{{ agentName(steps[si].agent_slug) }}</span>
+                        <span v-if="steps[si].agent_slug" class="nd-sub mono">
+                          {{ steps[si].agent_slug }}
+                        </span>
+                      </div>
 
-                          <div class="nd-row">
-                            <span class="nd-k">人设</span>
-                            <span class="nd-v">{{ agentName(steps[si].agent_slug) }}</span>
-                            <span v-if="steps[si].agent_slug" class="nd-sub mono">
-                              {{ steps[si].agent_slug }}
-                            </span>
-                          </div>
+                      <div class="nd-row nd-col">
+                        <span class="nd-k">Prompt</span>
+                        <pre class="nd-prompt">{{ steps[si].prompt_tpl }}</pre>
+                      </div>
 
-                          <div class="nd-row nd-col">
-                            <span class="nd-k">Prompt</span>
-                            <pre class="nd-prompt">{{ steps[si].prompt_tpl }}</pre>
-                          </div>
-
-                          <div v-if="refsOf(si).length" class="nd-row nd-col">
-                            <span class="nd-k">引用</span>
-                            <div class="nd-chips">
-                              <span v-for="r in refsOf(si)" :key="r" class="nd-chip mono">
-                                {{ '{' + '{' + r + '}' + '}' }}
-                              </span>
-                            </div>
-                          </div>
-
-                          <div class="nd-row nd-col">
-                            <span class="nd-k">产出</span>
-                            <div class="nd-chips">
-                              <span class="nd-chip mono">
-                                {{ steps[si].output_var.trim() || '不产出变量' }}
-                              </span>
-                              <span
-                                v-for="k in jsonKeysOf(si)"
-                                :key="k"
-                                class="nd-chip mono"
-                              >.{{ k }}</span>
-                            </div>
-                          </div>
-
-                          <div class="nd-row">
-                            <span class="nd-k">模型</span>
-                            <span class="nd-v">{{ modelNameOf(si) }}</span>
-                            <a-tag v-if="steps[si].optional" color="orange" class="nd-opt">
-                              可选
-                            </a-tag>
-                          </div>
-                        </div>
-                      </template>
-
-                      <div
-                        class="wf-node"
-                        :data-si="si"
-                        :class="nodeClass(si)"
-                        @click="$emit('locate', si)"
-                        @mouseenter="hovered = si"
-                        @mouseleave="hovered = null"
-                      >
-                        <div class="node-top">
-                          <span class="node-no">{{ si + 1 }}</span>
-                          <span class="node-key">
-                            {{ steps[si].key.trim() || '（未命名）' }}
-                          </span>
-                          <span v-if="steps[si].output_kind === 'json'" class="node-badge">
-                            JSON
-                          </span>
-                          <span v-if="steps[si].optional" class="node-badge node-badge-opt">
-                            可选
-                          </span>
-                          <ThunderboltOutlined
-                            v-if="steps[si].model_config_id != null"
-                            class="node-model-ic"
-                            :title="modelNameOf(si)"
-                          />
-                        </div>
-
-                        <div class="node-agent">
-                          {{ agentName(steps[si].agent_slug) }}
-                        </div>
-
-                        <div class="node-prompt">{{ promptSummary(si) }}</div>
-
-                        <div v-if="refsOf(si).length" class="node-refs">
-                          <span class="node-section-lbl">引用</span>
-                          <span v-for="r in refsOf(si)" :key="r" class="mini-chip mono">
-                            {{ r }}
-                          </span>
-                        </div>
-
-                        <div class="node-out">
-                          <span class="node-section-lbl">产出</span>
-                          <span class="node-out-name">
-                            {{ varLabel(si) || '不产出' }}
-                          </span>
-                          <span v-for="k in jsonKeysOf(si)" :key="k" class="mini-chip mono">
-                            .{{ k }}
+                      <div v-if="refsOf(si).length" class="nd-row nd-col">
+                        <span class="nd-k">引用</span>
+                        <div class="nd-chips">
+                          <span v-for="r in refsOf(si)" :key="r" class="nd-chip mono">
+                            {{ '{' + '{' + r + '}' + '}' }}
                           </span>
                         </div>
                       </div>
-                    </a-popover>
+
+                      <div class="nd-row nd-col">
+                        <span class="nd-k">产出</span>
+                        <div class="nd-chips">
+                          <span class="nd-chip mono">
+                            {{ steps[si].output_var.trim() || '不产出变量' }}
+                          </span>
+                          <span
+                            v-for="k in jsonKeysOf(si)"
+                            :key="k"
+                            class="nd-chip mono"
+                          >.{{ k }}</span>
+                        </div>
+                      </div>
+
+                      <div class="nd-row">
+                        <span class="nd-k">模型</span>
+                        <span class="nd-v">{{ modelNameOf(si) }}</span>
+                        <a-tag v-if="steps[si].optional" color="orange" class="nd-opt">
+                          可选
+                        </a-tag>
+                      </div>
+                    </div>
+                  </template>
+
+                  <div
+                    class="wf-node"
+                    :data-si="si"
+                    :class="nodeClass(si)"
+                    :style="nodeStyle(si)"
+                    @click="$emit('locate', si)"
+                    @mouseenter="hovered = si"
+                    @mouseleave="hovered = null"
+                  >
+                    <div class="node-top">
+                      <span class="node-no">{{ si + 1 }}</span>
+                      <span class="node-key">
+                        {{ steps[si].key.trim() || '（未命名）' }}
+                      </span>
+                      <span v-if="steps[si].output_kind === 'json'" class="node-badge">
+                        JSON
+                      </span>
+                      <span v-if="steps[si].optional" class="node-badge node-badge-opt">
+                        可选
+                      </span>
+                      <ThunderboltOutlined
+                        v-if="steps[si].model_config_id != null"
+                        class="node-model-ic"
+                        :title="modelNameOf(si)"
+                      />
+                    </div>
+
+                    <div class="node-agent">
+                      {{ agentName(steps[si].agent_slug) }}
+                    </div>
+
+                    <div class="node-prompt">{{ promptSummary(si) }}</div>
+
+                    <div v-if="refsOf(si).length" class="node-refs">
+                      <span class="node-section-lbl">引用</span>
+                      <span v-for="r in refsOf(si)" :key="r" class="mini-chip mono">
+                        {{ r }}
+                      </span>
+                    </div>
+
+                    <div class="node-out">
+                      <span class="node-section-lbl">产出</span>
+                      <span class="node-out-name">
+                        {{ varLabel(si) || '不产出' }}
+                      </span>
+                      <span v-for="k in jsonKeysOf(si)" :key="k" class="mini-chip mono">
+                        .{{ k }}
+                      </span>
+                    </div>
                   </div>
-                </div>
-              </template>
+                </a-popover>
+              </div>
             </div>
           </div>
         </div>
@@ -251,6 +269,7 @@ import {
   PlusOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons-vue'
+import type { ELK, ElkExtendedEdge, ElkNode } from 'elkjs'
 import type { Agent } from '@/api'
 import { storageKeys } from '@/utils/storage'
 import {
@@ -445,7 +464,7 @@ const holderStyle = computed(() => ({
 }))
 const scaleStyle = computed(() => ({ transform: `scale(${scale.value})` }))
 
-// ---- 引用线：底出顶入的正交线，横向段走组间空白带，位置从 DOM 量出来 -------------
+// ---- 布局：卡片坐标与引用线一起交给 ELK（elkjs layered）算 ----------------------
 
 interface Edge {
   d: string
@@ -456,15 +475,58 @@ interface Edge {
   labelY: number
 }
 
+/** 第几步的卡片在布局坐标系里的位置与尺寸（尺寸就是喂给 ELK 的那份）。 */
+interface Box {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+/** 组标签列宽：卡片、走线、↓ 整体右移这么多，标签列固定在最左。 */
+const LABEL_COL = 100
+/** 行间（并行组之间）与行内（并行卡片之间）的空白，口径同原手写布局。 */
+const ROW_GAP = 48
+const NODE_GAP = 14
+
 const edges = ref<Edge[]>([])
 const size = ref({ w: 0, h: 0 })
+const boxes = ref(new Map<number, Box>())
+/** 还没算出第一版布局：布局层先不可见。 */
+const placed = ref(false)
 
-/** 每个节点属于第几个并行组，端口分组与跳组绕轨都按它判断。 */
+const nodeIndexes = computed(() => props.steps.map((_, index) => index))
+
+/** 每一步属于第几个并行组：顺序边要不要补、↓ 画在哪几道间隙都按它判断。 */
 const stepGroupSeq = computed(() => groupSequence(props.steps))
 
+const graphStyle = computed(() => ({
+  width: `${LABEL_COL + size.value.w + PAD}px`,
+  height: `${size.value.h}px`,
+  // 第一行上方那根 ↓ 要占这段留白；没有输入行就没这根箭头，也不留。
+  marginTop: props.inputNames.length ? '24px' : '0',
+}))
+/** SVG 与卡片同坐标系：线的原点也在标签列右边，和节点一起整体右移。 */
+const edgesStyle = computed(() => ({ left: `${LABEL_COL}px` }))
+
+/** 每个并行组占的一行从哪儿到哪儿：组标签与 ↓ 都按它定位。 */
+const groupRects = computed(() =>
+  groups.value.map((group) => {
+    let top = Infinity
+    let bottom = 0
+    for (const si of group.indexes) {
+      const box = boxes.value.get(si)
+      if (!box) continue
+      top = Math.min(top, box.y)
+      bottom = Math.max(bottom, box.y + box.h)
+    }
+    return { top: Number.isFinite(top) ? top : 0, bottom }
+  }),
+)
+
 /**
- * 存在相邻组引用线的组间序号（g 与 g+1 之间记 g）：转弯移到间隙正中后，
- * 水平走线会经过中心线的 ↓ 箭头，这些组间就不再画箭头——引用线已经说了流向。
+ * 存在相邻组引用线的组间序号（g 与 g+1 之间记 g）：引用线从上一行接到下一行，
+ * 已经把「先跑哪组」说明白了，那道间隙就不再补一个 ↓ 箭头。
  */
 const linkedBuses = computed(() => {
   const set = new Set<number>()
@@ -476,6 +538,34 @@ const linkedBuses = computed(() => {
   }
   return set
 })
+
+/** 要画 ↓ 的间隙：-1 是第一行上方（只有存在输入行时才有），其余是组与组之间。 */
+const arrowGaps = computed<number[]>(() => {
+  const list: number[] = []
+  if (props.inputNames.length) list.push(-1)
+  for (let g = 0; g < groups.value.length - 1; g += 1) {
+    if (!linkedBuses.value.has(g)) list.push(g)
+  }
+  return list
+})
+
+function groupHeadStyle(index: number) {
+  return { top: `${(groupRects.value[index]?.top ?? 0) + 4}px` }
+}
+
+function arrowStyle(gap: number) {
+  const rows = groupRects.value
+  const y = gap < 0 ? -12 : ((rows[gap]?.bottom ?? 0) + (rows[gap + 1]?.top ?? 0)) / 2
+  return {
+    left: `${LABEL_COL + size.value.w / 2}px`,
+    top: `${y}px`,
+  }
+}
+
+function nodeStyle(index: number) {
+  const box = boxes.value.get(index)
+  return { left: `${(box?.x ?? 0) + LABEL_COL}px`, top: `${box?.y ?? 0}px` }
+}
 
 /**
  * 点序列 → 圆角正交路径：中间拐角用二次贝塞尔收个小圆角，首尾段保持笔直，
@@ -500,114 +590,144 @@ function roundedPath(points: Array<[number, number]>, radius: number): string {
   return d
 }
 
+/** elkjs 打包有一兆多，结构图真打开时才取，不拖累编辑页首屏。 */
+let elkLoader: Promise<ELK> | null = null
+function loadElk(): Promise<ELK> {
+  if (!elkLoader) {
+    elkLoader = import('elkjs/lib/elk.bundled.js').then((mod) => new mod.default())
+  }
+  return elkLoader
+}
+
+/** 布局一次发一个号：等回来时若已有更新的一次在跑，这次结果直接丢，免得倒灌成旧图。 */
+let layoutSeq = 0
+
 /**
- * 线画在内容的自然坐标系里。
+ * 算一次布局：先从 DOM 量每张卡片的尺寸喂给 ELK，再把它算出的坐标与走线写回来。
  *
- * 变换在更外层 .canvas-scale 上，content 与节点的 rect 同被缩放：差值统一除以
- * scale 还原成自然坐标；origin 是 top-left，线性可除。size 取自然尺寸而不是 rect。
+ * 卡片宽度固定、高度由内容决定，都跟坐标无关，所以绝对定位下 offsetWidth/Height
+ * 照样量得准，不需要先按流程排一版再量。
  *
- * 节点每次现从 DOM 上按 data-si 找，不缓存元素：加一步、改组名之后同一批 DOM 节点
- * 挂的是哪一步全变了，缓存下来的只会认错人、把线画丢。
- *
- * 路由底出顶入：源底边 → 组间空白带（总线）→ 目标顶边。并行组里靠右的节点
- * 再也不会把线横着拉过同组左节点；相邻组走一条总线，跳组才绕左侧主干轨。
+ * 相邻两组之间一条引用都没有时要补一条不可见的顺序边：layered 只按边分层层，
+ * 缺了它两组会被并到同一行，把「先后执行」画成「并行」。
  */
-function measure() {
+async function runLayout() {
   const content = contentEl.value
-  if (!content) return
-  measureNatural()
-  if (!natural.value.w || !natural.value.h) return
-  const base = content.getBoundingClientRect()
-  size.value = { ...natural.value }
-  const s = scale.value || 1
-  const elAt = new Map<number, HTMLElement>()
+  if (!content || !groups.value.length) {
+    placed.value = false
+    boxes.value = new Map()
+    edges.value = []
+    size.value = { w: 0, h: 0 }
+    return
+  }
+  const token = ++layoutSeq
+
+  const dims = new Map<number, { w: number; h: number }>()
   content.querySelectorAll<HTMLElement>('.wf-node[data-si]').forEach((el) => {
-    elAt.set(Number(el.dataset.si), el)
+    dims.set(Number(el.dataset.si), { w: el.offsetWidth, h: el.offsetHeight })
   })
 
-  // 每个并行组行的顶/底（自然坐标）：总线 y 从相邻两组的行间空白里取。
-  const groupRects = groups.value.map((g) => {
-    let top = Infinity
-    let bottom = 0
-    for (const si of g.indexes) {
-      const el = elAt.get(si)
-      if (!(el instanceof HTMLElement)) continue
-      const r = el.getBoundingClientRect()
-      top = Math.min(top, (r.top - base.top) / s)
-      bottom = Math.max(bottom, (r.bottom - base.top) / s)
+  /** 边 id → 引用线：ELK 回结果时靠它认领，顺序边不在表里，回来自然不画。 */
+  const linkById = new Map<string, StepLink>()
+  const graphEdges: ElkExtendedEdge[] = links.value.map((link, i) => {
+    const id = `link-${i}`
+    linkById.set(id, link)
+    return {
+      id,
+      sources: [String(link.from)],
+      targets: [String(link.to)],
     }
-    return { top: Number.isFinite(top) ? top : 0, bottom }
   })
-  /** 第 g 组与 g+1 组之间的总线 y：取两组间隙的正中，转弯在中间。 */
-  function busY(g: number): number {
-    const cur = groupRects[g]
-    const next = groupRects[g + 1]
-    if (!cur || !next) return cur ? cur.bottom + 12 : 0
-    return cur.bottom + (next.top - cur.bottom) / 2
+  const seqs = stepGroupSeq.value
+  groups.value.forEach((group, gi) => {
+    if (!gi) return
+    const direct = links.value.some(
+      (link) => seqs[link.from] === gi - 1 && seqs[link.to] === gi,
+    )
+    if (direct) return
+    const prev = groups.value[gi - 1]
+    graphEdges.push({
+      id: `seq-${gi}`,
+      sources: [String(prev.indexes[prev.indexes.length - 1])],
+      targets: [String(group.indexes[0])],
+    })
+  })
+
+  const graph: ElkNode = {
+    id: 'wf',
+    layoutOptions: {
+      'elk.algorithm': 'layered',
+      'elk.direction': 'DOWN',
+      'elk.edgeRouting': 'ORTHOGONAL',
+      // 行内按步骤原序排：交叉最小化会把并行三兄弟画成 5、4、3，顺带加一步也不会整行跳位。
+      'elk.layered.crossingMinimization.forceNodeModelOrder': 'true',
+      // NETWORK_SIMPLEX 顺手把卡片横向排到让走线最短、不交叉的位置。
+      'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
+      'elk.layered.spacing.nodeNodeBetweenLayers': String(ROW_GAP),
+      'elk.spacing.nodeNode': String(NODE_GAP),
+      'elk.spacing.edgeNode': '10',
+      'elk.padding': `[top=${PAD},left=${PAD},bottom=${PAD},right=${PAD}]`,
+    },
+    children: props.steps.map((_, index) => ({
+      id: String(index),
+      width: dims.get(index)?.w ?? 260,
+      height: dims.get(index)?.h ?? 120,
+      // 同一行的卡片顶边对齐：并行的几步看着才平起平坐。这条得挂在节点上，
+      // 写在根上 layered 不认，高低不齐的卡片会被拆成好几「行」。
+      layoutOptions: { 'elk.alignment': 'TOP' },
+    })),
+    edges: graphEdges,
   }
 
-  // 出入端口先计数：同一节点有多条边时，端口在底边/顶边均布，不叠在同一点。
-  const outCount = new Map<number, number>()
-  const inCount = new Map<number, number>()
-  for (const link of links.value) {
-    outCount.set(link.from, (outCount.get(link.from) ?? 0) + 1)
-    inCount.set(link.to, (inCount.get(link.to) ?? 0) + 1)
+  const elk = await loadElk()
+  const result = await elk.layout(graph)
+  if (token !== layoutSeq) return
+
+  const next = new Map<number, Box>()
+  for (const child of result.children ?? []) {
+    const index = Number(child.id)
+    if (!Number.isInteger(index)) continue
+    next.set(index, {
+      x: child.x ?? 0,
+      y: child.y ?? 0,
+      w: child.width ?? 0,
+      h: child.height ?? 0,
+    })
   }
-  const outSeen = new Map<number, number>()
-  const inSeen = new Map<number, number>()
+  boxes.value = next
+  size.value = { w: result.width ?? 0, h: result.height ?? 0 }
+  placed.value = true
 
   const list: Edge[] = []
-  links.value.forEach((link, serial) => {
-    const fromEl = elAt.get(link.from)
-    const toEl = elAt.get(link.to)
-    if (!(fromEl instanceof HTMLElement) || !(toEl instanceof HTMLElement)) return
-    const a = fromEl.getBoundingClientRect()
-    const b = toEl.getBoundingClientRect()
-    const x1 = (a.left - base.left) / s
-    const x2 = (b.left - base.left) / s
-    const w1 = a.width / s
-    const w2 = b.width / s
-    const y1 = (a.bottom - base.top) / s
-    const y2 = (b.top - base.top) / s
-    // 端口位置：n 条边把边分成 n+1 段，第 i 条取第 i 个分点（单条边即中点）。
-    const pi = outSeen.get(link.from) ?? 0
-    const qi = inSeen.get(link.to) ?? 0
-    outSeen.set(link.from, pi + 1)
-    inSeen.set(link.to, qi + 1)
-    const sx = x1 + (w1 * (pi + 1)) / ((outCount.get(link.from) ?? 1) + 1)
-    const tx = x2 + (w2 * (qi + 1)) / ((inCount.get(link.to) ?? 1) + 1)
-
-    const seqFrom = stepGroupSeq.value[link.from] ?? 0
-    const seqTo = stepGroupSeq.value[link.to] ?? 0
-    const yDown = busY(seqFrom)
-    const yUp = busY(seqTo - 1)
-    let pts: Array<[number, number]>
-    if (seqTo === seqFrom + 1) {
-      // 相邻组：只走中间一条总线；列对齐（sx≈tx）时整条路退化成竖直直线。
-      pts = [[sx, y1], [sx, yDown], [tx, yDown], [tx, y2]]
-    } else {
-      // 跳组：下到源组下总线 → 左侧主干轨纵走 → 从目标组上总线右行进入。
-      const rail = 8 + (serial % 3) * 4
-      pts = [
-        [sx, y1],
-        [sx, yDown],
-        [rail, yDown],
-        [rail, yUp],
-        [tx, yUp],
-        [tx, y2],
-      ]
+  for (const edge of result.edges ?? []) {
+    const link = linkById.get(edge.id ?? '')
+    if (!link) continue
+    const section = edge.sections?.[0]
+    if (!section) continue
+    const points: Array<[number, number]> = [
+      [section.startPoint.x, section.startPoint.y],
+      ...(section.bendPoints ?? []).map((p): [number, number] => [p.x, p.y]),
+      [section.endPoint.x, section.endPoint.y],
+    ]
+    // 变量名标签挑最长的那一段：段直、离两端都远，悬停时最好认。
+    let long = 0
+    let longLen = -1
+    for (let i = 0; i < points.length - 1; i += 1) {
+      const len = Math.hypot(points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1])
+      if (len > longLen) {
+        longLen = len
+        long = i
+      }
     }
     list.push({
-      d: roundedPath(pts, 6),
+      d: roundedPath(points, 6),
       from: link.from,
       to: link.to,
       variable: link.variable,
-      // 变量名仅悬停时显示：相邻组标在走线旁空白里，跳组标在主干段中点。
-      labelX:
-        seqTo === seqFrom + 1 ? Math.min(sx, tx) + 6 : 8 + (serial % 3) * 4 + 3,
-      labelY: seqTo === seqFrom + 1 ? (y1 + y2) / 2 : (yDown + yUp) / 2,
+      labelX: (points[long][0] + points[long + 1][0]) / 2,
+      labelY: (points[long][1] + points[long + 1][1]) / 2 - 4,
     })
-  })
+  }
   edges.value = list
 }
 
@@ -629,11 +749,11 @@ function revealActive() {
 }
 
 /**
- * 外部触发重测：弹窗动画结束（afterOpen）后容器尺寸才落定，由父级调一次，
- * 确保自然尺寸与引用线都是对的。
+ * 外部触发重算：弹窗动画结束（afterOpen）后容器尺寸才落定，由父级调一次，
+ * 确保尺寸与引用线都是对的。
  */
 function refresh() {
-  measure()
+  void runLayout()
   if (zoomMode.value === 'fit') scale.value = fitScale()
 }
 defineExpose({ refresh })
@@ -643,7 +763,7 @@ let contentObserver: ResizeObserver | null = null
 
 onMounted(() => {
   // 纵向流默认原尺寸：不主动 fit，组多就往下滚。
-  void nextTick(measure)
+  void nextTick(runLayout)
   if (scrollEl.value && typeof ResizeObserver !== 'undefined') {
     // 视口宽变化（窗口、面板）：fit 档重算系数；manual 不动。
     viewportObserver = new ResizeObserver(() => {
@@ -652,9 +772,9 @@ onMounted(() => {
     viewportObserver.observe(scrollEl.value)
   }
   if (contentEl.value && typeof ResizeObserver !== 'undefined') {
-    // 内容自然尺寸变化（增删步骤、改组名）：重画 → fit 档再重算。
+    // 内容自然尺寸变化（增删步骤、卡片撑高）：重量尺寸 → fit 档再重算系数。
     contentObserver = new ResizeObserver(() => {
-      measure()
+      measureNatural()
       if (zoomMode.value === 'fit') scale.value = fitScale()
     })
     contentObserver.observe(contentEl.value)
@@ -668,22 +788,19 @@ onBeforeUnmount(() => {
   contentObserver = null
 })
 
-// keep-alive 切标签回来：几何可能被期间的增删改动，补一次测量。
+// keep-alive 切标签回来：几何可能被期间的增删改动，补一次布局。
 onActivated(() => {
   if (collapsed.value) return
-  void nextTick(() => {
-    measure()
-    if (zoomMode.value === 'fit') scale.value = fitScale()
-  })
+  void nextTick(runLayout)
 })
 
-// 增删步骤、改组名、改模板都会让线重算。
+// 增删步骤、改组名、改模板都会让卡片大小和连线变，重算一次布局。
 watch(
   () =>
     props.steps
       .map((step) => `${step.group_key}|${step.key}|${step.output_var}|${step.prompt_tpl}`)
       .join('\n'),
-  () => void nextTick(measure),
+  () => void nextTick(runLayout),
 )
 
 watch(
@@ -757,15 +874,20 @@ watch(
   position: relative;
   display: flex;
   flex-direction: column;
-  /* 左侧 26px：跳组引用的主干轨走这里；右侧对称留白，居中时视觉不偏。 */
-  padding-left: 26px;
-  padding-right: 26px;
+  padding: 0 12px;
   min-width: max-content;
+}
+/* 布局层：尺寸由 ELK 的算结果决定，卡片、线、标签都绝对定位在里面。 */
+.graph-layer {
+  position: relative;
+  flex: none;
+}
+.graph-measuring {
+  visibility: hidden;
 }
 .canvas-edges {
   position: absolute;
   top: 0;
-  left: 0;
   z-index: var(--z-base);
   pointer-events: none;
 }
@@ -833,37 +955,24 @@ watch(
   padding: 1px 6px;
 }
 
-/* ---- 顺序箭头：只表示组间执行顺序，与走线轨里的引用线分开 ---- */
+/* ---- 顺序箭头：只表示组间执行顺序，与引用线分开 ---- */
 .flow-arrow {
-  /* content 中心右移 head 的一半（44px）= 节点区域中心，与居中后的节点对齐。
-     自身不占高度：间距归 group-row 的 margin 管，箭头只视觉浮在间隙正中。 */
-  align-self: center;
-  height: 0;
-  margin-inline-start: 44px;
-  transform: translateY(23px);
-  overflow: visible;
+  position: absolute;
+  /* 落点由 arrowStyle 现算：横向在卡片区域中轴，纵向在两行之间的空档正中。 */
+  transform: translate(-50%, -50%);
   color: var(--text-3);
   font-size: var(--fs-xs);
   line-height: 1;
 }
 
-/* ---- 并行组行 ---- */
-.group-row {
-  display: flex;
-  align-items: flex-start;
-  /* 组间固定间距：不依赖 ↓ 箭头（有引用线的组间箭头不渲染），间距不能塌陷。 */
-  margin-top: 48px;
-}
-.canvas-content > .group-row:first-child {
-  margin-top: 0;
-}
+/* ---- 并行组标签列 ---- */
 .group-head {
+  position: absolute;
+  left: 0;
   width: 88px;
-  flex: none;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding-top: 4px;
 }
 .group-name {
   font-size: var(--fs-xs);
@@ -878,18 +987,11 @@ watch(
   color: var(--text-3);
   white-space: nowrap;
 }
-.group-body {
-  flex: 1;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 14px;
-}
 
 /* ---- 节点卡片 ---- */
 .wf-node {
+  position: absolute;
   width: 260px;
-  flex: none;
   border: 1px solid var(--hairline);
   border-radius: var(--radius-md);
   background: var(--surface);
