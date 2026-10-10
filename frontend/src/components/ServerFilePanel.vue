@@ -609,6 +609,9 @@ function fmtTime(mtime: number): string {
 onMounted(() => {
   load('')
 })
+
+// 终端右键「在文件浏览器打开」：父页面直接让面板跳到那个目录。
+defineExpose({ openPath: (path: string) => load(path) })
 </script>
 
 <style scoped>

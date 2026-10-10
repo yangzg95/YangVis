@@ -51,6 +51,7 @@ import {
   ClearOutlined,
   CloseOutlined,
   CopyOutlined,
+  FolderOpenOutlined,
   SelectOutlined,
   SnippetsOutlined,
 } from '@ant-design/icons-vue'
@@ -62,6 +63,8 @@ const emit = defineEmits<{
   // closed 时带上 WebSocket 断开码：父组件据此区分「服务端主动拒绝」
   // （1008 鉴权/查无此机，自动重连没意义）和网络层断开（值得自动重连）。
   (e: 'status', value: 'connecting' | 'connected' | 'closed', code?: number): void
+  // 右键「在文件浏览器打开」：拿到终端当前目录后交给父页面展开文件面板。
+  (e: 'browseFiles', path: string): void
 }>()
 
 const hostEl = ref<HTMLElement | null>(null)
@@ -232,6 +235,16 @@ function openMenu(event: MouseEvent) {
   event.preventDefault()
   // xterm 自己也绑了 contextmenu（把隐藏 textarea 挪到鼠标下、灌入选中文字），
   // 但它不动视觉选区，所以这里的 hasSelection 拿到的还是用户刚框住的那段。
+  // 探测当前目录要向 PTY 提交命令：全屏程序里会变成程序输入，有半行未提交
+  // 内容会把用户的半截命令一起带走，两种情况都置灰。
+  const inAlternate = term?.buffer.active.type === 'alternate'
+  const socketClosed = socket?.readyState !== WebSocket.OPEN
+  const probeBlocked = socketClosed || inAlternate || !!pendingLine
+  const probeHint = socketClosed
+    ? '终端还没连上'
+    : inAlternate
+      ? '正在使用全屏程序，先退出'
+      : '当前行有未提交内容，先回车或清空'
   menuItems.value = [
     {
       key: 'copy',
@@ -246,11 +259,19 @@ function openMenu(event: MouseEvent) {
       label: '粘贴',
       icon: SnippetsOutlined,
       group: 0,
-      disabled: socket?.readyState !== WebSocket.OPEN,
+      disabled: socketClosed,
       disabledHint: '终端还没连上',
     },
     { key: 'select-all', label: '全选', icon: SelectOutlined, group: 1 },
     { key: 'clear', label: '清屏', icon: ClearOutlined, group: 1 },
+    {
+      key: 'open-in-files',
+      label: '在文件浏览器打开',
+      icon: FolderOpenOutlined,
+      group: 2,
+      disabled: probeBlocked,
+      disabledHint: probeHint,
+    },
   ]
   menu.x = event.clientX
   menu.y = event.clientY
@@ -263,7 +284,32 @@ function onMenuPick(key: string) {
   else if (key === 'paste') void pasteClipboard()
   else if (key === 'select-all') term?.selectAll()
   else if (key === 'clear') term?.clear()
+  else if (key === 'open-in-files') requestCwd()
   // 清屏只清本地缓冲，一个字节都不发给 PTY：远端 shell 的状态不受影响。
+}
+
+/** 探测 PTY shell 的当前目录。
+
+ * 新开 SSH exec 通道拿到的是全新会话的起始目录，不是这个 shell 的 cwd，所以
+ * 只能向 PTY 自己问。命令尾部带的 CSI 序列把刚回显的命令行上移、整行擦除并
+ * 删行——屏幕和滚动缓冲里都不留痕；路径通过 OSC 697 回传，由 xterm 的
+ * parser 接住。只在右键打开的那一刻校验过状态（已连接 / 主缓冲 / 无半行）。
+ */
+function requestCwd() {
+  if (!term || socket?.readyState !== WebSocket.OPEN) return
+  if (term.buffer.active.type === 'alternate' || pendingLine) return
+
+  let done = false
+  const osc = term.parser.registerOscHandler(697, (data) => {
+    if (!done && data.startsWith('/')) {
+      done = true
+      emit('browseFiles', data)
+    }
+    return true
+  })
+  window.setTimeout(() => osc.dispose(), 3000)
+
+  socket.send("printf '\\e]697;%s\\a\\e[1A\\e[2K\\e[M' \"$PWD\"\r")
 }
 
 // 选中即复制（PuTTY 口径）。onSelectionChange 在拖选过程中连续触发，

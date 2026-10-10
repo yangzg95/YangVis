@@ -1239,6 +1239,15 @@ class _CommandLineTracker:
         return submitted
 
 
+def _is_cwd_probe(command: str) -> bool:
+    """前端右键「在文件浏览器打开」的 cwd 探测命令。
+
+    那条 printf 在终端屏幕上会自我擦除，审计里也不该留痕——否则每右键一次
+    就刷一条无意义的 printf。标记串（OSC 697 格式 + $PWD）足够独特。
+    """
+    return "697;%s" in command and "$PWD" in command
+
+
 def _record_manual_command(user_id: int, server_id: int, server_name: str, command: str) -> None:
     """把终端里手敲的一行命令写进审计表。
 
@@ -1345,7 +1354,8 @@ async def terminal(
                     )
                     continue
             for command in tracker.feed(message):
-                _record_manual_command(user.user_id, audit_target[0], audit_target[1], command)
+                if not _is_cwd_probe(command):
+                    _record_manual_command(user.user_id, audit_target[0], audit_target[1], command)
             process.stdin.write(message)
 
     logger.info("terminal tunnel opened: user %s, server %s", user.user_id, server_id)

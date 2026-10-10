@@ -85,6 +85,7 @@
         </div>
         <ServerFilePanel
           v-if="server"
+          ref="filePanelRef"
           v-show="leftTab === 'files'"
           :server-id="serverId"
           @show-transfers="leftTab = 'transfer'"
@@ -107,6 +108,7 @@
           :key="reconnectSeq"
           :server-id="serverId"
           @status="onTerminalStatus"
+          @browse-files="onBrowseFiles"
         />
         <div v-else-if="loadError" class="term-error">
           <CloudServerOutlined class="term-error-icon" />
@@ -219,6 +221,7 @@ const transfers = useTransfersStore()
 // 重连 = 换掉 key 重挂载 ServerTerminal，比给它加重连方法简单，状态也干净。
 const reconnectSeq = ref(0)
 const terminalRef = ref<InstanceType<typeof ServerTerminal> | null>(null)
+const filePanelRef = ref<InstanceType<typeof ServerFilePanel> | null>(null)
 // 终端还没连上时收到的「送到终端」命令先存着，连上后立即补送。
 let pendingInput = ''
 
@@ -302,6 +305,15 @@ function onChatCommand(command: string) {
     return
   }
   terminalRef.value?.sendInput(command)
+}
+
+/** 终端右键「在文件浏览器打开」：展开左侧文件面板并跳到终端当前目录。 */
+async function onBrowseFiles(path: string) {
+  if (!server.value) return
+  showFiles.value = true
+  leftTab.value = 'files'
+  await nextTick()
+  filePanelRef.value?.openPath(path)
 }
 
 // ---- 断线自动重连 ------------------------------------------------------------
