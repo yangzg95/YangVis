@@ -250,6 +250,13 @@ def migrate_schema() -> None:
             conn.execute(text("ALTER TABLE workflow ADD COLUMN mcp_server_ids JSON NULL"))
         logger.info("added workflow.mcp_server_ids")
 
+    # 节点级 MCP 挂载：仅对所属步骤生效，与 workflow.mcp_server_ids 取并集。
+    step_columns = _column_names("workflow_step")
+    if step_columns and "mcp_server_ids" not in step_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE workflow_step ADD COLUMN mcp_server_ids JSON NULL"))
+        logger.info("added workflow_step.mcp_server_ids")
+
     for table, retired in RETIRED_STATUS_COLUMNS.items():
         existing = _column_names(table)
         for column in retired:

@@ -1183,6 +1183,11 @@ class WorkflowStep(Base):
     # 写死某个用户的配置 id 对其他人毫无意义。
     model_config_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
+    # 节点级挂载的 MCP 服务 id 列表，如 [3, 7]：仅本步生效，与
+    # ``workflow.mcp_server_ids``（全流程所有步骤生效）取并集。
+    # 同一服务两边都挂只连接一次。内置步骤恒为空。
+    mcp_server_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
     # 可选步骤失败不拖垮整条流程（例如「附一段配图建议」这类锦上添花的步骤）。
     optional: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 

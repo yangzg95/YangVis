@@ -74,7 +74,7 @@ from app.services.agent_run import (
     run_agent,
 )
 from app.services.agents import BUILTIN_OWNER_ID, AgentService
-from app.services.mcp_tools import open_bundle, resolve_servers
+from app.services.mcp_tools import open_bundle, plan_step_tools, resolve_servers
 from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.workflows")
@@ -834,6 +834,7 @@ class WorkflowService:
                     output_keys=list(step.output_keys) if step.output_keys else None,
                     output_var=step.output_var,
                     model_config_id=step.model_config_id,
+                    mcp_server_ids=list(step.mcp_server_ids or []),
                     optional=step.optional,
                 )
                 for step in steps
@@ -981,6 +982,8 @@ class WorkflowService:
                     output_keys=list(step.output_keys) if step.output_keys else None,
                     output_var=step.output_var,
                     model_config_id=step.model_config_id,
+                    # 副本在本人名下，节点级挂载引用同样有效。
+                    mcp_server_ids=list(step.mcp_server_ids or []),
                     optional=step.optional,
                 )
             )
@@ -1063,6 +1066,21 @@ class WorkflowService:
                 except LookupError as exc:
                     raise ValueError(f"{where}的模型配置不存在") from exc
 
+            # 节点级 MCP 挂载：与工作流级同一口径（存在且属于本人，去重；停用
+            # 放行，运行时再挡），报错要点名是第几步挂的。
+            step_mcp_ids = list(dict.fromkeys(step.mcp_server_ids or []))
+            if step_mcp_ids:
+                owned_step_servers = self._db.scalars(
+                    select(McpServer.id).where(
+                        McpServer.owner_id == self._owner_id,
+                        McpServer.id.in_(step_mcp_ids),
+                    )
+                ).all()
+                if len(set(owned_step_servers)) != len(step_mcp_ids):
+                    raise ValueError(
+                        f"{where}挂载了不存在或不属于本人的 MCP 服务，请重新选择"
+                    )
+
             steps.append(
                 WorkflowStep(
                     # workflow_id 先占 0，落库前才补真值：校验失败时这些实例从未
@@ -1079,6 +1097,7 @@ class WorkflowService:
                     # 一个既不是 NULL 也不是名字的值。
                     output_var=step.output_var or None,
                     model_config_id=step.model_config_id,
+                    mcp_server_ids=step_mcp_ids,
                     optional=step.optional,
                 )
             )
@@ -1488,6 +1507,15 @@ def fail_run(db: Session, owner_id: int, run_id: int, message: str) -> None:
 
 # ---- 执行 ------------------------------------------------------------------
 
+def _merge_servers(*groups: Sequence[McpServer]) -> List[McpServer]:
+    """把多组已解析的服务按 id 去重合并：同一服务两级都挂只连接一次。"""
+    merged: Dict[int, McpServer] = {}
+    for group in groups:
+        for server in group:
+            merged.setdefault(server.id, server)
+    return list(merged.values())
+
+
 @dataclass
 class _StepOutcome:
     """一个步骤的执行结果，供编排协程判断要不要继续往下走。"""
@@ -1690,14 +1718,27 @@ async def execute_run(
         # 而不是让每个步骤各自失败一遍。按步骤指定的配置在步骤里各自校验。
         require_chat_model(db, owner_id)
 
-        # MCP 连接束：工作流挂载的全部服务在这里连接一次、initialize 一次，
-        # 所有步骤共用。连接失败发生在首个事件之前，由 stream_run 的既有
-        # 异常路径把 run 落成 failed（与「模型未就绪」的前置失败同路径）。
+        # MCP 连接束：连接集合 = 工作流级挂载 ∪ 全部节点级挂载（并集），在
+        # 这里统一连接、每个服务只 initialize 一次。连接失败发生在首个事件
+        # 之前，由 stream_run 的既有异常路径把 run 落成 failed（与「模型未
+        # 就绪」的前置失败同路径）。
         workflow = db.get(Workflow, run.workflow_id)
-        servers = resolve_servers(
-            db, owner_id, list(workflow.mcp_server_ids or [])
-        )
-        bundle = await open_bundle(servers)
+        global_ids = list(dict.fromkeys(workflow.mcp_server_ids or []))
+        # 两级分别解析：节点级的停用/越权错误要带得出处，而不是一句通用提示。
+        global_servers = resolve_servers(db, owner_id, global_ids)
+        step_servers: List[McpServer] = []
+        for step in steps:
+            try:
+                step_servers.extend(
+                    resolve_servers(db, owner_id, list(step.mcp_server_ids or []))
+                )
+            except (LookupError, ValueError) as exc:
+                raise ValueError(
+                    f"节点 {step.key} 挂载的 MCP 服务有问题：{exc}"
+                ) from exc
+        bundle = await open_bundle(_merge_servers(global_servers, step_servers))
+        # 预计算每步的工具子集（冲突在同节点生效集合内判），同样在首事件之前。
+        step_tool_plan = plan_step_tools(bundle, global_ids, steps)
 
         try:
             run.status = RUN_RUNNING
@@ -1738,7 +1779,7 @@ async def execute_run(
                             _execute_step(
                                 owner_id=owner_id, run_id=run_id, step=member,
                                 context=context, queue=queue,
-                                tools=bundle.tools,
+                                tools=step_tool_plan[member.key],
                             )
                             for member in members
                         ],
@@ -2198,24 +2239,30 @@ async def rerun_step(*, owner_id: int, run_id: int, key: str) -> None:
         context = _rerun_context(db, run, key)
         step = _detach(db, definition)
 
-        # 单步重跑也按工作流**当前**的 MCP 挂载建束。连接失败就地结算运行，
-        # 与 execute_run 的前置失败表现一致。
+        # 单步重跑按「工作流级挂载 ∪ 目标节点挂载」建束——不必为别的节点
+        # 挂的服务买单。连接失败就地结算运行，与 execute_run 的前置失败一致。
         workflow_row = db.get(Workflow, run.workflow_id)
-        servers = resolve_servers(
-            db, owner_id, list(workflow_row.mcp_server_ids or [])
+        global_ids = list(dict.fromkeys(workflow_row.mcp_server_ids or []))
+        global_servers = resolve_servers(db, owner_id, global_ids)
+        target_servers = resolve_servers(
+            db, owner_id, list(definition.mcp_server_ids or [])
         )
         try:
-            bundle = await open_bundle(servers)
+            bundle = await open_bundle(
+                _merge_servers(global_servers, target_servers)
+            )
         except Exception as exc:  # noqa: BLE001 - 不能让运行卡在 running
             settle_run_status(db, owner_id, run_id, error=model_error_text(exc))
             return
+        step_tool_plan = plan_step_tools(bundle, global_ids, [definition])
+        step_tools = step_tool_plan[definition.key]
 
     queue: asyncio.Queue = asyncio.Queue()
     try:
         try:
             await _execute_step(
                 owner_id=owner_id, run_id=run_id, step=step,
-                context=context, queue=queue, tools=bundle.tools,
+                context=context, queue=queue, tools=step_tools,
             )
         finally:
             await bundle.__aexit__(None, None, None)

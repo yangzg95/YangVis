@@ -222,6 +222,18 @@
         class="w-model"
         :disabled="readonly"
       />
+      <!-- 节点级 MCP：仅本步生效；与基本信息页的全流程挂载取并集。 -->
+      <a-select
+        v-model:value="step.mcp_server_ids"
+        :options="mcpOptions"
+        mode="multiple"
+        max-tag-count="responsive"
+        allow-clear
+        placeholder="节点级 MCP（仅本步）"
+        size="small"
+        class="w-step-mcp"
+        :disabled="readonly"
+      />
       <a-checkbox v-model:checked="step.optional" :disabled="readonly">可选步骤</a-checkbox>
     </div>
 
@@ -230,6 +242,12 @@
     <div v-if="advancedOpen" class="hint block keys-hint">
       「并行分组」名（默认 g1/g2）只是内部凭据，相邻同名的步骤才算同组并行；
       一般不用改，加并行用「并行步骤」按钮、进下一组用「下一步」。
+    </div>
+
+    <!-- 两级挂载的区别在高级区说破：基本信息页挂的全流程可用，这里挂的只有本步。 -->
+    <div v-if="advancedOpen" class="hint block keys-hint">
+      节点级 MCP 只对本步生效；基本信息页挂的 MCP 对所有步骤生效，两处取并集，
+      同一服务挂重了只连接一次。
     </div>
 
     <!-- 「格式字段」的心结说破：字段不是智能体定义的，是这一步的模板要的。
@@ -272,12 +290,20 @@ const props = withDefaults(
     agent: Agent | null
     agentOptions: { value: string; label: string; agent: Agent }[]
     modelOptions: { value: number; label: string }[]
+    /** 节点级 MCP 下拉：与基本信息页同源，只列启用中的本人服务。 */
+    mcpOptions: { value: number; label: string }[]
     /** 校验缺口：与父级 problemIds 同一份，红框随填随灭。 */
     problemIds: Set<string>
     showProblems: boolean
     advancedOpen: boolean
   }>(),
-  { agent: null, upstreamGroups: () => [], groupLabelText: '未命名', parallel: false },
+  {
+    agent: null,
+    upstreamGroups: () => [],
+    groupLabelText: '未命名',
+    parallel: false,
+    mcpOptions: () => [],
+  },
 )
 
 defineEmits<{
@@ -606,6 +632,9 @@ watch(
 }
 .w-model {
   width: 180px;
+}
+.w-step-mcp {
+  width: 240px;
 }
 .spacer {
   flex: 1;

@@ -497,6 +497,8 @@ export interface WorkflowStep {
   /** 有值则本步输出以该名进上下文，供后续步骤的模板引用。 */
   output_var?: string | null
   model_config_id?: number | null
+  /** 节点级挂载的 MCP 服务：仅本步生效，与工作流级 mcp_server_ids 取并集。 */
+  mcp_server_ids: number[]
   optional: boolean
 }
 

@@ -167,6 +167,7 @@
             :agent="agentOf(form.steps[index].agent_slug)"
             :agent-options="agentOptions"
             :model-options="modelOptions"
+            :mcp-options="mcpOptions"
             :problem-ids="problemIds"
             :show-problems="showProblems"
             :advanced-open="expanded.has(form.steps[index])"
@@ -340,7 +341,12 @@ function toggleExpanded(index: number) {
 function autoExpandAdvanced(steps: StepForm[]) {
   expanded.clear()
   for (const step of steps) {
-    if (step.output_kind === 'json' || step.model_config_id != null || step.optional) {
+    if (
+      step.output_kind === 'json' ||
+      step.model_config_id != null ||
+      step.mcp_server_ids.length ||
+      step.optional
+    ) {
       expanded.add(step)
     }
   }
@@ -700,6 +706,7 @@ async function submit() {
       output_keys: step.output_kind === 'json' && step.output_keys.length ? step.output_keys : null,
       output_var: step.output_var.trim() || null,
       model_config_id: step.model_config_id,
+      mcp_server_ids: [...step.mcp_server_ids],
       optional: step.optional,
     })),
   }

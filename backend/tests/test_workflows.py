@@ -12,6 +12,7 @@ import asyncio
 import json
 import time
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, delete, func, select, update
@@ -923,6 +924,82 @@ def test_duplicate_copies_mcp_server_ids(db):
     assert clone.mcp_server_ids is not workflow.mcp_server_ids
 
 
+def _step_payload(key: str, agent_slug: str = "writer", **extra) -> dict:
+    """一个最小合法步骤，节点级 MCP 等字段通过 ``extra`` 覆盖。"""
+    row = {
+        "key": key,
+        "group_key": key,
+        "agent_slug": agent_slug,
+        "prompt_tpl": "就{{topic}}写一段话",
+    }
+    row.update(extra)
+    return row
+
+
+def test_create_persists_step_mcp_server_ids(db):
+    """节点级挂载落在 workflow_step 行上，只属于该步骤。"""
+    _agents_named(db, "writer")
+    server = _mcp_server(db)
+    payload = _create_payload(
+        steps=[_step_payload("draft", mcp_server_ids=[server.id])]
+    )
+
+    workflow = WorkflowService(db, OWNER).create(payload)
+
+    step = WorkflowService(db, OWNER).steps_of(workflow.id)[0]
+    assert step.mcp_server_ids == [server.id]
+
+
+def test_step_mcp_ids_default_to_empty_list_in_item(db):
+    """没挂节点级 MCP：接口项里也是空列表，前端不必区分 null 与 []。"""
+    _agents_named(db, "writer")
+    workflow = WorkflowService(db, OWNER).create(_create_payload())
+
+    item = WorkflowService(db, OWNER).to_item(workflow)
+
+    assert item.steps[0].mcp_server_ids == []
+
+
+def test_create_rejects_foreign_step_mcp_server_id(db):
+    """节点级与工作流级同一条归属红线：别人的服务挂不上自己的步骤。"""
+    _agents_named(db, "writer")
+    foreign = _mcp_server(db, owner_id=OWNER + 1)
+    payload = _create_payload(
+        steps=[_step_payload("draft", mcp_server_ids=[foreign.id])]
+    )
+
+    with pytest.raises(ValueError, match="不存在或不属于本人"):
+        WorkflowService(db, OWNER).create(payload)
+
+
+def test_create_allows_disabled_step_mcp_server_at_save_time(db):
+    """节点级保存时同样对停用放行（允许先挂后启用），运行时再挡。"""
+    _agents_named(db, "writer")
+    disabled = _mcp_server(db, enabled=False, name="停用服务")
+    payload = _create_payload(
+        steps=[_step_payload("draft", mcp_server_ids=[disabled.id])]
+    )
+
+    workflow = WorkflowService(db, OWNER).create(payload)
+
+    step = WorkflowService(db, OWNER).steps_of(workflow.id)[0]
+    assert step.mcp_server_ids == [disabled.id]
+
+
+def test_duplicate_copies_step_mcp_server_ids(db):
+    _agents_named(db, "writer")
+    server = _mcp_server(db)
+    service = WorkflowService(db, OWNER)
+    workflow = service.create(
+        _create_payload(steps=[_step_payload("draft", mcp_server_ids=[server.id])])
+    )
+
+    clone = service.duplicate(workflow.id)
+    clone_step = service.steps_of(clone.id)[0]
+
+    assert clone_step.mcp_server_ids == [server.id]
+
+
 def test_update_replaces_the_steps_whole(db, monkeypatch):
     _agents_named(db, "writer", "scorer")
     service = WorkflowService(db, OWNER)
@@ -1360,25 +1437,31 @@ def test_execute_run_opens_mcp_bundle_and_passes_tools_to_each_step(db, monkeypa
     db.commit()
     run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
 
-    seen_tools: list[list] = []
+    seen_tools: list[list[str]] = []
 
     async def fake_run_agent(db, owner_id, agent_slug, user_prompt, *, tools=None, **kwargs):
-        seen_tools.append(list(tools or []))
+        seen_tools.append([tool.name for tool in (tools or [])])
         return "初稿"
 
     monkeypatch.setattr(workflows_module, "run_agent", fake_run_agent)
 
-    resolved: dict = {}
+    resolved: dict = {"calls": []}
+
+    class _ServerRow:
+        def __init__(self, server_id: int):
+            self.id = server_id
 
     def fake_resolve(db, owner_id, ids):
-        resolved["ids"] = list(ids)
-        return ["server-row"]
+        resolved["calls"].append(list(ids))
+        return [_ServerRow(server_id) for server_id in ids]
 
     monkeypatch.setattr(workflows_module, "resolve_servers", fake_resolve)
 
     class _FakeBundle:
         def __init__(self):
-            self.tools = ["mcp-tool"]
+            tool = SimpleNamespace(name="mcp-tool")
+            self.tools = [tool]
+            self.tools_by_server = {server.id: [tool]}
             self.closed = False
 
         async def __aexit__(self, *exc_info):
@@ -1387,14 +1470,15 @@ def test_execute_run_opens_mcp_bundle_and_passes_tools_to_each_step(db, monkeypa
     bundle = _FakeBundle()
 
     async def fake_open(servers):
-        assert servers == ["server-row"]
+        assert [row.id for row in servers] == [server.id]
         return bundle
 
     monkeypatch.setattr(workflows_module, "open_bundle", fake_open)
 
     events = _run_all(db, OWNER, run.id)
 
-    assert resolved["ids"] == [server.id]
+    # 工作流级解析一次 [id]、两个节点各解析一次 []；合并去重后只连接一次。
+    assert resolved["calls"] == [[server.id], [], []]
     assert seen_tools == [["mcp-tool"], ["mcp-tool"]]
     assert events[-1][1]["status"] == RUN_SUCCEEDED
     assert bundle.closed, "运行结束必须关连接束，stdio 子进程靠它回收"
@@ -1444,6 +1528,7 @@ def test_execute_run_with_empty_mcp_mount_skips_the_bundle(db, monkeypatch):
 
     class _FakeEmptyBundle:
         tools: list = []
+        tools_by_server: dict = {}
 
         async def __aexit__(self, *exc_info):
             return None
@@ -1460,6 +1545,122 @@ def test_execute_run_with_empty_mcp_mount_skips_the_bundle(db, monkeypatch):
 
     assert opened == [[]]
     assert events[-1][1]["status"] == RUN_SUCCEEDED
+
+
+def _set_step_mcp(db, workflow_id: int, key: str, ids: list[int]) -> None:
+    """直接改步骤行的节点级挂载（绕过保存校验），测试运行时行为用。"""
+    row = db.scalar(
+        select(WorkflowStep).where(
+            WorkflowStep.workflow_id == workflow_id, WorkflowStep.key == key
+        )
+    )
+    row.mcp_server_ids = list(ids)
+    db.commit()
+
+
+class _PlainBundle:
+    """假连接束：按 server id 给具名工具，避免真起 stdio；关闭可断言。"""
+
+    def __init__(self, tools_by_server: dict[int, list[str]]) -> None:
+        self.tools_by_server = {
+            server_id: [SimpleNamespace(name=name) for name in names]
+            for server_id, names in tools_by_server.items()
+        }
+        self.closed = False
+
+    async def __aexit__(self, *exc_info) -> None:
+        self.closed = True
+
+
+def _record_tools(monkeypatch) -> dict[str, list[str]]:
+    """把 run_agent 换成记录每步收到的工具名，返回收集容器。"""
+    seen: dict[str, list[str]] = {}
+
+    async def fake_run_agent(
+        db, owner_id, agent_slug, user_prompt, *, tools=None, **kwargs
+    ):
+        seen[agent_slug] = [tool.name for tool in (tools or [])]
+        return "结果"
+
+    monkeypatch.setattr(workflows_module, "run_agent", fake_run_agent)
+    return seen
+
+
+def test_step_mount_scopes_tools_to_that_step(db, monkeypatch):
+    """节点各挂各的：draft 只见网页工具、score 只见数据库工具，互不相串。"""
+    _chat_model(db)
+    web = _mcp_server(db, name="网页服务")
+    database = _mcp_server(db, name="数据库服务")
+    workflow = _two_step_workflow(db)
+    _set_step_mcp(db, workflow.id, "draft", [web.id])
+    _set_step_mcp(db, workflow.id, "score", [database.id])
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+
+    seen = _record_tools(monkeypatch)
+    bundle = _PlainBundle({web.id: ["web-tool"], database.id: ["db-tool"]})
+
+    async def fake_open(servers):
+        return bundle
+
+    monkeypatch.setattr(workflows_module, "open_bundle", fake_open)
+
+    events = _run_all(db, OWNER, run.id)
+
+    assert seen == {"writer": ["web-tool"], "scorer": ["db-tool"]}
+    assert events[-1][1]["status"] == RUN_SUCCEEDED
+    assert bundle.closed
+
+
+def test_same_mcp_on_workflow_and_step_connects_once(db, monkeypatch):
+    """同一服务两级都挂：去重后只连接一次，两步都看得见工具。"""
+    _chat_model(db)
+    server = _mcp_server(db)
+    workflow = _two_step_workflow(db)
+    workflow.mcp_server_ids = [server.id]
+    db.commit()
+    _set_step_mcp(db, workflow.id, "score", [server.id])
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+
+    seen = _record_tools(monkeypatch)
+    opened_ids: list[int] = []
+    bundle = _PlainBundle({server.id: ["only-tool"]})
+
+    async def fake_open(servers):
+        opened_ids.extend(row.id for row in servers)
+        return bundle
+
+    monkeypatch.setattr(workflows_module, "open_bundle", fake_open)
+
+    events = _run_all(db, OWNER, run.id)
+
+    assert opened_ids == [server.id]
+    assert seen == {"writer": ["only-tool"], "scorer": ["only-tool"]}
+    assert events[-1][1]["status"] == RUN_SUCCEEDED
+    assert bundle.closed
+
+
+def test_step_mount_resolve_error_names_the_step(db, monkeypatch):
+    """节点挂的服务已不存在：首个事件之前失败，错误消息点名节点 score。"""
+    _chat_model(db)
+    workflow = _two_step_workflow(db)
+    _set_step_mcp(db, workflow.id, "score", [999999])
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _stub_model(monkeypatch, {"writer": "x", "scorer": "y"}.get)
+
+    async def collect():
+        return [
+            (event, payload)
+            async for event, payload in stream_run(owner_id=OWNER, run_id=run.id)
+        ]
+
+    db.rollback()
+    events = asyncio.run(collect())
+    db.rollback()
+
+    assert [name for name, _ in events] == ["error"]
+    finished = WorkflowService(db, OWNER).get_run(run.id)
+    assert finished.status == RUN_FAILED
+    assert "节点 score" in (finished.error_msg or "")
 
 
 def test_run_timestamps_are_naive_local_not_utc(db, monkeypatch):
@@ -1850,6 +2051,51 @@ def test_rerun_settles_the_run_on_a_model_failure(db, monkeypatch):
     assert rows["score"].status == STEP_FAILED
     assert "评分模型挂了" in rows["score"].error_msg
     assert finished.status == RUN_FAILED and "评分模型挂了" in finished.error_msg
+
+
+def test_rerun_connects_workflow_and_target_step_union(db, monkeypatch):
+    """单步重跑只连接「工作流级 ∪ 目标节点」：别的节点挂的服务不连接。"""
+    _chat_model(db)
+    global_server = _mcp_server(db, name="全局服务")
+    draft_server = _mcp_server(db, name="初稿服务")
+    workflow = _two_step_workflow(db)
+    workflow.mcp_server_ids = [global_server.id]
+    db.commit()
+    _set_step_mcp(db, workflow.id, "draft", [draft_server.id])
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+    _stub_model(monkeypatch, {"writer": "初稿", "scorer": "8 分"}.get)
+    # 第一次运行也要假束：global + draft 两个服务都在生效集合里。
+    first_bundle = _PlainBundle(
+        {global_server.id: ["global-tool"], draft_server.id: ["draft-tool"]}
+    )
+
+    async def fake_open_first(servers):
+        return first_bundle
+
+    monkeypatch.setattr(workflows_module, "open_bundle", fake_open_first)
+
+    assert _run_all(db, OWNER, run.id)[-1][1]["status"] == RUN_SUCCEEDED
+    run_id = run.id
+
+    prepare_step_rerun(db, OWNER, run_id, "score")
+
+    seen = _record_tools(monkeypatch)
+    opened_ids: list[int] = []
+    bundle = _PlainBundle({global_server.id: ["global-tool"]})
+
+    async def fake_open(servers):
+        opened_ids.extend(row.id for row in servers)
+        return bundle
+
+    monkeypatch.setattr(workflows_module, "open_bundle", fake_open)
+
+    _rerun(db, OWNER, run_id, "score")
+
+    # draft 节点挂的服务与重跑 score 无关，不连接；工作流级的全局服务要在。
+    assert opened_ids == [global_server.id]
+    assert seen == {"scorer": ["global-tool"]}
+    assert bundle.closed
+    assert WorkflowService(db, OWNER).get_run(run_id).status == RUN_SUCCEEDED
 
 
 # ---- 重启收尾 ---------------------------------------------------------------

@@ -15,6 +15,8 @@ export interface StepForm {
   output_keys: string[]
   output_var: string
   model_config_id: number | null
+  /** 节点级挂载的 MCP 服务，仅本步生效；与工作流级挂载取并集。 */
+  mcp_server_ids: number[]
   optional: boolean
 }
 
@@ -51,6 +53,7 @@ export const emptyStep = (groupKey = ''): StepForm => ({
   output_keys: [],
   output_var: '',
   model_config_id: null,
+  mcp_server_ids: [],
   optional: false,
 })
 
@@ -65,6 +68,7 @@ export function toStepForm(step: WorkflowStep): StepForm {
     output_keys: [...(step.output_keys ?? [])],
     output_var: step.output_var ?? '',
     model_config_id: step.model_config_id ?? null,
+    mcp_server_ids: [...(step.mcp_server_ids ?? [])],
     optional: step.optional,
   }
 }

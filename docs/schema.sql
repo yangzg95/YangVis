@@ -440,6 +440,7 @@ CREATE TABLE IF NOT EXISTS workflow_step (
   output_keys     JSON         NULL COMMENT 'output_kind=json 时要求的顶层字段',
   output_var      VARCHAR(64)  NULL COMMENT '有值则本步输出以此名进上下文，供后续步骤引用',
   model_config_id BIGINT       NULL COMMENT '按步骤覆盖模型配置；NULL 用调用者的默认对话模型',
+  mcp_server_ids  JSON         NULL COMMENT '节点级挂载的 mcp_server.id 列表，仅本步生效，与 workflow.mcp_server_ids 取并集',
   optional        TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '可选步骤失败不拖垮整条流程',
   created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

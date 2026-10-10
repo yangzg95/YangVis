@@ -21,7 +21,7 @@ from app.services.mcp_servers import (
     read_secret,
     validate_transport_fields,
 )
-from app.services.mcp_tools import resolve_servers, server_prefix
+from app.services.mcp_tools import plan_step_tools, resolve_servers, server_prefix
 
 OWNER = 1
 
@@ -471,3 +471,93 @@ def test_run_agent_forces_convergence_after_max_rounds(db):
     assert fake.cursor == 9
     nudge = fake.received[-1][-1]
     assert "工具调用次数已达上限" in nudge.content
+
+
+# ---- plan_step_tools：两级挂载的并集、去重与冲突范围 -------------------------
+
+
+class _Named:
+    """一个只带 name 的最小工具：plan 只关心工具名。"""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _StepLike:
+    """一个只带 key 与节点级挂载的最小步骤。"""
+
+    def __init__(self, key: str, ids: tuple = ()) -> None:
+        self.key = key
+        self.mcp_server_ids = list(ids)
+
+
+class _BundleLike:
+    def __init__(self, tools_by_server: dict) -> None:
+        self.tools_by_server = dict(tools_by_server)
+
+
+@pytest.fixture()
+def clash_bundle():
+    """两个服务各贡献一个工具，工具名相同（模拟规范化后撞名）。"""
+    return _BundleLike(
+        {
+            1: [_Named("shared_foo")],
+            2: [_Named("shared_foo")],
+        }
+    )
+
+
+def _names(tools) -> list[str]:
+    return [tool.name for tool in tools]
+
+
+def test_plan_empty_when_nothing_mounted(clash_bundle):
+    plan = plan_step_tools(clash_bundle, [], [_StepLike("a")])
+
+    assert plan["a"] == []
+
+
+def _distinct_bundle() -> _BundleLike:
+    """两个服务工具名不同：顺序/并集展示用。"""
+    return _BundleLike({1: [_Named("a_tool")], 2: [_Named("b_tool")]})
+
+
+def test_plan_unions_workflow_and_step_mount():
+    bundle = _distinct_bundle()
+    plan = plan_step_tools(bundle, [1], [_StepLike("a", (2,))])
+
+    assert _names(plan["a"]) == ["a_tool", "b_tool"]
+
+
+def test_plan_workflow_level_reaches_every_step():
+    bundle = _distinct_bundle()
+    plan = plan_step_tools(
+        bundle, [1], [_StepLike("a"), _StepLike("b", (2,))]
+    )
+
+    assert _names(plan["a"]) == ["a_tool"]
+    assert _names(plan["b"]) == ["a_tool", "b_tool"]
+
+
+def test_plan_same_tool_name_on_different_steps_is_fine(clash_bundle):
+    """同名工具分挂不同节点：各自的生效集合里只有一个，放行。"""
+    plan = plan_step_tools(
+        clash_bundle, [], [_StepLike("a", (1,)), _StepLike("b", (2,))]
+    )
+
+    assert _names(plan["a"]) == ["shared_foo"]
+    assert _names(plan["b"]) == ["shared_foo"]
+
+
+def test_plan_clashes_when_same_step_gets_both_servers(clash_bundle):
+    """两个服务挂到同一节点：生效集合内工具重名，报错且点名节点。"""
+    with pytest.raises(ValueError, match="工具名冲突") as exc_info:
+        plan_step_tools(clash_bundle, [], [_StepLike("a", (1, 2))])
+
+    assert "a" in str(exc_info.value)
+
+
+def test_plan_dedups_repeated_ids(clash_bundle):
+    plan = plan_step_tools(clash_bundle, [1, 1], [_StepLike("a", (1,))])
+
+    assert _names(plan["a"]) == ["shared_foo"]

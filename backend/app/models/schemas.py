@@ -502,6 +502,8 @@ class WorkflowStepItem(BaseModel):
     output_keys: Optional[List[str]] = None
     output_var: Optional[str] = None
     model_config_id: Optional[int] = None
+    # 节点级挂载的 MCP 服务：仅本步生效，与工作流级 mcp_server_ids 取并集。
+    mcp_server_ids: List[int] = Field(default_factory=list)
     optional: bool
 
 
@@ -556,6 +558,8 @@ class WorkflowStepInput(BaseModel):
     output_keys: Optional[List[str]] = None
     output_var: Optional[str] = Field(default=None, max_length=64)
     model_config_id: Optional[int] = None
+    # 节点级挂载：仅本步生效；与工作流级挂载取并集，重复只生效一次。
+    mcp_server_ids: List[int] = Field(default_factory=list)
     optional: bool = False
 
 

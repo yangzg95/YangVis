@@ -31,7 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.crypto import decrypt
-from app.models.entities import McpServer
+from app.models.entities import McpServer, WorkflowStep
 from app.services.mcp_servers import (
     TRANSPORT_HTTP,
     TRANSPORT_SSE,
@@ -126,11 +126,17 @@ async def _enter_session(
 
 
 class McpToolBundle:
-    """一次工作流运行共用的连接束：每个服务只 initialize 一次。"""
+    """一次工作流运行共用的连接束：每个服务只 initialize 一次。
+
+    同时按服务 id 记录各服务贡献的工具（:attr:`tools_by_server`）：连接束装的
+    是全部挂载服务的**并集**，每个步骤实际能看见哪些工具由
+    :func:`plan_step_tools` 按「工作流级 ∪ 节点级」过滤后给出。
+    """
 
     def __init__(self) -> None:
         self._stack = AsyncExitStack()
         self.tools: List[BaseTool] = []
+        self.tools_by_server: Dict[int, List[BaseTool]] = {}
         self.server_names: List[str] = []
 
     async def __aenter__(self) -> "McpToolBundle":
@@ -150,15 +156,11 @@ class McpToolBundle:
             server_name=server_prefix(server.name),
             tool_name_prefix=True,
         )
-        # 前缀按服务名隔离了跨服务重名；两个服务规范化后同名（如 "A B" 与
-        # "A_B"）仍会撞，当场报错让用户重命名服务。
-        existing = {tool.name for tool in self.tools}
-        clashes = [tool.name for tool in tools if tool.name in existing]
-        if clashes:
-            raise ValueError(
-                f"MCP 工具名冲突：{'、'.join(clashes)}，请重命名对应的 MCP 服务"
-            )
+        # 束层面不再判跨服务重名：工具名冲突是「同一节点生效集合」的事
+        # （见 plan_step_tools）——两个服务规范化后同名，只要没挂到同一个
+        # 节点，就可以在一趟运行里共存、各自只连一次。
         self.tools.extend(tools)
+        self.tools_by_server[server.id] = list(tools)
         self.server_names.append(server.name)
         logger.info(
             "mcp bundle added server %s (%s, %d tool(s))",
@@ -209,6 +211,46 @@ async def open_bundle(servers: Sequence[McpServer]) -> McpToolBundle:
         await bundle.__aexit__(None, None, None)
         raise
     return bundle
+
+
+def plan_step_tools(
+    bundle: McpToolBundle,
+    workflow_ids: Sequence[int],
+    steps: Sequence[WorkflowStep],
+) -> Dict[str, List[BaseTool]]:
+    """预计算每个节点生效的工具：工作流级挂载 ∪ 节点级挂载，按服务 id 去重保序。
+
+    连接束装的是全部节点挂载的并集；这里按步骤把不属于自己的服务剔掉。同一
+    服务在两级（或一处重复填写）都挂了，只取一次。
+
+    工具名冲突只在**同一节点的生效集合**里判：两个服务规范化后同名，只有同时
+    出现在某个节点（工作流级挂载天然与谁都同屏）才算冲突，报出来让用户重命名
+    服务或调整挂载；分别挂在互不相关的节点上则放行。
+    """
+    global_ids = list(dict.fromkeys(workflow_ids))
+    plan: Dict[str, List[BaseTool]] = {}
+    for step in steps:
+        ids = list(dict.fromkeys(global_ids + list(step.mcp_server_ids or [])))
+        tools: List[BaseTool] = []
+        seen_names: set[str] = set()
+        clashes: List[str] = []
+        for server_id in ids:
+            # 能进 plan 的 id 都已通过 resolve + open_bundle，缺映射是内部
+            # 一致性问题，直接 KeyError 暴露，不静默吞掉。
+            for tool in bundle.tools_by_server[server_id]:
+                if tool.name in seen_names:
+                    clashes.append(tool.name)
+                else:
+                    seen_names.add(tool.name)
+                    tools.append(tool)
+        if clashes:
+            raise ValueError(
+                f"节点 {step.key} 上 MCP 工具名冲突："
+                f"{'、'.join(sorted(set(clashes)))}，"
+                "请重命名对应的 MCP 服务，或调整该节点的挂载"
+            )
+        plan[step.key] = tools
+    return plan
 
 
 async def test_connection(server: McpServer) -> Tuple[bool, str, int]:
