@@ -42,8 +42,8 @@ from app.models.schemas import (
     ModelPurpose,
     SearchHit,
 )
-from app.services import vectorstore
 from app.services.chunking import split_text
+from app.services.knowledge import vectorstore
 from app.services.providers import build_embeddings
 from app.timeutil import db_now
 
@@ -390,8 +390,8 @@ class KnowledgeService:
         )
         self._db.delete(doc)
         self._db.commit()
-        # 用传进来的 doc_id：实例删掉并 commit 之后属性已过期，再读 doc.id 会回查这条
-        # 已经不存在的行。
+        # 用传进来的 doc_id，不碰 doc 上的属性：commit 之后这个实例已经脱钩，此
+        # 时读到的只是删除前缓存的值。参数是现成的，没必要依赖这个 ORM 细节。
         _release_doc_lock(self._owner_id, doc_id)
         self._refresh_counts()
 

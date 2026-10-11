@@ -226,7 +226,7 @@ def delete_knowledge_type(
 
 
 async def _purge_vectors(collection: str, owner_id: int, doc_id: int) -> None:
-    from app.services import vectorstore
+    from app.services.knowledge import vectorstore
 
     try:
         await vectorstore.delete_by_doc(collection, owner_id, doc_id)
