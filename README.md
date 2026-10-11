@@ -74,7 +74,7 @@
 
 **前端**：Vue 3.5 · TypeScript 5.6 · Vite 5 · Pinia 2 · Vue Router 4 · Ant Design Vue 4 · xterm.js · Mermaid · Axios
 
-**后端**：Python 3.11 · FastAPI 0.115 · SQLAlchemy 2.0 + PyMySQL · LangChain / LangGraph · Qdrant · asyncssh（SSH/SFTP/PTY）· redis-py · PyJWT · cryptography（Fernet）· pypdf / python-docx · httpx
+**后端**：Python 3.12 · FastAPI 0.115 · SQLAlchemy 2.0 + PyMySQL · LangChain / LangGraph · Qdrant · asyncssh（SSH/SFTP/PTY）· redis-py · PyJWT · cryptography（Fernet）· pypdf / python-docx · httpx
 
 **存储**：MySQL 8.0（业务数据 + 审计）· Qdrant（向量）
 
@@ -143,7 +143,7 @@ docker-compose up -d --build
 ## 本地开发
 
 ```bash
-# 后端（Python 3.11+）
+# 后端（Python 3.12–3.13；生产镜像固定 3.12-slim）
 cd backend
 python -m venv .venv && .venv/Scripts/activate   # Windows；Linux/macOS 用 source .venv/bin/activate
 pip install -r requirements.txt

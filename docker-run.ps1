@@ -76,6 +76,20 @@ if ($envContent -match "(?m)^(DB_HOST|QDRANT_HOST)\s*=\s*(localhost|127\.0\.0\.1
     Write-Warning "如 MySQL/Qdrant 跑在宿主机，请改为 host.docker.internal（Windows Docker Desktop 可用）。"
 }
 
+# 用户上传的资产（幻灯片配图等）写在容器内的 uploads 目录：镜像里的 /app 是构建产物，
+# 重建即覆盖，不挂卷的话每次重新部署都会把它们清掉。挂载路径按 backend/app/config.py
+# 的口径来——.env 里设了 UPLOAD_MEDIA_DIR 就用它，否则是镜像默认的 /app/uploads。
+$uploadsPath = if ($envContent -match "(?m)^UPLOAD_MEDIA_DIR\s*=\s*(.+?)\s*$") {
+    $Matches[1].Trim('"').Trim("'")
+} else {
+    "/app/uploads"
+}
+# 镜像只预建并 chown 了 /app/uploads（见 Dockerfile）：挂到别的空路径时，命名卷会以
+# root 属主创建，而容器以 yangvis 运行，每次上传都会 EACCES。
+if ($uploadsPath -ne "/app/uploads") {
+    Write-Warning "UPLOAD_MEDIA_DIR=$uploadsPath 不是镜像预建的 /app/uploads，命名卷会以 root 属主创建，上传可能 EACCES。"
+}
+
 # 4. 停掉并删除旧容器（存在才删）
 $existing = docker ps -aq -f "name=^$ContainerName$"
 if ($existing) {
@@ -84,7 +98,7 @@ if ($existing) {
 }
 
 # 5. 启动新容器
-Write-Host "==> 启动容器 $ContainerName (端口 ${Port}:18099) ..." -ForegroundColor Cyan
+Write-Host "==> 启动容器 $ContainerName (端口 ${Port}:18099, 上传卷 ${ContainerName}_uploads:$uploadsPath) ..." -ForegroundColor Cyan
 # --memory-swap 与 --memory 相同 = 禁用 swap，超内存直接 OOM kill（由 restart 策略拉起），
 # 避免在小内存机器上因 swap 拖垮整机。
 docker run -d `
@@ -94,6 +108,7 @@ docker run -d `
     --memory-swap "${MemoryMB}m" `
     -e GUNICORN_WORKERS=$Workers `
     --env-file $EnvFile `
+    -v "${ContainerName}_uploads:$uploadsPath" `
     -p "${Port}:18099" `
     $ImageName
 if ($LASTEXITCODE -ne 0) { Write-Error "docker run 失败"; exit $LASTEXITCODE }

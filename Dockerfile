@@ -19,7 +19,10 @@ RUN npm run build
 # ============================================================
 #  Stage 2: backend runtime image (FastAPI + static frontend)
 # ============================================================
-FROM docker.m.daocloud.io/library/python:3.11-slim AS backend
+# 3.12 而不是 3.13：requirements.txt 钉死的 sqlalchemy==2.0.35 只发到 cp312 为止
+# （PyPI 上无 cp313 wheel），3.13 会退回 sdist 源码编译，slim 镜像里没有编译器，
+# C 扩展装不上就静默降级成纯 Python 路径。3.12 与 pyproject 的 >=3.12,<3.14 一致。
+FROM docker.m.daocloud.io/library/python:3.12-slim AS backend
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
