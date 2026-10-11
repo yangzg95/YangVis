@@ -73,7 +73,7 @@ def _base_url(request: Request) -> str:
 
 
 @router.get("/overview", response_model=APIResponse[AiGatewayOverview])
-async def overview(
+def overview(
     request: Request,
     service: AiGatewayService = Depends(get_service),
 ) -> APIResponse[AiGatewayOverview]:
@@ -84,7 +84,7 @@ async def overview(
 
 
 @router.get("/channels", response_model=APIResponse[ListResponse[AiChannelItem]])
-async def list_channels(
+def list_channels(
     service: AiGatewayService = Depends(get_service),
 ) -> APIResponse[ListResponse[AiChannelItem]]:
     items = [service.channel_item(channel) for channel in service.list_channels()]
@@ -92,7 +92,7 @@ async def list_channels(
 
 
 @router.post("/channels", response_model=APIResponse[AiChannelItem])
-async def create_channel(
+def create_channel(
     request: Request,
     payload: AiChannelCreate,
     service: AiGatewayService = Depends(get_service),
@@ -105,7 +105,7 @@ async def create_channel(
 
 
 @router.put("/channels/{channel_id}", response_model=APIResponse[AiChannelItem])
-async def update_channel(
+def update_channel(
     request: Request,
     channel_id: int,
     payload: AiChannelUpdate,
@@ -123,7 +123,7 @@ async def update_channel(
 
 
 @router.delete("/channels/{channel_id}", response_model=APIResponse[None])
-async def delete_channel(
+def delete_channel(
     channel_id: int,
     service: AiGatewayService = Depends(get_service),
 ) -> APIResponse[None]:
@@ -166,7 +166,7 @@ async def test_channel(
 
 
 @router.get("/routes", response_model=APIResponse[ListResponse[AiModelRouteItem]])
-async def list_routes(
+def list_routes(
     model_name: Optional[str] = Query(default=None),
     service: AiGatewayService = Depends(get_service),
 ) -> APIResponse[ListResponse[AiModelRouteItem]]:
@@ -175,7 +175,7 @@ async def list_routes(
 
 
 @router.post("/routes", response_model=APIResponse[AiModelRouteItem])
-async def create_route(
+def create_route(
     payload: AiModelRouteCreate,
     service: AiGatewayService = Depends(get_service),
 ) -> APIResponse[AiModelRouteItem]:
@@ -186,7 +186,7 @@ async def create_route(
 
 
 @router.put("/routes/{route_id}", response_model=APIResponse[AiModelRouteItem])
-async def update_route(
+def update_route(
     route_id: int,
     payload: AiModelRouteUpdate,
     service: AiGatewayService = Depends(get_service),
@@ -198,7 +198,7 @@ async def update_route(
 
 
 @router.delete("/routes/{route_id}", response_model=APIResponse[None])
-async def delete_route(
+def delete_route(
     route_id: int,
     service: AiGatewayService = Depends(get_service),
 ) -> APIResponse[None]:
@@ -213,7 +213,7 @@ async def delete_route(
 
 
 @router.get("/keys", response_model=APIResponse[ListResponse[AiApiKeyItem]])
-async def list_keys(
+def list_keys(
     service: AiGatewayService = Depends(get_service),
 ) -> APIResponse[ListResponse[AiApiKeyItem]]:
     items = [service.key_item(row) for row in service.list_keys()]
@@ -221,7 +221,7 @@ async def list_keys(
 
 
 @router.post("/keys", response_model=APIResponse[AiApiKeyCreated])
-async def create_key(
+def create_key(
     payload: AiApiKeyCreate,
     service: AiGatewayService = Depends(get_service),
 ) -> APIResponse[AiApiKeyCreated]:
@@ -231,7 +231,7 @@ async def create_key(
 
 
 @router.put("/keys/{key_id}", response_model=APIResponse[AiApiKeyItem])
-async def update_key(
+def update_key(
     key_id: int,
     payload: AiApiKeyUpdate,
     service: AiGatewayService = Depends(get_service),
@@ -244,7 +244,7 @@ async def update_key(
 
 
 @router.delete("/keys/{key_id}", response_model=APIResponse[None])
-async def delete_key(
+def delete_key(
     key_id: int,
     service: AiGatewayService = Depends(get_service),
 ) -> APIResponse[None]:
@@ -259,7 +259,7 @@ async def delete_key(
 
 
 @router.get("/stats", response_model=APIResponse[AiStats])
-async def stats(
+def stats(
     days: int = Query(default=7, ge=1, le=90),
     service: AiGatewayService = Depends(get_service),
 ) -> APIResponse[AiStats]:
@@ -267,7 +267,7 @@ async def stats(
 
 
 @router.get("/logs", response_model=APIResponse[ListResponse[AiCallLogItem]])
-async def list_logs(
+def list_logs(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
     key_id: Optional[int] = Query(default=None),
@@ -296,7 +296,7 @@ async def list_logs(
 
 
 @router.get("/logs/{log_id}", response_model=APIResponse[AiCallLogDetail])
-async def log_detail(
+def log_detail(
     log_id: int,
     service: AiGatewayService = Depends(get_service),
 ) -> APIResponse[AiCallLogDetail]:
@@ -308,7 +308,7 @@ async def log_detail(
 
 
 @router.post("/logs/purge", response_model=APIResponse[AiLogPurgeResult])
-async def purge_logs(
+def purge_logs(
     payload: AiLogPurgeRequest,
     service: AiGatewayService = Depends(get_service),
 ) -> APIResponse[AiLogPurgeResult]:

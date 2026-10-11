@@ -36,7 +36,7 @@ def get_service(
 
 
 @router.get("", response_model=APIResponse[ListResponse[MemoryItem]])
-async def list_memories(
+def list_memories(
     service: MemoryService = Depends(get_service),
 ) -> APIResponse[ListResponse[MemoryItem]]:
     rows = service.list()
@@ -45,7 +45,7 @@ async def list_memories(
 
 
 @router.post("", response_model=APIResponse[MemoryItem])
-async def create_memory(
+def create_memory(
     payload: MemoryCreate,
     service: MemoryService = Depends(get_service),
 ) -> APIResponse[MemoryItem]:
@@ -55,7 +55,7 @@ async def create_memory(
 
 
 @router.put("/{memory_id}", response_model=APIResponse[MemoryItem])
-async def update_memory(
+def update_memory(
     memory_id: int,
     payload: MemoryUpdate,
     service: MemoryService = Depends(get_service),
@@ -68,7 +68,7 @@ async def update_memory(
 
 
 @router.delete("/{memory_id}", response_model=APIResponse[None])
-async def delete_memory(
+def delete_memory(
     memory_id: int,
     service: MemoryService = Depends(get_service),
 ) -> APIResponse[None]:
@@ -80,7 +80,7 @@ async def delete_memory(
 
 
 @router.delete("", response_model=APIResponse[None])
-async def clear_memories(
+def clear_memories(
     service: MemoryService = Depends(get_service),
 ) -> APIResponse[None]:
     count = service.clear()

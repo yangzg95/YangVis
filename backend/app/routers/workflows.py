@@ -60,7 +60,7 @@ def get_service(
 
 # /runs 先声明：FastAPI 按注册顺序匹配，写在 /{workflow_id} 之后就永远查不到了。
 @router.get("/runs", response_model=APIResponse[ListResponse[WorkflowRunItem]])
-async def list_runs(
+def list_runs(
     workflow_id: Optional[int] = Query(default=None),
     subject_kind: Optional[str] = Query(default=None),
     subject_ref: Optional[str] = Query(default=None),
@@ -98,7 +98,7 @@ async def list_runs(
 
 
 @router.post("/runs/prune", response_model=APIResponse[WorkflowRunPruneResult])
-async def prune_run_history(
+def prune_run_history(
     payload: WorkflowRunPruneRequest,
     db: Session = Depends(get_db),
     service: WorkflowService = Depends(get_service),
@@ -118,7 +118,7 @@ async def prune_run_history(
 
 
 @router.get("/runs/{run_id}", response_model=APIResponse[WorkflowRunDetail])
-async def get_run(
+def get_run(
     run_id: int,
     service: WorkflowService = Depends(get_service),
 ) -> APIResponse[WorkflowRunDetail]:
@@ -135,7 +135,7 @@ async def get_run(
 
 
 @router.get("/runs/{run_id}/stream")
-async def follow_run_stream(
+def follow_run_stream(
     run_id: int,
     request: Request,
     service: WorkflowService = Depends(get_service),
@@ -193,7 +193,7 @@ def _apply_prepare_errors(exc: Exception) -> HTTPException:
 
 
 @router.post("/runs/{run_id}/steps/{key}/rerun", response_model=APIResponse[WorkflowRunItem])
-async def rerun_run_step(
+def rerun_run_step(
     run_id: int,
     key: str,
     background: BackgroundTasks,
@@ -229,7 +229,7 @@ async def rerun_run_step(
 
 
 @router.post("/runs/{run_id}/steps/{key}/resume", response_model=APIResponse[WorkflowRunItem])
-async def resume_run_step(
+def resume_run_step(
     run_id: int,
     key: str,
     background: BackgroundTasks,
@@ -263,7 +263,7 @@ async def resume_run_step(
 
 
 @router.get("", response_model=APIResponse[ListResponse[WorkflowItem]])
-async def list_workflows(
+def list_workflows(
     enabled_only: bool = Query(default=False),
     service: WorkflowService = Depends(get_service),
 ) -> APIResponse[ListResponse[WorkflowItem]]:
@@ -276,7 +276,7 @@ async def list_workflows(
 
 
 @router.get("/{workflow_id}", response_model=APIResponse[WorkflowItem])
-async def get_workflow(
+def get_workflow(
     workflow_id: int,
     service: WorkflowService = Depends(get_service),
 ) -> APIResponse[WorkflowItem]:
@@ -293,7 +293,7 @@ async def get_workflow(
 # 这条规则与智能体完全一致，界面上的说法也照搬。
 
 @router.post("", response_model=APIResponse[WorkflowItem])
-async def create_workflow(
+def create_workflow(
     payload: WorkflowCreate,
     service: WorkflowService = Depends(get_service),
 ) -> APIResponse[WorkflowItem]:
@@ -305,7 +305,7 @@ async def create_workflow(
 
 
 @router.put("/{workflow_id}", response_model=APIResponse[WorkflowItem])
-async def update_workflow(
+def update_workflow(
     workflow_id: int,
     payload: WorkflowUpdate,
     service: WorkflowService = Depends(get_service),
@@ -327,7 +327,7 @@ async def update_workflow(
 
 
 @router.delete("/{workflow_id}", response_model=APIResponse[None])
-async def delete_workflow(
+def delete_workflow(
     workflow_id: int,
     service: WorkflowService = Depends(get_service),
 ) -> APIResponse[None]:
@@ -341,7 +341,7 @@ async def delete_workflow(
 
 
 @router.post("/{workflow_id}/duplicate", response_model=APIResponse[WorkflowItem])
-async def duplicate_workflow(
+def duplicate_workflow(
     workflow_id: int,
     service: WorkflowService = Depends(get_service),
 ) -> APIResponse[WorkflowItem]:

@@ -32,7 +32,7 @@ router = APIRouter(prefix="/users", tags=["users"], dependencies=[Depends(requir
 
 
 @router.get("", response_model=APIResponse[ListResponse[UserItem]])
-async def list_users(db: Session = Depends(get_db)) -> APIResponse[ListResponse[UserItem]]:
+def list_users(db: Session = Depends(get_db)) -> APIResponse[ListResponse[UserItem]]:
     """列出所有账号，最新创建的排在前面。"""
     records = db.scalars(select(SysUser).order_by(SysUser.id.desc())).all()
     items = [UserItem.model_validate(record) for record in records]
@@ -40,7 +40,7 @@ async def list_users(db: Session = Depends(get_db)) -> APIResponse[ListResponse[
 
 
 @router.post("", response_model=APIResponse[UserItem])
-async def create_user(
+def create_user(
     payload: UserCreateRequest,
     admin: CurrentUser = Depends(require_admin),
     db: Session = Depends(get_db),
@@ -69,7 +69,7 @@ async def create_user(
 
 
 @router.put("/{user_id}", response_model=APIResponse[UserItem])
-async def update_user(
+def update_user(
     user_id: int,
     payload: UserUpdateRequest,
     admin: CurrentUser = Depends(require_admin),
@@ -100,7 +100,7 @@ async def update_user(
 
 
 @router.put("/{user_id}/status", response_model=APIResponse[UserItem])
-async def update_user_status(
+def update_user_status(
     user_id: int,
     payload: UserStatusRequest,
     admin: CurrentUser = Depends(require_admin),
@@ -128,7 +128,7 @@ async def update_user_status(
 
 
 @router.post("/{user_id}/password", response_model=APIResponse[None])
-async def reset_user_password(
+def reset_user_password(
     user_id: int,
     payload: PasswordResetRequest,
     admin: CurrentUser = Depends(require_admin),

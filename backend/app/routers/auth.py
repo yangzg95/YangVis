@@ -27,6 +27,7 @@ from app.models.schemas import (
     PasswordChangeRequest,
     UserInfo,
 )
+from app.netutil import client_ip
 from app.security import create_access_token, hash_password, verify_password
 from app.services.captcha import issue_captcha, verify_captcha
 from app.services.login_guard import locked_seconds, record_failure, reset_failures
@@ -53,7 +54,7 @@ def _to_user_info(user: SysUser) -> UserInfo:
 # ---- Endpoints -------------------------------------------------------------
 
 @router.get("/captcha", response_model=APIResponse[CaptchaResult])
-async def get_captcha() -> APIResponse[CaptchaResult]:
+def get_captcha() -> APIResponse[CaptchaResult]:
     """签发一张图形验证码。captcha_id 是加密令牌，答案不出现在明文里。"""
     captcha_id, png = issue_captcha()
     image = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
@@ -61,13 +62,13 @@ async def get_captcha() -> APIResponse[CaptchaResult]:
 
 
 @router.post("/login", response_model=APIResponse[LoginResult])
-async def login(
+def login(
     payload: LoginRequest,
     request: Request,
     db: Session = Depends(get_db),
 ) -> APIResponse[LoginResult]:
     """Verify credentials against ``sys_user`` and issue an access token."""
-    ip = request.client.host if request.client else "unknown"
+    ip = client_ip(request) or "unknown"
     # 计数键统一小写：MySQL 默认排序规则下用户名大小写不敏感，不收敛的话
     # 每换一种大小写组合就能多拿一轮尝试额度。查库的用户名做同样的 strip
     # 归一化，避免「 alice」这类输入计数记到 alice 头上、查询却查不到人。
@@ -113,7 +114,7 @@ async def login(
 
 
 @router.get("/me", response_model=APIResponse[UserInfo])
-async def current_user(
+def current_user(
     user: CurrentUser = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> APIResponse[UserInfo]:
@@ -125,7 +126,7 @@ async def current_user(
 
 
 @router.post("/logout", response_model=APIResponse[None])
-async def logout() -> APIResponse[None]:
+def logout() -> APIResponse[None]:
     """Log out.
 
     Tokens are stateless, so this only exists for the client to call before it
@@ -136,7 +137,7 @@ async def logout() -> APIResponse[None]:
 
 
 @router.post("/password", response_model=APIResponse[None])
-async def change_password(
+def change_password(
     payload: PasswordChangeRequest,
     user: CurrentUser = Depends(require_user),
     db: Session = Depends(get_db),

@@ -33,7 +33,7 @@ def get_service(
 
 
 @router.get("/status", response_model=APIResponse[NetdiskStatus])
-async def netdisk_status(
+def netdisk_status(
     service: NetdiskService = Depends(get_service),
 ) -> APIResponse[NetdiskStatus]:
     """绑定状态。configured=false 表示后端未配置 AppKey，前端隐藏整个入口。"""
@@ -41,7 +41,7 @@ async def netdisk_status(
 
 
 @router.get("/auth-url", response_model=APIResponse[NetdiskAuthUrl])
-async def netdisk_auth_url(
+def netdisk_auth_url(
     service: NetdiskService = Depends(get_service),
 ) -> APIResponse[NetdiskAuthUrl]:
     """百度 OAuth 授权页地址，前端在新窗口打开。"""
@@ -87,7 +87,7 @@ async def save_text_to_netdisk(
 
 
 @router.post("/unbind", response_model=APIResponse[None])
-async def unbind_netdisk(
+def unbind_netdisk(
     service: NetdiskService = Depends(get_service),
     user: CurrentUser = Depends(require_user),
 ) -> APIResponse[None]:

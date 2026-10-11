@@ -40,7 +40,7 @@ def get_service(
 
 
 @router.get("/models", response_model=APIResponse[ListResponse[ModelConfigItem]])
-async def list_models(
+def list_models(
     purpose: Optional[ModelPurpose] = Query(default=None),
     service: ModelConfigService = Depends(get_service),
 ) -> APIResponse[ListResponse[ModelConfigItem]]:
@@ -49,7 +49,7 @@ async def list_models(
 
 
 @router.post("/models", response_model=APIResponse[ModelConfigItem])
-async def create_model(
+def create_model(
     payload: ModelConfigCreate,
     service: ModelConfigService = Depends(get_service),
 ) -> APIResponse[ModelConfigItem]:
@@ -58,7 +58,7 @@ async def create_model(
 
 
 @router.put("/models/{config_id}", response_model=APIResponse[ModelConfigItem])
-async def update_model(
+def update_model(
     config_id: int,
     payload: ModelConfigUpdate,
     service: ModelConfigService = Depends(get_service),
@@ -71,7 +71,7 @@ async def update_model(
 
 
 @router.delete("/models/{config_id}", response_model=APIResponse[None])
-async def delete_model(
+def delete_model(
     config_id: int,
     service: ModelConfigService = Depends(get_service),
 ) -> APIResponse[None]:
@@ -83,7 +83,7 @@ async def delete_model(
 
 
 @router.post("/models/{config_id}/default", response_model=APIResponse[ModelConfigItem])
-async def set_default_model(
+def set_default_model(
     config_id: int,
     service: ModelConfigService = Depends(get_service),
 ) -> APIResponse[ModelConfigItem]:
@@ -123,7 +123,7 @@ async def test_model(
 
 
 @router.get("/models/status", response_model=APIResponse[ReadinessStatus])
-async def readiness_status(
+def readiness_status(
     user: CurrentUser = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> APIResponse[ReadinessStatus]:

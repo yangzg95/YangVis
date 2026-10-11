@@ -31,7 +31,7 @@ def get_service(
 
 
 @router.get("", response_model=APIResponse[ListResponse[AgentItem]])
-async def list_agents(
+def list_agents(
     enabled_only: bool = Query(default=False),
     service: AgentService = Depends(get_service),
 ) -> APIResponse[ListResponse[AgentItem]]:
@@ -41,7 +41,7 @@ async def list_agents(
 
 
 @router.post("", response_model=APIResponse[AgentItem])
-async def create_agent(
+def create_agent(
     payload: AgentCreate,
     service: AgentService = Depends(get_service),
 ) -> APIResponse[AgentItem]:
@@ -53,7 +53,7 @@ async def create_agent(
 
 
 @router.put("/{agent_id}", response_model=APIResponse[AgentItem])
-async def update_agent(
+def update_agent(
     agent_id: int,
     payload: AgentUpdate,
     service: AgentService = Depends(get_service),
@@ -68,7 +68,7 @@ async def update_agent(
 
 
 @router.delete("/{agent_id}", response_model=APIResponse[None])
-async def delete_agent(
+def delete_agent(
     agent_id: int,
     service: AgentService = Depends(get_service),
 ) -> APIResponse[None]:
@@ -82,7 +82,7 @@ async def delete_agent(
 
 
 @router.post("/{agent_id}/duplicate", response_model=APIResponse[AgentItem])
-async def duplicate_agent(
+def duplicate_agent(
     agent_id: int,
     service: AgentService = Depends(get_service),
 ) -> APIResponse[AgentItem]:

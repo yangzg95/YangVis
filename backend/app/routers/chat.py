@@ -44,7 +44,7 @@ def get_service(
 # ---- Conversations ----------------------------------------------------------
 
 @router.get("/conversations", response_model=APIResponse[ListResponse[ConversationItem]])
-async def list_conversations(
+def list_conversations(
     service: ChatService = Depends(get_service),
 ) -> APIResponse[ListResponse[ConversationItem]]:
     items = service.list_conversations()
@@ -52,7 +52,7 @@ async def list_conversations(
 
 
 @router.post("/conversations", response_model=APIResponse[ConversationItem])
-async def create_conversation(
+def create_conversation(
     # Defaulted so a bare POST works: "start a new chat" carries no data.
     payload: ConversationCreate = ConversationCreate(),
     service: ChatService = Depends(get_service),
@@ -83,7 +83,7 @@ async def create_conversation(
 
 
 @router.put("/conversations/{conversation_id}", response_model=APIResponse[ConversationItem])
-async def update_conversation(
+def update_conversation(
     conversation_id: int,
     payload: ConversationUpdate,
     service: ChatService = Depends(get_service),
@@ -114,7 +114,7 @@ async def update_conversation(
 
 
 @router.delete("/conversations/{conversation_id}", response_model=APIResponse[None])
-async def delete_conversation(
+def delete_conversation(
     conversation_id: int,
     service: ChatService = Depends(get_service),
 ) -> APIResponse[None]:
@@ -129,7 +129,7 @@ async def delete_conversation(
     "/conversations/{conversation_id}/messages",
     response_model=APIResponse[ListResponse[MessageItem]],
 )
-async def list_messages(
+def list_messages(
     conversation_id: int,
     service: ChatService = Depends(get_service),
 ) -> APIResponse[ListResponse[MessageItem]]:
@@ -144,7 +144,7 @@ async def list_messages(
     "/conversations/{conversation_id}/actions",
     response_model=APIResponse[ListResponse[OpsActionItem]],
 )
-async def list_actions(
+def list_actions(
     conversation_id: int,
     service: ChatService = Depends(get_service),
 ) -> APIResponse[ListResponse[OpsActionItem]]:
@@ -179,7 +179,7 @@ def _conversation_item(
     "/ops-conversations",
     response_model=APIResponse[ListResponse[ConversationItem]],
 )
-async def list_ops_conversations(
+def list_ops_conversations(
     target_type: str,
     target_id: int,
     service: ChatService = Depends(get_service),
@@ -194,7 +194,7 @@ async def list_ops_conversations(
 
 
 @router.post("/ops-conversations", response_model=APIResponse[ConversationItem])
-async def create_ops_conversation(
+def create_ops_conversation(
     payload: OpsConversationRequest,
     service: ChatService = Depends(get_service),
 ) -> APIResponse[ConversationItem]:
@@ -209,7 +209,7 @@ async def create_ops_conversation(
 
 
 @router.post("/actions/{action_id}/reject", response_model=APIResponse[OpsActionItem])
-async def reject_action(
+def reject_action(
     action_id: int,
     user: CurrentUser = Depends(require_user),
     service: ChatService = Depends(get_service),
@@ -266,7 +266,7 @@ async def confirm_action(
 
 
 @router.put("/messages/{message_id}", response_model=APIResponse[MessageItem])
-async def update_message(
+def update_message(
     message_id: int,
     payload: MessageUpdate,
     service: ChatService = Depends(get_service),

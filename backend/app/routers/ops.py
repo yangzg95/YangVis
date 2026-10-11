@@ -120,7 +120,7 @@ def _bad_request(exc: ValueError) -> HTTPException:
 
 
 @router.post("/ws-ticket", response_model=APIResponse[WsTicket])
-async def issue_ws_ticket(user: CurrentUser = Depends(require_user)) -> APIResponse[WsTicket]:
+def issue_ws_ticket(user: CurrentUser = Depends(require_user)) -> APIResponse[WsTicket]:
     """签发一张短时效的 WebSocket 入场票。
 
     浏览器无法给 WebSocket 握手加 Authorization 头，只能走 query string，
@@ -137,7 +137,7 @@ async def issue_ws_ticket(user: CurrentUser = Depends(require_user)) -> APIRespo
 
 
 @router.get("/servers", response_model=APIResponse[ListResponse[OpsServerItem]])
-async def list_servers(
+def list_servers(
     keyword: Optional[str] = Query(default=None, max_length=128),
     service: server_ops.OpsServerService = Depends(get_server_service),
 ) -> APIResponse[ListResponse[OpsServerItem]]:
@@ -146,7 +146,7 @@ async def list_servers(
 
 
 @router.post("/servers", response_model=APIResponse[OpsServerItem])
-async def create_server(
+def create_server(
     payload: OpsServerCreate,
     _admin: CurrentUser = Depends(require_admin),
     service: server_ops.OpsServerService = Depends(get_server_service),
@@ -159,7 +159,7 @@ async def create_server(
 
 
 @router.put("/servers/{server_id}", response_model=APIResponse[OpsServerItem])
-async def update_server(
+def update_server(
     server_id: int,
     payload: OpsServerUpdate,
     _admin: CurrentUser = Depends(require_admin),
@@ -175,7 +175,7 @@ async def update_server(
 
 
 @router.delete("/servers/{server_id}", response_model=APIResponse[None])
-async def delete_server(
+def delete_server(
     server_id: int,
     _admin: CurrentUser = Depends(require_admin),
     service: server_ops.OpsServerService = Depends(get_server_service),
@@ -212,7 +212,7 @@ async def test_server(
 
 
 @router.get("/databases", response_model=APIResponse[ListResponse[OpsDatabaseItem]])
-async def list_databases(
+def list_databases(
     keyword: Optional[str] = Query(default=None, max_length=128),
     db_type: Optional[DatabaseType] = Query(default=None),
     service: db_ops.OpsDatabaseService = Depends(get_database_service),
@@ -222,7 +222,7 @@ async def list_databases(
 
 
 @router.post("/databases", response_model=APIResponse[OpsDatabaseItem])
-async def create_database(
+def create_database(
     payload: OpsDatabaseCreate,
     _admin: CurrentUser = Depends(require_admin),
     service: db_ops.OpsDatabaseService = Depends(get_database_service),
@@ -235,7 +235,7 @@ async def create_database(
 
 
 @router.put("/databases/{database_id}", response_model=APIResponse[OpsDatabaseItem])
-async def update_database(
+def update_database(
     database_id: int,
     payload: OpsDatabaseUpdate,
     _admin: CurrentUser = Depends(require_admin),
@@ -251,7 +251,7 @@ async def update_database(
 
 
 @router.delete("/databases/{database_id}", response_model=APIResponse[None])
-async def delete_database(
+def delete_database(
     database_id: int,
     _admin: CurrentUser = Depends(require_admin),
     service: db_ops.OpsDatabaseService = Depends(get_database_service),
@@ -375,7 +375,7 @@ def get_favorite_service(
 
 
 @router.get("/sql-favorites", response_model=APIResponse[ListResponse[SqlFavoriteItem]])
-async def list_sql_favorites(
+def list_sql_favorites(
     database_id: Optional[int] = Query(default=None),
     service: db_ops.OpsSqlFavoriteService = Depends(get_favorite_service),
 ) -> APIResponse[ListResponse[SqlFavoriteItem]]:
@@ -386,7 +386,7 @@ async def list_sql_favorites(
 
 
 @router.post("/sql-favorites", response_model=APIResponse[SqlFavoriteItem])
-async def create_sql_favorite(
+def create_sql_favorite(
     payload: SqlFavoriteCreate,
     service: db_ops.OpsSqlFavoriteService = Depends(get_favorite_service),
 ) -> APIResponse[SqlFavoriteItem]:
@@ -398,7 +398,7 @@ async def create_sql_favorite(
 
 
 @router.put("/sql-favorites/{favorite_id}", response_model=APIResponse[SqlFavoriteItem])
-async def update_sql_favorite(
+def update_sql_favorite(
     favorite_id: int,
     payload: SqlFavoriteUpdate,
     service: db_ops.OpsSqlFavoriteService = Depends(get_favorite_service),
@@ -411,7 +411,7 @@ async def update_sql_favorite(
 
 
 @router.delete("/sql-favorites/{favorite_id}", response_model=APIResponse[None])
-async def delete_sql_favorite(
+def delete_sql_favorite(
     favorite_id: int,
     service: db_ops.OpsSqlFavoriteService = Depends(get_favorite_service),
 ) -> APIResponse[None]:
@@ -1119,7 +1119,7 @@ def _audit(
 
 
 @router.get("/audit", response_model=APIResponse[ListResponse[OpsAuditItem]])
-async def list_audit(
+def list_audit(
     target_type: Optional[str] = Query(default=None, pattern="^(server|database)$"),
     target_id: Optional[int] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),

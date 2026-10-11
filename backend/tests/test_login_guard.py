@@ -5,8 +5,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from cryptography.fernet import Fernet
+from fastapi import Request
 
 from app.config import get_settings
+from app.netutil import client_ip
 from app.services import captcha, login_guard
 from app.services.captcha import issue_captcha, verify_captcha
 
@@ -130,3 +132,28 @@ def test_lock_expires():
     counter = login_guard._counters[("alice", "1.2.3.4")]
     counter.locked_until = _utcnow() - timedelta(seconds=1)
     assert login_guard.locked_seconds("alice", "1.2.3.4") == 0
+
+
+# ---- 反代后的来源地址 --------------------------------------------------------
+
+
+def _request(forwarded: str | None = None, peer: str | None = "10.0.0.1") -> Request:
+    headers = [] if forwarded is None else [(b"x-forwarded-for", forwarded.encode())]
+    return Request({"type": "http", "headers": headers, "client": (peer, 54321) if peer else None})
+
+
+def test_client_ip_takes_the_first_forwarded_hop():
+    # 线上 nginx 后面 request.client.host 恒为网关容器：拿它当限流键，全站访客在
+    # 计数器里就是同一个人，IP 上限由第一个撞错密码的人替所有人触发。
+    assert client_ip(_request("203.0.113.7, 10.0.0.1")) == "203.0.113.7"
+
+
+def test_client_ip_falls_back_to_the_peer():
+    # 本地直跑没有反代，这一维回到对端地址。
+    assert client_ip(_request()) == "10.0.0.1"
+    assert client_ip(_request(peer=None)) is None
+
+
+def test_client_ip_truncates_to_the_log_column_width():
+    # ai_call_log.client_ip 是 String(64)，超了会当场炸在写日志上。
+    assert len(client_ip(_request("x" * 200))) == 64

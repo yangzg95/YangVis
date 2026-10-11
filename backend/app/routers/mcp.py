@@ -37,7 +37,7 @@ def get_service(
 
 
 @router.get("", response_model=APIResponse[ListResponse[McpServerItem]])
-async def list_mcp_servers(
+def list_mcp_servers(
     service: McpServerService = Depends(get_service),
 ) -> APIResponse[ListResponse[McpServerItem]]:
     """当前用户配置的全部 MCP 服务。"""
@@ -46,7 +46,7 @@ async def list_mcp_servers(
 
 
 @router.post("", response_model=APIResponse[McpServerItem])
-async def create_mcp_server(
+def create_mcp_server(
     payload: McpServerCreate,
     service: McpServerService = Depends(get_service),
 ) -> APIResponse[McpServerItem]:
@@ -58,7 +58,7 @@ async def create_mcp_server(
 
 
 @router.get("/export", response_model=APIResponse[McpExportResponse])
-async def export_mcp_config(
+def export_mcp_config(
     ids: Optional[List[int]] = Query(default=None),
     service: McpServerService = Depends(get_service),
 ) -> APIResponse[McpExportResponse]:
@@ -75,7 +75,7 @@ async def export_mcp_config(
 
 
 @router.post("/import", response_model=APIResponse[McpImportReport])
-async def import_mcp_config(
+def import_mcp_config(
     payload: McpImportRequest,
     service: McpServerService = Depends(get_service),
 ) -> APIResponse[McpImportReport]:
@@ -88,7 +88,7 @@ async def import_mcp_config(
 
 
 @router.get("/{server_id}", response_model=APIResponse[McpServerItem])
-async def get_mcp_server(
+def get_mcp_server(
     server_id: int,
     service: McpServerService = Depends(get_service),
 ) -> APIResponse[McpServerItem]:
@@ -100,7 +100,7 @@ async def get_mcp_server(
 
 
 @router.put("/{server_id}", response_model=APIResponse[McpServerItem])
-async def update_mcp_server(
+def update_mcp_server(
     server_id: int,
     payload: McpServerUpdate,
     service: McpServerService = Depends(get_service),
@@ -115,7 +115,7 @@ async def update_mcp_server(
 
 
 @router.delete("/{server_id}", response_model=APIResponse[None])
-async def delete_mcp_server(
+def delete_mcp_server(
     server_id: int,
     service: McpServerService = Depends(get_service),
 ) -> APIResponse[None]:

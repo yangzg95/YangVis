@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.entities import AiApiKey
+from app.netutil import client_ip
 from app.services import ai_gateway_proxy as proxy
 from app.services.ai_gateway import extract_bearer_key, find_api_key, list_public_models
 from app.sse import with_byte_heartbeat
@@ -107,18 +108,10 @@ async def _read_body(request: Request) -> Dict[str, Any]:
     return body
 
 
-def _client_ip(request: Request) -> Optional[str]:
-    # 反代后面的真实来源：nginx 惯例是 X-Forwarded-For 的第一个地址。
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()[:64]
-    return request.client.host if request.client else None
-
-
 def _prepare(
     request: Request, key: AiApiKey, body: Dict[str, Any], endpoint: str
 ) -> proxy.CallRecord:
-    record = proxy.new_record(endpoint, key, _client_ip(request))
+    record = proxy.new_record(endpoint, key, client_ip(request))
     record.model = body.get("model") if isinstance(body.get("model"), str) else None
     record.stream = bool(body.get("stream"))
     record.request_body = json.dumps(body, ensure_ascii=False)

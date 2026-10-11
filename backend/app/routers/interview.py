@@ -36,7 +36,7 @@ def get_service(
 # ---- 面试场次 ----------------------------------------------------------------
 
 @router.get("/interviews", response_model=APIResponse[ListResponse[InterviewItem]])
-async def list_interviews(
+def list_interviews(
     service: InterviewService = Depends(get_service),
 ) -> APIResponse[ListResponse[InterviewItem]]:
     items = [InterviewService.to_item(record) for record in service.list_records()]
@@ -44,7 +44,7 @@ async def list_interviews(
 
 
 @router.post("/interviews", response_model=APIResponse[InterviewDetail])
-async def create_interview(
+def create_interview(
     payload: InterviewCreate,
     service: InterviewService = Depends(get_service),
 ) -> APIResponse[InterviewDetail]:
@@ -53,7 +53,7 @@ async def create_interview(
 
 
 @router.get("/interviews/{record_id}", response_model=APIResponse[InterviewDetail])
-async def get_interview(
+def get_interview(
     record_id: int,
     service: InterviewService = Depends(get_service),
 ) -> APIResponse[InterviewDetail]:
@@ -65,7 +65,7 @@ async def get_interview(
 
 
 @router.put("/interviews/{record_id}", response_model=APIResponse[InterviewDetail])
-async def update_interview(
+def update_interview(
     record_id: int,
     payload: InterviewUpdate,
     service: InterviewService = Depends(get_service),
@@ -80,7 +80,7 @@ async def update_interview(
 
 
 @router.delete("/interviews/{record_id}", response_model=APIResponse[None])
-async def delete_interview(
+def delete_interview(
     record_id: int,
     service: InterviewService = Depends(get_service),
 ) -> APIResponse[None]:
@@ -96,7 +96,7 @@ async def delete_interview(
 # ---- 题目 ---------------------------------------------------------------------
 
 @router.post("/interviews/{record_id}/questions", response_model=APIResponse[InterviewDetail])
-async def add_question(
+def add_question(
     record_id: int,
     payload: InterviewQuestionIn,
     service: InterviewService = Depends(get_service),
@@ -112,7 +112,7 @@ async def add_question(
 @router.put(
     "/interviews/{record_id}/questions/{qid}", response_model=APIResponse[InterviewDetail]
 )
-async def update_question(
+def update_question(
     record_id: int,
     qid: str,
     payload: InterviewQuestionIn,
@@ -128,7 +128,7 @@ async def update_question(
 @router.delete(
     "/interviews/{record_id}/questions/{qid}", response_model=APIResponse[InterviewDetail]
 )
-async def delete_question(
+def delete_question(
     record_id: int,
     qid: str,
     service: InterviewService = Depends(get_service),
@@ -146,7 +146,7 @@ async def delete_question(
     "/interviews/{record_id}/questions/{qid}/answer",
     response_model=APIResponse[InterviewDetail],
 )
-async def generate_answer(
+def generate_answer(
     record_id: int,
     qid: str,
     background: BackgroundTasks,

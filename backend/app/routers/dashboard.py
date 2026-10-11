@@ -13,7 +13,7 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 
 @router.get("/summary", response_model=APIResponse[DashboardSummary])
-async def summary(
+def summary(
     user: CurrentUser = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> APIResponse[DashboardSummary]:

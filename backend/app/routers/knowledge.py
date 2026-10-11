@@ -78,7 +78,7 @@ def require_embedding_ready(
 # ---- Projects ---------------------------------------------------------------
 
 @router.get("/projects", response_model=APIResponse[ListResponse[KbProject]])
-async def list_projects(
+def list_projects(
     service: KnowledgeService = Depends(get_service),
 ) -> APIResponse[ListResponse[KbProject]]:
     items = service.list_projects()
@@ -86,7 +86,7 @@ async def list_projects(
 
 
 @router.post("/projects", response_model=APIResponse[KbProject])
-async def create_project(
+def create_project(
     payload: KbProjectCreate,
     service: KnowledgeService = Depends(get_service),
 ) -> APIResponse[KbProject]:
@@ -105,7 +105,7 @@ async def create_project(
 
 
 @router.put("/projects/{project_id}", response_model=APIResponse[KbProject])
-async def update_project(
+def update_project(
     project_id: int,
     payload: KbProjectUpdate,
     service: KnowledgeService = Depends(get_service),
@@ -121,7 +121,7 @@ async def update_project(
 
 
 @router.delete("/projects/{project_id}", response_model=APIResponse[None])
-async def delete_project(
+def delete_project(
     project_id: int,
     background: BackgroundTasks,
     service: KnowledgeService = Depends(get_service),
@@ -146,7 +146,7 @@ async def delete_project(
 # ---- Knowledge types --------------------------------------------------------
 
 @router.get("/types", response_model=APIResponse[ListResponse[KnowledgeType]])
-async def list_knowledge_types(
+def list_knowledge_types(
     project_id: int = Query(..., ge=1),
     service: KnowledgeService = Depends(get_service),
 ) -> APIResponse[ListResponse[KnowledgeType]]:
@@ -160,7 +160,7 @@ async def list_knowledge_types(
 
 
 @router.post("/types", response_model=APIResponse[KnowledgeType])
-async def create_knowledge_type(
+def create_knowledge_type(
     payload: KnowledgeTypeCreate,
     service: KnowledgeService = Depends(get_service),
 ) -> APIResponse[KnowledgeType]:
@@ -182,7 +182,7 @@ async def create_knowledge_type(
 
 
 @router.put("/types/{type_id}", response_model=APIResponse[KnowledgeType])
-async def update_knowledge_type(
+def update_knowledge_type(
     type_id: int,
     payload: KnowledgeTypeUpdate,
     service: KnowledgeService = Depends(get_service),
@@ -206,7 +206,7 @@ async def update_knowledge_type(
 
 
 @router.delete("/types/{type_id}", response_model=APIResponse[None])
-async def delete_knowledge_type(
+def delete_knowledge_type(
     type_id: int,
     background: BackgroundTasks,
     service: KnowledgeService = Depends(get_service),
@@ -240,7 +240,7 @@ async def _purge_vectors(collection: str, owner_id: int, doc_id: int) -> None:
     "/types/{type_id}/documents",
     response_model=APIResponse[ListResponse[KnowledgeDocument]],
 )
-async def list_documents(
+def list_documents(
     type_id: int,
     page: Optional[int] = Query(default=None, ge=1),
     page_size: Optional[int] = Query(default=None, ge=1, le=200),
@@ -259,7 +259,7 @@ async def list_documents(
 
 
 @router.get("/documents", response_model=APIResponse[ListResponse[KnowledgeDocument]])
-async def list_all_documents(
+def list_all_documents(
     type_id: Optional[int] = Query(default=None),
     page: Optional[int] = Query(default=None, ge=1),
     page_size: Optional[int] = Query(default=None, ge=1, le=200),
@@ -326,7 +326,7 @@ async def upload_document(
 
 
 @router.post("/documents/{doc_id}/reindex", response_model=APIResponse[KnowledgeDocument])
-async def reindex_document(
+def reindex_document(
     doc_id: int,
     background: BackgroundTasks,
     service: KnowledgeService = Depends(require_embedding_ready),
@@ -345,7 +345,7 @@ async def reindex_document(
 
 
 @router.delete("/documents/{doc_id}", response_model=APIResponse[None])
-async def delete_document(
+def delete_document(
     doc_id: int,
     background: BackgroundTasks,
     service: KnowledgeService = Depends(get_service),
@@ -359,7 +359,7 @@ async def delete_document(
 
 
 @router.post("/documents/batch-delete", response_model=APIResponse[DocBatchResult])
-async def batch_delete_documents(
+def batch_delete_documents(
     payload: DocBatchPayload,
     background: BackgroundTasks,
     service: KnowledgeService = Depends(get_service),
@@ -384,7 +384,7 @@ async def batch_delete_documents(
 
 
 @router.post("/documents/batch-reindex", response_model=APIResponse[DocBatchResult])
-async def batch_reindex_documents(
+def batch_reindex_documents(
     payload: DocBatchPayload,
     background: BackgroundTasks,
     service: KnowledgeService = Depends(require_embedding_ready),
@@ -412,7 +412,7 @@ async def batch_reindex_documents(
 # ---- Index ------------------------------------------------------------------
 
 @router.get("/index/state", response_model=APIResponse[IndexState])
-async def index_state(
+def index_state(
     service: KnowledgeService = Depends(get_service),
 ) -> APIResponse[IndexState]:
     """Not gated: the SPA needs this to explain *why* the rest is unavailable."""
@@ -420,7 +420,7 @@ async def index_state(
 
 
 @router.post("/index/rebuild", response_model=APIResponse[RebuildResult])
-async def rebuild_index(
+def rebuild_index(
     background: BackgroundTasks,
     service: KnowledgeService = Depends(require_embedding_ready),
 ) -> APIResponse[RebuildResult]:

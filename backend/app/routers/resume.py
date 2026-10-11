@@ -1,6 +1,7 @@
 """智能办公 · 简历相关接口。"""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 from urllib.parse import quote
@@ -77,7 +78,7 @@ def get_netdisk_service(
 # ---- 简历 -------------------------------------------------------------------
 
 @router.get("/resumes", response_model=APIResponse[ListResponse[ResumeItem]])
-async def list_resumes(
+def list_resumes(
     service: ResumeService = Depends(get_service),
 ) -> APIResponse[ListResponse[ResumeItem]]:
     items = service.to_items(service.list_resumes())
@@ -109,7 +110,9 @@ async def upload_resume(
 
     filename = file.filename or "untitled.pdf"
     try:
-        text = extract_resume_text(filename, raw)
+        # pypdf / python-docx 是本地 CPU 解析，放线程里跑：这个 handler 因为要
+        # await 读上传体只能是 async def，直接在事件循环里解析会卡住所有流。
+        text = await asyncio.to_thread(extract_resume_text, filename, raw)
     except UnsupportedFileType as exc:
         return APIResponse(code=-1, message=str(exc))
 
@@ -137,7 +140,7 @@ async def upload_resume(
 
 
 @router.get("/resumes/{resume_id}", response_model=APIResponse[ResumeDetail])
-async def get_resume(
+def get_resume(
     resume_id: int,
     service: ResumeService = Depends(get_service),
 ) -> APIResponse[ResumeDetail]:
@@ -149,7 +152,7 @@ async def get_resume(
 
 
 @router.get("/resumes/{resume_id}/preview", response_model=APIResponse[ResumePreview])
-async def preview_resume(
+def preview_resume(
     resume_id: int,
     service: ResumeService = Depends(get_service),
 ) -> APIResponse[ResumePreview]:
@@ -171,7 +174,7 @@ async def preview_resume(
 
 
 @router.put("/resumes/{resume_id}", response_model=APIResponse[ResumeItem])
-async def update_resume(
+def update_resume(
     resume_id: int,
     payload: ResumeUpdate,
     service: ResumeService = Depends(get_service),
@@ -276,7 +279,7 @@ async def download_resume(
 
 
 @router.post("/resumes/{resume_id}/analyze", response_model=APIResponse[ResumeItem])
-async def analyze_resume(
+def analyze_resume(
     resume_id: int,
     background: BackgroundTasks,
     service: ResumeService = Depends(get_service),
@@ -309,7 +312,7 @@ async def _analyze_task(owner_id: int, resume_id: int) -> None:
 # ---- 简历对比 ---------------------------------------------------------------
 
 @router.post("/comparisons", response_model=APIResponse[ResumeComparisonItem])
-async def create_comparison(
+def create_comparison(
     payload: ResumeCompareRequest,
     background: BackgroundTasks,
     service: ResumeService = Depends(get_service),
@@ -326,7 +329,7 @@ async def create_comparison(
 
 
 @router.get("/comparisons", response_model=APIResponse[ListResponse[ResumeComparisonItem]])
-async def list_comparisons(
+def list_comparisons(
     service: ResumeService = Depends(get_service),
 ) -> APIResponse[ListResponse[ResumeComparisonItem]]:
     items = service.to_comparison_items(service.list_comparisons())
@@ -334,7 +337,7 @@ async def list_comparisons(
 
 
 @router.get("/comparisons/{comparison_id}", response_model=APIResponse[ResumeComparisonDetail])
-async def get_comparison(
+def get_comparison(
     comparison_id: int,
     service: ResumeService = Depends(get_service),
 ) -> APIResponse[ResumeComparisonDetail]:
@@ -346,7 +349,7 @@ async def get_comparison(
 
 
 @router.delete("/comparisons/{comparison_id}", response_model=APIResponse[None])
-async def delete_comparison(
+def delete_comparison(
     comparison_id: int,
     service: ResumeService = Depends(get_service),
 ) -> APIResponse[None]:
@@ -373,7 +376,7 @@ async def _compare_task(owner_id: int, comparison_id: int) -> None:
 # ---- 求职助手（toolkit）-------------------------------------------------------
 
 @router.post("/toolkit", response_model=APIResponse[ResumeToolkitItem])
-async def create_toolkit_task(
+def create_toolkit_task(
     payload: ResumeToolkitCreate,
     background: BackgroundTasks,
     service: ResumeService = Depends(get_service),
@@ -391,7 +394,7 @@ async def create_toolkit_task(
 
 
 @router.get("/toolkit", response_model=APIResponse[ListResponse[ResumeToolkitItem]])
-async def list_toolkit_tasks(
+def list_toolkit_tasks(
     service: ResumeService = Depends(get_service),
 ) -> APIResponse[ListResponse[ResumeToolkitItem]]:
     items = service.to_toolkit_items(service.list_toolkit_tasks())
@@ -399,7 +402,7 @@ async def list_toolkit_tasks(
 
 
 @router.get("/toolkit/{task_id}", response_model=APIResponse[ResumeToolkitDetail])
-async def get_toolkit_task(
+def get_toolkit_task(
     task_id: int,
     service: ResumeService = Depends(get_service),
 ) -> APIResponse[ResumeToolkitDetail]:
@@ -411,7 +414,7 @@ async def get_toolkit_task(
 
 
 @router.delete("/toolkit/{task_id}", response_model=APIResponse[None])
-async def delete_toolkit_task(
+def delete_toolkit_task(
     task_id: int,
     service: ResumeService = Depends(get_service),
 ) -> APIResponse[None]:

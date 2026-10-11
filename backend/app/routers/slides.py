@@ -1,6 +1,7 @@
 """智能办公 · 幻灯片相关接口。"""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import List, Optional
 from urllib.parse import quote
@@ -73,7 +74,7 @@ def _not_found(exc: LookupError) -> HTTPException:
 
 
 @router.get("", response_model=APIResponse[ListResponse[SlideDeckItem]])
-async def list_decks(
+def list_decks(
     service: SlideService = Depends(get_service),
 ) -> APIResponse[ListResponse[SlideDeckItem]]:
     items = service.to_items(service.list_decks())
@@ -118,7 +119,8 @@ async def create_deck(
             return APIResponse(code=-1, message=oversize_message(limit))
         filename = upload.filename or "untitled"
         try:
-            extracted = extract_resume_text(filename, raw)
+            # 本地 CPU 解析放线程里，别在事件循环里啃 PDF。
+            extracted = await asyncio.to_thread(extract_resume_text, filename, raw)
         except UnsupportedFileType as exc:
             return APIResponse(code=-1, message=str(exc))
         if extracted:
@@ -147,7 +149,7 @@ async def create_deck(
 
 
 @router.get("/{deck_id}", response_model=APIResponse[SlideDeckDetail])
-async def get_deck(
+def get_deck(
     deck_id: int,
     service: SlideService = Depends(get_service),
 ) -> APIResponse[SlideDeckDetail]:
@@ -159,7 +161,7 @@ async def get_deck(
 
 
 @router.put("/{deck_id}", response_model=APIResponse[SlideDeckDetail])
-async def save_deck(
+def save_deck(
     deck_id: int,
     payload: SlideDeckSave,
     service: SlideService = Depends(get_service),
@@ -185,7 +187,7 @@ async def save_deck(
 
 
 @router.delete("/{deck_id}", response_model=APIResponse[None])
-async def delete_deck(
+def delete_deck(
     deck_id: int,
     service: SlideService = Depends(get_service),
 ) -> APIResponse[None]:
@@ -206,7 +208,7 @@ async def delete_deck(
 
 
 @router.post("/{deck_id}/generate", response_model=APIResponse[SlideDeckItem])
-async def regenerate_deck(
+def regenerate_deck(
     deck_id: int,
     background: BackgroundTasks,
     payload: SlideDeckRegenerate,
@@ -247,7 +249,7 @@ def _html_response(content: str, *, attachment_name: Optional[str] = None) -> Re
 
 
 @router.get("/{deck_id}/html")
-async def preview_html(
+def preview_html(
     deck_id: int,
     service: SlideService = Depends(get_service),
 ) -> Response:
@@ -265,7 +267,7 @@ async def preview_html(
 
 
 @router.get("/{deck_id}/export")
-async def export_html(
+def export_html(
     request: Request,
     deck_id: int,
     service: SlideService = Depends(get_service),
@@ -316,7 +318,8 @@ async def upload_asset(
         return APIResponse(code=-1, message=oversize_message(limit))
 
     try:
-        stored = store_image(deck_id, file.filename or "image", raw)
+        # 落盘是同步 IO，放线程里。
+        stored = await asyncio.to_thread(store_image, deck_id, file.filename or "image", raw)
     except SlideImageError as exc:
         return APIResponse(code=-1, message=str(exc))
 
@@ -332,7 +335,7 @@ async def upload_asset(
 
 
 @router.delete("/{deck_id}/assets/{asset_id}", response_model=APIResponse[SlideDeckDetail])
-async def delete_asset(
+def delete_asset(
     deck_id: int,
     asset_id: str,
     service: SlideService = Depends(get_service),
