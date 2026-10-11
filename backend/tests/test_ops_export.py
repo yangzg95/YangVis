@@ -11,6 +11,8 @@ import pytest
 
 from app.models.schemas import DbRowFilter, DbRowSort
 from app.services import ops_database as db_ops
+from app.services import ops_db_data as db_data
+from app.services import ops_db_schema as db_schema
 
 
 class FakeConn:
@@ -88,7 +90,7 @@ def connect(monkeypatch):
 
     def install(script, conn=None):
         conn = conn or ScriptedConn(script)
-        monkeypatch.setattr(db_ops, "_connect_mysql", lambda *a, **k: conn)
+        monkeypatch.setattr(db_data, "_connect_mysql", lambda *a, **k: conn)
         return conn
 
     return install
@@ -101,7 +103,7 @@ def test_open_export_builds_count_probe_and_stable_order_without_params(connect)
         "SELECT COLUMN_NAME": {"rows": [("id", "PRI"), ("name", "")]},
     })
     # 建连之后的第一条业务语句就是 COUNT(*)，列名靠一条 LIMIT 0 的探针拿。
-    session = db_ops._open_export_sync(ITEM, "", "shop", "orders", [], [], "")  # type: ignore[arg-type]
+    session = db_data._open_export_sync(ITEM, "", "shop", "orders", [], [], "")  # type: ignore[arg-type]
     try:
         assert [sql for sql, _ in conn.executed[:3]] == [
             "SELECT COUNT(*) FROM `shop`.`orders`",
@@ -126,7 +128,7 @@ def test_open_export_without_a_primary_key_orders_by_the_first_column(connect):
         "SELECT * FROM": {"description": (("name",), ("created_at",)), "rows": []},
         "SELECT COLUMN_NAME": {"rows": [("name", ""), ("created_at", "")]},
     })
-    session = db_ops._open_export_sync(ITEM, "", "shop", "orders", [], [], "")  # type: ignore[arg-type]
+    session = db_data._open_export_sync(ITEM, "", "shop", "orders", [], [], "")  # type: ignore[arg-type]
     try:
         assert session.head_sql == "SELECT * FROM `shop`.`orders` ORDER BY `name` ASC"
     finally:
@@ -138,7 +140,7 @@ def test_open_export_keeps_user_sort_and_filters_as_params(connect):
         "SELECT COUNT(*)": {"rows": [(3,)]},
         "SELECT * FROM": {"description": (("id",), ("created_at",))},
     })
-    session = db_ops._open_export_sync(  # type: ignore[arg-type]
+    session = db_data._open_export_sync(  # type: ignore[arg-type]
         ITEM,
         "",
         "shop",
@@ -162,7 +164,7 @@ def test_open_export_keeps_user_sort_and_filters_as_params(connect):
 
 def test_export_batch_appends_limit_and_offset_to_the_same_head(connect):
     conn = connect({"SELECT * FROM": {"description": (("id",),), "rows": [(1,), (2,)]}})
-    rows = db_ops._fetch_export_batch_sync(
+    rows = db_data._fetch_export_batch_sync(
         conn, "SELECT * FROM `shop`.`orders`", ("x",), 1000  # type: ignore[arg-type]
     )
     assert rows == [(1,), (2,)]
@@ -178,10 +180,10 @@ def test_open_export_closes_the_connection_when_a_statement_fails(connect):
     connect({}, conn)
     # 建连之后任何一步炸了都不能把连接漏在那里：响应还没开始，没人会来收尾。
     with pytest.raises(pymysql.Error):
-        db_ops._open_export_sync(ITEM, "", "shop", "missing", [], [], "")  # type: ignore[arg-type]
+        db_data._open_export_sync(ITEM, "", "shop", "missing", [], [], "")  # type: ignore[arg-type]
     assert conn.closed == 1
-def session(total: int = 3, conn=None) -> db_ops._ExportSession:
-    return db_ops._ExportSession(
+def session(total: int = 3, conn=None) -> db_data._ExportSession:
+    return db_data._ExportSession(
         conn or FakeConn(),  # type: ignore[arg-type]
         "shop",
         "orders",
@@ -206,7 +208,7 @@ def batches(monkeypatch):
         recorded.append(offset)
         return state["batches"].pop(0) if state["batches"] else []
 
-    monkeypatch.setattr(db_ops, "_fetch_export_batch_sync", fake_fetch)
+    monkeypatch.setattr(db_data, "_fetch_export_batch_sync", fake_fetch)
 
     def load(*groups):
         state["batches"] = [list(g) for g in groups]
@@ -219,7 +221,7 @@ def batches(monkeypatch):
 
 
 def test_browse_clauses_combine_raw_where_and_structured_filters():
-    where_sql, params, order_sql = db_ops._browse_clauses(
+    where_sql, params, order_sql = db_data._browse_clauses(
         [DbRowFilter(column="status", op="eq", value="paid")],
         [DbRowSort(column="id", direction="desc")],
         "amount > 10",
@@ -230,11 +232,11 @@ def test_browse_clauses_combine_raw_where_and_structured_filters():
 
 
 def test_browse_clauses_without_anything_yield_no_where():
-    assert db_ops._browse_clauses([], [], "") == ("", [], "")
+    assert db_data._browse_clauses([], [], "") == ("", [], "")
 
 
 def test_quote_ident_doubles_backtick_in_table_names():
-    assert db_ops._quote_ident("or`der") == "`or``der`"
+    assert db_schema._quote_ident("or`der") == "`or``der`"
 
 
 # ---- 格式写出 -------------------------------------------------------------------
@@ -242,7 +244,7 @@ def test_quote_ident_doubles_backtick_in_table_names():
 
 def test_csv_has_bom_crlf_and_quotes_only_when_needed(batches):
     batches([(1, "a,b"), (2, 'say "hi"'), (3, "plain")])
-    out = asyncio.run(_collect(db_ops.stream_export(session(3), "csv")))
+    out = asyncio.run(_collect(db_data.stream_export(session(3), "csv")))
     assert out.startswith("\ufeffid,name\r\n")
     # 含逗号/引号的格子才加引号，普通值原样留着——整列都裹引号的 CSV 没法 diff。
     assert out.endswith('1,"a,b"\r\n2,"say ""hi"""\r\n3,plain\r\n')
@@ -250,25 +252,25 @@ def test_csv_has_bom_crlf_and_quotes_only_when_needed(batches):
 
 def test_csv_keeps_newlines_inside_quotes(batches):
     batches([(1, "two\nlines")])
-    out = asyncio.run(_collect(db_ops.stream_export(session(1), "csv")))
+    out = asyncio.run(_collect(db_data.stream_export(session(1), "csv")))
     assert '1,"two\nlines"' in out
 
 
 def test_json_is_one_object_per_row_with_non_ascii_kept(batches):
     batches([(1, "已付款"), (2, None)])
-    out = asyncio.run(_collect(db_ops.stream_export(session(2), "json")))
+    out = asyncio.run(_collect(db_data.stream_export(session(2), "json")))
     assert out == '[\n  {"id": 1, "name": "已付款"},\n  {"id": 2, "name": null}\n]'
 
 
 def test_empty_json_export_is_still_valid(batches):
     batches()
-    out = asyncio.run(_collect(db_ops.stream_export(session(0), "json")))
+    out = asyncio.run(_collect(db_data.stream_export(session(0), "json")))
     assert out == "[\n\n]"
 
 
 def test_markdown_escapes_pipes_and_folds_newlines(batches):
     batches([(1, "a|b"), (2, "x\ny")])
-    out = asyncio.run(_collect(db_ops.stream_export(session(2), "markdown")))
+    out = asyncio.run(_collect(db_data.stream_export(session(2), "markdown")))
     assert out.splitlines() == [
         "| id | name |",
         "| --- | --- |",
@@ -279,7 +281,7 @@ def test_markdown_escapes_pipes_and_folds_newlines(batches):
 
 def test_insert_groups_a_batch_into_one_statement(batches):
     batches([(1, "ok"), (2, None)])
-    out = asyncio.run(_collect(db_ops.stream_export(session(2), "insert")))
+    out = asyncio.run(_collect(db_data.stream_export(session(2), "insert")))
     assert out == (
         "INSERT INTO `shop`.`orders` (`id`, `name`) VALUES\n"
         "(1, 'ok'),\n"
@@ -291,7 +293,7 @@ def test_insert_uses_stringified_values_for_dates_and_bytes(batches):
     import datetime
 
     batches([(1, datetime.date(2026, 9, 28)), (2, b"\xffbytes")])
-    out = asyncio.run(_collect(db_ops.stream_export(session(2), "insert")))
+    out = asyncio.run(_collect(db_data.stream_export(session(2), "insert")))
     assert "'2026-09-28'" in out
     # BLOB 走 utf-8 替换解码，与浏览页所见一致：导出文件不会比屏幕上的更准。
     assert "'" + chr(0xFFFD) + "bytes'" in out
@@ -306,31 +308,31 @@ def full(n: int):
 
 
 def test_export_stops_at_the_declared_total_without_another_batch(batches):
-    recorded = batches(full(db_ops._EXPORT_BATCH), full(db_ops._EXPORT_BATCH), [(9999, "extra")])
-    total = db_ops._EXPORT_BATCH * 2
-    out = asyncio.run(_collect(db_ops.stream_export(session(total), "csv")))
+    recorded = batches(full(db_data._EXPORT_BATCH), full(db_data._EXPORT_BATCH), [(9999, "extra")])
+    total = db_data._EXPORT_BATCH * 2
+    out = asyncio.run(_collect(db_data.stream_export(session(total), "csv")))
     # 第三批在总数之外：多取一批就是把屏幕之外的行也塞进文件。
-    assert recorded == [0, db_ops._EXPORT_BATCH]
+    assert recorded == [0, db_data._EXPORT_BATCH]
     assert "9999,extra" not in out
 
 
 def test_export_advances_offsets_by_rows_actually_returned(batches):
-    recorded = batches(full(db_ops._EXPORT_BATCH), [(999, "tail")])
-    asyncio.run(_collect(db_ops.stream_export(session(db_ops._EXPORT_BATCH + 1), "csv")))
-    assert recorded == [0, db_ops._EXPORT_BATCH]
+    recorded = batches(full(db_data._EXPORT_BATCH), [(999, "tail")])
+    asyncio.run(_collect(db_data.stream_export(session(db_data._EXPORT_BATCH + 1), "csv")))
+    assert recorded == [0, db_data._EXPORT_BATCH]
 
 
 def test_short_batch_ends_the_stream_even_if_count_says_more(batches):
     # 只读事务里 COUNT(*) 与取数同快照，短批就是取完了，不该再按总数空转。
     recorded = batches([(1, "a")])
-    asyncio.run(_collect(db_ops.stream_export(session(10), "csv")))
+    asyncio.run(_collect(db_data.stream_export(session(10), "csv")))
     assert recorded == [0]
 
 
 def test_connection_is_closed_when_the_client_walks_away(batches):
     batches([(1, "a")] * 50)
     conn = FakeConn()
-    chunks = db_ops.stream_export(session(50, conn), "csv")
+    chunks = db_data.stream_export(session(50, conn), "csv")
 
     async def abort():
         first = await chunks.__anext__()
@@ -344,21 +346,21 @@ def test_connection_is_closed_when_the_client_walks_away(batches):
 def test_rollback_failure_still_closes_the_connection(batches):
     batches([(1, "a")])
     conn = FakeConn(fail_rollback=True)
-    asyncio.run(_collect(db_ops.stream_export(session(1, conn), "csv")))
+    asyncio.run(_collect(db_data.stream_export(session(1, conn), "csv")))
     assert conn.closed == 1
 
 
 def test_unknown_format_is_refused_before_any_row_is_read(batches):
     with pytest.raises(db_ops.OpsDbError):
-        asyncio.run(_collect(db_ops.stream_export(session(1), "xlsx")))
+        asyncio.run(_collect(db_data.stream_export(session(1), "xlsx")))
 
 
 def test_open_export_rejects_a_hostile_where_fragment():
     # 手输条件与浏览同一道只读网关：分号后面藏什么都进不到连接里。
     with pytest.raises(db_ops.OpsDbError, match="安全检查"):
-        asyncio.run(db_ops.open_export(object(), "shop", "orders", where="1=1; DROP TABLE x"))
+        asyncio.run(db_data.open_export(object(), "shop", "orders", where="1=1; DROP TABLE x"))
 
 
 def test_where_longer_than_the_browse_limit_is_refused():
     with pytest.raises(db_ops.OpsDbError, match="太长"):
-        asyncio.run(db_ops.open_export(object(), "shop", "orders", where="a" * 1025))
+        asyncio.run(db_data.open_export(object(), "shop", "orders", where="a" * 1025))

@@ -19,6 +19,8 @@ from app.models.schemas import (
     DbTableDefUpdate,
 )
 from app.services import ops_database as db_ops
+from app.services import ops_db_design as db_design
+from app.services.ops_safety import classify_sql_writable
 
 
 def col(name, column_type="varchar(64)", *, nullable=True, default=None, extra="", comment=""):
@@ -57,7 +59,7 @@ def show(payload, *, columns, primary_key=(), indexes=(), comment=""):
         indexes=list(indexes),
         comment=comment,
     )
-    return db_ops.build_alter_preview("shop", "orders", definition, payload)
+    return db_design.build_alter_preview("shop", "orders", definition, payload)
 
 
 def sqls(result):
@@ -213,7 +215,7 @@ def test_quotable_names_are_escaped_and_still_pass_the_gate():
     payload = DbTableDefUpdate(columns=[want("a", "int"), want("b`c", "int")])
     sql = sqls(show(payload, columns=[col("a", "int")]))[0]
     assert "`b``c`" in sql
-    assert db_ops.classify_sql_writable(sql).allowed
+    assert classify_sql_writable(sql).allowed
 
 
 # ---- 主键与索引 ---------------------------------------------------------------
@@ -317,7 +319,7 @@ def apply(statements):
         id=1, owner_id=1, name="台账", db_type="mysql", host="h", username="u", writable=True
     )
     # 全部被拒时一句都不会进数据库连接，所以这些用例不需要真实 MySQL。
-    return asyncio.run(db_ops.apply_alter(item, "shop", "orders", statements))
+    return asyncio.run(db_design.apply_alter(item, "shop", "orders", statements))
 
 
 def test_apply_refuses_statements_aimed_at_other_tables():

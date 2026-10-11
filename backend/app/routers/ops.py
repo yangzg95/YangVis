@@ -81,6 +81,11 @@ from app.models.schemas import (
 )
 from app.security import create_ws_ticket
 from app.services import ops_database as db_ops
+from app.services import ops_db_data as db_data
+from app.services import ops_db_design as db_design
+from app.services import ops_db_exec as db_exec
+from app.services import ops_db_redis as db_redis
+from app.services import ops_db_schema as db_schema
 from app.services import ops_server as server_ops
 from app.services.chat_ops import Auditor
 
@@ -274,7 +279,7 @@ async def test_database(
         raise _not_found(exc) from exc
 
     try:
-        banner = await db_ops.test_connection(row)
+        banner = await db_exec.test_connection(row)
     except (db_ops.OpsDbError, db_ops.OpsDbForbidden) as exc:
         logger.warning("connectivity test of database %s failed: %s", database_id, exc)
         service.record_check(row, ok=False, message=str(exc))
@@ -308,7 +313,7 @@ async def execute_database(
     writable = row.writable and user.can_ops_write
     verdict = "write" if writable else "readonly"
     try:
-        result = await db_ops.execute(row, command, payload.schema_, allow_write=user.can_ops_write)
+        result = await db_exec.execute(row, command, payload.schema_, allow_write=user.can_ops_write)
     except db_ops.OpsDbForbidden as exc:
         _audit(db, user.user_id, row, command, "forbidden", False, str(exc))
         raise BusinessError(CODE_OPS_FORBIDDEN, str(exc)) from exc
@@ -346,7 +351,7 @@ async def execute_database_batch(
     writable = row.writable and user.can_ops_write
     verdict = "write" if writable else "readonly"
     try:
-        result, any_forbidden = await db_ops.execute_batch(
+        result, any_forbidden = await db_exec.execute_batch(
             row, command, payload.schema_, allow_write=user.can_ops_write
         )
     except db_ops.OpsDbError as exc:
@@ -483,7 +488,7 @@ async def list_database_schemas(
     except LookupError as exc:
         raise _not_found(exc) from exc
     try:
-        items = await db_ops.list_schemas(row)
+        items = await db_schema.list_schemas(row)
     except db_ops.OpsDbError as exc:
         raise _browse_error(exc) from exc
     _note_browse_success(service, row)
@@ -501,7 +506,7 @@ async def list_database_tables(
 ) -> APIResponse[ListResponse[DbTableItem]]:
     row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
     try:
-        items = await db_ops.list_tables(row, schema)
+        items = await db_schema.list_tables(row, schema)
     except db_ops.OpsDbError as exc:
         raise _browse_error(exc) from exc
     _note_browse_success(service, row)
@@ -520,7 +525,7 @@ async def list_database_columns(
 ) -> APIResponse[ListResponse[DbColumnItem]]:
     row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
     try:
-        items = await db_ops.list_columns(row, schema, table)
+        items = await db_schema.list_columns(row, schema, table)
     except db_ops.OpsDbError as exc:
         raise _browse_error(exc) from exc
     _note_browse_success(service, row)
@@ -540,7 +545,7 @@ async def read_database_table_ddl(
     """``SHOW CREATE TABLE`` 原文。改结构不在这里做——那是「设计表」页签的活。"""
     row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
     try:
-        ddl = await db_ops.table_ddl(row, schema, table)
+        ddl = await db_schema.table_ddl(row, schema, table)
     except db_ops.OpsDbError as exc:
         raise _browse_error(exc) from exc
     _note_browse_success(service, row)
@@ -559,7 +564,7 @@ async def list_database_table_indexes(
 ) -> APIResponse[ListResponse[DbIndexItem]]:
     row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
     try:
-        items = await db_ops.list_indexes(row, schema, table)
+        items = await db_schema.list_indexes(row, schema, table)
     except db_ops.OpsDbError as exc:
         raise _browse_error(exc) from exc
     _note_browse_success(service, row)
@@ -578,7 +583,7 @@ async def list_database_table_foreign_keys(
 ) -> APIResponse[ListResponse[DbForeignKeyItem]]:
     row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
     try:
-        items = await db_ops.list_foreign_keys(row, schema, table)
+        items = await db_schema.list_foreign_keys(row, schema, table)
     except db_ops.OpsDbError as exc:
         raise _browse_error(exc) from exc
     _note_browse_success(service, row)
@@ -598,7 +603,7 @@ async def read_database_table_def(
     """设计表页签的初值：列 + 主键 + 索引（外键只读，不在这里编辑）。"""
     row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
     try:
-        definition = await db_ops.table_def(row, schema, table)
+        definition = await db_design.table_def(row, schema, table)
     except db_ops.OpsDbError as exc:
         raise _browse_error(exc) from exc
     _note_browse_success(service, row)
@@ -617,7 +622,7 @@ async def read_database_erd(
     """一个库的实体关系数据（外键连线 + 关键列），前端渲染成 Mermaid erDiagram。"""
     row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
     try:
-        data = await db_ops.erd(row, schema)
+        data = await db_schema.erd(row, schema)
     except db_ops.OpsDbError as exc:
         raise _browse_error(exc) from exc
     _note_browse_success(service, row)
@@ -636,7 +641,7 @@ async def database_completion_meta(
     """查询编辑器的补全元数据：该库下所有表和列，一次拉齐。"""
     row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
     try:
-        items = await db_ops.list_completion_meta(row, schema)
+        items = await db_schema.list_completion_meta(row, schema)
     except db_ops.OpsDbError as exc:
         raise _browse_error(exc) from exc
     _note_browse_success(service, row)
@@ -652,7 +657,7 @@ async def browse_database_rows(
     schema: str,
     table: str,
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=100, ge=1, le=db_ops.MAX_PAGE_SIZE),
+    page_size: int = Query(default=100, ge=1, le=db_exec.MAX_PAGE_SIZE),
     filters: Optional[str] = Query(default=None),
     order_by: Optional[str] = Query(default=None),
     where: Optional[str] = Query(default=None, max_length=1024),
@@ -669,7 +674,7 @@ async def browse_database_rows(
     except ValueError as exc:
         raise BusinessError(CODE_OPS_EXEC_FAILED, str(exc)) from exc
     try:
-        result = await db_ops.browse_rows(
+        result = await db_data.browse_rows(
             row, schema, table, page, page_size, filter_list, sort_list, where or ""
         )
     except db_ops.OpsDbError as exc:
@@ -678,7 +683,7 @@ async def browse_database_rows(
     return APIResponse(data=result)
 
 
-# 「导出全部」的格式 → (media type, 文件后缀)。键与 db_ops._EXPORT_STREAMERS 一致。
+# 「导出全部」的格式 → (media type, 文件后缀)。键与 db_data._EXPORT_STREAMERS 一致。
 _EXPORT_MEDIA: Dict[str, tuple] = {
     "csv": ("text/csv", "csv"),
     "json": ("application/json", "json"),
@@ -721,7 +726,7 @@ async def export_database_rows(
 
     command = f"[导出 {fmt}] {schema}.{table}"
     try:
-        session = await db_ops.open_export(
+        session = await db_data.open_export(
             row, schema, table, filter_list, sort_list, where or ""
         )
     except db_ops.OpsDbError as exc:
@@ -732,7 +737,7 @@ async def export_database_rows(
     _note_browse_success(service, row)
     media_type, suffix = _EXPORT_MEDIA[fmt]
     return StreamingResponse(
-        db_ops.stream_export(session, fmt),
+        db_data.stream_export(session, fmt),
         media_type=f'{media_type}; charset="utf-8"',
         headers={
             "Content-Disposition": _attachment(f"{schema}.{table}.{suffix}"),
@@ -773,7 +778,7 @@ async def update_database_row(
         raise BusinessError(CODE_OPS_FORBIDDEN, "该连接未开启写入，或当前账号没有写权限")
 
     try:
-        display, result = await db_ops.update_row(row, schema, table, payload.key, payload.sets)
+        display, result = await db_data.update_row(row, schema, table, payload.key, payload.sets)
     except db_ops.OpsDbForbidden as exc:
         command = getattr(exc, "display", "") or _row_write_fallback("update", schema, table)
         _audit(db, user.user_id, row, command, "forbidden", False, str(exc))
@@ -812,7 +817,7 @@ async def delete_database_row(
         raise BusinessError(CODE_OPS_FORBIDDEN, "该连接未开启写入，或当前账号没有写权限")
 
     try:
-        display, result = await db_ops.delete_row(row, schema, table, payload.key)
+        display, result = await db_data.delete_row(row, schema, table, payload.key)
     except db_ops.OpsDbForbidden as exc:
         command = getattr(exc, "display", "") or _row_write_fallback("delete", schema, table)
         _audit(db, user.user_id, row, command, "forbidden", False, str(exc))
@@ -862,7 +867,7 @@ async def preview_database_table_alter(
     row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
     _require_table_design(db, user, row, schema, table)
     try:
-        preview = await db_ops.preview_alter(row, schema, table, payload)
+        preview = await db_design.preview_alter(row, schema, table, payload)
     except db_ops.OpsDbError as exc:
         raise _browse_error(exc) from exc
     _note_browse_success(service, row)
@@ -892,7 +897,7 @@ async def apply_database_table_alter(
 
     command = "\n".join(payload.statements)
     try:
-        result, any_forbidden = await db_ops.apply_alter(
+        result, any_forbidden = await db_design.apply_alter(
             row, schema, table, payload.statements
         )
     except db_ops.OpsDbError as exc:
@@ -917,12 +922,12 @@ async def scan_database_keys(
     db: int = Query(default=0, ge=0, le=15),
     pattern: str = Query(default="*", max_length=256),
     cursor: str = Query(default="0", max_length=32),
-    count: int = Query(default=100, ge=1, le=db_ops.MAX_PAGE_SIZE),
+    count: int = Query(default=100, ge=1, le=db_exec.MAX_PAGE_SIZE),
     service: db_ops.OpsDatabaseService = Depends(get_database_service),
 ) -> APIResponse[RedisScanResult]:
     row = _get_typed_database(database_id, DatabaseType.REDIS, service)
     try:
-        result = await db_ops.scan_keys(row, db, pattern, cursor, count)
+        result = await db_redis.scan_keys(row, db, pattern, cursor, count)
     except db_ops.OpsDbError as exc:
         raise _browse_error(exc) from exc
     _note_browse_success(service, row)
@@ -938,7 +943,7 @@ async def read_database_key(
 ) -> APIResponse[RedisKeyDetail]:
     row = _get_typed_database(database_id, DatabaseType.REDIS, service)
     try:
-        result = await db_ops.key_detail(row, db, key)
+        result = await db_redis.key_detail(row, db, key)
     except db_ops.OpsDbError as exc:
         raise _browse_error(exc) from exc
     _note_browse_success(service, row)
@@ -1002,7 +1007,7 @@ async def create_database_redis_key(
     return await _run_redis_write(
         db, user, database_id,
         _redis_intent("新建 key", payload.key),
-        lambda row: db_ops.create_key(row, payload),
+        lambda row: db_redis.create_key(row, payload),
     )
 
 
@@ -1017,7 +1022,7 @@ async def update_database_redis_string(
     return await _run_redis_write(
         db, user, database_id,
         _redis_intent("改值", payload.key),
-        lambda row: db_ops.set_string(row, payload),
+        lambda row: db_redis.set_string(row, payload),
     )
 
 
@@ -1034,7 +1039,7 @@ async def add_database_redis_element(
     return await _run_redis_write(
         db, user, database_id,
         _redis_intent("加元素", payload.key),
-        lambda row: db_ops.add_element(row, payload),
+        lambda row: db_redis.add_element(row, payload),
     )
 
 
@@ -1051,7 +1056,7 @@ async def remove_database_redis_element(
     return await _run_redis_write(
         db, user, database_id,
         _redis_intent("删元素", payload.key),
-        lambda row: db_ops.remove_element(row, payload),
+        lambda row: db_redis.remove_element(row, payload),
     )
 
 
@@ -1069,7 +1074,7 @@ async def set_database_redis_ttl(
     return await _run_redis_write(
         db, user, database_id,
         _redis_intent(action, payload.key),
-        lambda row: db_ops.set_ttl(row, payload),
+        lambda row: db_redis.set_ttl(row, payload),
     )
 
 
@@ -1086,7 +1091,7 @@ async def delete_database_redis_keys(
     return await _run_redis_write(
         db, user, database_id,
         _redis_intent("批量删除", f"{len(payload.keys)} 个 key"),
-        lambda row: db_ops.delete_keys(row, payload),
+        lambda row: db_redis.delete_keys(row, payload),
     )
 
 

@@ -34,6 +34,7 @@ from app.config import get_settings
 from app.models.entities import OpsAuditLog, OpsDatabase, OpsPendingAction, OpsServer
 from app.models.schemas import DatabaseType
 from app.services import ops_database as db_ops
+from app.services import ops_db_exec as db_exec
 from app.services import ops_server as server_ops
 from app.services.ops_actions import finish_execution
 from app.services.ops_safety import classify_command
@@ -377,7 +378,7 @@ class ChatOpsToolbox:
 
     async def _exec_database_query(self, database: OpsDatabase, statement: str) -> str:
         try:
-            result = await db_ops.execute(database, statement)
+            result = await db_exec.execute(database, statement)
         except db_ops.OpsDbForbidden as exc:
             self._db_audit.record(
                 target_id=database.id,
