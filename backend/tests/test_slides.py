@@ -28,13 +28,9 @@ from app.services.slides import (
     _parse_deck_output,
     _truncate,
 )
-from app.services.workflows import (
-    RUN_SUCCEEDED,
-    SUBJECT_ANALYZING,
-    SUBJECT_SLIDE_DECK,
-    latest_run,
-    seed_builtin_workflows,
-)
+from app.services.workflow_builtin import seed_builtin_workflows
+from app.services.workflow_runs import latest_run
+from app.services.workflows import RUN_SUCCEEDED, SUBJECT_ANALYZING, SUBJECT_SLIDE_DECK
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
 JPEG = b"\xff\xd8\xff\xe0" + b"0" * 32

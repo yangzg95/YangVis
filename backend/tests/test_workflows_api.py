@@ -19,9 +19,10 @@ from app.deps import require_user
 from app.models.entities import ModelConfig, Workflow, WorkflowRun, WorkflowRunStep
 from app.models.schemas import CurrentUser, ModelPurpose
 from app.routers import workflows as workflows_router
-from app.services import workflows as workflows_module
+from app.services import workflow_exec
 from app.services.agents import seed_builtin_agents
-from app.services.workflows import WorkflowService, seed_builtin_workflows
+from app.services.workflow_builtin import seed_builtin_workflows
+from app.services.workflow_defs import WorkflowService
 
 OWNER = 1
 
@@ -81,7 +82,7 @@ def _stub_model(monkeypatch, reply: str):
     ):
         return reply
 
-    monkeypatch.setattr(workflows_module, "run_agent", fake_run_agent)
+    monkeypatch.setattr(workflow_exec, "run_agent", fake_run_agent)
 
 
 def _events(response) -> list[tuple[str, dict]]:
@@ -381,7 +382,7 @@ def test_stream_run_rejects_unknown_input_before_any_step(env, monkeypatch):
         calls.append(args)
         return "x"
 
-    monkeypatch.setattr(workflows_module, "run_agent", no_call)
+    monkeypatch.setattr(workflow_exec, "run_agent", no_call)
     with Session() as db:
         workflow_id = db.scalar(select(Workflow).where(Workflow.slug == "resume-analysis")).id
 
@@ -474,7 +475,7 @@ def _recording_model(monkeypatch, reply: str) -> list[str]:
         prompts.append(user_prompt)
         return reply
 
-    monkeypatch.setattr(workflows_module, "run_agent", fake_run_agent)
+    monkeypatch.setattr(workflow_exec, "run_agent", fake_run_agent)
     return prompts
 
 

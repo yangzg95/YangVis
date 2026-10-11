@@ -5,7 +5,8 @@
 ``services/interview.py``、``services/slides.py``），于是「provider 返回内容块
 列表要怎么拉平」「该用多长超时」这类问题要在三处分别修。
 
-这里只负责**一次调用**。多步骤的编排、进度与落库见 ``services/workflows.py``。
+这里只负责**一次调用**。多步骤的编排、进度与落库见
+``services/workflow_exec.py``，那一层的模块清单见 :mod:`app.services.workflows`。
 """
 from __future__ import annotations
 

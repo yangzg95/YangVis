@@ -30,34 +30,26 @@ from app.models.entities import (
     WorkflowStep,
 )
 from app.models.schemas import ModelPurpose, WorkflowCreate, WorkflowUpdate
-from app.services import workflows as workflows_module
+from app.services import workflow_exec, workflow_rerun
+from app.services.workflow_builtin import BUILTIN_WORKFLOWS, seed_builtin_workflows
+from app.services.workflow_defs import SUBJECT_LABEL_MAX, WorkflowService
+from app.services.workflow_exec import execute_run
+from app.services.workflow_rerun import prepare_step_rerun, rerun_step
+from app.services.workflow_runs import STALE_RUN_ERROR, prune_runs, reset_stale_runs, subject_state
+from app.services.workflow_stream import follow_run, stream_run
+from app.services.workflow_template import _PLACEHOLDER, _group_order, render_prompt
 from app.services.workflows import (
-    BUILTIN_WORKFLOWS,
     RUN_FAILED,
     RUN_PENDING,
     RUN_RUNNING,
     RUN_SUCCEEDED,
-    STALE_RUN_ERROR,
-    SUBJECT_ERROR,
-    SUBJECT_LABEL_MAX,
-    SUBJECT_READY,
     STEP_FAILED,
     STEP_PENDING,
     STEP_RUNNING,
     STEP_SKIPPED,
     STEP_SUCCEEDED,
-    WorkflowService,
-    _group_order,
-    execute_run,
-    follow_run,
-    prepare_step_rerun,
-    prune_runs,
-    render_prompt,
-    stream_run,
-    rerun_step,
-    reset_stale_runs,
-    seed_builtin_workflows,
-    subject_state,
+    SUBJECT_ERROR,
+    SUBJECT_READY,
 )
 
 OWNER = 1
@@ -132,7 +124,7 @@ def _stub_model(monkeypatch, reply_for):
             raise reply
         return reply
 
-    monkeypatch.setattr(workflows_module, "run_agent", fake_run_agent)
+    monkeypatch.setattr(workflow_exec, "run_agent", fake_run_agent)
     return calls
 
 
@@ -248,7 +240,7 @@ def _two_step_workflow(
 
 
 def _template_vars(prompt_tpl: str) -> set[str]:
-    return {match.group(1) for match in workflows_module._PLACEHOLDER.finditer(prompt_tpl)}
+    return {match.group(1) for match in _PLACEHOLDER.finditer(prompt_tpl)}
 
 
 def _scene(
@@ -1443,7 +1435,7 @@ def test_execute_run_opens_mcp_bundle_and_passes_tools_to_each_step(db, monkeypa
         seen_tools.append([tool.name for tool in (tools or [])])
         return "初稿"
 
-    monkeypatch.setattr(workflows_module, "run_agent", fake_run_agent)
+    monkeypatch.setattr(workflow_exec, "run_agent", fake_run_agent)
 
     resolved: dict = {"calls": []}
 
@@ -1455,7 +1447,7 @@ def test_execute_run_opens_mcp_bundle_and_passes_tools_to_each_step(db, monkeypa
         resolved["calls"].append(list(ids))
         return [_ServerRow(server_id) for server_id in ids]
 
-    monkeypatch.setattr(workflows_module, "resolve_servers", fake_resolve)
+    monkeypatch.setattr(workflow_exec, "resolve_servers", fake_resolve)
 
     class _FakeBundle:
         def __init__(self):
@@ -1473,7 +1465,7 @@ def test_execute_run_opens_mcp_bundle_and_passes_tools_to_each_step(db, monkeypa
         assert [row.id for row in servers] == [server.id]
         return bundle
 
-    monkeypatch.setattr(workflows_module, "open_bundle", fake_open)
+    monkeypatch.setattr(workflow_exec, "open_bundle", fake_open)
 
     events = _run_all(db, OWNER, run.id)
 
@@ -1493,7 +1485,7 @@ def test_execute_run_fails_when_mcp_bundle_cannot_open(db, monkeypatch):
     def fake_resolve(db, owner_id, ids):
         raise LookupError("挂载的 MCP 服务不存在或无权访问：9，")
 
-    monkeypatch.setattr(workflows_module, "resolve_servers", fake_resolve)
+    monkeypatch.setattr(workflow_exec, "resolve_servers", fake_resolve)
     _stub_model(monkeypatch, {"writer": "x", "scorer": "y"}.get)
 
     # 解析失败发生在首个事件之前：由 stream_run 的既有异常路径落终态，
@@ -1537,8 +1529,8 @@ def test_execute_run_with_empty_mcp_mount_skips_the_bundle(db, monkeypatch):
         opened.append(servers)
         return _FakeEmptyBundle()
 
-    monkeypatch.setattr(workflows_module, "resolve_servers", fake_resolve)
-    monkeypatch.setattr(workflows_module, "open_bundle", fake_open)
+    monkeypatch.setattr(workflow_exec, "resolve_servers", fake_resolve)
+    monkeypatch.setattr(workflow_exec, "open_bundle", fake_open)
     _stub_model(monkeypatch, {"writer": "初稿", "scorer": "8 分"}.get)
 
     events = _run_all(db, OWNER, run.id)
@@ -1582,7 +1574,7 @@ def _record_tools(monkeypatch) -> dict[str, list[str]]:
         seen[agent_slug] = [tool.name for tool in (tools or [])]
         return "结果"
 
-    monkeypatch.setattr(workflows_module, "run_agent", fake_run_agent)
+    monkeypatch.setattr(workflow_exec, "run_agent", fake_run_agent)
     return seen
 
 
@@ -1602,7 +1594,7 @@ def test_step_mount_scopes_tools_to_that_step(db, monkeypatch):
     async def fake_open(servers):
         return bundle
 
-    monkeypatch.setattr(workflows_module, "open_bundle", fake_open)
+    monkeypatch.setattr(workflow_exec, "open_bundle", fake_open)
 
     events = _run_all(db, OWNER, run.id)
 
@@ -1629,7 +1621,7 @@ def test_same_mcp_on_workflow_and_step_connects_once(db, monkeypatch):
         opened_ids.extend(row.id for row in servers)
         return bundle
 
-    monkeypatch.setattr(workflows_module, "open_bundle", fake_open)
+    monkeypatch.setattr(workflow_exec, "open_bundle", fake_open)
 
     events = _run_all(db, OWNER, run.id)
 
@@ -2072,7 +2064,7 @@ def test_rerun_connects_workflow_and_target_step_union(db, monkeypatch):
     async def fake_open_first(servers):
         return first_bundle
 
-    monkeypatch.setattr(workflows_module, "open_bundle", fake_open_first)
+    monkeypatch.setattr(workflow_exec, "open_bundle", fake_open_first)
 
     assert _run_all(db, OWNER, run.id)[-1][1]["status"] == RUN_SUCCEEDED
     run_id = run.id
@@ -2087,7 +2079,7 @@ def test_rerun_connects_workflow_and_target_step_union(db, monkeypatch):
         opened_ids.extend(row.id for row in servers)
         return bundle
 
-    monkeypatch.setattr(workflows_module, "open_bundle", fake_open)
+    monkeypatch.setattr(workflow_rerun, "open_bundle", fake_open)
 
     _rerun(db, OWNER, run_id, "score")
 

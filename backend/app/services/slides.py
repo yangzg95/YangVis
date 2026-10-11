@@ -46,17 +46,15 @@ from app.services.slides_html import (
     sanitize_theme,
 )
 from app.services.slides_store import StoredImage
-from app.services.workflows import (
-    SUBJECT_ERROR,
-    SUBJECT_SLIDE_DECK,
-    builtin_output,
+from app.services.workflow_builtin import builtin_output, start_builtin
+from app.services.workflow_runs import (
     fail_run,
     latest_run,
     latest_runs,
     running_subjects,
-    start_builtin,
     subject_state,
 )
+from app.services.workflows import SUBJECT_ERROR, SUBJECT_SLIDE_DECK
 
 logger = logging.getLogger("yangvis.slides")
 

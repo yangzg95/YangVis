@@ -5,7 +5,7 @@ P0 钉的是「模型调用改由工作流执行」：每次分析都要在 ``wo
 上不再有 ``status`` / ``error_msg``，界面上的状态是从认领了这份简历的那次运行翻译
 出来的，所以这里的断言全部走 ``service.to_item(...)``，而不是读实体。
 
-模型调用打桩（替换 ``app.services.workflows.run_agent``），不碰真实服务商。
+模型调用打桩（替换 ``app.services.workflow_exec.run_agent``），不碰真实服务商。
 """
 from __future__ import annotations
 
@@ -26,20 +26,18 @@ from app.models.entities import (
     WorkflowRunStep,
 )
 from app.models.schemas import ModelPurpose
-from app.services import workflows as workflows_module
+from app.services import workflow_exec
 from app.services.resume import ResumeService, _analysis_product
+from app.services.workflow_builtin import seed_builtin_workflows
+from app.services.workflow_runs import STALE_RUN_ERROR, latest_run, reset_stale_runs
 from app.services.workflows import (
     RUN_SUCCEEDED,
-    STALE_RUN_ERROR,
     SUBJECT_ANALYZING,
     SUBJECT_ERROR,
     SUBJECT_READY,
     SUBJECT_RESUME,
     SUBJECT_RESUME_COMPARISON,
     SUBJECT_UPLOADED,
-    latest_run,
-    reset_stale_runs,
-    seed_builtin_workflows,
 )
 
 OWNER = 1
@@ -104,7 +102,7 @@ def model_call(monkeypatch):
                 raise reply
             return reply
 
-        monkeypatch.setattr(workflows_module, "run_agent", fake_run_agent)
+        monkeypatch.setattr(workflow_exec, "run_agent", fake_run_agent)
         return calls
 
     return stub

@@ -1267,7 +1267,7 @@ class WorkflowRunStep(Base):
     存下渲染后的 prompt 与原始输出，单步失败才能既看得见原因、又能重跑。
 
     并行组的步骤会并发写入，每个步骤用自己的 session（见
-    ``services/workflows.py`` 的 ``execute_run``）。
+    ``services/workflow_exec.py`` 的 ``execute_run``）。
     """
 
     __tablename__ = "workflow_run_step"

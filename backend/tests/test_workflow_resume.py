@@ -7,7 +7,7 @@
 * g2 ``slide-architect`` 出 markdown（``draft``，模板引 ``{{analysis.report}}``）；
 * g3 ``interview-answerer`` 出 markdown（``final``）。
 
-模型调用打桩（替换 ``app.services.workflows.run_agent``），按 ``agent_slug``
+模型调用打桩（替换 ``app.services.workflow_exec.run_agent``），按 ``agent_slug``
 应答；不碰真实服务商。
 """
 from __future__ import annotations
@@ -23,21 +23,18 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models.entities import ModelConfig, WorkflowRun, WorkflowRunStep
 from app.models.schemas import ModelPurpose, WorkflowCreate
-from app.services import workflows as workflows_module
+from app.services import workflow_exec
 from app.services.agents import seed_builtin_agents
+from app.services.workflow_builtin import seed_builtin_workflows
+from app.services.workflow_defs import WorkflowService
+from app.services.workflow_exec import execute_run
+from app.services.workflow_rerun import prepare_resume, prepare_step_rerun, rerun_step, resume_run
 from app.services.workflows import (
     RUN_RUNNING,
     RUN_SUCCEEDED,
     STEP_PENDING,
     STEP_SKIPPED,
     STEP_SUCCEEDED,
-    WorkflowService,
-    execute_run,
-    prepare_resume,
-    prepare_step_rerun,
-    rerun_step,
-    resume_run,
-    seed_builtin_workflows,
 )
 
 OWNER = 1
@@ -116,7 +113,7 @@ def routed_model(monkeypatch):
             raise result
         return result
 
-    monkeypatch.setattr(workflows_module, "run_agent", fake_run_agent)
+    monkeypatch.setattr(workflow_exec, "run_agent", fake_run_agent)
     return calls, replies
 
 
