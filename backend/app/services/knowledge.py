@@ -60,6 +60,16 @@ def _doc_index_lock(owner_id: int, doc_id: int) -> asyncio.Lock:
     return _doc_index_locks.setdefault((owner_id, doc_id), asyncio.Lock())
 
 
+def _release_doc_lock(owner_id: int, doc_id: int) -> None:
+    """文档删掉后把它的锁从表里摘掉。
+
+    这张表按 (owner, doc) 累积，不摘就只增不减：删过的文档越多，白占的锁越多。
+    正在等这把锁的协程握的是自己那一份对象引用，摘掉表项不会让它失效；锁本身
+    互斥的语义到文档删除这一步已经没有意义，所以不必等它释放。
+    """
+    _doc_index_locks.pop((owner_id, doc_id), None)
+
+
 class IndexStatus:
     UNINITIALIZED = "uninitialized"
     INDEXING = "indexing"
@@ -309,6 +319,7 @@ class KnowledgeService:
                     KbChunk.owner_id == self._owner_id, KbChunk.doc_id == doc_id
                 )
             )
+            _release_doc_lock(self._owner_id, doc_id)
         self._db.execute(
             delete(KbDocument).where(
                 KbDocument.owner_id == self._owner_id, KbDocument.type_id == type_id
@@ -379,6 +390,9 @@ class KnowledgeService:
         )
         self._db.delete(doc)
         self._db.commit()
+        # 用传进来的 doc_id：实例删掉并 commit 之后属性已过期，再读 doc.id 会回查这条
+        # 已经不存在的行。
+        _release_doc_lock(self._owner_id, doc_id)
         self._refresh_counts()
 
     def set_document_status(

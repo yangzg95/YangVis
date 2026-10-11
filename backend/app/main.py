@@ -1,7 +1,9 @@
 """yangvis 的 FastAPI 应用入口。"""
 from __future__ import annotations
 
+import contextlib
 import logging
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
@@ -54,6 +56,34 @@ if not isinstance(_log_level, int):
     _log_level = logging.INFO
 logging.basicConfig(level=_log_level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
+# 启动与关停挂在 lifespan 上；`@app.on_event` 是 FastAPI 已经弃用的旧写法。
+# 这个函数必须定义在 FastAPI(...) 之前——lifespan 是构造参数，不是装饰器。
+@contextlib.asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    # 每步单独记失败：裸 traceback 看不出死在哪一步。
+    for step_name, step in (
+        ("validate_settings", lambda: validate_settings(settings)),
+        ("create_tables", create_tables),
+        ("migrate_schema", migrate_schema),
+        ("bootstrap_admin", lambda: bootstrap_admin(settings)),
+        ("seed_agents", seed_agents),
+        ("seed_workflows", seed_workflows),
+        ("reset_stale_jobs", reset_stale_jobs),
+        # 清理放在收尾之后：遗留的 running 先变成失败，才谈得上按窗口删。
+        ("prune_workflow_runs", prune_workflow_runs),
+    ):
+        try:
+            step()
+        except Exception:
+            logger.error("startup step %s failed", step_name, exc_info=True)
+            raise
+    logger.info("yangvis backend started on port %s", settings.PORT)
+    try:
+        yield
+    finally:
+        logger.info("yangvis backend shutting down")
+
+
 app = FastAPI(
     title=settings.APP_NAME,
     version="1.0.0",
@@ -61,6 +91,7 @@ app = FastAPI(
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
+    lifespan=lifespan,
 )
 
 # CORS 放开，方便本地开发时 SPA 直接调用后端 API。
@@ -276,30 +307,3 @@ def _placeholder() -> Path:
             encoding="utf-8",
         )
     return placeholder
-
-
-@app.on_event("startup")
-async def on_startup() -> None:
-    # 每步单独记失败：裸 traceback 看不出死在哪一步。
-    for step_name, step in (
-        ("validate_settings", lambda: validate_settings(settings)),
-        ("create_tables", create_tables),
-        ("migrate_schema", migrate_schema),
-        ("bootstrap_admin", lambda: bootstrap_admin(settings)),
-        ("seed_agents", seed_agents),
-        ("seed_workflows", seed_workflows),
-        ("reset_stale_jobs", reset_stale_jobs),
-        # 清理放在收尾之后：遗留的 running 先变成失败，才谈得上按窗口删。
-        ("prune_workflow_runs", prune_workflow_runs),
-    ):
-        try:
-            step()
-        except Exception:
-            logger.error("startup step %s failed", step_name, exc_info=True)
-            raise
-    logger.info("yangvis backend started on port %s", settings.PORT)
-
-
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
-    logger.info("yangvis backend shutting down")
