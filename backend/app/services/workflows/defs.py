@@ -45,13 +45,13 @@ from app.models.schemas import (
 )
 from app.services.agent_run import OUTPUT_JSON, OUTPUT_MARKDOWN, require_chat_model
 from app.services.agents import AgentService, BUILTIN_OWNER_ID
-from app.services.workflow_template import _PLACEHOLDER, _group_order
+from app.services.workflows.template import _PLACEHOLDER, _group_order
 from app.services.workflows import RUN_PENDING, STEP_PENDING
 
 logger = logging.getLogger("yangvis.workflows")
 
 # 变量名、步骤 key 与分组名的合法字符。必须与模板引用的字符集对齐（见
-# :func:`app.services.workflow_template.render_prompt`）：一个声明成 ``my-var``
+# :func:`app.services.workflows.template.render_prompt`）：一个声明成 ``my-var``
 # 的变量模板里永远引用不到，静默少喂一段材料比保存时报错难查得多。不含点号——
 # ``a.b`` 里的 ``a`` 是变量名，点号后面是它的字段。
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -68,7 +68,7 @@ def _input_schema(fields: Sequence[WorkflowInputField]) -> List[dict]:
     """把声明的输入变量落成 ``workflow.input_schema`` 的 JSON 值。
 
     标签留空时用变量名兜底：界面上少填一格不该让运行历史里出现一个没有名字的
-    变量。形状与内置工作流 seed 出来的完全一致（:mod:`app.services.workflow_builtin`
+    变量。形状与内置工作流 seed 出来的完全一致（:mod:`app.services.workflows.builtin`
     的 ``BuiltinInput`` 同三个键），读的一侧不用分两种情况。
     """
     return [

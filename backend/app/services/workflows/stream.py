@@ -7,7 +7,7 @@
 
 :func:`follow_run` 反过来一个东西都不执行，只读 ``workflow_run_step`` 里已经落库
 的事实：先回放现状，再按 ``FOLLOW_POLL_SECONDS`` 推之后的变化，事件名与载荷形状跟
-:func:`app.services.workflow_exec.execute_run` 一致，客户端不用为「跟着跑」和
+:func:`app.services.workflows.exec.execute_run` 一致，客户端不用为「跟着跑」和
 「中途接上」写两套解析。能这么分，靠的是执行器每一步即时提交。
 """
 from __future__ import annotations
@@ -23,8 +23,8 @@ from app.errors import BusinessError
 from app.models.entities import ModelConfig, WorkflowRun, WorkflowRunStep, WorkflowStep
 from app.services.agent_run import model_error_text
 from app.services.agents import AgentService
-from app.services.workflow_exec import execute_run
-from app.services.workflow_runs import settle_run_status
+from app.services.workflows.exec import execute_run
+from app.services.workflows.runs import settle_run_status
 from app.services.workflows import (
     RUN_PENDING,
     RUN_RUNNING,

@@ -44,8 +44,8 @@ from app.services.agent_run import (
     require_chat_model,
 )
 from app.services.chunking import UnsupportedFileType, extract_text, normalise
-from app.services.workflow_builtin import builtin_output, finish_builtin_step, start_builtin
-from app.services.workflow_runs import (
+from app.services.workflows.builtin import builtin_output, finish_builtin_step, start_builtin
+from app.services.workflows.runs import (
     fail_run,
     latest_run,
     latest_runs,

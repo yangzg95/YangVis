@@ -46,8 +46,8 @@ from app.services.slides_html import (
     sanitize_theme,
 )
 from app.services.slides_store import StoredImage
-from app.services.workflow_builtin import builtin_output, start_builtin
-from app.services.workflow_runs import (
+from app.services.workflows.builtin import builtin_output, start_builtin
+from app.services.workflows.runs import (
     fail_run,
     latest_run,
     latest_runs,

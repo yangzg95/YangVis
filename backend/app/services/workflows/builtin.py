@@ -25,8 +25,8 @@ from sqlalchemy.orm import Session
 from app.models.entities import Workflow, WorkflowRun, WorkflowRunStep, WorkflowStep
 from app.services.agent_run import OUTPUT_JSON, OUTPUT_MARKDOWN
 from app.services.agents import BUILTIN_OWNER_ID
-from app.services.workflow_defs import WorkflowService
-from app.services.workflow_exec import execute_run
+from app.services.workflows.defs import WorkflowService
+from app.services.workflows.exec import execute_run
 from app.services.workflows import RUN_SUCCEEDED, STEP_SUCCEEDED
 
 logger = logging.getLogger("yangvis.workflows")

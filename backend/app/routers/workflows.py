@@ -31,16 +31,16 @@ from app.models.schemas import (
     WorkflowRerunRequest,
     WorkflowUpdate,
 )
-from app.services.workflow_defs import WorkflowService
-from app.services.workflow_rerun import (
+from app.services.workflows.defs import WorkflowService
+from app.services.workflows.rerun import (
     OverrideValidationError,
     prepare_resume,
     prepare_step_rerun,
     rerun_step,
     resume_run,
 )
-from app.services.workflow_runs import prune_runs
-from app.services.workflow_stream import follow_run, stream_run
+from app.services.workflows.runs import prune_runs
+from app.services.workflows.stream import follow_run, stream_run
 from app.sse import SSE_HEADERS, sse_event, with_heartbeat
 
 logger = logging.getLogger("yangvis.workflows")

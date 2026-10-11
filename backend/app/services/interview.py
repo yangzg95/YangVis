@@ -44,8 +44,8 @@ from app.services.agent_run import (
     model_error_text,
     require_chat_model,
 )
-from app.services.workflow_builtin import builtin_output, start_builtin
-from app.services.workflow_runs import (
+from app.services.workflows.builtin import builtin_output, start_builtin
+from app.services.workflows.runs import (
     fail_run,
     latest_run,
     latest_runs,

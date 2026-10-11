@@ -13,8 +13,8 @@ from app.security import hash_password
 from app.services.agents import seed_builtin_agents
 from app.services.knowledge import reset_stale_indexing
 from app.services.ops_actions import reset_stale_ops_actions
-from app.services.workflow_builtin import seed_builtin_workflows
-from app.services.workflow_runs import prune_runs, reset_stale_runs
+from app.services.workflows.builtin import seed_builtin_workflows
+from app.services.workflows.runs import prune_runs, reset_stale_runs
 
 logger = logging.getLogger("yangvis.bootstrap")
 

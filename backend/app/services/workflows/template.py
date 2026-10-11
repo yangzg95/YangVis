@@ -23,7 +23,7 @@ from app.models.entities import WorkflowStep
 # ---- 模板 ------------------------------------------------------------------
 
 # ``{{name}}`` 与 ``{{name.字段}}`` 的形状。字符集与定义存处的标识符校验对齐
-# （见 :mod:`app.services.workflow_defs`），保存时能写的变量名这里才取得到。
+# （见 :mod:`app.services.workflows.defs`），保存时能写的变量名这里才取得到。
 _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\}\}")
 
 # 取不到值的哨兵：``None`` 是一种合法的值（JSON 里的 null），不能拿来当缺失。
@@ -104,7 +104,7 @@ def _group_order(steps: Sequence[WorkflowStep]) -> List[Tuple[str, List[Workflow
     """把步骤切成并行组：**相邻**且分组名相同的算一组，组序即首次出现的顺序。
 
     保存时已经拦过「同名组被别的组隔开」（见
-    :meth:`app.services.workflow_defs.WorkflowService._normalize`），所以这里按
+    :meth:`app.services.workflows.defs.WorkflowService._normalize`），所以这里按
     相邻切与按 group_key 归并结果相同；用相邻这一套是因为界面也是这个口径，
     画出来几列就是跑起来几段，两边不必各自解释一次。
     """

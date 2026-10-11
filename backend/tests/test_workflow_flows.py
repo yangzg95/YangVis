@@ -4,8 +4,8 @@
 输出、每步状态）落进 ``workflow_run`` / ``workflow_run_step``，而业务行上的进度
 与它讲同一个故事。区别在于这个故事现在**只有运行记录一份**：业务行只留产物，
 ``status`` / ``error_msg`` 是序列化时从认领了该对象的那次运行翻译出来的（见
-``services/workflow_runs.py`` 的 ``subject_state``）。模型调用打桩（替换
-``app.services.workflow_exec.run_agent``），不碰真实服务商。
+``services/workflows/runs.py`` 的 ``subject_state``）。模型调用打桩（替换
+``app.services.workflows.exec.run_agent``），不碰真实服务商。
 """
 from __future__ import annotations
 
@@ -24,12 +24,12 @@ from app.models.schemas import (
     ModelPurpose,
     ResumeToolkitCreate,
 )
-from app.services import workflow_exec
+from app.services.workflows import exec as workflow_exec
 from app.services.interview import InterviewService
 from app.services.resume import ResumeService
 from app.services.slides import SlideService
-from app.services.workflow_builtin import seed_builtin_workflows
-from app.services.workflow_runs import STALE_RUN_ERROR, reset_stale_runs
+from app.services.workflows.builtin import seed_builtin_workflows
+from app.services.workflows.runs import STALE_RUN_ERROR, reset_stale_runs
 from app.services.workflows import (
     RUN_FAILED,
     RUN_SUCCEEDED,

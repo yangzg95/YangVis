@@ -19,10 +19,10 @@ from app.deps import require_user
 from app.models.entities import ModelConfig, Workflow, WorkflowRun, WorkflowRunStep
 from app.models.schemas import CurrentUser, ModelPurpose
 from app.routers import workflows as workflows_router
-from app.services import workflow_exec
+from app.services.workflows import exec as workflow_exec
 from app.services.agents import seed_builtin_agents
-from app.services.workflow_builtin import seed_builtin_workflows
-from app.services.workflow_defs import WorkflowService
+from app.services.workflows.builtin import seed_builtin_workflows
+from app.services.workflows.defs import WorkflowService
 
 OWNER = 1
 

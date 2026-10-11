@@ -30,14 +30,14 @@ from app.models.entities import (
     WorkflowStep,
 )
 from app.models.schemas import ModelPurpose, WorkflowCreate, WorkflowUpdate
-from app.services import workflow_exec, workflow_rerun
-from app.services.workflow_builtin import BUILTIN_WORKFLOWS, seed_builtin_workflows
-from app.services.workflow_defs import SUBJECT_LABEL_MAX, WorkflowService
-from app.services.workflow_exec import execute_run
-from app.services.workflow_rerun import prepare_step_rerun, rerun_step
-from app.services.workflow_runs import STALE_RUN_ERROR, prune_runs, reset_stale_runs, subject_state
-from app.services.workflow_stream import follow_run, stream_run
-from app.services.workflow_template import _PLACEHOLDER, _group_order, render_prompt
+from app.services.workflows import exec as workflow_exec, rerun as workflow_rerun
+from app.services.workflows.builtin import BUILTIN_WORKFLOWS, seed_builtin_workflows
+from app.services.workflows.defs import SUBJECT_LABEL_MAX, WorkflowService
+from app.services.workflows.exec import execute_run
+from app.services.workflows.rerun import prepare_step_rerun, rerun_step
+from app.services.workflows.runs import STALE_RUN_ERROR, prune_runs, reset_stale_runs, subject_state
+from app.services.workflows.stream import follow_run, stream_run
+from app.services.workflows.template import _PLACEHOLDER, _group_order, render_prompt
 from app.services.workflows import (
     RUN_FAILED,
     RUN_PENDING,
