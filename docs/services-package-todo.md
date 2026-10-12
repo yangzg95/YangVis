@@ -20,10 +20,11 @@
 | `77200ed` | refactor(chat)：收尾任务从 memory 挪到对话侧，解掉 `memory → chat` 那条回边 |
 | `b92c59a` | refactor(chat)：`services/chat/` = `service.py` + `memory.py` + `__init__.py` 门面（转发四个名字） |
 
-`backend/app/services/` 现在是 **13 个平铺模块 + 7 个包**。全量测试 **752 passed**
-（627 基线 + 对话那两面网 125 条：`tests/test_chat_service.py` 81、`tests/test_chat_memory.py` 43、
-`tests/test_background.py` 1——最后那条是 ④ 把 `fire_and_forget` 收平时跟着搬出对话套件的。
-这台机器计时跟着用例数走：670 条 1 分 45 秒、752 条 2 分 14 秒 / 3 分 00 秒，还是 2 分钟上下量级；
+`backend/app/services/` 现在是 **13 个平铺模块 + 7 个包**。全量测试 **758 passed**
+（627 基线 + 对话那两面网连着搬出去的那条共 126 条：`tests/test_chat_service.py` 82、
+`tests/test_chat_memory.py` 43、`tests/test_background.py` 1——最后那条是 ④ 把 `fire_and_forget`
+收平时跟着搬出对话套件的；再加 `tests/test_model_config.py` 5 条，钉模型配置的删除语义）。
+这台机器计时跟着用例数走：670 条 1 分 45 秒、752 条 2 分 14 秒 / 3 分 00 秒、758 条 2 分 10 秒，还是 2 分钟上下量级；
 上一台记的 4.2 分钟别再引用。`.venv/Scripts/python.exe -m pytest -q`，venv 在仓库根、不在 backend 下）。
 
 ## 试点定下来的五条形状规则
@@ -133,9 +134,7 @@ memory 引用块 −2 个名字，净零，函数追加在文件尾，于是 19 
    `chat/service.require_chat_config`、`knowledge/service.get_embedding_config`），连
    `ModelConfigService.get_default` 自己也是同一句，现在它成了那一个定义。**只抽「查」**——
    判「能不能用」留在调用方（对话看 `last_test_ok`，embedding 还要 `vector_size`），所以异常
-   与文案一概没动。**留着一个问题等你定**：同一个 `CODE_CHAT_NOT_READY` 有两种文案，agent_run
-   说「系统设置 → 模型管理」（菜单实为「系统设置 → 模型与集成」，页内 tab 叫「模型管理」，
-   这句够用），对话侧说「设置」（旧名）。统一它就是改用户可见文本，不是去重。
+   与文案一概没动。**它留的那个文案问题后来按用户点的单收了**（见下面「四刀之后补的两处」）。
 3. **③ 剥 ```json 栅栏与截括号跨度收成两个原语**（`agent_run.strip_json_fence` / `json_span`）：
    栅栏正则在 agent_run 与 slides 里是一模一样的一行，跨度截取的三行逻辑三处各写一遍。
    **刻意没把三个解析函数并成一个带 flag 的大函数**——三处契约不同（只认 dict 抛 ValueError /
@@ -149,6 +148,23 @@ memory 引用块 −2 个名字，净零，函数追加在文件尾，于是 19 
    patch 的是 `chat_module.fire_and_forget`，收平之后 `chat/service.py` 的模块全局里仍有这个名字
    （import 进来的），patch 照样打得中，一行都不用改；要跟着搬家的只有那个直接翻私有
    `_BACKGROUND_TASKS` 的用例。
+
+### 四刀之后补的两处（2026-10-12，用户按编号点的 1、3）
+
+1. **同一个 `CODE_CHAT_NOT_READY` 的两种文案收成一种**：取 agent_run 那句「系统设置 → 模型管理」
+   （菜单实为「系统设置 → 模型与集成」，页内 tab 叫「模型管理」，这句够用），对话侧的「设置」是旧名。
+   `chat/service.py:212`、`:221` 就地换字、**净零行**，所以流程文档里 20 个钉死行号一个都不用重钉；
+   agent_run 里「没有默认配置」那条也补成同一句（「请先到…添加并通过连通性测试」→「请前往…添加对话模型
+   并通过连通性测试」），于是两个调用点的四句现在两两相同（用途不对、404 那两句本来就一致）。
+   两处 docstring 里的「退回『设置』」也跟着换成全名。**这是改用户可见文本，不是去重**，
+   动它的前提是用户点了单。
+2. **删模型配置不再留悬空引用**：`model_config.delete()` 先把指向它的 `chat_conversation.model_config_id`
+   与 `workflow_step.model_config_id` 置空再删行（那些表没有外键，不手动清就永远悬着）；
+   `after_answer_task` 同时补捕 `LookupError`，旧数据里已经悬空的那批才有兜底。**`workflow_run_step`
+   那一列不清**——它是「这一步当时实际用了哪份」的留痕，不是「以后用哪份」。新增
+   `tests/test_model_config.py` 5 条钉删除语义（引用清理、默认顶上、跨 owner 拒绝），
+   `tests/test_chat_service.py` 第九节加 1 条钉「悬空 id 下收尾任务安静返回」，全量因此 758。
+   模型配置模块其余部分（列表、掩码、凭据轮换）仍是测试缺口。
 
 ## 每一刀照抄的流程
 
@@ -175,7 +191,7 @@ memory 引用块 −2 个名字，净零，函数追加在文件尾，于是 19 
    **还了技术债那一刀（解环、合并分节）没法用「只差 import 行」自证**，改用逐行比对函数体：
    从 HEAD 抠出旧节、从新文件抠出搬过去的那节，把刻意差异（删掉的延迟导入、`_memory_logger`
    改名与随之多出的换行）归零后 diff 应当为空——`git diff --numstat` 那时只用来确认改动范围。
-5. `python -c "import app.main"`，再全量 pytest（期望 752 passed）。
+5. `python -c "import app.main"`，再全量 pytest（期望 758 passed）。
 6. 换行按字节核：`echo "lines=$(wc -l < f) cr=$(tr -dc '\r' < f | wc -c)"`，两数相等才算 CRLF。
    `Write` 工具新建的文件落成 LF，得自己转（ops 那刀的 `__init__.py` 就是转完才 39/39）。
    **反过来也成立**：仓库里本来就有 LF 的文件别顺手转成 CRLF——`tests/test_ops_sftp_paste.py`
@@ -195,15 +211,14 @@ memory 引用块 −2 个名字，净零，函数追加在文件尾，于是 19 
 - **UI 那条**（一键复制相关）等用户截图验收，不要猜像素。
 - **测试缺口**：`netdisk.py`(433) / `agents.py`(708) / `resume.py` 主体(843，现只有
   `test_resume_workflow.py` 13 条) / auth·users 路由，都没有本域用例。
+  `model_config.py` 现在只钉住了删除语义（5 条），列表、掩码、凭据轮换还空着。
   已知的：knowledge 89、workflows 四件 139、ops 八件 183、slides 52、ai_gateway 39、mcp 40、
-  chat 124（`test_chat_service.py` 81 + `test_chat_memory.py` 43，2026-10-12 补上）加
-  `test_background.py` 1。
-- **对话用例补出来两处，都还没动**（等用户定）：① `services/chat/service.py:21` 的顶层
+  chat 125（`test_chat_service.py` 82 + `test_chat_memory.py` 43，2026-10-12 补上）加
+  `test_background.py` 1、`test_model_config.py` 5。
+- **对话用例补出来的形状债，还剩一处**（等用户定）：`services/chat/service.py:21` 的顶层
   `from app.database import SessionLocal` 与其余后台任务的函数内延迟导入不一致——生产无差异，
-  纯粹是测试面的形状债；② `model_config.delete()` 不清 `chat_conversation.model_config_id`，
-  而 `require_chat_config(id)` 对不存在的 id 抛的是 `LookupError`，`after_answer_task` 只捕
-  `BusinessError`——引用悬空时收尾任务带一个没人取的异常死掉，主链路（`routers/chat.py:332`）
-  同一条数据则是用户看到 404。
+  纯粹是测试面的形状债。同一批补出来的第二处（删模型配置留悬空引用、收尾任务不接 `LookupError`）
+  已在 2026-10-12 收掉，见上面「四刀之后补的两处」。
 - **`models/schemas.py`(2074) 与 `routers/ops.py`(1401) 不动**——它们的长是同类声明/路由的
   重复，不是职责混杂，拆开只是搬运（用户 2026-10-11 明确过）。
 
