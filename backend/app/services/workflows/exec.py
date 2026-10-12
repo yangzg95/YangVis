@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 from app.models.entities import McpServer, Workflow, WorkflowRun, WorkflowRunStep, WorkflowStep
 from app.services.agent_run import model_error_text, parse_output, require_chat_model, run_agent
 from app.services.agents import AgentService
-from app.services.mcp_tools import open_bundle, plan_step_tools, resolve_servers
+from app.services.mcp.tools import open_bundle, plan_step_tools, resolve_servers
 from app.services.workflows.template import _group_order, render_prompt
 from app.services.workflows import (
     RUN_FAILED,

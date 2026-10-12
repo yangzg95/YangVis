@@ -21,8 +21,8 @@ from app.models.schemas import (
     McpServerUpdate,
     TestResult,
 )
-from app.services.mcp_servers import McpServerService, export_document
-from app.services.mcp_tools import test_connection
+from app.services.mcp import McpServerService, export_document
+from app.services.mcp.tools import test_connection
 
 logger = logging.getLogger("yangvis.mcp")
 

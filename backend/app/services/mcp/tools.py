@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 
 from app.crypto import decrypt
 from app.models.entities import McpServer, WorkflowStep
-from app.services.mcp_servers import (
+from app.services.mcp.servers import (
     TRANSPORT_HTTP,
     TRANSPORT_SSE,
     TRANSPORT_STDIO,

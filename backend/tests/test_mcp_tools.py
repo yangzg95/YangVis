@@ -16,12 +16,12 @@ from app.models.entities import Agent, McpServer, ModelConfig
 from app.models.schemas import McpServerCreate, McpServerUpdate, ModelPurpose
 from app.services import agent_run as agent_run_module
 from app.services.agent_run import TOOL_OUTPUT_LIMIT, run_agent
-from app.services.mcp_servers import (
+from app.services.mcp import (
     McpServerService,
     read_secret,
     validate_transport_fields,
 )
-from app.services.mcp_tools import plan_step_tools, resolve_servers, server_prefix
+from app.services.mcp.tools import plan_step_tools, resolve_servers, server_prefix
 
 OWNER = 1
 

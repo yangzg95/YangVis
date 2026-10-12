@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.models.entities import Workflow, WorkflowRun, WorkflowRunStep, WorkflowStep
 from app.services.agent_run import OUTPUT_JSON, model_error_text
-from app.services.mcp_tools import open_bundle, plan_step_tools, resolve_servers
+from app.services.mcp.tools import open_bundle, plan_step_tools, resolve_servers
 from app.services.workflows.exec import _execute_step, _merge_servers, _rebuild_context, execute_run
 from app.services.workflows.runs import settle_run_status
 from app.services.workflows.template import _group_order

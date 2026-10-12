@@ -19,7 +19,7 @@ from app.deps import require_user
 from app.models.entities import McpServer
 from app.models.schemas import CurrentUser, McpServerCreate
 from app.routers import mcp as mcp_router
-from app.services.mcp_servers import (
+from app.services.mcp import (
     McpServerService,
     export_document,
     parse_mcp_config,
