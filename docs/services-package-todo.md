@@ -1,8 +1,8 @@
 # services 层收包 TODO
 
-接着上一台机器上的活。2026-10-11 落地两刀，10-12 再落 slides、ai_gateway、mcp、ops 四刀——
-**六刀之后收包这一档基本走完了**：只剩 chat+memory 一簇有回边要先解。这份文档记下：已经做完的
-基线、六刀攒下的形状规则、每刀必须走的验证流程、以及那一簇还卡着的。**动手前先跑一次
+接着上一台机器上的活。2026-10-11 落地两刀，10-12 再落 slides、ai_gateway、mcp、ops、chat 五刀——
+**七刀之后收包这一档走完了**：还有得收的簇没有了，剩下的 13 个平铺模块按规则 3 都该留着。
+这份文档记下：已经做完的基线、七刀攒下的形状规则、每刀必须走的验证流程。**动手前先跑一次
 `git log --oneline -3` 和 `git status --short`，确认工作树是干净的**（本仓库常有两个会话同时在改，
 脏树别硬来；ops 那刀就是等另一个会话收工才动的）。
 
@@ -17,12 +17,14 @@
 | `230cc24` | refactor(ai_gateway)：`services/ai_gateway/` = `service.py` + `proxy.py` + `__init__.py` 门面 |
 | `6f97f5a` | refactor(mcp)：`services/mcp/` = `servers.py` + `tools.py` + `__init__.py` 门面 |
 | `2aed1a0` | refactor(ops)：`services/ops/` = 十个子模块 + **只做包文档的 `__init__.py`**（无门面） |
+| `77200ed` | refactor(chat)：收尾任务从 memory 挪到对话侧，解掉 `memory → chat` 那条回边 |
+| `b92c59a` | refactor(chat)：`services/chat/` = `service.py` + `memory.py` + `__init__.py` 门面（转发四个名字） |
 
-`backend/app/services/` 现在是 **15 个平铺模块 + 6 个包**。全量测试 **627 passed**
-（这台机器四次都是 2 分钟上下：2 分 06 秒、1 分 57 秒、1 分 54 秒、ops 这刀 1 分 48 秒；
+`backend/app/services/` 现在是 **13 个平铺模块 + 7 个包**。全量测试 **627 passed**
+（这台机器六次都是 2 分钟上下：2 分 06 秒、1 分 57 秒、1 分 54 秒、1 分 48 秒、2 分 20 秒、1 分 48 秒；
 上一台记的 4.2 分钟别再引用。`.venv/Scripts/python.exe -m pytest -q`，venv 在仓库根、不在 backend 下）。
 
-## 试点定下来的四条形状规则
+## 试点定下来的五条形状规则
 
 1. **包名 = 被吸收的那个模块名**，所以调用方的 `from app.services.X import ...` 一行都不用改。
    knowledge 那刀是 `knowledge.py → knowledge/`，workflow 那刀是 `workflows.py → workflows/__init__.py`。
@@ -35,6 +37,9 @@
    没一个同名可吸收，包名照样新起，于是 51 行 import 全部要改（包内互引 19 + 外部 32），
    加上 `docs/ops-chat-confirm-flow.md` 里 5 处散文路径——这一刀实测的引用面是 **51+5 行**，
    此前文档里估的「102 行」把同一行的两种写法和注释重复计了，别再引用那个数。
+   **chat 那刀回到规则 1 的正例**：`chat.py → chat/` 有同名可吸收，所以 `routers/chat.py:28`
+   那行一个字母都没动，整刀的外部引用只改了 4 行（routers/memory.py 走 `chat.memory`、
+   测试指子模块、entities.py 一处散文、包内一行导入）。这就是「先找同名模块」值钱的实测数。
 2. **门面只在有唯一入口类时做**：`knowledge/__init__.py` 按 `app/models/__init__.py` 的先例用
    绝对 import 重导出公开名（`# noqa: F401`）；`workflows/__init__.py` 只当词汇表，**不做转发**，
    调用方直接子模块取名字。别为了统一形式硬造门面。slides 那刀照 knowledge 做：只重导出
@@ -56,33 +61,45 @@
    那些，其中私有函数与模块级 `settings` 快照**门面取不到**，必须改指子模块
    （`from app.services.slides import service as slides_module`）。slides 那刀因此改了四行
    而不是文档里估的一行；`test_knowledge.py` 本来就是这形态，照它抄就行。
+   chat 那刀是同一件事的 patch 版本：`test_ops_confirm.py` 要 patch `build_chat_model`、
+   `fire_and_forget` 这些模块全局，`from app.services import chat as chat_module` 收包之后
+   拿到的是**包**，patch 到包上作用不到 `chat.service` 里真正执行的那份名字——测试会照过，
+   但兜住的是空气。所以这种行必须改成 `from app.services.chat import service as chat_module`，
+   而且这是**唯一一类必须改指向的测试引用**，别顺手把别的名也指到子模块。
+5. **域里有环就先解环，解环那一刀单独提交**（chat 那刀学的）：`chat.py` 顶层引 memory、
+   `memory.py` 里延迟引 chat，这种「靠函数内 import 才没炸」的方向不能带进包里。判函数归谁
+   看两点——谁调它（`after_answer_task` 只有 `chat.py:976` 调），以及它依赖的是谁的语义
+   （它要的 `get_conversation` / `require_chat_config` 是带 owner 过滤、用 404 掩盖存在性的
+   加载器，搬到记忆侧等于复制归属逻辑）。于是整节「后台任务」搬去对话侧，memory 只剩
+   `MemoryService` 与其四个常量，方向变单向。搬完顺手清掉 memory 因此不再需要的
+   `asyncio`/`SessionLocal`/`BusinessError`/`AgentService` 四个 import。
+   **日志通道跟着职责不跟着文件**：那两条 `logger.exception` 仍要走 `yangvis.memory`，
+   所以在对话侧显式写一个 `_memory_logger = logging.getLogger("yangvis.memory")`——
+   不然记忆失败的日志会悄悄跑到 `yangvis.chat`，而没人会为此写测试。
 
-## 还剩哪些簇
+## 这一档走完了
 
-到 `2aed1a0` 为止，**收包这一档只剩一簇有得做**，而且它先要还一笔技术债。其余的
-`agent_run.py` / `chat_ops.py` / `captcha.py` / `login_guard.py` / `providers.py` 都是
-跨域共用的工具，按规则 3 就该留在平铺层——**不是每个模块都非进包不可**。
+到 `b92c59a` 为止，七个包落地（knowledge、workflows、slides、ai_gateway、mcp、ops、chat），
+**没有还能收的簇了**。剩下的 13 个平铺模块分两类，两类都不该进包：
 
-### ops 那刀做完了（2026-10-12）
+- **跨域共用工具**（规则 3）：`chunking.py`、`uploads.py`、`providers.py`、`agent_run.py`
+  （引用方散布在 workflows 包的五个子模块 + interview、resume、slides/service 加两个测试）、
+  `chat_ops.py`（`routers/ops.py` 也在用它的 `Auditor`）、`model_config.py`。
+- **一个域就一个类**（规则 3 后半句，一个类不再往下拆）：`agents.py`(708)、`resume.py`(843)、
+  `netdisk.py`(433)、`interview.py`、`dashboard.py`、`captcha.py`、`login_guard.py`。
 
-当初压着不动的两个理由都解了：另一个会话收工了；`docs/ops-chat-confirm-flow.md` 的路径
-连行号一起核过——全是就地改（in-place 替换 import 行与散文路径），行数一行没变，所以
-它钉死的 `ops/safety.py:46`（`_SHELL_METACHARS`）、`ops/actions.py:89`（CAS 那条 UPDATE）、
-`ops/server.py:355`（`OPS_OUTPUT_LIMIT`）改完仍对得上。**收包前把钉行号的文档列出来，改完逐条
-sed 一遍确认那行还在**，这比重新核一遍整份文档便宜得多。
+要接着做，回到「测试缺口」那一节——那里的性价比现在高于继续 reshuffle。
 
-### 唯一还剩的一簇：chat + memory，但有一条回边
+### 两刀留下的核行号手法（下次还要用）
 
-`chat.py`(997) + `memory.py`(464) 是对话域仅剩的两个大块，看着该收，但**互引方向没解**：
-`chat.py:39` 顶层引 `app.services.memory`，而 `memory.py:429` 在函数内部延迟引
-`app.services.chat`——这条回边是靠「函数内 import」才没炸的，收包时别把它提到顶层。
-要动就先定谁是底层：把 memory 改成不回调 chat（把那段依赖的参数化进去），再收；
-否则这一簇就继续平铺。
-
-`agents.py`(708) + `agent_run.py`(263) 看着是天然一簇，但 `agent_run` 的引用方散布在
-workflows 包的五个实现子模块加 `workflows/__init__.py` 的文档行，还有 interview、resume
-两个平铺 service 加 `slides/service.py`，以及 `test_mcp_tools.py`、`test_slides.py` 两个
-测试——它是规则 3 说的共用工具，不收。
+`docs/ops-chat-confirm-flow.md` 把 ops 与对话的**路径连行号**钉死在文里。两刀都靠「就地改」
+把位移做到零：ops 那刀只换 import 行与散文路径，行数一行没变；chat 那刀顶部 +2 个 import、
+memory 引用块 −2 个名字，净零，函数追加在文件尾，于是 19 个钉死的服务侧行号全部原样对得上
+（67=OPS_REACT_STEPS、88=STEP_LIMIT_SUFFIX、104=_OPS_RULES、890=citations 帧、908=confirm 帧、
+931=`finally:`、991=done 帧）。**改完逐条 sed 一遍确认那行还是那句话**，比重新核整份文档便宜。
+两个坑：批量换 `chat.py:NNN` 时 `routers/chat.py` 也在文里，用负向后视 `(?<!routers/)` 保护，
+**先替 `services/chat.py` 再替裸名**；拿 placeholder 先盖 `routers/` 前缀不管用——`:NNN` 后缀
+照样会被裸名规则改掉，还原时匹配不上（chat 那刀第一遍就撞在这）。
 
 ## 每一刀照抄的流程
 
@@ -104,12 +121,20 @@ workflows 包的五个实现子模块加 `workflows/__init__.py` 的文档行，
 4. 行为中性证明，逐文件：`diff <(git show HEAD:旧路径 | tr -d '\r') <(tr -d '\r' < 新路径)`。
    期望差异**只有 import 行和文档里的 `:mod:`/路径引用**。`workflows/runs.py` 与
    `mcp/servers.py` 都是 0 差异纯挪；ops 那刀有四个 0 差异（actions / safety / server / sftp），
-   剩下六个只差 import 与 `:mod:`。
+   剩下六个只差 import 与 `:mod:`；chat 那刀 `chat/memory.py` 是 0 差异，`chat/service.py`
+   只差包内那一行导入。
+   **还了技术债那一刀（解环、合并分节）没法用「只差 import 行」自证**，改用逐行比对函数体：
+   从 HEAD 抠出旧节、从新文件抠出搬过去的那节，把刻意差异（删掉的延迟导入、`_memory_logger`
+   改名与随之多出的换行）归零后 diff 应当为空——`git diff --numstat` 那时只用来确认改动范围。
 5. `python -c "import app.main"`，再全量 pytest（期望 627 passed）。
 6. 换行按字节核：`echo "lines=$(wc -l < f) cr=$(tr -dc '\r' < f | wc -c)"`，两数相等才算 CRLF。
    `Write` 工具新建的文件落成 LF，得自己转（ops 那刀的 `__init__.py` 就是转完才 39/39）。
    **反过来也成立**：仓库里本来就有 LF 的文件别顺手转成 CRLF——`tests/test_ops_sftp_paste.py`
    在 HEAD 上就是 159 行 / 0 CR，脚本按原样写回才对，所以核完要拿 `git show HEAD:同路径` 比一下。
+   **但 `git show` 比不出工作树的换行**（autocrlf 存的是 LF，任何文件都显示 0 CR）——要看
+   工作树就直接对文件跑 `tr -dc '\r' | wc -c`，拿 `lines == cr` 判 CRLF。chat 那刀的实际形态是
+   一个仓库里两种都有：`chat/service.py` 1063/1063 是 CRLF，`chat/memory.py` 397/0 是 LF（它
+   本来就是 LF，`git mv` 原样带走），新建的 `chat/__init__.py` 用 Write 落成 LF 后转成了 23/23。
 7. 等用户明说再提交；`type(scope): 中文短句` + 一段说明白「为什么这么切、改了哪些引用、
    什么没动」。
 
@@ -119,8 +144,9 @@ workflows 包的五个实现子模块加 `workflows/__init__.py` 的文档行，
   `pip --dry-run --only-binary=:all:`（84 包全有 wheel，0 sdist）。起来之后补一次 `docker build`。
 - **MySQL 连接池上限**这条要生产库的 `max_connections` 才能定，还欠着。
 - **UI 那条**（一键复制相关）等用户截图验收，不要猜像素。
-- **测试缺口**：`chat.py`(997 行) / `memory.py`(464) / `netdisk.py`(433) / `agents.py`(708) /
-  `resume.py` 主体(843，现只有 `test_resume_workflow.py` 13 条) / auth·users 路由，都没有本域用例。
+- **测试缺口**：`chat/service.py`(1063 行) / `chat/memory.py`(397) / `netdisk.py`(433) /
+  `agents.py`(708) / `resume.py` 主体(843，现只有 `test_resume_workflow.py` 13 条) /
+  auth·users 路由，都没有本域用例。
   已知的：knowledge 89、workflows 四件 139、ops 八件 183、slides 52、ai_gateway 39、mcp 40。
 - **`models/schemas.py`(2074) 与 `routers/ops.py`(1401) 不动**——它们的长是同类声明/路由的
   重复，不是职责混杂，拆开只是搬运（用户 2026-10-11 明确过）。
