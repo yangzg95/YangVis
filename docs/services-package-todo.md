@@ -20,8 +20,10 @@
 | `77200ed` | refactor(chat)：收尾任务从 memory 挪到对话侧，解掉 `memory → chat` 那条回边 |
 | `b92c59a` | refactor(chat)：`services/chat/` = `service.py` + `memory.py` + `__init__.py` 门面（转发四个名字） |
 
-`backend/app/services/` 现在是 **13 个平铺模块 + 7 个包**。全量测试 **627 passed**
-（这台机器六次都是 2 分钟上下：2 分 06 秒、1 分 57 秒、1 分 54 秒、1 分 48 秒、2 分 20 秒、1 分 48 秒；
+`backend/app/services/` 现在是 **13 个平铺模块 + 7 个包**。全量测试 **752 passed**
+（627 基线 + 对话那两面网 125 条：`tests/test_chat_service.py` 81、`tests/test_chat_memory.py` 43、
+`tests/test_background.py` 1——最后那条是 ④ 把 `fire_and_forget` 收平时跟着搬出对话套件的。
+这台机器计时跟着用例数走：670 条 1 分 45 秒、752 条 2 分 14 秒 / 3 分 00 秒，还是 2 分钟上下量级；
 上一台记的 4.2 分钟别再引用。`.venv/Scripts/python.exe -m pytest -q`，venv 在仓库根、不在 backend 下）。
 
 ## 试点定下来的五条形状规则
@@ -66,6 +68,13 @@
    拿到的是**包**，patch 到包上作用不到 `chat.service` 里真正执行的那份名字——测试会照过，
    但兜住的是空气。所以这种行必须改成 `from app.services.chat import service as chat_module`，
    而且这是**唯一一类必须改指向的测试引用**，别顺手把别的名也指到子模块。
+   **同一条规则的第二次实测**（补对话用例时撞的，比 patch 名字更隐蔽）：`SessionLocal` 这类
+   「模块顶部 import 进来的名字」在进程里有两份，patch `app.database.SessionLocal` 动不到
+   `chat/service.py` 手里那把，于是 `after_answer_task` 绕过临时库去连了 `.env` 里的开发库——
+   用例照样全绿，只是读到的是真库的 id。仓库其余后台任务（`routers/interview.py:170`、
+   `resume.py:302`、`slides.py:359`、`workflows/exec.py:135`）都在函数体内延迟 import，
+   就是为了让那一处 patch 够用；顶层 import 的模块得连消费方一起换（`test_knowledge.py:271`
+   早就这么写）。**用例读到了不该存在的行，先怀疑它连的是别的库**，别改断言。
 5. **域里有环就先解环，解环那一刀单独提交**（chat 那刀学的）：`chat.py` 顶层引 memory、
    `memory.py` 里延迟引 chat，这种「靠函数内 import 才没炸」的方向不能带进包里。判函数归谁
    看两点——谁调它（`after_answer_task` 只有 `chat.py:976` 调），以及它依赖的是谁的语义
@@ -89,6 +98,7 @@
   `netdisk.py`(433)、`interview.py`、`dashboard.py`、`captcha.py`、`login_guard.py`。
 
 要接着做，回到「测试缺口」那一节——那里的性价比现在高于继续 reshuffle。
+（收包之后确实还剩跨模块的重复，但那是**就地去重**、不是收包，见下面「又砍了四刀」那节。）
 
 ### 两刀留下的核行号手法（下次还要用）
 
@@ -100,6 +110,45 @@ memory 引用块 −2 个名字，净零，函数追加在文件尾，于是 19 
 两个坑：批量换 `chat.py:NNN` 时 `routers/chat.py` 也在文里，用负向后视 `(?<!routers/)` 保护，
 **先替 `services/chat.py` 再替裸名**；拿 placeholder 先盖 `routers/` 前缀不管用——`:NNN` 后缀
 照样会被裸名规则改掉，还原时匹配不上（chat 那刀第一遍就撞在这）。
+**下面那四刀把这 19 个号挪了**（②在顶部 +1、在 `require_chat_config` 里 −6，④删的段落在 998
+之后）：≤104 的三个号 +1（67→68、88→89、104→105），其余全部 −5（890→885、908→903、931→926、
+991→986…），`docs/ops-chat-confirm-flow.md` 已按新号重钉。重钉的做法是拿
+`git show HEAD:` 那份逐号比对「映射后的那一行还是不是同一句话」，20 处全对上才写回——
+别照算术改，算术会漏掉文档里没进映射表的号（`chat/service.py:835` 就是漏网的一条）。
+
+### 收包之后又砍了四刀：跨模块的重复，就地收（2026-10-12）
+
+簇没有了，**重复还有**。四处都不建新包：`common/`/`support/` 违背规则 1（没有同名模块可吸收，
+代价是所有 importer 改指向），而平铺层本来就在承担「跨域共用」这个角色。四处都走完
+「每一刀照抄的流程」，全量测试仍是 **752 passed**（④把一个用例从对话套件搬进新的
+`tests/test_background.py`，总数不动）。
+
+1. **① `routers/ops_files.py` 接进 `services/uploads.py`**：SFTP 上传的提前拒绝自己抄了一份
+   文案和一份 Content-Length 判定，而 uploads 里就有 `oversize_message()` 与
+   `content_length_exceeds()`（那里的注释原话是「与 ops_files 的提前拒绝口径一致」——本来就要
+   共享）。默认 500MB 是整除的，两版文案输出一样，但 `//` 与 `:.0f` 遇上半 MB 的限额会分家；
+   换共享件之后 `int(header)` 撞见非数字不再一路走到 500。
+2. **② 默认模型配置的查询收进 `model_config.py:default_model_config(db, owner_id, purpose)`**：
+   同一条 `owner + purpose + is_default` 的 select 抄了三份（`agent_run.require_chat_model`、
+   `chat/service.require_chat_config`、`knowledge/service.get_embedding_config`），连
+   `ModelConfigService.get_default` 自己也是同一句，现在它成了那一个定义。**只抽「查」**——
+   判「能不能用」留在调用方（对话看 `last_test_ok`，embedding 还要 `vector_size`），所以异常
+   与文案一概没动。**留着一个问题等你定**：同一个 `CODE_CHAT_NOT_READY` 有两种文案，agent_run
+   说「系统设置 → 模型管理」（菜单实为「系统设置 → 模型与集成」，页内 tab 叫「模型管理」，
+   这句够用），对话侧说「设置」（旧名）。统一它就是改用户可见文本，不是去重。
+3. **③ 剥 ```json 栅栏与截括号跨度收成两个原语**（`agent_run.strip_json_fence` / `json_span`）：
+   栅栏正则在 agent_run 与 slides 里是一模一样的一行，跨度截取的三行逻辑三处各写一遍。
+   **刻意没把三个解析函数并成一个带 flag 的大函数**——三处契约不同（只认 dict 抛 ValueError /
+   对象与数组谁先出现取谁 / 失败返回 None 跳过本轮），slides 那段「先 `[` 就按数组截，反了会
+   掐出第一个元素、整份结构白丢」的血书进了函数签名就没人再读了。三个调用点各自保留错误处理，
+   memory 那份顺带白拿栅栏处理（它此前靠松正则碰巧也能吃栅栏，行为等价）。
+4. **④ `fire_and_forget` 从 `chat/service.py` 收平到 `app/background.py`**：它是纯 asyncio 件
+   （强引用 set + 完成回调摘除），性质与 `sse.py` 同类，不该住在域包里；`workflows/stream.py`
+   的 `_DETACHED_RUNS` 是同一 idiom 的第二份（除那三行没有别的用处，确认过不是接流要查的注册表），
+   删掉改调它。**这一刀给规则 4 补了一个正例**：`test_ops_confirm.py:920`、`test_chat_service.py:259`
+   patch 的是 `chat_module.fire_and_forget`，收平之后 `chat/service.py` 的模块全局里仍有这个名字
+   （import 进来的），patch 照样打得中，一行都不用改；要跟着搬家的只有那个直接翻私有
+   `_BACKGROUND_TASKS` 的用例。
 
 ## 每一刀照抄的流程
 
@@ -126,7 +175,7 @@ memory 引用块 −2 个名字，净零，函数追加在文件尾，于是 19 
    **还了技术债那一刀（解环、合并分节）没法用「只差 import 行」自证**，改用逐行比对函数体：
    从 HEAD 抠出旧节、从新文件抠出搬过去的那节，把刻意差异（删掉的延迟导入、`_memory_logger`
    改名与随之多出的换行）归零后 diff 应当为空——`git diff --numstat` 那时只用来确认改动范围。
-5. `python -c "import app.main"`，再全量 pytest（期望 627 passed）。
+5. `python -c "import app.main"`，再全量 pytest（期望 752 passed）。
 6. 换行按字节核：`echo "lines=$(wc -l < f) cr=$(tr -dc '\r' < f | wc -c)"`，两数相等才算 CRLF。
    `Write` 工具新建的文件落成 LF，得自己转（ops 那刀的 `__init__.py` 就是转完才 39/39）。
    **反过来也成立**：仓库里本来就有 LF 的文件别顺手转成 CRLF——`tests/test_ops_sftp_paste.py`
@@ -144,10 +193,17 @@ memory 引用块 −2 个名字，净零，函数追加在文件尾，于是 19 
   `pip --dry-run --only-binary=:all:`（84 包全有 wheel，0 sdist）。起来之后补一次 `docker build`。
 - **MySQL 连接池上限**这条要生产库的 `max_connections` 才能定，还欠着。
 - **UI 那条**（一键复制相关）等用户截图验收，不要猜像素。
-- **测试缺口**：`chat/service.py`(1063 行) / `chat/memory.py`(397) / `netdisk.py`(433) /
-  `agents.py`(708) / `resume.py` 主体(843，现只有 `test_resume_workflow.py` 13 条) /
-  auth·users 路由，都没有本域用例。
-  已知的：knowledge 89、workflows 四件 139、ops 八件 183、slides 52、ai_gateway 39、mcp 40。
+- **测试缺口**：`netdisk.py`(433) / `agents.py`(708) / `resume.py` 主体(843，现只有
+  `test_resume_workflow.py` 13 条) / auth·users 路由，都没有本域用例。
+  已知的：knowledge 89、workflows 四件 139、ops 八件 183、slides 52、ai_gateway 39、mcp 40、
+  chat 124（`test_chat_service.py` 81 + `test_chat_memory.py` 43，2026-10-12 补上）加
+  `test_background.py` 1。
+- **对话用例补出来两处，都还没动**（等用户定）：① `services/chat/service.py:21` 的顶层
+  `from app.database import SessionLocal` 与其余后台任务的函数内延迟导入不一致——生产无差异，
+  纯粹是测试面的形状债；② `model_config.delete()` 不清 `chat_conversation.model_config_id`，
+  而 `require_chat_config(id)` 对不存在的 id 抛的是 `LookupError`，`after_answer_task` 只捕
+  `BusinessError`——引用悬空时收尾任务带一个没人取的异常死掉，主链路（`routers/chat.py:332`）
+  同一条数据则是用户看到 404。
 - **`models/schemas.py`(2074) 与 `routers/ops.py`(1401) 不动**——它们的长是同类声明/路由的
   重复，不是职责混杂，拆开只是搬运（用户 2026-10-11 明确过）。
 
