@@ -2,7 +2,7 @@
 
 简历分析、幻灯片生成、面试参考答案这些后台调用，现在都是工作流的一个步骤，
 统一走这里。之前它们各自抄了一份几乎相同的 ``_ask``（``services/resume.py``、
-``services/interview.py``、``services/slides.py``），于是「provider 返回内容块
+``services/interview.py``、``services/slides/service.py``），于是「provider 返回内容块
 列表要怎么拉平」「该用多长超时」这类问题要在三处分别修。
 
 这里只负责**一次调用**。多步骤的编排、进度与落库见

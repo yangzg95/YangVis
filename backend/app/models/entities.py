@@ -852,13 +852,13 @@ class SlideDeck(Base):
     ``slides`` 是唯一事实源，页面级增删改按服务端发放的 ``sid`` 寻址（与
     :class:`InterviewRecord` 的 ``qid`` 同一约定，数组下标在并发增删时会漂移）。
 
-    ``html`` 是每次写入时由 ``services/slides_html.py`` 从 slides 确定性重渲染
+    ``html`` 是每次写入时由 ``services/slides/html.py`` 从 slides 确定性重渲染
     的自包含文档：预览、放映、导出三个入口都只读这一份，不会出现「看到的和
     下载的不是同一套渲染」；因此它派生自 slides，永远不单独接受写。
 
     ``source_text`` / ``assets`` 是生成当时的材料快照——文档抽取出的纯文本进
     ``source_text``，重新生成只读这份快照。配图则落在服务器本地磁盘
-    （``services/slides_store.py``），这里只存相对路径与对外 URL，所以数据库不
+    （``services/slides/store.py``），这里只存相对路径与对外 URL，所以数据库不
     跟着图片一起膨胀，网页上的图片也能直接用 ``<img>`` 浏览。
 
     生成进度与失败原因在 ``workflow_run`` 上（``subject_kind`` 为 ``slide-deck``），
@@ -879,7 +879,7 @@ class SlideDeck(Base):
     # [{id, name, mime, size, rel_path, url}]，图片文件在服务器本地磁盘上，
     # rel_path 是相对 UPLOAD_MEDIA_DIR 的路径，url 是浏览器可直接访问的路径。
     assets: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
-    # {preset, ratio, accent}，合法值见 services/slides_html.py 的白名单。
+    # {preset, ratio, accent}，合法值见 services/slides/html.py 的白名单。
     theme: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     # [{sid, layout, title, subtitle, bullets, asset_id, notes}]
     slides: Mapped[list] = mapped_column(JSON, nullable=False, default=list)

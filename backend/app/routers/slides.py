@@ -35,7 +35,7 @@ from app.models.schemas import (
 from app.services.chunking import UnsupportedFileType
 from app.services.resume import extract_resume_text
 from app.services.slides import SlideService
-from app.services.slides_store import (
+from app.services.slides.store import (
     SlideImageError,
     delete_image,
     delete_image_dir,
@@ -303,7 +303,7 @@ async def upload_asset(
     """上传一张配图：按内容魔数判定格式，落到服务器本地磁盘，网页可直接浏览。
 
     扩展名由魔数决定，客户端报的 ``Content-Type`` 与文件名都不参与路径和类型
-    判定（详见 :mod:`app.services.slides_store`）。
+    判定（详见 :mod:`app.services.slides.store`）。
     """
     limit = settings.SLIDE_MAX_IMAGE_BYTES
     if content_length_exceeds(request.headers.get("content-length"), limit):

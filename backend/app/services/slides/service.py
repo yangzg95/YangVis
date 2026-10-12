@@ -12,7 +12,7 @@
 产物（slides / theme / html）。
 
 事实源是 ``slides`` 这一列结构化页面；``html`` 是从它确定性渲染出来的派生物
-（见 :mod:`app.services.slides_html`），每次写入和每次读取都会重渲一遍。用户改
+（见 :mod:`app.services.slides.html`），每次写入和每次读取都会重渲一遍。用户改
 内容只改 ``slides``，预览 / 放映 / 导出自然同步。
 """
 from __future__ import annotations
@@ -39,13 +39,13 @@ from app.services.agent_run import (
     model_error_text,
     require_chat_model,
 )
-from app.services.slides_html import (
+from app.services.slides.html import (
     MAX_DECK_PAGES,
     render_document,
     sanitize_pages,
     sanitize_theme,
 )
-from app.services.slides_store import StoredImage
+from app.services.slides.store import StoredImage
 from app.services.workflows.builtin import builtin_output, start_builtin
 from app.services.workflows.runs import (
     fail_run,

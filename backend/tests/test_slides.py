@@ -17,11 +17,11 @@ from app.database import Base
 from app.errors import BusinessError
 from app.models.entities import SlideDeck
 from app.models.schemas import SlideDeckSave
-from app.services import slides as slides_module
-from app.services import slides_html
-from app.services import slides_store as store
+from app.services.slides import service as slides_module
+from app.services.slides import html as slides_html
+from app.services.slides import store
 from app.services.agent_run import model_error_text
-from app.services.slides import (
+from app.services.slides.service import (
     SlideService,
     _generate_inputs,
     _json_candidate,

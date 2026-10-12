@@ -1627,7 +1627,7 @@ class ResumeToolkitDetail(ResumeToolkitItem):
 # ---- 智能办公 · 幻灯片 ---------------------------------------------------------
 
 # 页面版式。裸字符串存储，与现有状态字段同一约定（不用 Enum）；每个版式对应
-# services/slides_html.py 里的一个渲染分支，加版式要同时改这两处。
+# services/slides/html.py 里的一个渲染分支，加版式要同时改这两处。
 SlideLayout = Literal[
     "cover",     # 封面：大标题 + 副标题
     "section",   # 章节过渡页

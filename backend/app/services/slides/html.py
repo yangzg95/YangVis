@@ -23,7 +23,7 @@ import re
 import uuid
 from typing import Any, Dict, Iterable, List
 
-from app.services.slides_store import resolve_url
+from app.services.slides.store import resolve_url
 
 # 单字段长度上限：与 schemas 里的声明一致，在这里再裁一次是因为模型输出不归
 # Pydantic 管（它给什么我们收什么），而渲染器不能相信长度。
@@ -185,7 +185,7 @@ def sanitize_pages(raw: Any, asset_ids: Iterable[str] = ()) -> List[Dict[str, An
 def asset_urls(assets: Any) -> Dict[str, str]:
     """把库里的 assets 列转成 ``{asset_id: 可访问 URL}``。
 
-    只认 ``slides_store.is_safe_rel_path`` 认可的路径形状：这一列可能被手工改
+    只认 ``slides.store.is_safe_rel_path`` 认可的路径形状：这一列可能被手工改
     过，渲染器不该相信它干净。
     """
     urls: Dict[str, str] = {}

@@ -293,7 +293,7 @@ CREATE TABLE IF NOT EXISTS slide_deck (
   requirement VARCHAR(512) NULL     COMMENT '用户当次提出的要求（受众/页数/风格），重新生成时可覆盖',
   source_text MEDIUMTEXT   NOT NULL COMMENT '创建时的材料快照：粘贴文案 + 上传文档解析出的文本',
   assets      JSON         NOT NULL COMMENT '[{id, name, mime, size, rel_path, url}]，图片文件在服务器本地磁盘',
-  theme       JSON         NOT NULL COMMENT '{preset, ratio, accent}，合法值由 services/slides_html.py 白名单把关',
+  theme       JSON         NOT NULL COMMENT '{preset, ratio, accent}，合法值由 services/slides/html.py 白名单把关',
   slides      JSON         NOT NULL COMMENT '[{sid, layout, title, subtitle, bullets, asset_id, notes}]，唯一事实源',
   html        MEDIUMTEXT   NULL     COMMENT '派生物：每次写 slides/theme/assets 时由服务端重渲染，预览/放映/导出共用',
   created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,

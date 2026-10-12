@@ -242,7 +242,7 @@ if STATIC_DIR.exists():
 #
 # 幻灯片配图落在服务器本地磁盘，并由这一条挂载对外提供 —— 放映文档里的
 # <img> 是浏览器自己发的请求，带不上 Authorization 头，所以这里必须是直连的
-# 静态路径。文件名是随机 id（见 services/slides_store.py），不可猜即不可得。
+# 静态路径。文件名是随机 id（见 services/slides/store.py），不可猜即不可得。
 #
 # 目录单独于 STATIC_DIR：后者是前端构建产物，重建镜像即覆盖，用户资产不能
 # 活在那里面。Docker 部署要把这个目录挂成卷。
