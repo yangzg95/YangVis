@@ -1424,6 +1424,20 @@ def test_wrap_up_does_nothing_when_the_chat_config_is_gone(db, memory):
     assert memory["calls"] == []
 
 
+def test_wrap_up_survives_a_dangling_config_reference(db, memory):
+    """会话指着一份已经不存在的配置：读它抛的是 404 那条 ``LookupError``，
+    收尾任务一样得咽下去——以前这里没人接，异常只落在事件循环的日志里。"""
+    conv = make_conversation(db, model_config_id=add_config(db, title="删掉的那份").id)
+    gone = db.scalar(select(ModelConfig).where(ModelConfig.title == "删掉的那份"))
+    db.delete(gone)
+    db.commit()
+    db.expire_all()
+    assert conv.model_config_id is not None  # 悬空 id 就是这一刀要钉的旧数据形态
+
+    wait(chat_module.after_answer_task(OWNER, conv.id, 6))
+    assert memory["calls"] == []
+
+
 def test_wrap_up_keeps_going_when_the_summary_fails(db, memory, caplog):
     """两步各自兜底：摘要炸了不影响记忆提取，反之亦然。"""
     conv = make_conversation(db)

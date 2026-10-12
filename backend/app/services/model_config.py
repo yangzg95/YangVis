@@ -8,11 +8,11 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, select, update
 from sqlalchemy.orm import Session
 
 from app.crypto import DecryptionError, decrypt, encrypt, is_masked, mask
-from app.models.entities import ModelConfig
+from app.models.entities import ChatConversation, ModelConfig, WorkflowStep
 from app.models.schemas import (
     ModelConfigCreate,
     ModelConfigItem,
@@ -157,6 +157,20 @@ class ModelConfigService:
         config = self.get(config_id)
         was_default = config.is_default
         purpose = ModelPurpose(config.purpose)
+
+        # 配置删了，引用它的行不会跟着消失：会话与个人工作流步骤各留一个
+        # ``model_config_id``，之后按 id 去取配置就撞 LookupError——主链路把它变成
+        # 404，后台收尾任务里那个异常则没人接。清空等于退回「跟随默认配置」，
+        # 正是删掉这份配置之后该有的行为。不补 owner 过滤也安全：写入路径都校验过
+        # 配置属于本人，别人的行指不过来。``workflow_run_step`` 不跟着清——那一列记的
+        # 是「这一步当时实际用了哪份」，是留痕。
+        for row_type in (ChatConversation, WorkflowStep):
+            self._db.execute(
+                update(row_type)
+                .where(row_type.model_config_id == config_id)
+                .values(model_config_id=None)
+            )
+
         self._db.delete(config)
         self._db.flush()
 

@@ -192,7 +192,7 @@ class ChatService:
         """确定本次回答用哪份对话模型配置。
 
         传了 ``config_id`` 就用指定的那份（必须是本人的、对话用途、且已通过
-        连通性测试）；否则退回「设置」里的默认对话模型。
+        连通性测试）；否则退回「系统设置 → 模型管理」里的默认对话模型。
         """
         if config_id is not None:
             config = self._db.scalar(
@@ -209,7 +209,7 @@ class ChatService:
                 raise BusinessError(
                     CODE_CHAT_NOT_READY,
                     f"对话模型「{config.title}」尚未通过连通性测试，"
-                    "请前往「设置」测试后再使用。",
+                    "请前往「系统设置 → 模型管理」测试后再使用。",
                 )
             return config
 
@@ -218,7 +218,7 @@ class ChatService:
             raise BusinessError(
                 CODE_CHAT_NOT_READY,
                 "尚未配置可用的对话模型。"
-                "请前往「设置」添加对话模型并通过连通性测试。",
+                "请前往「系统设置 → 模型管理」添加对话模型并通过连通性测试。",
             )
         return config
 
@@ -1017,8 +1017,9 @@ async def after_answer_task(owner_id: int, conversation_id: int, history_turns: 
 
         try:
             config = chat_service.require_chat_config(conversation.model_config_id)
-        except BusinessError:
+        except (BusinessError, LookupError):
             # 对话模型配置被改掉/删掉了：记忆与摘要是增强，不是拦路的理由。
+            # LookupError 是删掉之前的历史数据留下的悬空 id（delete() 现在会清）。
             return
 
         try:

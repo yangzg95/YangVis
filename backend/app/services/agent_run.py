@@ -74,7 +74,7 @@ def require_chat_model(
     """确定这次调用用哪份对话模型配置。
 
     传了 ``config_id``（工作流步骤按步骤指定模型）就用那份，必须是本人的、对话
-    用途、且已通过连通性测试；否则退回「设置」里的默认对话模型。
+    用途、且已通过连通性测试；否则退回「系统设置 → 模型管理」里的默认对话模型。
 
     未就绪时抛 :class:`BusinessError`（``CODE_CHAT_NOT_READY``）而不是普通错误：
     这个 code 驱动的是一套「去把模型配上」的引导流程，前端按 code 分支。
@@ -103,7 +103,7 @@ def require_chat_model(
         raise BusinessError(
             CODE_CHAT_NOT_READY,
             "尚未配置可用的对话模型。"
-            "请先到「系统设置 → 模型管理」添加并通过连通性测试。",
+            "请前往「系统设置 → 模型管理」添加对话模型并通过连通性测试。",
         )
     return config
 
