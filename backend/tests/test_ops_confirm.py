@@ -38,7 +38,7 @@ from app.models.entities import (
     OpsServer,
 )
 from app.models.schemas import DatabaseType, ModelPurpose
-from app.services import chat as chat_module
+from app.services.chat import service as chat_module
 from app.services.ops import server as server_ops
 from app.services.agents import AgentService, seed_builtin_agents
 from app.services.chat import ChatService, ROLE_ASSISTANT, ROLE_USER

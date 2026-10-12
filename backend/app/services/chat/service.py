@@ -38,7 +38,7 @@ from app.services.ops import actions as ops_actions
 from app.services.agents import AgentService
 from app.services.chat_ops import TARGET_SERVER, Auditor, ChatOpsToolbox, OpsTarget
 from app.services.knowledge import KnowledgeService
-from app.services.memory import (
+from app.services.chat.memory import (
     MEMORY_RULES,
     MemoryService,
 )

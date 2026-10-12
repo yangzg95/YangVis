@@ -375,7 +375,7 @@ class ChatMessage(Base):
 class ChatSummary(Base):
     """一个会话「最近几轮之前」那部分历史的滚动摘要。
 
-    回放窗口（services/chat.py 的 HISTORY_TURNS）之外的消息对模型不可见，
+    回放窗口（services/chat/service.py 的 HISTORY_TURNS）之外的消息对模型不可见，
     摘要就是它们留在上下文里的唯一形式。摘要是*全量重算*出来的——不存
     「摘要到第几条消息」的 checkpoint，这样历史消息被手动改写后，下一次
     重算自然吸收，任何 worker 也都能随时重算，无需跨进程状态。

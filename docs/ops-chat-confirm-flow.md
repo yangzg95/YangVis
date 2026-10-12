@@ -10,7 +10,7 @@
 
 这是本设计最需要解释的一点，也是旧 WebSocket 方案死掉的原因。
 
-「断点」处没有任何东西在等。`_propose()`（`services/chat_ops.py:276`）落库后直接 `return` 一个字符串给模型，函数就结束了——没有 `await`、没有 `Event`、没有 `Queue.get()`。模型按 prompt 规则收尾，`astream_events` 自然耗尽，`done` 发完，`finally` 里 `stream.aclose()` + `toolbox.aclose()` 关掉 SSH（`services/chat.py:931`）。此后这个 worker 上关于本次提议的内存状态**全部销毁**：工具箱对象、那条连接、请求级 session。
+「断点」处没有任何东西在等。`_propose()`（`services/chat_ops.py:276`）落库后直接 `return` 一个字符串给模型，函数就结束了——没有 `await`、没有 `Event`、没有 `Queue.get()`。模型按 prompt 规则收尾，`astream_events` 自然耗尽，`done` 发完，`finally` 里 `stream.aclose()` + `toolbox.aclose()` 关掉 SSH（`services/chat/service.py:931`）。此后这个 worker 上关于本次提议的内存状态**全部销毁**：工具箱对象、那条连接、请求级 session。
 
 唯一的残留是 MySQL 里那一行 `status='pending'`。所以：
 
@@ -38,12 +38,12 @@
 | 事件 | payload | 产出位置 | 说明 |
 | --- | --- | --- | --- |
 | `meta` | conversation_id / agent_id / 检索范围 / model_config_id | `routers/chat.py:340` | 先于任何 token，首条提问也能立刻改 URL 与侧栏 |
-| `step` | `{tool, query, input}` | `chat.py:882` | 每次 `on_tool_start`。`input` 是完整入参，前端按工具名挑 command / statement / query |
-| `citations` | 全量列表 | `chat.py:890` | 每次 `on_tool_end` 后发一次，客户端整体替换。模型一次都不检索就没有这帧 |
-| `token` | 字符串 | `chat.py:922` | 正文增量 |
-| `exec` | `{action_id, command, exit_status, output, elapsed_ms, success}` | `chat.py:895`（只读）、`chat.py:601`（确认后） | `action_id: null` 表示未经确认的只读直跑 |
-| `confirm` | `{action_id, command, reason, target_*, timeout_seconds}` | `chat.py:908` | `propose_command` 落库后立刻推，卡片和本轮回答一起出现，不等 `done` |
-| `done` | `{message_id, conversation_id}` | `chat.py:991` | 用户中途停止时**不发**（`chat.py:987`）——客户端已经走了 |
+| `step` | `{tool, query, input}` | `chat/service.py:882` | 每次 `on_tool_start`。`input` 是完整入参，前端按工具名挑 command / statement / query |
+| `citations` | 全量列表 | `chat/service.py:890` | 每次 `on_tool_end` 后发一次，客户端整体替换。模型一次都不检索就没有这帧 |
+| `token` | 字符串 | `chat/service.py:922` | 正文增量 |
+| `exec` | `{action_id, command, exit_status, output, elapsed_ms, success}` | `chat/service.py:895`（只读）、`chat/service.py:601`（确认后） | `action_id: null` 表示未经确认的只读直跑 |
+| `confirm` | `{action_id, command, reason, target_*, timeout_seconds}` | `chat/service.py:908` | `propose_command` 落库后立刻推，卡片和本轮回答一起出现，不等 `done` |
+| `done` | `{message_id, conversation_id}` | `chat/service.py:991` | 用户中途停止时**不发**（`chat/service.py:987`）——客户端已经走了 |
 | `error` | `{code, message}` | 各端点兜底 | 403 / 404 / 409 / -1 |
 
 confirm 端点的事件序列是固定的：`exec → token* → done|error`。
@@ -94,7 +94,7 @@ pending ──claim_for_confirm()──► approved ──执行成功──► 
 - `display_status`（:47）—— 过期判定用惰性换算，不每次回写库。
 - `reset_stale_ops_actions`（:144，`bootstrap.py:340` 启动时调）—— 把上个进程遗留的 pending 物化成 expired，让它们呈现为「等待超时」而不是永远可点。
 
-拒绝时会补一条 assistant 消息进历史（`chat.py:560`）：否则历史里「提议 → 没有下文」会让模型以为命令还在等。
+拒绝时会补一条 assistant 消息进历史（`chat/service.py:560`）：否则历史里「提议 → 没有下文」会让模型以为命令还在等。
 
 ## 前端状态流转
 
@@ -116,26 +116,26 @@ pending ──claim_for_confirm()──► approved ──执行成功──► 
 
 | | 自由模式 | 绑定模式 |
 | --- | --- | --- |
-| 入口 | 智能体开 `use_ops`（内置 `ops-assistant`，`agents.py:467`） | 会话带 `ops_target_type/id`（内置 `server-ops` / `db-ops` 人设，二者 `use_ops=False`，工具箱是靠会话目标挂上的，`chat.py:821`） |
+| 入口 | 智能体开 `use_ops`（内置 `ops-assistant`，`agents.py:467`） | 会话带 `ops_target_type/id`（内置 `server-ops` / `db-ops` 人设，二者 `use_ops=False`，工具箱是靠会话目标挂上的，`chat/service.py:821`） |
 | 工具签名 | 带 `server_id` / `database_id`，模型从台账里挑 | **根本没有 id 参数**，命令永远落在绑定的目标上 |
 | 归属校验 | 在闭包里做 `self._servers.get(server_id)`——模型能决定查哪台，够不到别人的机器 | 建会话时已校验 |
 | prompt | 无目标说明 | `prompt_suffix()` 追加「当前已连接的服务器/数据库…」（`chat_ops.py:192`） |
 | 会话列表归属 | 出现在主对话侧栏 | 不进主对话列表（`list_conversations` 默认过滤 `ops_target_type IS NULL`），只在嵌入面板的历史下拉里翻 |
 
-`_OPS_RULES`（`chat.py:104`）追加在 system prompt **末尾**，不依赖用户自己写的智能体——「写命令必须经用户确认」这条硬约束不该因为用户改了人设就消失。
+`_OPS_RULES`（`chat/service.py:104`）追加在 system prompt **末尾**，不依赖用户自己写的智能体——「写命令必须经用户确认」这条硬约束不该因为用户改了人设就消失。
 
 ## 规避掉的坑
 
 1. **等待跨不过进程边界。** 见上节。这是整篇的由来。
-2. **`exec` 必须早于模型配置解析。** `chat.py:599`：命令已经执行完了，这时才发现「对话模型没通过连通性测试」绝不能把结果吞掉。
-3. **续答不落 user 消息。** 合成的是 `[系统] 用户已批准…` 旁白，`question_persisted=False`（`chat.py:635`）。落 user 消息的话，用户的提问流里会出现一条他没说过的话；不落的话历史里已有的问答仍能给模型来龙去脉。
-4. **`message_id` 只能回填。** 提议发生在流式中途，那条 assistant 消息还没落库，所以列可空，回答落库后再补（`chat.py:968`）。
-5. **运维排查会把步数上限撞穿。** 沿用检索的 `MAX_REACT_STEPS=8` 会在排查中途抛 `GraphRecursionError`，用户看到的就是「AI 说到一半突然停了」。挂工具箱时提到 25（`chat.py:67`），且真撞上限时不报错，把已流出的内容存下来 + 补一句「回复『继续』可接着排查」（`chat.py:88`）。
+2. **`exec` 必须早于模型配置解析。** `chat/service.py:599`：命令已经执行完了，这时才发现「对话模型没通过连通性测试」绝不能把结果吞掉。
+3. **续答不落 user 消息。** 合成的是 `[系统] 用户已批准…` 旁白，`question_persisted=False`（`chat/service.py:635`）。落 user 消息的话，用户的提问流里会出现一条他没说过的话；不落的话历史里已有的问答仍能给模型来龙去脉。
+4. **`message_id` 只能回填。** 提议发生在流式中途，那条 assistant 消息还没落库，所以列可空，回答落库后再补（`chat/service.py:968`）。
+5. **运维排查会把步数上限撞穿。** 沿用检索的 `MAX_REACT_STEPS=8` 会在排查中途抛 `GraphRecursionError`，用户看到的就是「AI 说到一半突然停了」。挂工具箱时提到 25（`chat/service.py:67`），且真撞上限时不报错，把已流出的内容存下来 + 补一句「回复『继续』可接着排查」（`chat/service.py:88`）。
 6. **AI 通道要更宽的命令超时。** `du`/`find` 在大磁盘上远超交互通道的 20s，用交互超时会误杀。AI 通道单独 `OPS_AGENT_CMD_TIMEOUT=120s`（`chat_ops.py:231`），交互终端不受影响。
 7. **命令输出撑爆上下文。** 两层截断：传输层 `OPS_OUTPUT_LIMIT=8192`（`ops/server.py:355`），回灌模型前再截到 `OUTPUT_LIMIT=4000`（`chat_ops.py:48`）。模型要细看某一段可以自己加 `tail`/`grep` 再查。
 8. **日志不带命令全文。** 写命令常带敏感参数，全文已在审计表，日志只留首词（`chat_ops.py:307`）。
 9. **SSH 连接别常驻。** 一次回答里复用一条（每条命令重连既慢又刷 auth 日志），回答结束即关——一次回答可能只跑一两条命令，长连接占着不如随用随建。
-10. **删会话要连带删 pending，但不能动审计。** `chat.py:347`：`ops_pending_action` 跟着会话走（挂起的卡片不该留在任何地方），`ops_audit_log` 是留痕、不是会话内容。
+10. **删会话要连带删 pending，但不能动审计。** `chat/service.py:347`：`ops_pending_action` 跟着会话走（挂起的卡片不该留在任何地方），`ops_audit_log` 是留痕、不是会话内容。
 
 ## 明确的取舍
 
@@ -168,7 +168,7 @@ SELECT id, actor, command, verdict, success, pending_action_id
 | 位置 | 看到什么 |
 | --- | --- |
 | `chat_ops.py:305` | 提议落库瞬间 |
-| `chat.py:908` | `confirm` 帧推给前端 |
+| `chat/service.py:908` | `confirm` 帧推给前端 |
 | `ops/actions.py:89` | CAS——两个标签页同时点确认，第二次 `rowcount=0` |
 | `chat_ops.py:335` | **唯一真正挂起的地方**；命令跑 120s 期间前端只收到 `: ping`，Network 里 Response 一片空白 |
 
@@ -191,10 +191,10 @@ curl -N -X POST http://localhost:18099/api/chat/actions/18/confirm \
   - 第 1 层（分类与 SQL/shell 绕过手法）仍由 `backend/tests/test_ops_safety.py` 的 19 个用例负责。
   - 两处都没测到的：真 SSH、真服务商。测试里全部打桩，机器上的实际行为要靠 `## 本地验证` 那一段。
 - **已知措辞冲突**：内置 `ops-assistant` 人设正文第 4 条（`agents.py:479`）让模型「把命令写清楚交给他到运维页面执行」，而末尾 `_OPS_RULES` 第 3 条要求走 `propose_command`。两条指令对同一个场景给出相反做法。
-  **未实测**：自由模式下确认卡片究竟稳不稳出得来，我只从注入顺序推断（`chat.py:835` 把 `_OPS_RULES` 拼在 prompt 最末尾，靠位置压过人设正文），没有实跑统计过成功率。要坐实就多问几次「重启 xxx 服务」看卡片出不出现。改的话改人设正文，别改 `_OPS_RULES`——后者是所有挂了运维工具箱的智能体共用的硬约束。
+  **未实测**：自由模式下确认卡片究竟稳不稳出得来，我只从注入顺序推断（`chat/service.py:835` 把 `_OPS_RULES` 拼在 prompt 最末尾，靠位置压过人设正文），没有实跑统计过成功率。要坐实就多问几次「重启 xxx 服务」看卡片出不出现。改的话改人设正文，别改 `_OPS_RULES`——后者是所有挂了运维工具箱的智能体共用的硬约束。
 - 改这条链路时顺带看一眼 `docs/schema.sql:239` 的 `ops_pending_action` DDL 注释，状态枚举与 verdict 枚举都以它为准。
 
 ## 相关文件
 
-- **后端**：`routers/chat.py`（completions / retry / confirm / reject / actions 回放 / ops-conversations）· `services/chat.py`（ReAct 循环、`_OPS_RULES`、`confirm_action_stream`）· `services/chat_ops.py`（工具箱与两阶段上半场）· `services/ops/actions.py`（状态机）· `services/ops/safety.py`（分类）· `services/ops/server.py` / `ops/db_exec.py`（执行）· `sse.py`（帧格式、心跳、响应头）· `models/entities.py`（`OpsPendingAction`）· `bootstrap.py`（启动收尾）
+- **后端**：`routers/chat.py`（completions / retry / confirm / reject / actions 回放 / ops-conversations）· `services/chat/service.py`（ReAct 循环、`_OPS_RULES`、`confirm_action_stream`）· `services/chat_ops.py`（工具箱与两阶段上半场）· `services/ops/actions.py`（状态机）· `services/ops/safety.py`（分类）· `services/ops/server.py` / `ops/db_exec.py`（执行）· `sse.py`（帧格式、心跳、响应头）· `models/entities.py`（`OpsPendingAction`）· `bootstrap.py`（启动收尾）
 - **前端**：`api/index.ts`（`streamSse` / `dispatchSse` / `chatApi.confirmAction`）· `utils/useOpsConfirm.ts`（状态流转）· `components/ConfirmCard.vue`（卡片与倒计时）· `components/OpsChat.vue`（嵌入面板）· `views/Chat.vue` · `views/OpsServerTerminal.vue`（exec 回显进终端）

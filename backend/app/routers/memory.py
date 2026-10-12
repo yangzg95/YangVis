@@ -21,7 +21,7 @@ from app.models.schemas import (
     MemoryItem,
     MemoryUpdate,
 )
-from app.services.memory import MemoryService
+from app.services.chat.memory import MemoryService
 
 logger = logging.getLogger("yangvis.memory")
 

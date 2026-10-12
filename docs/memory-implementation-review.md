@@ -74,7 +74,7 @@ fire_and_forget(after_answer_task)   ← 请求外执行，自开 session
 
 ## 改动清单
 
-- **后端**：`models/entities.py`（Agent.use_memory、ChatSummary、UserMemory）· `services/memory.py`（新）· `services/chat.py`（注入 + 触发）· `services/agents.py`（开关贯通）· `routers/memory.py`（新）· `bootstrap.py`（列迁移）· `docs/schema.sql`
+- **后端**：`models/entities.py`（Agent.use_memory、ChatSummary、UserMemory）· `services/chat/memory.py`（新）· `services/chat/service.py`（注入 + 触发）· `services/agents.py`（开关贯通）· `routers/memory.py`（新）· `bootstrap.py`（列迁移）· `docs/schema.sql`
 - **前端**：`api/index.ts`（memoryApi）· `Agents.vue`（开关）· `Settings.vue`（记忆管理 Tab）
 
 ---
