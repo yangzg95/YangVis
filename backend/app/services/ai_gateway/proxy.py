@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models.entities import AiApiKey, AiCallLog
-from app.services.ai_gateway import (
+from app.services.ai_gateway.service import (
     RouteCandidate,
     resolve_candidates,
     truncate_text,

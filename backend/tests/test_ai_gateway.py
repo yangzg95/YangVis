@@ -19,8 +19,8 @@ from app.models.schemas import (
     AiChannelUpdate,
     AiModelRouteCreate,
 )
-from app.services import ai_gateway as gateway
-from app.services import ai_gateway_proxy as proxy
+from app.services.ai_gateway import service as gateway
+from app.services.ai_gateway import proxy
 from app.services.ai_gateway import (
     DISPLAY_PREFIX_LENGTH,
     KEY_PREFIX,
@@ -38,7 +38,7 @@ from app.services.ai_gateway import (
     truncate_text,
     write_call_log,
 )
-from app.services.ai_gateway_proxy import (
+from app.services.ai_gateway.proxy import (
     CallRecord,
     StreamAccumulator,
     apply_usage,

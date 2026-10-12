@@ -37,7 +37,7 @@ from app.models.schemas import (
     ListResponse,
     TestResult,
 )
-from app.services import ai_gateway_proxy as proxy
+from app.services.ai_gateway import proxy
 from app.services.ai_gateway import AiGatewayService, public_base_url
 
 logger = logging.getLogger("yangvis.ai_gateway.admin")

@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.entities import AiApiKey
 from app.netutil import client_ip
-from app.services import ai_gateway_proxy as proxy
+from app.services.ai_gateway import proxy
 from app.services.ai_gateway import extract_bearer_key, find_api_key, list_public_models
 from app.sse import with_byte_heartbeat
 

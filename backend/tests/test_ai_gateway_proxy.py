@@ -17,7 +17,7 @@ from app.database import Base, get_db
 from app.models.entities import AiApiKey, AiCallLog
 from app.models.schemas import AiApiKeyUpdate, AiChannelCreate, AiModelRouteCreate
 from app.routers import ai_gateway_openai
-from app.services import ai_gateway_proxy as proxy
+from app.services.ai_gateway import proxy
 from app.services.ai_gateway import AiGatewayService
 
 PRIMARY = "https://primary.test/v1"

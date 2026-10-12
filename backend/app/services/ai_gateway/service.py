@@ -1,6 +1,6 @@
 """AI 网关的管理侧：通道、模型路由、统一密钥、调用日志与统计。
 
-对外转发在 :mod:`app.services.ai_gateway_proxy`；这里只管配置与留痕。网关是
+对外转发在 :mod:`app.services.ai_gateway.proxy`；这里只管配置与留痕。网关是
 平台级资产（不像 ``model_config`` 按用户隔离），因此所有写操作都由
 ``require_admin`` 把关。
 """
