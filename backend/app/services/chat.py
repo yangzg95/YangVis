@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Awaitable, Callable, List, Optional, Sequence, Tuple
@@ -17,6 +18,7 @@ from sqlalchemy import Select, delete, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.database import SessionLocal
 from app.errors import CODE_CHAT_NOT_READY, BusinessError
 from app.models.entities import (
     Agent,
@@ -39,8 +41,6 @@ from app.services.knowledge import KnowledgeService
 from app.services.memory import (
     MEMORY_RULES,
     MemoryService,
-    after_answer_task,
-    fire_and_forget,
 )
 from app.services.ops import database as db_ops
 from app.services.ops import server as server_ops
@@ -995,3 +995,69 @@ def derive_title(question: str) -> str:
     """第一个问题顺带充当会话标题。"""
     title = " ".join(question.split())
     return title[:40] if len(title) <= 40 else f"{title[:40]}…"
+
+
+# ---- 后台任务 -------------------------------------------------------------------
+
+# 收尾任务的失败日志仍走 yangvis.memory 这个通道：搬过来的是模块归属，
+# 日志按职责分，不按文件走。
+_memory_logger = logging.getLogger("yangvis.memory")
+
+# asyncio.create_task 创建的任务只被事件循环弱引用，不放一份强引用，任务可能
+# 在跑完之前就被 GC 回收。
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def fire_and_forget(coro) -> None:
+    """在请求结束后继续跑一个协程（SSE 流没法用 FastAPI 的 BackgroundTasks）。
+
+    任务体内的异常必须自己兜住——这里的回调只负责回收引用。
+    """
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+
+async def after_answer_task(owner_id: int, conversation_id: int, history_turns: int) -> None:
+    """一轮问答落库之后的收尾：重算会话摘要、提取长期记忆。
+
+    自己开一个 session：任务真正跑起来的时候，请求级别的 session 早就关了
+    （与 knowledge.index_document_task 同一形态）。任何一步失败都只记日志，
+    下一步照常——全量重算的设计保证下一次成功调用会把错过的补回来。
+    """
+    with SessionLocal() as db:
+        chat_service = ChatService(db, owner_id)
+        memory = MemoryService(db, owner_id)
+
+        try:
+            conversation = chat_service.get_conversation(conversation_id)
+        except LookupError:
+            return  # 会话在回答落库后又被删了
+
+        try:
+            config = chat_service.require_chat_config(conversation.model_config_id)
+        except BusinessError:
+            # 对话模型配置被改掉/删掉了：记忆与摘要是增强，不是拦路的理由。
+            return
+
+        try:
+            await memory.refresh_summary(
+                conversation, config, history_turns=history_turns
+            )
+        except Exception:  # noqa: BLE001 - 绝不让后台任务无声无息地死掉
+            _memory_logger.exception(
+                "summary refresh failed for conversation %s", conversation_id
+            )
+
+        agent = None
+        if conversation.agent_id is not None:
+            try:
+                agent = AgentService(db, owner_id).get(conversation.agent_id)
+            except LookupError:
+                pass
+        try:
+            await memory.extract_memories(conversation, config, agent)
+        except Exception:  # noqa: BLE001
+            _memory_logger.exception(
+                "memory extraction failed for conversation %s", conversation_id
+            )
