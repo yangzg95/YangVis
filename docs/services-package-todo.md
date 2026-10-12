@@ -1,6 +1,6 @@
 # services 层收包 TODO
 
-接着上一台机器上的活。2026-10-11 落地两刀，10-12 这刀是 slides；这份文档记下：已经做完的、
+接着上一台机器上的活。2026-10-11 落地两刀，10-12 又落了 slides 与 ai_gateway 两刀；这份文档记下：已经做完的、
 下一刀的实测尺寸、每刀必须走的验证流程、以及卡住的项目。**动手前先跑一次
 `git log --oneline -3` 和 `git status --short`，确认工作树是干净的**（本仓库常有两个
 会话同时在改，脏树别硬来）。
@@ -13,10 +13,11 @@
 | `056702c` | test(knowledge)：89 个用例，这个域的第一张网 |
 | `5a395a0` | refactor(workflow)：`services/workflows/` = `__init__.py`（词汇表）+ 七个实现子模块 |
 | `1d21019` | refactor(slides)：`services/slides/` = `service.py` + `html.py` + `store.py` + `__init__.py` 门面 |
+| `230cc24` | refactor(ai_gateway)：`services/ai_gateway/` = `service.py` + `proxy.py` + `__init__.py` 门面 |
 
-`backend/app/services/` 现在是 **29 个平铺模块 + 3 个包**。全量测试 **627 passed**
-（这台机器 2 分 06 秒跑完，上一台记的是 4.2 分钟；`.venv/Scripts/python.exe -m pytest -q`，
-venv 在仓库根、不在 backend 下）。
+`backend/app/services/` 现在是 **27 个平铺模块 + 4 个包**。全量测试 **627 passed**
+（这台机器两次都是 2 分钟上下：2 分 06 秒、1 分 57 秒；上一台记的 4.2 分钟别再引用。
+`.venv/Scripts/python.exe -m pytest -q`，venv 在仓库根、不在 backend 下）。
 
 ## 试点定下来的四条形状规则
 
@@ -27,6 +28,10 @@ venv 在仓库根、不在 backend 下）。
    调用方直接子模块取名字。别为了统一形式硬造门面。slides 那刀照 knowledge 做：只重导出
    `SlideService` 加 `html`/`store` 两个**子模块名**，router 的上传图片接口直接
    `from app.services.slides.store import ...`——门面不替子模块转发函数。
+   **转发的宽度按调用方实际取什么定**（ai_gateway 那刀学的）：入口类之外若还有一把平铺
+   公开函数被 router/测试直接取，就把这串公开名整串重导出（16 个），让
+   `from app.services.X import 函数名` 保持零改动；只露子模块名会让调用方改指子模块，
+   反而多了改动面。判据是先 grep 出「从包名取名字」的清单，而不是照抄上一个包的形式。
 3. **跨域共用的工具留在平铺层**，不许塞进包里：`chunking.py`（知识库 router + 简历 router +
    `services/resume.py` 都在用）、`uploads.py`（三个 router 在用）。
    一个类仍占一个模块，不再往下拆。
@@ -37,32 +42,7 @@ venv 在仓库根、不在 backend 下）。
 
 ## 下一刀（按性价比排）
 
-### 1. ai_gateway：两个模块，1173 行 —— 热机之后第一刀
-
-`ai_gateway.py`(612) + `ai_gateway_proxy.py`(561)。上一份文档估的「只有六处」只数了
-proxy 那一侧，10-12 重量的完整引用面是这些：`routers/ai_gateway.py:40,41`、
-`routers/ai_gateway_openai.py:24,25`、包内 `ai_gateway_proxy.py:31` 引 gateway、
-`test_ai_gateway.py:22,23,24,41`、`test_ai_gateway_proxy.py:20,21`，外加
-`ai_gateway.py:3` 的一处 `:mod:`。依赖是单向的（proxy 接 gateway，gateway 谁都不接），
-所以怎么摆都不会炸。
-
-形状要先定一件事：`ai_gateway.py` 有入口类 `AiGatewayService`，但也有一把平铺的
-公开函数（`public_base_url`、`extract_bearer_key`、`find_api_key`、`list_public_models`、
-`write_call_log`、`RouteCandidate` 等），router 和 proxy 都在直接取它们。
-- 走 workflows 那种：`ai_gateway.py` 整体变成 `ai_gateway/__init__.py`，
-  `from app.services.ai_gateway import X` 五处一行不动，只改 proxy 那六处；
-- 走 knowledge/slides 那种：主体进 `ai_gateway/gateway.py`，门面把上面那串公开名全
-  重导出——改动行数更多，但包内形状统一（`__init__` 只当门面、实现住子模块）。
-我倾向第二种，代价是门面的 import 块有十几行。
-
-坑：其中三处是 `from app.services import ai_gateway_proxy as proxy` 的**别名形态**——包名正好是
-`ai_gateway`、子模块叫 `proxy`，改成 `from app.services.ai_gateway import proxy` 就行，连 `as`
-都不用留。按规则 4，`test_ai_gateway.py:22` 的 `from app.services import ai_gateway as gateway`
-加 `gateway.X` 属性访问也要一起核（走第二种形状时它得指到 `gateway` 子模块）。
-**别动 logger 名**：`ai_gateway_proxy.py:38` 的 `logging.getLogger("yangvis.ai_gateway_proxy")`
-是日志通道名、不是模块路径，knowledge 那刀同理保住了 `yangvis.vectorstore`。
-
-### 2. mcp：两个模块，790 行
+### 1. mcp：两个模块，790 行
 
 `mcp_servers.py`(526) + `mcp_tools.py`(264)。要改七处：`routers/mcp.py:24,25`、
 包内的 `workflows/exec.py:33` 与 `workflows/rerun.py:31`、`test_mcp_config_io.py:22`、
@@ -71,7 +51,11 @@ proxy 那一侧，10-12 重量的完整引用面是这些：`routers/ai_gateway.
 `langchain_mcp_adapters.tools` 引的 `load_mcp_tools`（第三方，不是本仓库模块）。
 所以模式必须带全前缀 `app\.services\.mcp_`，裸词替换会把外部依赖一起改掉。
 
-### 3. ops：十个模块，4163 行 —— **建议缓，先别动**
+动手前先按规则 2 补的那句做一遍：grep 出「从包名取名字」的清单，再定门面转多宽；
+再按规则 4 数一遍测试里 `from app.services import X as 别名` 之后的 `X.attr`（私有名
+和模块级 `settings` 快照得指子模块）。mcp 这一簇还没有包，两个模块谁引谁要先看清。
+
+### 2. ops：十个模块，4163 行 —— **建议缓，先别动**
 
 引用面 102 行，是最大的一族，但两个理由压着：
 
@@ -81,7 +65,7 @@ proxy 那一侧，10-12 重量的完整引用面是这些：`routers/ai_gateway.
   收包会让这份文档全线对不上，而改它等于替别人改他刚写完的稿子。要动就得连带把那份文档的
   路径与行号一起核一遍。
 
-### 4. agents / 对话域：先别收，有一条回边
+### 3. agents / 对话域：先别收，有一条回边
 
 `agents.py`(708) + `agent_run.py`(263) 看着是天然一簇，但 `agent_run` 的引用方散布在
 workflows 包的五个实现子模块加 `workflows/__init__.py` 的文档行，还有 interview、resume
