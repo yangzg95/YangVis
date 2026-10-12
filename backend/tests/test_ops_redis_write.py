@@ -17,8 +17,8 @@ from app.models.schemas import (
     RedisStringUpdateRequest,
     RedisTtlRequest,
 )
-from app.services import ops_database as db_ops
-from app.services import ops_db_redis as db_redis
+from app.services.ops import database as db_ops
+from app.services.ops import db_redis as db_redis
 
 ITEM = SimpleNamespace(id=1, db_type="redis", writable=True)
 

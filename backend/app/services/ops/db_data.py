@@ -41,15 +41,15 @@ from app.models.schemas import (
     DbRowWriteResult,
     DbRowsResult,
 )
-from app.services.ops_database import OpsDbError, OpsDbForbidden
-from app.services.ops_db_exec import (
+from app.services.ops.database import OpsDbError, OpsDbForbidden
+from app.services.ops.db_exec import (
     MAX_PAGE_SIZE,
     _connect_mysql,
     _password_of,
     _stringify,
 )
-from app.services.ops_db_schema import _quote_ident
-from app.services.ops_safety import classify_sql, classify_sql_writable
+from app.services.ops.db_schema import _quote_ident
+from app.services.ops.safety import classify_sql, classify_sql_writable
 
 logger = logging.getLogger("yangvis.ops_database")
 

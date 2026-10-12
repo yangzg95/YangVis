@@ -5,7 +5,7 @@ SQL 全部在服务端拼，用户能控制的只有标识符（库名 / 表名�
 系统库排序时沉底，各类列表都带行数上限（``_BROWSE_CAP`` / ``_COMPLETION_CAP``），
 ER 图另有表数与列数两道截断，超了就置 ``truncated`` 而不是悄悄少画。
 
-Redis 连接展开的是逻辑库，库列表由 :mod:`app.services.ops_db_redis` 给出。
+Redis 连接展开的是逻辑库，库列表由 :mod:`app.services.ops.db_redis` 给出。
 """
 from __future__ import annotations
 
@@ -30,9 +30,9 @@ from app.models.schemas import (
     DbTableDdl,
     DbTableItem,
 )
-from app.services.ops_database import OpsDbError
-from app.services.ops_db_exec import _password_of, _query_mysql
-from app.services.ops_db_redis import _list_redis_dbs
+from app.services.ops.database import OpsDbError
+from app.services.ops.db_exec import _password_of, _query_mysql
+from app.services.ops.db_redis import _list_redis_dbs
 
 # ---- 浏览（Navicat 式界面的数据源） -------------------------------------------
 #

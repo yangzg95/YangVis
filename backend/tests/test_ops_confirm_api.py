@@ -31,11 +31,11 @@ from app.deps import require_user
 from app.main import app
 from app.models.entities import ChatConversation, ModelConfig, OpsPendingAction, OpsServer
 from app.models.schemas import CurrentUser, ModelPurpose
-from app.services import ops_server as server_ops
+from app.services.ops import server as server_ops
 from app.services.agents import AgentService, seed_builtin_agents
 from app.services.chat import ChatService
 from app.services.chat_ops import TARGET_SERVER
-from app.services.ops_actions import (
+from app.services.ops.actions import (
     STATUS_PENDING,
     STATUS_REJECTED,
     get_owned,

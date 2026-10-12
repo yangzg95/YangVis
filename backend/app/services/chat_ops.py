@@ -33,11 +33,11 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.models.entities import OpsAuditLog, OpsDatabase, OpsPendingAction, OpsServer
 from app.models.schemas import DatabaseType
-from app.services import ops_database as db_ops
-from app.services import ops_db_exec as db_exec
-from app.services import ops_server as server_ops
-from app.services.ops_actions import finish_execution
-from app.services.ops_safety import classify_command
+from app.services.ops import database as db_ops
+from app.services.ops import db_exec as db_exec
+from app.services.ops import server as server_ops
+from app.services.ops.actions import finish_execution
+from app.services.ops.safety import classify_command
 
 logger = logging.getLogger("yangvis.chat_ops")
 

@@ -9,7 +9,7 @@ import asyncio
 import asyncssh
 import pytest
 
-from app.services.ops_sftp import SftpError, paste, paste_candidate
+from app.services.ops.sftp import SftpError, paste, paste_candidate
 
 
 def run(coro):

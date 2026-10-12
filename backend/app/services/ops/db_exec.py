@@ -1,6 +1,6 @@
 """运维数据库的连接与执行通道。
 
-「默认只读」这句约束不靠命令解析兜底。解析（:mod:`app.services.ops_safety`）只是
+「默认只读」这句约束不靠命令解析兜底。解析（:mod:`app.services.ops.safety`）只是
 第一道门，真正的保证在连接本身：MySQL 会话开在 ``READ ONLY`` 事务里，并带上
 ``MAX_EXECUTION_TIME``——即便解析被绕过，服务端自己会拒绝写入。Redis 没有只读
 会话这种东西，因此走白名单 + 硬禁用清单，并且不允许任何脚本类命令。
@@ -37,8 +37,8 @@ from app.models.schemas import (
     DbBatchStatement,
     DbExecuteResult,
 )
-from app.services.ops_database import OpsDbError, OpsDbForbidden
-from app.services.ops_safety import (
+from app.services.ops.database import OpsDbError, OpsDbForbidden
+from app.services.ops.safety import (
     Verdict,
     classify_redis,
     classify_redis_writable,

@@ -10,9 +10,9 @@ import pymysql
 import pytest
 
 from app.models.schemas import DbRowFilter, DbRowSort
-from app.services import ops_database as db_ops
-from app.services import ops_db_data as db_data
-from app.services import ops_db_schema as db_schema
+from app.services.ops import database as db_ops
+from app.services.ops import db_data as db_data
+from app.services.ops import db_schema as db_schema
 
 
 class FakeConn:

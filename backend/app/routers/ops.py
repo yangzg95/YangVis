@@ -80,13 +80,13 @@ from app.models.schemas import (
     WsTicket,
 )
 from app.security import create_ws_ticket
-from app.services import ops_database as db_ops
-from app.services import ops_db_data as db_data
-from app.services import ops_db_design as db_design
-from app.services import ops_db_exec as db_exec
-from app.services import ops_db_redis as db_redis
-from app.services import ops_db_schema as db_schema
-from app.services import ops_server as server_ops
+from app.services.ops import database as db_ops
+from app.services.ops import db_data as db_data
+from app.services.ops import db_design as db_design
+from app.services.ops import db_exec as db_exec
+from app.services.ops import db_redis as db_redis
+from app.services.ops import db_schema as db_schema
+from app.services.ops import server as server_ops
 from app.services.chat_ops import Auditor
 
 logger = logging.getLogger("yangvis.ops")

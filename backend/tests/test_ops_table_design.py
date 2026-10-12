@@ -18,9 +18,9 @@ from app.models.schemas import (
     DbTableDef,
     DbTableDefUpdate,
 )
-from app.services import ops_database as db_ops
-from app.services import ops_db_design as db_design
-from app.services.ops_safety import classify_sql_writable
+from app.services.ops import database as db_ops
+from app.services.ops import db_design as db_design
+from app.services.ops.safety import classify_sql_writable
 
 
 def col(name, column_type="varchar(64)", *, nullable=True, default=None, extra="", comment=""):

@@ -40,8 +40,8 @@ from app.models.schemas import (
     RedisTtlRequest,
     RedisWriteResult,
 )
-from app.services.ops_database import OpsDbError
-from app.services.ops_db_exec import (
+from app.services.ops.database import OpsDbError
+from app.services.ops.db_exec import (
     MAX_PAGE_SIZE,
     _connect_redis,
     _default_redis_db,

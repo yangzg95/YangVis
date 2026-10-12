@@ -37,16 +37,16 @@ from app.models.schemas import (
     DbTableDef,
     DbTableDefUpdate,
 )
-from app.services.ops_database import OpsDbError
-from app.services.ops_db_data import _display_literal
-from app.services.ops_db_exec import (
+from app.services.ops.database import OpsDbError
+from app.services.ops.db_data import _display_literal
+from app.services.ops.db_exec import (
     _password_of,
     _preview_sql,
     _query_mysql,
     _run_mysql_batch,
 )
-from app.services.ops_db_schema import _quote_ident, list_columns, list_indexes
-from app.services.ops_safety import classify_sql_writable
+from app.services.ops.db_schema import _quote_ident, list_columns, list_indexes
+from app.services.ops.safety import classify_sql_writable
 from app.timeutil import db_now
 
 # ---- 设计表（表定义编辑） -------------------------------------------------------

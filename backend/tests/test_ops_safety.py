@@ -3,7 +3,7 @@
 判定器是「让 AI / 用户碰数据库」这件事的第一道门，各种绕过手法和误报
 回归都钉在这里。
 """
-from app.services.ops_safety import (
+from app.services.ops.safety import (
     classify_redis,
     classify_redis_writable,
     classify_sql,

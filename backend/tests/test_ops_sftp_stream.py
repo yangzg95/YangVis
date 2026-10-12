@@ -12,7 +12,7 @@ from typing import Optional
 import pytest
 
 from app.routers.ops_files import _UploadTooLarge, _iter_body_chunks
-from app.services.ops_sftp import (
+from app.services.ops.sftp import (
     SftpError,
     iter_file_chunks,
     open_session,

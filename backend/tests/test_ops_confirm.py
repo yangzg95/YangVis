@@ -39,11 +39,11 @@ from app.models.entities import (
 )
 from app.models.schemas import DatabaseType, ModelPurpose
 from app.services import chat as chat_module
-from app.services import ops_server as server_ops
+from app.services.ops import server as server_ops
 from app.services.agents import AgentService, seed_builtin_agents
 from app.services.chat import ChatService, ROLE_ASSISTANT, ROLE_USER
 from app.services.chat_ops import TARGET_SERVER, ChatOpsToolbox, OpsTarget
-from app.services.ops_actions import (
+from app.services.ops.actions import (
     STATUS_APPROVED,
     STATUS_EXECUTED,
     STATUS_EXPIRED,

@@ -41,7 +41,7 @@ from app.models.schemas import (
     SftpPasteRequest,
     SftpPasteResult,
 )
-from app.services import ops_sftp, ops_server as server_ops
+from app.services.ops import sftp as ops_sftp, server as server_ops
 
 logger = logging.getLogger("yangvis.ops_files")
 

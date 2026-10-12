@@ -56,7 +56,7 @@ confirm 端点的事件序列是固定的：`exec → token* → done|error`。
 
 ## 授权：三层边界
 
-**1. 分类**（`services/ops_safety.py`，刻意写成不碰网络不碰 DB 的纯函数）。三态 `readonly` / `needs_confirm` / `forbidden`。白名单不只看首个词——`;` `&&` `||` 重定向 反引号 `$(` `${` 换行一律挡（`ops_safety.py:46`），管道网开一面但要求每段独立合法，危险 flag 单独拦。
+**1. 分类**（`services/ops/safety.py`，刻意写成不碰网络不碰 DB 的纯函数）。三态 `readonly` / `needs_confirm` / `forbidden`。白名单不只看首个词——`;` `&&` `||` 重定向 反引号 `$(` `${` 换行一律挡（`ops/safety.py:46`），管道网开一面但要求每段独立合法，危险 flag 单独拦。
 
 **数据库侧还有第二道真保证**：连接建立后立刻 `SET SESSION TRANSACTION READ ONLY`。即使解析被绕过，服务端自己拒写。所以数据库不存在「确认后可写」通道——模型要写只能把 SQL 写给用户，让他到运维页面执行。
 
@@ -86,7 +86,7 @@ pending ──claim_for_confirm()──► approved ──执行成功──► 
        （CAS 的 created_at 条件不成立；或进程重启时 reset_stale 物化）
 ```
 
-实现在 `services/ops_actions.py`，全部是单语句 UPDATE：
+实现在 `services/ops/actions.py`，全部是单语句 UPDATE：
 
 - `claim_for_confirm`（:83）—— `WHERE id AND owner_id AND status='pending' AND created_at >= now-180s`。InnoDB 行锁保证并发/重复点击只有一个请求 `rowcount=1`。**过期视同未批准**——没人应答就执行写命令，正是这套设计要防的事。
 - `claim_for_reject`（:106）—— 不卡 `created_at`：用户点的「拒绝」就是答案，只是来晚了，允许标记。
@@ -132,7 +132,7 @@ pending ──claim_for_confirm()──► approved ──执行成功──► 
 4. **`message_id` 只能回填。** 提议发生在流式中途，那条 assistant 消息还没落库，所以列可空，回答落库后再补（`chat.py:968`）。
 5. **运维排查会把步数上限撞穿。** 沿用检索的 `MAX_REACT_STEPS=8` 会在排查中途抛 `GraphRecursionError`，用户看到的就是「AI 说到一半突然停了」。挂工具箱时提到 25（`chat.py:67`），且真撞上限时不报错，把已流出的内容存下来 + 补一句「回复『继续』可接着排查」（`chat.py:88`）。
 6. **AI 通道要更宽的命令超时。** `du`/`find` 在大磁盘上远超交互通道的 20s，用交互超时会误杀。AI 通道单独 `OPS_AGENT_CMD_TIMEOUT=120s`（`chat_ops.py:231`），交互终端不受影响。
-7. **命令输出撑爆上下文。** 两层截断：传输层 `OPS_OUTPUT_LIMIT=8192`（`ops_server.py:355`），回灌模型前再截到 `OUTPUT_LIMIT=4000`（`chat_ops.py:48`）。模型要细看某一段可以自己加 `tail`/`grep` 再查。
+7. **命令输出撑爆上下文。** 两层截断：传输层 `OPS_OUTPUT_LIMIT=8192`（`ops/server.py:355`），回灌模型前再截到 `OUTPUT_LIMIT=4000`（`chat_ops.py:48`）。模型要细看某一段可以自己加 `tail`/`grep` 再查。
 8. **日志不带命令全文。** 写命令常带敏感参数，全文已在审计表，日志只留首词（`chat_ops.py:307`）。
 9. **SSH 连接别常驻。** 一次回答里复用一条（每条命令重连既慢又刷 auth 日志），回答结束即关——一次回答可能只跑一两条命令，长连接占着不如随用随建。
 10. **删会话要连带删 pending，但不能动审计。** `chat.py:347`：`ops_pending_action` 跟着会话走（挂起的卡片不该留在任何地方），`ops_audit_log` 是留痕、不是会话内容。
@@ -169,7 +169,7 @@ SELECT id, actor, command, verdict, success, pending_action_id
 | --- | --- |
 | `chat_ops.py:305` | 提议落库瞬间 |
 | `chat.py:908` | `confirm` 帧推给前端 |
-| `ops_actions.py:89` | CAS——两个标签页同时点确认，第二次 `rowcount=0` |
+| `ops/actions.py:89` | CAS——两个标签页同时点确认，第二次 `rowcount=0` |
 | `chat_ops.py:335` | **唯一真正挂起的地方**；命令跑 120s 期间前端只收到 `: ping`，Network 里 Response 一片空白 |
 
 别在断点上停超过 100s——前端看门狗会掐流，会误判成 bug。
@@ -196,5 +196,5 @@ curl -N -X POST http://localhost:18099/api/chat/actions/18/confirm \
 
 ## 相关文件
 
-- **后端**：`routers/chat.py`（completions / retry / confirm / reject / actions 回放 / ops-conversations）· `services/chat.py`（ReAct 循环、`_OPS_RULES`、`confirm_action_stream`）· `services/chat_ops.py`（工具箱与两阶段上半场）· `services/ops_actions.py`（状态机）· `services/ops_safety.py`（分类）· `services/ops_server.py` / `ops_db_exec.py`（执行）· `sse.py`（帧格式、心跳、响应头）· `models/entities.py`（`OpsPendingAction`）· `bootstrap.py`（启动收尾）
+- **后端**：`routers/chat.py`（completions / retry / confirm / reject / actions 回放 / ops-conversations）· `services/chat.py`（ReAct 循环、`_OPS_RULES`、`confirm_action_stream`）· `services/chat_ops.py`（工具箱与两阶段上半场）· `services/ops/actions.py`（状态机）· `services/ops/safety.py`（分类）· `services/ops/server.py` / `ops/db_exec.py`（执行）· `sse.py`（帧格式、心跳、响应头）· `models/entities.py`（`OpsPendingAction`）· `bootstrap.py`（启动收尾）
 - **前端**：`api/index.ts`（`streamSse` / `dispatchSse` / `chatApi.confirmAction`）· `utils/useOpsConfirm.ts`（状态流转）· `components/ConfirmCard.vue`（卡片与倒计时）· `components/OpsChat.vue`（嵌入面板）· `views/Chat.vue` · `views/OpsServerTerminal.vue`（exec 回显进终端）

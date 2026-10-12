@@ -32,7 +32,7 @@ from app.models.schemas import (
     ModelPurpose,
     OpsActionItem,
 )
-from app.services import ops_actions
+from app.services.ops import actions as ops_actions
 from app.services.agents import AgentService
 from app.services.chat_ops import TARGET_SERVER, Auditor, ChatOpsToolbox, OpsTarget
 from app.services.knowledge import KnowledgeService
@@ -42,8 +42,8 @@ from app.services.memory import (
     after_answer_task,
     fire_and_forget,
 )
-from app.services import ops_database as db_ops
-from app.services import ops_server as server_ops
+from app.services.ops import database as db_ops
+from app.services.ops import server as server_ops
 from app.services.providers import build_chat_model
 
 logger = logging.getLogger("yangvis.chat")
