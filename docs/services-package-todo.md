@@ -1,6 +1,6 @@
 # services 层收包 TODO
 
-接着上一台机器上的活。今天（2026-10-11）已经落地两刀，这份文档记下：已经做完的、
+接着上一台机器上的活。2026-10-11 落地两刀，10-12 这刀是 slides；这份文档记下：已经做完的、
 下一刀的实测尺寸、每刀必须走的验证流程、以及卡住的项目。**动手前先跑一次
 `git log --oneline -3` 和 `git status --short`，确认工作树是干净的**（本仓库常有两个
 会话同时在改，脏树别硬来）。
@@ -12,43 +12,57 @@
 | `042913d` | refactor(knowledge)：`services/knowledge/` = `service.py` + `vectorstore.py` + `__init__.py` 门面 |
 | `056702c` | test(knowledge)：89 个用例，这个域的第一张网 |
 | `5a395a0` | refactor(workflow)：`services/workflows/` = `__init__.py`（词汇表）+ 七个实现子模块 |
+| `1d21019` | refactor(slides)：`services/slides/` = `service.py` + `html.py` + `store.py` + `__init__.py` 门面 |
 
-`backend/app/services/` 现在是 **32 个平铺模块 + 2 个包**。全量测试 **627 passed**
-（约 4.2 分钟，`.venv/Scripts/python.exe -m pytest -q`，venv 在仓库根、不在 backend 下）。
+`backend/app/services/` 现在是 **29 个平铺模块 + 3 个包**。全量测试 **627 passed**
+（这台机器 2 分 06 秒跑完，上一台记的是 4.2 分钟；`.venv/Scripts/python.exe -m pytest -q`，
+venv 在仓库根、不在 backend 下）。
 
-## 试点定下来的三条形状规则
+## 试点定下来的四条形状规则
 
 1. **包名 = 被吸收的那个模块名**，所以调用方的 `from app.services.X import ...` 一行都不用改。
    knowledge 那刀是 `knowledge.py → knowledge/`，workflow 那刀是 `workflows.py → workflows/__init__.py`。
 2. **门面只在有唯一入口类时做**：`knowledge/__init__.py` 按 `app/models/__init__.py` 的先例用
    绝对 import 重导出公开名（`# noqa: F401`）；`workflows/__init__.py` 只当词汇表，**不做转发**，
-   调用方直接子模块取名字。别为了统一形式硬造门面。
+   调用方直接子模块取名字。别为了统一形式硬造门面。slides 那刀照 knowledge 做：只重导出
+   `SlideService` 加 `html`/`store` 两个**子模块名**，router 的上传图片接口直接
+   `from app.services.slides.store import ...`——门面不替子模块转发函数。
 3. **跨域共用的工具留在平铺层**，不许塞进包里：`chunking.py`（知识库 router + 简历 router +
    `services/resume.py` 都在用）、`uploads.py`（三个 router 在用）。
    一个类仍占一个模块，不再往下拆。
+4. **数引用要把测试的属性访问形态一起数**：`from app.services import X` 之后写 `X.attr` 的
+   那些，其中私有函数与模块级 `settings` 快照**门面取不到**，必须改指子模块
+   （`from app.services.slides import service as slides_module`）。slides 那刀因此改了四行
+   而不是文档里估的一行；`test_knowledge.py` 本来就是这形态，照它抄就行。
 
 ## 下一刀（按性价比排）
 
-### 1. slides：三个模块，1318 行
+### 1. ai_gateway：两个模块，1173 行 —— 热机之后第一刀
 
-`slides.py`(496) + `slides_html.py`(648) + `slides_store.py`(174)。**真 import 只有三行**
-（`routers/slides.py:38` 引 store、`services/slides.py:42` 与 `:48` 引 html 和 store），
-另有两处 `:mod:`（`routers/slides.py:306`、`services/slides.py:15`）和五处散文里写死的路径
-（`main.py:245`、`entities.py:855/861/882`、`schemas.py:1630`）要一起跟。`test_slides.py`
-（52 个用例）是 `from app.services import slides_html` 加 `slides_html.X` 属性访问的形态，
-改一行 import 就全保住。**最小的一刀，适合热机。**
+`ai_gateway.py`(612) + `ai_gateway_proxy.py`(561)。上一份文档估的「只有六处」只数了
+proxy 那一侧，10-12 重量的完整引用面是这些：`routers/ai_gateway.py:40,41`、
+`routers/ai_gateway_openai.py:24,25`、包内 `ai_gateway_proxy.py:31` 引 gateway、
+`test_ai_gateway.py:22,23,24,41`、`test_ai_gateway_proxy.py:20,21`，外加
+`ai_gateway.py:3` 的一处 `:mod:`。依赖是单向的（proxy 接 gateway，gateway 谁都不接），
+所以怎么摆都不会炸。
 
-### 2. ai_gateway：两个模块，1173 行
+形状要先定一件事：`ai_gateway.py` 有入口类 `AiGatewayService`，但也有一把平铺的
+公开函数（`public_base_url`、`extract_bearer_key`、`find_api_key`、`list_public_models`、
+`write_call_log`、`RouteCandidate` 等），router 和 proxy 都在直接取它们。
+- 走 workflows 那种：`ai_gateway.py` 整体变成 `ai_gateway/__init__.py`，
+  `from app.services.ai_gateway import X` 五处一行不动，只改 proxy 那六处；
+- 走 knowledge/slides 那种：主体进 `ai_gateway/gateway.py`，门面把上面那串公开名全
+  重导出——改动行数更多，但包内形状统一（`__init__` 只当门面、实现住子模块）。
+我倾向第二种，代价是门面的 import 块有十几行。
 
-`ai_gateway.py`(612) + `ai_gateway_proxy.py`(561)。**要改的只有六处**：
-`routers/ai_gateway.py:40`、`routers/ai_gateway_openai.py:24`、`services/ai_gateway.py:3` 的
-`:mod:` 引用、`test_ai_gateway.py:23` 与 `:41`、`test_ai_gateway_proxy.py:20`。
 坑：其中三处是 `from app.services import ai_gateway_proxy as proxy` 的**别名形态**——包名正好是
 `ai_gateway`、子模块叫 `proxy`，改成 `from app.services.ai_gateway import proxy` 就行，连 `as`
-都不用留。**别动 logger 名**：`ai_gateway_proxy.py:38` 的 `logging.getLogger("yangvis.ai_gateway_proxy")`
+都不用留。按规则 4，`test_ai_gateway.py:22` 的 `from app.services import ai_gateway as gateway`
+加 `gateway.X` 属性访问也要一起核（走第二种形状时它得指到 `gateway` 子模块）。
+**别动 logger 名**：`ai_gateway_proxy.py:38` 的 `logging.getLogger("yangvis.ai_gateway_proxy")`
 是日志通道名、不是模块路径，knowledge 那刀同理保住了 `yangvis.vectorstore`。
 
-### 3. mcp：两个模块，790 行
+### 2. mcp：两个模块，790 行
 
 `mcp_servers.py`(526) + `mcp_tools.py`(264)。要改七处：`routers/mcp.py:24,25`、
 包内的 `workflows/exec.py:33` 与 `workflows/rerun.py:31`、`test_mcp_config_io.py:22`、
@@ -57,7 +71,7 @@
 `langchain_mcp_adapters.tools` 引的 `load_mcp_tools`（第三方，不是本仓库模块）。
 所以模式必须带全前缀 `app\.services\.mcp_`，裸词替换会把外部依赖一起改掉。
 
-### 4. ops：十个模块，4163 行 —— **建议缓，先别动**
+### 3. ops：十个模块，4163 行 —— **建议缓，先别动**
 
 引用面 102 行，是最大的一族，但两个理由压着：
 
@@ -67,11 +81,11 @@
   收包会让这份文档全线对不上，而改它等于替别人改他刚写完的稿子。要动就得连带把那份文档的
   路径与行号一起核一遍。
 
-### 5. agents / 对话域：先别收，有一条回边
+### 4. agents / 对话域：先别收，有一条回边
 
 `agents.py`(708) + `agent_run.py`(263) 看着是天然一簇，但 `agent_run` 的引用方散布在
-workflows 包的五个实现子模块加 `workflows/__init__.py` 的文档行，还有 interview、resume、slides
-三个 service 和 `test_mcp_tools.py`、`test_slides.py` 两个测试。更麻烦的是**chat 与 memory 互引**：
+workflows 包的五个实现子模块加 `workflows/__init__.py` 的文档行，还有 interview、resume
+两个平铺 service 加 `slides/service.py`，以及 `test_mcp_tools.py`、`test_slides.py` 两个测试。更麻烦的是**chat 与 memory 互引**：
 `chat.py:39` 顶层引 `app.services.memory`，而 `memory.py:429` 在函数内部延迟引
 `app.services.chat`——这条回边是靠「函数内 import」才没炸的，收包时别把它提到顶层。
 这一簇要么先把 chat/memory 的方向解掉，要么就让它继续平铺。
@@ -85,6 +99,9 @@ workflows 包的五个实现子模块加 `workflows/__init__.py` 的文档行，
      检测 `b"\r\n" in raw` 后按原样写回。
    - 两种 import 形态都要覆盖：`from app.services.workflow_x import n` 和
      `from app.services import workflow_x [as 别名]`。后者只改这一行、保留别名。
+   - 有门面的包跑 pytest 前先把测试里 `from app.services import X as 别名` 的**属性访问**
+     核一遍（规则 4）：私有名和模块级 `settings` 快照门面给不出来，会在 collection
+     阶段就 ImportError，改指子模块即可。slides 那刀就是先撞了这个才补的。
 3. 残留核查要连散文路径一起扫：`grep -rn "app\.services\.X_\|services/X_[a-z]*\.py" backend/app backend/tests docs README.md`
    （`.md` 与 `frontend/` 也要，别只 grep `.py`）。
 4. 行为中性证明，逐文件：`diff <(git show HEAD:旧路径 | tr -d '\r') <(tr -d '\r' < 新路径)`。
