@@ -1,9 +1,9 @@
 # services 层收包 TODO
 
-接着上一台机器上的活。2026-10-11 落地两刀，10-12 又落了 slides 与 ai_gateway 两刀；这份文档记下：已经做完的、
-下一刀的实测尺寸、每刀必须走的验证流程、以及卡住的项目。**动手前先跑一次
-`git log --oneline -3` 和 `git status --short`，确认工作树是干净的**（本仓库常有两个
-会话同时在改，脏树别硬来）。
+接着上一台机器上的活。2026-10-11 落地两刀，10-12 再落 slides、ai_gateway、mcp 三刀——五刀之后
+「有同名模块可吸收」那一档走完了。这份文档记下：已经做完的基线、五刀攒下的形状规则、每刀必须
+走的验证流程、以及还卡着的两簇。**动手前先跑一次 `git log --oneline -3` 和
+`git status --short`，确认工作树是干净的**（本仓库常有两个会话同时在改，脏树别硬来）。
 
 ## 已完成的基线
 
@@ -14,15 +14,22 @@
 | `5a395a0` | refactor(workflow)：`services/workflows/` = `__init__.py`（词汇表）+ 七个实现子模块 |
 | `1d21019` | refactor(slides)：`services/slides/` = `service.py` + `html.py` + `store.py` + `__init__.py` 门面 |
 | `230cc24` | refactor(ai_gateway)：`services/ai_gateway/` = `service.py` + `proxy.py` + `__init__.py` 门面 |
+| `6f97f5a` | refactor(mcp)：`services/mcp/` = `servers.py` + `tools.py` + `__init__.py` 门面 |
 
-`backend/app/services/` 现在是 **27 个平铺模块 + 4 个包**。全量测试 **627 passed**
-（这台机器两次都是 2 分钟上下：2 分 06 秒、1 分 57 秒；上一台记的 4.2 分钟别再引用。
+`backend/app/services/` 现在是 **25 个平铺模块 + 5 个包**。全量测试 **627 passed**
+（这台机器三次都是 2 分钟上下：2 分 06 秒、1 分 57 秒、1 分 54 秒；上一台记的 4.2 分钟别再引用。
 `.venv/Scripts/python.exe -m pytest -q`，venv 在仓库根、不在 backend 下）。
 
 ## 试点定下来的四条形状规则
 
 1. **包名 = 被吸收的那个模块名**，所以调用方的 `from app.services.X import ...` 一行都不用改。
    knowledge 那刀是 `knowledge.py → knowledge/`，workflow 那刀是 `workflows.py → workflows/__init__.py`。
+   **但这一条只在真有一个同名模块可吸收时成立**（mcp 那刀学的）：`mcp_servers.py` +
+   `mcp_tools.py` 谁都不叫 `mcp.py`，包名是新起的，于是调用方**全部**要改——mcp 那刀八行
+   （router 两行、workflows 的 exec 与 rerun 各一行、包内 tools 接 servers 一行、
+   两个测试文件三行）。这种包里，「从包名取名字」的清单就成了
+   门面宽度的唯一依据：先 grep 出外面到底取哪些名字，再决定转发什么、让谁走子模块路径，
+   别照抄上一个包的形式。
 2. **门面只在有唯一入口类时做**：`knowledge/__init__.py` 按 `app/models/__init__.py` 的先例用
    绝对 import 重导出公开名（`# noqa: F401`）；`workflows/__init__.py` 只当词汇表，**不做转发**，
    调用方直接子模块取名字。别为了统一形式硬造门面。slides 那刀照 knowledge 做：只重导出
@@ -40,22 +47,13 @@
    （`from app.services.slides import service as slides_module`）。slides 那刀因此改了四行
    而不是文档里估的一行；`test_knowledge.py` 本来就是这形态，照它抄就行。
 
-## 下一刀（按性价比排）
+## 还剩哪些簇
 
-### 1. mcp：两个模块，790 行
+到 `6f97f5a` 为止，「同名模块可吸收」那一档已经走完（knowledge、workflow、slides、
+ai_gateway、mcp 五刀）。**性价比队列空了**：剩下两簇一条被别人的文档钉死、一条有回边，
+都不是收包该继续烧时间的地方——要接着做，回到「测试缺口」那一节。
 
-`mcp_servers.py`(526) + `mcp_tools.py`(264)。要改七处：`routers/mcp.py:24,25`、
-包内的 `workflows/exec.py:33` 与 `workflows/rerun.py:31`、`test_mcp_config_io.py:22`、
-`test_mcp_tools.py:19,24`。**这簇有一个真陷阱**：`mcp_tools` / `mcp_servers` 这两个词在别处也出现
-——`routers/mcp.py:40` 的函数名 `list_mcp_servers`，以及 `test_mcp_tools.py:279,290` 从
-`langchain_mcp_adapters.tools` 引的 `load_mcp_tools`（第三方，不是本仓库模块）。
-所以模式必须带全前缀 `app\.services\.mcp_`，裸词替换会把外部依赖一起改掉。
-
-动手前先按规则 2 补的那句做一遍：grep 出「从包名取名字」的清单，再定门面转多宽；
-再按规则 4 数一遍测试里 `from app.services import X as 别名` 之后的 `X.attr`（私有名
-和模块级 `settings` 快照得指子模块）。mcp 这一簇还没有包，两个模块谁引谁要先看清。
-
-### 2. ops：十个模块，4163 行 —— **建议缓，先别动**
+### 1. ops：十个模块，4163 行 —— **建议缓，先别动**
 
 引用面 102 行，是最大的一族，但两个理由压着：
 
@@ -65,11 +63,12 @@
   收包会让这份文档全线对不上，而改它等于替别人改他刚写完的稿子。要动就得连带把那份文档的
   路径与行号一起核一遍。
 
-### 3. agents / 对话域：先别收，有一条回边
+### 2. agents / 对话域：先别收，有一条回边
 
 `agents.py`(708) + `agent_run.py`(263) 看着是天然一簇，但 `agent_run` 的引用方散布在
 workflows 包的五个实现子模块加 `workflows/__init__.py` 的文档行，还有 interview、resume
-两个平铺 service 加 `slides/service.py`，以及 `test_mcp_tools.py`、`test_slides.py` 两个测试。更麻烦的是**chat 与 memory 互引**：
+两个平铺 service 加 `slides/service.py`，以及 `test_mcp_tools.py`、`test_slides.py` 两个
+测试。更麻烦的是**chat 与 memory 互引**：
 `chat.py:39` 顶层引 `app.services.memory`，而 `memory.py:429` 在函数内部延迟引
 `app.services.chat`——这条回边是靠「函数内 import」才没炸的，收包时别把它提到顶层。
 这一簇要么先把 chat/memory 的方向解掉，要么就让它继续平铺。
@@ -87,9 +86,12 @@ workflows 包的五个实现子模块加 `workflows/__init__.py` 的文档行，
      核一遍（规则 4）：私有名和模块级 `settings` 快照门面给不出来，会在 collection
      阶段就 ImportError，改指子模块即可。slides 那刀就是先撞了这个才补的。
 3. 残留核查要连散文路径一起扫：`grep -rn "app\.services\.X_\|services/X_[a-z]*\.py" backend/app backend/tests docs README.md`
-   （`.md` 与 `frontend/` 也要，别只 grep `.py`）。
+   （`.md` 与 `frontend/` 也要，别只 grep `.py`）。mcp 那刀这条抓出来的是零残留，而替换
+   模式带全前缀才让 `routers/mcp.py` 的函数名 `list_mcp_servers` 和第三方
+   `langchain_mcp_adapters.tools.load_mcp_tools` 全身而退。
 4. 行为中性证明，逐文件：`diff <(git show HEAD:旧路径 | tr -d '\r') <(tr -d '\r' < 新路径)`。
-   期望差异**只有 import 行和文档里的 `:mod:`/路径引用**。上一刀里 `workflows/runs.py` 是 0 差异纯挪。
+   期望差异**只有 import 行和文档里的 `:mod:`/路径引用**。`workflows/runs.py` 与
+   `mcp/servers.py` 都是 0 差异纯挪。
 5. `python -c "import app.main"`，再全量 pytest（期望 627 passed）。
 6. 换行按字节核：`echo "lines=$(wc -l < f) cr=$(tr -dc '\r' < f | wc -c)"`，两数相等才算 CRLF。
    `Write` 工具新建的文件落成 LF，得自己转。
