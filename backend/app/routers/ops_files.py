@@ -42,6 +42,7 @@ from app.models.schemas import (
     SftpPasteResult,
 )
 from app.services.ops import sftp as ops_sftp, server as server_ops
+from app.services.uploads import content_length_exceeds, oversize_message
 
 logger = logging.getLogger("yangvis.ops_files")
 
@@ -264,12 +265,10 @@ async def upload_file(
     server, db = ctx
 
     limit = settings.OPS_SFTP_MAX_UPLOAD_BYTES
-    oversize_message = f"文件过大，上限 {limit // 1024 // 1024} MB"
 
-    # 提前拒绝：Content-Length 是整个 multipart 的大小，留 1MB 余量给表单开销。
-    # 不能用 UploadFile.size——处理器入口时它只反映已 spool 的部分。
+    # 提前拒绝走 uploads 的统一口径（Content-Length 含表单开销，余量在那里）。
     content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > limit + 1024 * 1024:
+    if content_length_exceeds(content_length, limit):
         logger.debug(
             "sftp upload %s on server %s rejected early: content-length %s over the %d-byte limit",
             file.filename,
@@ -277,7 +276,7 @@ async def upload_file(
             content_length,
             limit,
         )
-        return APIResponse(code=-1, message=oversize_message)
+        return APIResponse(code=-1, message=oversize_message(limit))
 
     # 文件名只留 basename：multipart 里偶尔会带上客户端的本地路径分隔符。
     name = (file.filename or "unnamed").replace("\\", "/").rsplit("/", 1)[-1]
@@ -307,7 +306,7 @@ async def upload_file(
             server.id,
             limit,
         )
-        return APIResponse(code=-1, message=oversize_message)
+        return APIResponse(code=-1, message=oversize_message(limit))
     except ops_sftp.SftpError as exc:
         # 停顿看门狗到点也走这里（body 读取侧和 SFTP 写入侧都是 SftpError）。
         _audit(db, user.user_id, server, f"sftp upload {path}/{name}", False, str(exc))

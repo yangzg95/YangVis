@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import List, Optional
 
 from sqlalchemy import Select, delete, select
@@ -31,6 +30,7 @@ from app.models.entities import (
     ModelConfig,
     UserMemory,
 )
+from app.services.agent_run import json_span, strip_json_fence
 from app.services.providers import build_chat_model
 
 logger = logging.getLogger("yangvis.memory")
@@ -374,8 +374,8 @@ class MemoryService:
 
     def _parse_operations(self, text: str, conversation_id: int) -> Optional[List[dict]]:
         """从模型输出里解析操作列表；解析失败返回 None（本轮跳过，不算错误）。"""
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match is None:
+        span = json_span(strip_json_fence(text))
+        if span is None:
             logger.warning(
                 "memory extraction for conversation %s returned no JSON: %.200s",
                 conversation_id,
@@ -383,7 +383,7 @@ class MemoryService:
             )
             return None
         try:
-            payload = json.loads(match.group(0))
+            payload = json.loads(span)
         except json.JSONDecodeError:
             logger.warning(
                 "memory extraction for conversation %s returned bad JSON: %.200s",

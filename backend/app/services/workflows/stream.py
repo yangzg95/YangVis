@@ -2,8 +2,8 @@
 
 :func:`stream_run` 把执行挂在自己的 ``asyncio`` 任务上，SSE 只做转发。旧实现让
 响应直接消费执行生成器，客户端一断流，取消就打在建到一半的生成器上——运行行的
-终态没人写，界面永远「执行中」。``_DETACHED_RUNS`` 不是多余的：asyncio 对任务只
-持弱引用，没人 await 的分离任务可能跑到一半就被回收。
+终态没人写，界面永远「执行中」。挂任务用的是 :func:`app.background.fire_and_forget`，
+不是随手 ``create_task``：asyncio 对任务只持弱引用，没人 await 的会跑到一半被回收。
 
 :func:`follow_run` 反过来一个东西都不执行，只读 ``workflow_run_step`` 里已经落库
 的事实：先回放现状，再按 ``FOLLOW_POLL_SECONDS`` 推之后的变化，事件名与载荷形状跟
@@ -19,6 +19,7 @@ from typing import AsyncIterator, Awaitable, Callable, Dict, Optional, Tuple
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.background import fire_and_forget
 from app.errors import BusinessError
 from app.models.entities import ModelConfig, WorkflowRun, WorkflowRunStep, WorkflowStep
 from app.services.agent_run import model_error_text
@@ -41,9 +42,6 @@ FOLLOW_POLL_SECONDS = 1.2
 
 
 # ---- 脱离响应执行运行 --------------------------------------------------------
-
-# asyncio 只对任务持弱引用：没人 await 的分离任务可能跑到一半就被回收，这里吊着它。
-_DETACHED_RUNS: set[asyncio.Task] = set()
 
 # 转发队列的收尾哨兵：执行任务结束（跑完或炸完）后流就到头了。
 _RUN_STREAM_END = object()
@@ -86,9 +84,7 @@ async def stream_run(
         finally:
             await queue.put(_RUN_STREAM_END)
 
-    task = asyncio.create_task(_execute())
-    _DETACHED_RUNS.add(task)
-    task.add_done_callback(_DETACHED_RUNS.discard)
+    fire_and_forget(_execute())
 
     while True:
         item = await queue.get()

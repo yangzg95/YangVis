@@ -22,6 +22,7 @@ from app.errors import CODE_CHAT_NOT_READY, BusinessError
 from app.models.entities import Agent, ModelConfig
 from app.models.schemas import ModelPurpose
 from app.services.agents import AgentService
+from app.services.model_config import default_model_config
 from app.services.providers import build_chat_model
 
 logger = logging.getLogger("yangvis.agent_run")
@@ -97,13 +98,7 @@ def require_chat_model(
             )
         return config
 
-    config = db.scalar(
-        select(ModelConfig).where(
-            ModelConfig.owner_id == owner_id,
-            ModelConfig.purpose == ModelPurpose.CHAT.value,
-            ModelConfig.is_default.is_(True),
-        )
-    )
+    config = default_model_config(db, owner_id, ModelPurpose.CHAT)
     if config is None or not config.last_test_ok:
         raise BusinessError(
             CODE_CHAT_NOT_READY,
@@ -219,6 +214,28 @@ def model_error_text(exc: Exception) -> str:
 
 _JSON_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 
+
+def strip_json_fence(raw_text: str) -> str:
+    """去掉裹在输出外面的 ```json 代码栅栏，顺带收掉首尾空白。
+
+    栅栏要整对出现在首尾才算。模型在栅栏前后还写了寒暄时这里不动它——
+    下面 :func:`json_span` 照样能从散文里截出括号跨度。
+    """
+    text = raw_text.strip()
+    fence = _JSON_FENCE.match(text)
+    return fence.group(1) if fence else text
+
+
+def json_span(text: str, open_brace: str = "{", close_brace: str = "}") -> Optional[str]:
+    """第一个 ``open_brace`` 到最后一个 ``close_brace`` 的跨度，截不出来是 None。
+
+    取最外层那对：JSON 前后带散文、数组里套对象都不影响，半截输出会因为
+    等不到闭括号而返回 None，而不是交出截断的片段。
+    """
+    start, end = text.find(open_brace), text.rfind(close_brace)
+    return text[start : end + 1] if 0 <= start < end else None
+
+
 def extract_json_object(raw_text: str) -> dict:
     """从模型输出里剥出一个 JSON 对象。
 
@@ -227,16 +244,11 @@ def extract_json_object(raw_text: str) -> dict:
     :class:`ValueError`——调用方要么换个解析策略（简历分析退回整段当报告），
     要么让这一步失败（幻灯片没有合法结构就是没产物）。
     """
-    text = raw_text.strip()
-    fence = _JSON_FENCE.match(text)
-    if fence:
-        text = fence.group(1)
-
-    start, end = text.find("{"), text.rfind("}")
-    if not (0 <= start < end):
+    span = json_span(strip_json_fence(raw_text))
+    if span is None:
         raise ValueError("模型输出里没有 JSON 对象")
     try:
-        data = json.loads(text[start : end + 1])
+        data = json.loads(span)
     except json.JSONDecodeError as exc:
         raise ValueError(f"模型输出的 JSON 无法解析：{exc}") from exc
     if not isinstance(data, dict):

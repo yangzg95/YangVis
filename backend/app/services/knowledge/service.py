@@ -44,6 +44,7 @@ from app.models.schemas import (
 )
 from app.services.chunking import split_text
 from app.services.knowledge import vectorstore
+from app.services.model_config import default_model_config
 from app.services.providers import build_embeddings
 from app.timeutil import db_now
 
@@ -114,13 +115,7 @@ class KnowledgeService:
 
     def get_embedding_config(self) -> Optional[ModelConfig]:
         """调用者默认的 embedding 模型，前提是它已经通过验证。"""
-        config = self._db.scalar(
-            select(ModelConfig).where(
-                ModelConfig.owner_id == self._owner_id,
-                ModelConfig.purpose == ModelPurpose.EMBEDDING.value,
-                ModelConfig.is_default.is_(True),
-            )
-        )
+        config = default_model_config(self._db, self._owner_id, ModelPurpose.EMBEDDING)
         if config is None or not config.last_test_ok or not config.vector_size:
             return None
         return config

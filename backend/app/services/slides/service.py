@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -35,9 +34,11 @@ from app.models.schemas import (
     SlideTheme,
 )
 from app.services.agent_run import (
+    json_span,
     labeled_section,
     model_error_text,
     require_chat_model,
+    strip_json_fence,
 )
 from app.services.slides.html import (
     MAX_DECK_PAGES,
@@ -84,21 +85,13 @@ def _json_candidate(text: str) -> Optional[str]:
     数组形式 ``[{...}]`` 里也有花括号，按「对象优先」截会掐出第一个元素，
     解析出来是个没有 slides 的字典，整份结构白丢。
     """
-    stripped = text.strip()
-    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", stripped, re.DOTALL)
-    if fence:
-        stripped = fence.group(1)
+    stripped = strip_json_fence(text)
 
     pairs = (("{", "}"), ("[", "]"))
-
-    def span(open_brace: str, close_brace: str) -> Optional[str]:
-        start, end = stripped.find(open_brace), stripped.rfind(close_brace)
-        return stripped[start : end + 1] if 0 <= start < end else None
-
     starts = {open_brace: stripped.find(open_brace) for open_brace, _ in pairs}
     object_first = starts["{"] != -1 and (starts["["] == -1 or starts["{"] < starts["["])
     first, second = pairs if object_first else (pairs[1], pairs[0])
-    return span(*first) or span(*second)
+    return json_span(stripped, *first) or json_span(stripped, *second)
 
 
 def _parse_deck_output(raw_text: str) -> tuple[Dict[str, Any], List[Any]]:

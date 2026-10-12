@@ -1,7 +1,7 @@
 """模型配置的存取，按单个用户隔离。
 
-所有查询都要经过 :meth:`ModelConfigService._scope`，这样 handler 就不会
-因为漏写一个过滤条件而误读到别人的配置。
+所有查询都要经过 :meth:`ModelConfigService._scope` 或 :func:`default_model_config`，
+这样 handler 就不会因为漏写一个过滤条件而误读到别人的配置。
 """
 from __future__ import annotations
 
@@ -22,6 +22,23 @@ from app.models.schemas import (
 from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.model_config")
+
+
+def default_model_config(
+    db: Session, owner_id: int, purpose: ModelPurpose
+) -> Optional[ModelConfig]:
+    """某个用途的默认配置，没有则 None。
+
+    「能不能拿来用」是调用方的事：对话要 `last_test_ok`，embedding 还要
+    `vector_size`，各处门的口径不一样，所以这里只负责查。
+    """
+    return db.scalar(
+        select(ModelConfig).where(
+            ModelConfig.owner_id == owner_id,
+            ModelConfig.purpose == purpose.value,
+            ModelConfig.is_default.is_(True),
+        )
+    )
 
 
 class ModelConfigService:
@@ -58,11 +75,7 @@ class ModelConfigService:
         return config
 
     def get_default(self, purpose: ModelPurpose) -> Optional[ModelConfig]:
-        stmt = self._scope(select(ModelConfig)).where(
-            ModelConfig.purpose == purpose.value,
-            ModelConfig.is_default.is_(True),
-        )
-        return self._db.scalar(stmt)
+        return default_model_config(self._db, self._owner_id, purpose)
 
     # -- 变更操作 -----------------------------------------------------------
 

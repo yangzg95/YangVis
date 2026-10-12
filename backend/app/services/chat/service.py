@@ -9,7 +9,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Awaitable, Callable, List, Optional, Sequence, Tuple
@@ -17,6 +16,7 @@ from typing import AsyncIterator, Awaitable, Callable, List, Optional, Sequence,
 from sqlalchemy import Select, delete, func, select
 from sqlalchemy.orm import Session
 
+from app.background import fire_and_forget
 from app.config import get_settings
 from app.database import SessionLocal
 from app.errors import CODE_CHAT_NOT_READY, BusinessError
@@ -38,6 +38,7 @@ from app.services.ops import actions as ops_actions
 from app.services.agents import AgentService
 from app.services.chat_ops import TARGET_SERVER, Auditor, ChatOpsToolbox, OpsTarget
 from app.services.knowledge import KnowledgeService
+from app.services.model_config import default_model_config
 from app.services.chat.memory import (
     MEMORY_RULES,
     MemoryService,
@@ -212,13 +213,7 @@ class ChatService:
                 )
             return config
 
-        config = self._db.scalar(
-            select(ModelConfig).where(
-                ModelConfig.owner_id == self._owner_id,
-                ModelConfig.purpose == ModelPurpose.CHAT.value,
-                ModelConfig.is_default.is_(True),
-            )
-        )
+        config = default_model_config(self._db, self._owner_id, ModelPurpose.CHAT)
         if config is None or not config.last_test_ok:
             raise BusinessError(
                 CODE_CHAT_NOT_READY,
@@ -1002,20 +997,6 @@ def derive_title(question: str) -> str:
 # 收尾任务的失败日志仍走 yangvis.memory 这个通道：搬过来的是模块归属，
 # 日志按职责分，不按文件走。
 _memory_logger = logging.getLogger("yangvis.memory")
-
-# asyncio.create_task 创建的任务只被事件循环弱引用，不放一份强引用，任务可能
-# 在跑完之前就被 GC 回收。
-_BACKGROUND_TASKS: set[asyncio.Task] = set()
-
-
-def fire_and_forget(coro) -> None:
-    """在请求结束后继续跑一个协程（SSE 流没法用 FastAPI 的 BackgroundTasks）。
-
-    任务体内的异常必须自己兜住——这里的回调只负责回收引用。
-    """
-    task = asyncio.create_task(coro)
-    _BACKGROUND_TASKS.add(task)
-    task.add_done_callback(_BACKGROUND_TASKS.discard)
 
 
 async def after_answer_task(owner_id: int, conversation_id: int, history_turns: int) -> None:
