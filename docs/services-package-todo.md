@@ -20,12 +20,15 @@
 | `77200ed` | refactor(chat)：收尾任务从 memory 挪到对话侧，解掉 `memory → chat` 那条回边 |
 | `b92c59a` | refactor(chat)：`services/chat/` = `service.py` + `memory.py` + `__init__.py` 门面（转发四个名字） |
 
-`backend/app/services/` 现在是 **13 个平铺模块 + 7 个包**。全量测试 **758 passed**
+`backend/app/services/` 现在是 **13 个平铺模块 + 7 个包**。收包那几刀落定时全量 **758 passed**
 （627 基线 + 对话那两面网连着搬出去的那条共 126 条：`tests/test_chat_service.py` 82、
 `tests/test_chat_memory.py` 43、`tests/test_background.py` 1——最后那条是 ④ 把 `fire_and_forget`
 收平时跟着搬出对话套件的；再加 `tests/test_model_config.py` 5 条，钉模型配置的删除语义）。
-这台机器计时跟着用例数走：670 条 1 分 45 秒、752 条 2 分 14 秒 / 3 分 00 秒、758 条 2 分 10 秒，还是 2 分钟上下量级；
-上一台记的 4.2 分钟别再引用。`.venv/Scripts/python.exe -m pytest -q`，venv 在仓库根、不在 backend 下）。
+2026-10-13 四个测试缺口补完，全量钉在 **912**：`tests/test_netdisk.py` 53、
+`tests/test_auth_users_api.py` 27、`tests/test_agents.py` 30、`tests/test_resume_service.py` 44。
+这台机器计时跟着用例数走：670 条 1 分 45 秒、752 条 2 分 14 秒 / 3 分 00 秒、758 条 2 分 10 秒、
+912 条 2 分 50 秒，还是 2 分钟上下量级；
+上一台记的 4.2 分钟别再引用。（`.venv/Scripts/python.exe -m pytest -q`，venv 在仓库根、不在 backend 下。）
 
 ## 试点定下来的五条形状规则
 
@@ -76,6 +79,11 @@
    `resume.py:302`、`slides.py:359`、`workflows/exec.py:135`）都在函数体内延迟 import，
    就是为了让那一处 patch 够用；顶层 import 的模块得连消费方一起换（`test_knowledge.py:271`
    早就这么写）。**用例读到了不该存在的行，先怀疑它连的是别的库**，别改断言。
+   **这笔形状债 2026-10-13 已还**：`chat/service.py` 的顶层 `SessionLocal` 改成 `after_answer_task`
+   函数体内导入，对话套件的 patch 面从两处收成一处（`db` fixture 与那个 spied 用例都只改
+   `app.database.SessionLocal`）。仓库里还剩两处顶层形态，都是**有意保留**、别再照着改：
+   `knowledge/service.py:18`（所以 `test_knowledge.py` 非 patch 两处不可）与
+   `ai_gateway/proxy.py:29`（`test_ai_gateway_proxy.py:51` 直接 patch 模块那把，本来就够用）。
 5. **域里有环就先解环，解环那一刀单独提交**（chat 那刀学的）：`chat.py` 顶层引 memory、
    `memory.py` 里延迟引 chat，这种「靠函数内 import 才没炸」的方向不能带进包里。判函数归谁
    看两点——谁调它（`after_answer_task` 只有 `chat.py:976` 调），以及它依赖的是谁的语义
@@ -116,6 +124,10 @@ memory 引用块 −2 个名字，净零，函数追加在文件尾，于是 19 
 991→986…），`docs/ops-chat-confirm-flow.md` 已按新号重钉。重钉的做法是拿
 `git show HEAD:` 那份逐号比对「映射后的那一行还是不是同一句话」，20 处全对上才写回——
 别照算术改，算术会漏掉文档里没进映射表的号（`chat/service.py:835` 就是漏网的一条）。
+**还债那一刀（`SessionLocal` 改函数内延迟导入，2026-10-13）是顶行 −1、尾行 +4**：删的是第 21 行
+那个顶层 import，加的四行全在 1008 之后的 `after_answer_task` 里，于是 19 个号**齐 −1**
+（67→66、104→103、986→985…），一次 `re.sub` 加一个 `(?<!routers/)` 就够，写回前照上面的办法
+拿 `git show HEAD:` 比对 `HEAD[n] == WORK[n-1]`，19 个号全对上才动笔。
 
 ### 收包之后又砍了四刀：跨模块的重复，就地收（2026-10-12）
 
@@ -191,7 +203,8 @@ memory 引用块 −2 个名字，净零，函数追加在文件尾，于是 19 
    **还了技术债那一刀（解环、合并分节）没法用「只差 import 行」自证**，改用逐行比对函数体：
    从 HEAD 抠出旧节、从新文件抠出搬过去的那节，把刻意差异（删掉的延迟导入、`_memory_logger`
    改名与随之多出的换行）归零后 diff 应当为空——`git diff --numstat` 那时只用来确认改动范围。
-5. `python -c "import app.main"`，再全量 pytest（期望 758 passed）。
+5. `python -c "import app.main"`，再全量 pytest（收包那几刀的基线是 758 passed；四个测试缺口
+   补完之后钉在 **912**，2026-10-13）。
 6. 换行按字节核：`echo "lines=$(wc -l < f) cr=$(tr -dc '\r' < f | wc -c)"`，两数相等才算 CRLF。
    `Write` 工具新建的文件落成 LF，得自己转（ops 那刀的 `__init__.py` 就是转完才 39/39）。
    **反过来也成立**：仓库里本来就有 LF 的文件别顺手转成 CRLF——`tests/test_ops_sftp_paste.py`
@@ -205,20 +218,26 @@ memory 引用块 −2 个名字，净零，函数追加在文件尾，于是 19 
 
 ## 不是收包、但还挂着的事
 
-- **镜像构建没实跑**：Docker daemon 起不来。3.12 那刀的替代证据是 AST 扫（0/77 问题）+
-  `pip --dry-run --only-binary=:all:`（84 包全有 wheel，0 sdist）。起来之后补一次 `docker build`。
+- **镜像构建已实跑**（2026-10-13，daemon 通了）：`docker build` 全绿，出的镜像里
+  SQLAlchemy 2.0.35 带编译扩展（`cext` 为真）、`app.main` 导入成功、200 条路由——这正是
+  3.12 那刀要护住的东西。**但有一处要说清**：依赖层命中的是缓存，`COPY backend/requirements.txt`
+  那层的 key 跟当前文件一致，所以「pip 装得上」是被缓存推断出来的、不是当场观察到的；
+  补进镜像的那次实测就是拿来抵这一层的。首次无缓存构建仍未见过。
 - **MySQL 连接池上限**这条要生产库的 `max_connections` 才能定，还欠着。
 - **UI 那条**（一键复制相关）等用户截图验收，不要猜像素。
-- **测试缺口**：`netdisk.py`(433) / `agents.py`(708) / `resume.py` 主体(843，现只有
-  `test_resume_workflow.py` 13 条) / auth·users 路由，都没有本域用例。
-  `model_config.py` 现在只钉住了删除语义（5 条），列表、掩码、凭据轮换还空着。
+- **四个测试缺口全补完了**（2026-10-13）：`netdisk.py` 53 条、auth·users 路由 27 条
+  （`test_auth_users_api.py`，鉴权链全程是真的、只覆盖 `get_db`）、`agents.py` 30 条
+  （`test_agents.py`：内置表形状与交叉引用 6、seed 3、可见性与隔离 5、写路径 5、复制 3、
+  路由层 8）、`resume.py` 主体 44 条（`test_resume_service.py`，和既有的
+  `test_resume_workflow.py` 13 条分开）。全量 912 passed。
+  **还空着的只有 `model_config.py`**：现在只钉住了删除语义（5 条），列表、掩码、凭据轮换没用例。
   已知的：knowledge 89、workflows 四件 139、ops 八件 183、slides 52、ai_gateway 39、mcp 40、
   chat 125（`test_chat_service.py` 82 + `test_chat_memory.py` 43，2026-10-12 补上）加
   `test_background.py` 1、`test_model_config.py` 5。
-- **对话用例补出来的形状债，还剩一处**（等用户定）：`services/chat/service.py:21` 的顶层
-  `from app.database import SessionLocal` 与其余后台任务的函数内延迟导入不一致——生产无差异，
-  纯粹是测试面的形状债。同一批补出来的第二处（删模型配置留悬空引用、收尾任务不接 `LookupError`）
-  已在 2026-10-12 收掉，见上面「四刀之后补的两处」。
+- **对话用例补出来的三处，全收完了**（2026-10-12、10-13）：① `chat/service.py` 顶层
+  `SessionLocal` 已于 10-13 改成 `after_answer_task` 函数内延迟导入，patch 面收成一处；
+  ② 删模型配置留悬空引用、收尾任务不接 `LookupError`；③ 同一个 `CODE_CHAT_NOT_READY`
+  两种文案。②③ 见上面「四刀之后补的两处」。
 - **`models/schemas.py`(2074) 与 `routers/ops.py`(1401) 不动**——它们的长是同类声明/路由的
   重复，不是职责混杂，拆开只是搬运（用户 2026-10-11 明确过）。
 
