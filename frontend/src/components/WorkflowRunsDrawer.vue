@@ -3,7 +3,7 @@
     :open="open"
     :title="drawerTitle"
     placement="right"
-    :width="860"
+    width="min(1240px, 94vw)"
     :mask-closable="false"
     @update:open="(value: boolean) => emit('update:open', value)"
   >
@@ -24,18 +24,37 @@
 
     <div v-else-if="!subject && composerOpen" class="composer">
       <a-form layout="vertical">
-        <a-form-item
-          v-for="field in workflow?.inputs ?? []"
-          :key="field.name"
-          :required="field.required"
-        >
+        <a-form-item v-for="field in requiredFields" :key="field.name" :required="true">
           <template #label>
             {{ field.label }}
             <span class="muted">{{ field.name }}</span>
-            <span v-if="!field.required" class="muted">选填</span>
           </template>
           <a-textarea v-model:value="inputs[field.name]" :rows="4" :disabled="running" />
         </a-form-item>
+
+        <!-- 选填参数默认折叠；填了会在折叠行上报个数，收起也不会忘了下面有内容。 -->
+        <div v-if="optionalFields.length" class="composer-optional">
+          <div class="group-head" @click="optionalOpen = !optionalOpen">
+            <span class="caret">
+              <RightOutlined v-if="!optionalOpen" />
+              <DownOutlined v-else />
+            </span>
+            <span class="muted">
+              选填参数 · {{ optionalFields.length }} 项
+              <template v-if="filledOptionalCount">（已填 {{ filledOptionalCount }}）</template>
+            </span>
+          </div>
+          <div v-show="optionalOpen">
+            <a-form-item v-for="field in optionalFields" :key="field.name">
+              <template #label>
+                {{ field.label }}
+                <span class="muted">{{ field.name }}</span>
+              </template>
+              <a-textarea v-model:value="inputs[field.name]" :rows="3" :disabled="running" />
+            </a-form-item>
+          </div>
+        </div>
+
         <a-empty
           v-if="!workflow?.inputs.length"
           description="这条流程没有输入变量"
@@ -135,13 +154,22 @@
               <!-- 反方向入口：跑挂了得有个去处，新开标签页回到那份产物，抽屉里的
                    现场留着接着看。 -->
               <a
-                v-if="subjectLinks.get(run.id)"
-                :href="subjectLinks.get(run.id)?.href"
+                v-if="linkFor(run)"
+                :href="linkFor(run)?.href"
                 target="_blank"
                 rel="noopener"
                 class="run-jump"
                 @click.stop
-              >{{ subjectLinks.get(run.id)?.text }}</a>
+              >{{ linkFor(run)?.text }}</a>
+              <!-- 抽屉宽度终究有限：完整现场新开标签页进整页（WorkflowRunView），
+                   长输入与逐步的输入/输出分组在那里看才不挤。 -->
+              <a
+                :href="runPageHref(run)"
+                target="_blank"
+                rel="noopener"
+                class="run-jump"
+                @click.stop
+              >完整现场</a>
               <span class="spacer" />
               <span v-if="run.elapsed_ms != null" class="muted">{{ fmtElapsed(run.elapsed_ms) }}</span>
               <span v-if="run.model_names?.length" class="muted run-models">
@@ -153,153 +181,13 @@
             <a-tag :color="statusColor(run.status)">{{ statusText(run.status) }}</a-tag>
           </template>
 
-          <div v-if="details[run.id]" class="scene">
-            <div v-if="inputPairs(run).length" class="scene-inputs">
-              <div v-for="[name, value] in inputPairs(run)" :key="name" class="scene-input">
-                <div class="scene-line">
-                  <span class="muted">{{ name }}</span>
-                  <span class="spacer" />
-                  <a-tooltip title="复制">
-                    <button
-                      type="button"
-                      class="scene-copy"
-                      @click="copyScene(`输入 ${name}`, value)"
-                    >
-                      <CopyOutlined />
-                    </button>
-                  </a-tooltip>
-                </div>
-                <pre>{{ value }}</pre>
-              </div>
-            </div>
-            <p v-if="run.error_msg" class="danger">{{ run.error_msg }}</p>
-
-            <div class="scene-tools">
-              <span class="muted">每步现场可折叠</span>
-              <span class="spacer" />
-              <a-button size="small" type="link" @click="collapseAll(details[run.id], false)">
-                展开全部
-              </a-button>
-              <a-button size="small" type="link" @click="collapseAll(details[run.id], true)">
-                收起全部
-              </a-button>
-            </div>
-
-            <div v-for="step in details[run.id].steps" :key="step.id" class="scene-step">
-              <div class="scene-head" @click="toggleStep(run.id, step)">
-                <span class="scene-caret">
-                  <RightOutlined v-if="isStepCollapsed(run.id, step)" />
-                  <DownOutlined v-else />
-                </span>
-                <a-tag :color="statusColor(step.status)">{{ statusText(step.status) }}</a-tag>
-                <span class="live-key">{{ step.key }}</span>
-                <span class="muted">{{ step.agent_name || step.agent_slug }}</span>
-                <span v-if="step.optional" class="muted">可选</span>
-                <span class="spacer" />
-                <span v-if="step.model_name" class="muted">{{ step.model_name }}</span>
-                <span v-if="step.elapsed_ms != null" class="muted">{{ fmtElapsed(step.elapsed_ms) }}</span>
-                <a-tooltip
-                  title="先调整这一步收到的输入变量，再用流程当前定义重跑一次；只重跑这一步，不写回业务结果——要新产物请回功能页面重新发起。"
-                >
-                  <a-button
-                    size="small"
-                    :disabled="!canRerun(run)"
-                    @click.stop="openStepModal(run, step, 'rerun')"
-                  >
-                    重跑这步
-                  </a-button>
-                </a-tooltip>
-                <a-tooltip
-                  title="从这一步所在并行组继续跑到结束：本组及之后各组重置重跑，上游产物不变；可先调整输入变量。不写回业务结果——要新产物请回功能页面重新发起。"
-                >
-                  <a-button
-                    size="small"
-                    :disabled="!canRerun(run)"
-                    @click.stop="openStepModal(run, step, 'resume')"
-                  >
-                    从此步继续
-                  </a-button>
-                </a-tooltip>
-              </div>
-              <div v-show="!isStepCollapsed(run.id, step)" class="scene-body">
-              <div v-if="step.error_msg" class="danger">{{ step.error_msg }}</div>
-              <div v-if="stepInputFields(details[run.id], step).length" class="scene-block">
-                <div class="scene-label">这一步收到的输入（上游产物按当时落库的结果）</div>
-                <div
-                  v-for="field in stepInputFields(details[run.id], step)"
-                  :key="field.name"
-                  class="scene-field"
-                >
-                  <div class="scene-line">
-                    <span class="scene-field-name">
-                      {{ field.name }}
-                      <a-tag v-if="field.isJson" color="blue" class="scene-field-tag">JSON</a-tag>
-                    </span>
-                    <span class="spacer" />
-                    <a-tooltip title="复制">
-                      <button
-                        type="button"
-                        class="scene-copy"
-                        @click="copyScene(`变量 ${field.name}`, field.value)"
-                      >
-                        <CopyOutlined />
-                      </button>
-                    </a-tooltip>
-                  </div>
-                  <pre>{{ field.value }}</pre>
-                </div>
-              </div>
-              <div v-if="step.prompt" class="scene-block">
-                <div class="scene-line">
-                  <div class="scene-label">发给模型的 prompt</div>
-                  <span class="spacer" />
-                  <a-tooltip title="复制">
-                    <button
-                      type="button"
-                      class="scene-copy"
-                      @click="copyScene('prompt', step.prompt)"
-                    >
-                      <CopyOutlined />
-                    </button>
-                  </a-tooltip>
-                </div>
-                <pre>{{ step.prompt }}</pre>
-              </div>
-              <div v-if="step.output" class="scene-block">
-                <div class="scene-line">
-                  <div class="scene-label">模型原始输出</div>
-                  <span class="spacer" />
-                  <a-tooltip title="复制">
-                    <button
-                      type="button"
-                      class="scene-copy"
-                      @click="copyScene('输出', step.output)"
-                    >
-                      <CopyOutlined />
-                    </button>
-                  </a-tooltip>
-                </div>
-                <pre>{{ step.output }}</pre>
-              </div>
-              <div v-if="step.parsed" class="scene-block">
-                <div class="scene-line">
-                  <div class="scene-label">按契约解析出的对象</div>
-                  <span class="spacer" />
-                  <a-tooltip title="复制">
-                    <button
-                      type="button"
-                      class="scene-copy"
-                      @click="copyScene('解析对象', JSON.stringify(step.parsed, null, 2))"
-                    >
-                      <CopyOutlined />
-                    </button>
-                  </a-tooltip>
-                </div>
-                <pre>{{ JSON.stringify(step.parsed, null, 2) }}</pre>
-              </div>
-              </div>
-            </div>
-          </div>
+          <RunScene
+            v-if="details[run.id]"
+            :detail="details[run.id]"
+            :busy="!canRerun(run)"
+            @rerun="(step: WorkflowRunStep) => openStepModal(run, step, 'rerun')"
+            @resume="(step: WorkflowRunStep) => openStepModal(run, step, 'resume')"
+          />
           <a-skeleton v-else active :paragraph="{ rows: 3 }" />
         </a-collapse-panel>
       </a-collapse>
@@ -307,50 +195,25 @@
 
     <!-- 重跑这步 / 从此步继续 共用的输入调整弹框：改的是这次执行收到的上下文
          变量，提交后按当前模板重新渲染，不写回运行输入与任何上游行。 -->
-    <a-modal
-      :open="editModal.open"
-      :title="editModal.mode === 'rerun' ? '重跑这一步 · 调整输入' : '从此步继续 · 调整输入'"
-      ok-text="开始"
-      cancel-text="取消"
-      :confirm-loading="editModal.submitting"
-      :width="620"
-      @ok="confirmStepModal"
-      @update:open="(value: boolean) => { if (!value) editModal.open = false }"
-    >
-      <a-alert
-        type="info"
-        show-icon
-        class="edit-modal-tip"
-        :message="
-          editModal.mode === 'rerun'
-            ? '只重跑这一步：用下面的变量按当前模板重新渲染 prompt，实际 prompt 仍逐行落库；不写回业务结果。'
-            : '将重跑本步所在并行组及之后所有步骤：上游组的产物不变，覆盖只影响这一次执行。'
-        "
-      />
-      <a-form layout="vertical">
-        <a-form-item v-for="field in editModal.fields" :key="field.name">
-          <template #label>
-            {{ field.name }}
-            <a-tag v-if="field.isJson" color="blue">JSON</a-tag>
-          </template>
-          <a-textarea v-model:value="editModal.values[field.name]" :rows="4" />
-        </a-form-item>
-        <a-empty
-          v-if="!editModal.fields.length"
-          description="这一步没有可调整的上下文变量"
-          :image-style="{ height: '40px' }"
-        />
-      </a-form>
-    </a-modal>
+    <StepOverrideModal
+      v-model:open="editModal.open"
+      :mode="editModal.mode"
+      :fields="editModal.fields"
+      :submitting="editModal.submitting"
+      @confirm="confirmStepModal"
+    />
   </a-drawer>
 </template>
 
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { useRouter, type RouteLocationRaw } from 'vue-router'
+import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { CopyOutlined, DownOutlined, PlayCircleOutlined, RightOutlined } from '@ant-design/icons-vue'
-import { copyText } from '@/utils/clipboard'
+import { DownOutlined, PlayCircleOutlined, RightOutlined } from '@ant-design/icons-vue'
+import RunScene from '@/components/workflow/RunScene.vue'
+import StepOverrideModal from '@/components/workflow/StepOverrideModal.vue'
+import { stepInputFields, type StepField } from '@/components/workflow/runFields'
+import { subjectLink } from '@/components/workflow/runLinks'
 import {
   workflowsApi,
   type RunStatus,
@@ -407,11 +270,8 @@ const following = ref(false)
 /** 本次打开里用户明点过「停止跟随」：不再自动接回还在跑的那次。 */
 let followSuppressed = false
 const inputs = reactive<Record<string, string>>({})
-/**
- * 每步现场的折叠状态，key 形状 ``运行 id:步骤 key``。只记用户显式动过的：
- * 没动过的按默认（失败步展开、其余收起）取值。
- */
-const collapsedSteps = reactive<Record<string, boolean>>({})
+/** 发起表单里选填参数一栏的展开状态（默认折叠，见模板分组注释）。 */
+const optionalOpen = ref(false)
 const details = reactive<Record<number, WorkflowRunDetail>>({})
 const expanded = ref<number[]>([])
 const live = reactive<{ runId: number | null; status: string; error: string | null; steps: LiveStep[] }>({
@@ -440,43 +300,14 @@ const emptyText = computed(() => {
   return props.subject ? '这个对象还没有运行记录' : '还没有运行记录'
 })
 
-/**
- * 那次运行认领的业务对象能不能被深链。
- *
- * 报告页与工作台都在 ``/office`` 下按整数 id 寻址，运行记录的 ``subject_ref``
- * 就是那个 id。面试题不能：它的 ref 是题目在自己记录里的 qid，光凭这一个数落不到
- * 「哪一条面试记录」——与其给一个会跳错的链接，不如只留标题里快照下来的名字。
- */
-function subjectLink(run: WorkflowRun): { text: string; href: string } | null {
-  const id = Number(run.subject_ref)
-  if (!run.subject_kind || !Number.isInteger(id)) return null
-  switch (run.subject_kind) {
-    case 'resume':
-      return openInNewTab('看简历', { name: 'ReportView', params: { kind: 'resume', id } })
-    case 'resume-comparison':
-      return openInNewTab('看对比', { name: 'ReportView', params: { kind: 'comparison', id } })
-    case 'resume-toolkit':
-      return openInNewTab('看助手', { name: 'ReportView', params: { kind: 'toolkit', id } })
-    case 'slide-deck':
-      return openInNewTab('开工作台', { name: 'SlideWorkbench', params: { id } })
-    default:
-      return null
-  }
+/** 业务对象深链与「完整现场」整页：都新开标签页，见 runLinks 与 WorkflowRunView。 */
+function linkFor(run: WorkflowRun) {
+  return subjectLink(router, run)
 }
 
-/** 与简历/幻灯片列表「查看报告」同一模式：整页展示是 bare 路由，新开标签页。 */
-function openInNewTab(text: string, to: RouteLocationRaw) {
-  return { text, href: router.resolve(to).href }
+function runPageHref(run: WorkflowRun) {
+  return router.resolve({ name: 'WorkflowRunView', params: { id: run.id } }).href
 }
-
-/** 按运行 id 索引一次，模板里就不必为同一个对象算三遍。 */
-const subjectLinks = computed(() => {
-  const links = new Map<number, { text: string; href: string } | null>()
-  // 业务对象模式下整列都是同一个对象，用户已经站在它上面了。
-  if (props.subject) return links
-  for (const run of runs.value) links.set(run.id, subjectLink(run))
-  return links
-})
 
 const liveCaption = computed(() => {
   if (running.value) return '本次运行'
@@ -496,17 +327,6 @@ function onFilterChange() {
 function startedText(run: WorkflowRun) {
   const started = run.started_at || run.created_at
   return started ? new Date(started).toLocaleString() : '—'
-}
-function inputPairs(run: WorkflowRun): [string, string][] {
-  const detail = details[run.id]
-  if (!detail) return []
-  return Object.entries(detail.inputs).filter(([, value]) => value)
-}
-
-/** 现场里每一块文本都按原样复制：贴回编辑器或别处都还是落库时的那份内容。 */
-async function copyScene(what: string, text: string) {
-  if (await copyText(text)) message.success(`${what}已复制`)
-  else message.error('复制失败，浏览器拒绝了剪贴板访问')
 }
 
 watch(
@@ -749,76 +569,7 @@ function canRerun(run: WorkflowRun) {
   return !liveBusy.value
 }
 
-// ---- 每步现场折叠 ----------------------------------------------------------
-
-function stepCardKey(runId: number, key: string) {
-  return `${runId}:${key}`
-}
-
-/** 这一步现场是否收起：没显式动过就按默认——失败步展开，其余收起。 */
-function isStepCollapsed(runId: number, step: WorkflowRunStep) {
-  const key = stepCardKey(runId, step.key)
-  return key in collapsedSteps ? collapsedSteps[key] : step.status !== 'failed'
-}
-
-function toggleStep(runId: number, step: WorkflowRunStep) {
-  const key = stepCardKey(runId, step.key)
-  collapsedSteps[key] = !isStepCollapsed(runId, step)
-}
-
-/** 展开全部 / 收起全部：把这次现场里每一步都写成显式状态。 */
-function collapseAll(detail: WorkflowRunDetail, collapsed: boolean) {
-  for (const step of detail.steps) {
-    collapsedSteps[stepCardKey(detail.id, step.key)] = collapsed
-  }
-}
-
-/** 重跑/续跑受理后清掉这一运行的折叠覆盖，新现场按默认重新展开失败步。 */
-function clearStepCollapse(runId: number) {
-  for (const key of Object.keys(collapsedSteps)) {
-    if (key.startsWith(`${runId}:`)) delete collapsedSteps[key]
-  }
-}
-
-// ---- 每一步收到的输入 --------------------------------------------------------
-
-/** 一步现场里可展示/可覆盖的一个上下文变量。 */
-interface StepField {
-  name: string
-  value: string
-  /** 值是 JSON 步骤的解析产物：弹框里按 JSON 编辑，提交时服务端按 JSON 解析。 */
-  isJson: boolean
-}
-
-/**
- * 还原某一步实际收到的上下文变量：运行输入 ＋ **严格早于**本步所在组的步骤产物。
- *
- * 纯函数，形状与后端 ``_rebuild_context`` / ``_context_fields`` 对齐：同组并行
- * 步骤的产物不在里面（第一次跑时它们彼此也看不见）；同名变量由产物覆盖输入。
- */
-function stepInputFields(detail: WorkflowRunDetail, step: WorkflowRunStep): StepField[] {
-  // 组在 steps 里首次出现的次序即执行次序（后端按 sort_order 返回）。
-  const groupOrder = new Map<string, number>()
-  for (const row of detail.steps) {
-    if (!groupOrder.has(row.group_key)) groupOrder.set(row.group_key, groupOrder.size)
-  }
-  const targetGroup = groupOrder.get(step.group_key) ?? 0
-
-  const fields = new Map<string, StepField>()
-  for (const [name, value] of Object.entries(detail.inputs)) {
-    fields.set(name, { name, value, isJson: false })
-  }
-  for (const row of detail.steps) {
-    if ((groupOrder.get(row.group_key) ?? 0) >= targetGroup || !row.output_var) continue
-    const raw: unknown = row.parsed ?? row.output ?? ''
-    fields.set(row.output_var, {
-      name: row.output_var,
-      value: typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2),
-      isJson: row.parsed != null,
-    })
-  }
-  return [...fields.values()]
-}
+// ---- 每步现场折叠与输入还原在 RunScene / runFields：抽屉与整页共用一份形状。 ----
 
 // ---- 重跑 / 续跑的输入调整弹框 -----------------------------------------------
 
@@ -828,7 +579,6 @@ const editModal = reactive<{
   runId: number
   key: string
   fields: StepField[]
-  values: Record<string, string>
   submitting: boolean
 }>({
   open: false,
@@ -836,31 +586,27 @@ const editModal = reactive<{
   runId: 0,
   key: '',
   fields: [],
-  values: {},
   submitting: false,
 })
 
 function openStepModal(run: WorkflowRun, step: WorkflowRunStep, mode: 'rerun' | 'resume') {
   const detail = details[run.id]
   if (!detail) return
-  const fields = stepInputFields(detail, step)
   editModal.mode = mode
   editModal.runId = run.id
   editModal.key = step.key
-  editModal.fields = fields
-  editModal.values = Object.fromEntries(fields.map((field) => [field.name, field.value]))
+  editModal.fields = stepInputFields(detail, step)
   editModal.open = true
 }
 
-async function confirmStepModal() {
+async function confirmStepModal(values: Record<string, string>) {
   editModal.submitting = true
   const runId = editModal.runId
-  const inputs = { ...editModal.values }
   try {
     if (editModal.mode === 'rerun') {
-      await workflowsApi.rerunStep(runId, editModal.key, inputs)
+      await workflowsApi.rerunStep(runId, editModal.key, values)
     } else {
-      await workflowsApi.resumeFromStep(runId, editModal.key, inputs)
+      await workflowsApi.resumeFromStep(runId, editModal.key, values)
     }
   } catch {
     return // 拦截器已提示：400（未知变量/JSON 非法）、409（还没跑完）原因在 message。
@@ -869,10 +615,23 @@ async function confirmStepModal() {
   }
   editModal.open = false
   // 旧现场先撤：后端已把目标行打回 pending、整条运行改回执行中，跟随流看它跑完。
+  // RunScene 拿到重取的新 detail 会自己回到默认折叠（失败步重新展开）。
   delete details[runId]
-  clearStepCollapse(runId)
   attachFollow(runId)
 }
+
+// ---- 发起表单：必填平铺，选填默认折叠 ----------------------------------------
+
+const requiredFields = computed(
+  () => (props.workflow?.inputs ?? []).filter((field) => field.required),
+)
+const optionalFields = computed(
+  () => (props.workflow?.inputs ?? []).filter((field) => !field.required),
+)
+/** 折叠行上报「已填 N」：选填收起来了，填没填也要看得见。 */
+const filledOptionalCount = computed(
+  () => optionalFields.value.filter((field) => (inputs[field.name] ?? '').trim()).length,
+)
 </script>
 
 <style scoped>
@@ -910,9 +669,6 @@ async function confirmStepModal() {
 }
 .live-key {
   font-family: var(--font-mono);
-}
-.scene-inputs {
-  margin-bottom: 12px;
 }
 .run-head {
   display: flex;
@@ -958,95 +714,20 @@ async function confirmStepModal() {
 .runs-filter {
   width: 112px;
 }
-.scene-input pre,
-.scene-field pre,
-.scene-block pre {
-  margin: 4px 0 0;
-  padding: 8px;
-  background: var(--surface);
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-sm);
-  max-height: 220px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: var(--fs-xs);
-  line-height: 1.6;
+/* 发起表单的选填分组头：折叠状态也要看得见填了几项，与整页/现场的分组头同一形状。 */
+.composer-optional {
+  margin-bottom: 12px;
 }
-.scene-step {
-  border-top: 1px solid var(--hairline);
-  padding-top: 8px;
-  margin-top: 8px;
-}
-.scene-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.scene-tools {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin: 4px 0 8px;
-  font-size: var(--fs-xs);
-}
-.scene-tools :deep(.ant-btn-link) {
-  padding: 0 4px;
-  height: auto;
-  font-size: var(--fs-xs);
-}
-.scene-caret {
-  display: inline-flex;
-  align-items: center;
-  color: var(--text-3);
-  font-size: var(--fs-xs);
-}
-.scene-body {
-  margin-top: 8px;
-}
-/* 块标题行：变量名/标签靠左，复制入口贴到行尾。 */
-.scene-line {
+.group-head {
   display: flex;
   align-items: center;
   gap: 6px;
-}
-.scene-copy {
-  display: inline-flex;
-  padding: 0 2px;
-  border: none;
-  background: transparent;
-  color: var(--text-3);
-  font-size: var(--fs-xs);
   cursor: pointer;
-  transition: color 0.15s;
+  user-select: none;
 }
-.scene-copy:hover {
-  color: var(--signal-text);
-}
-.scene-field {
-  margin-top: 6px;
-}
-.scene-field-name {
+.caret {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  color: var(--text-3);
-  font-size: var(--fs-xs);
-  font-family: var(--font-mono);
-}
-.scene-field-tag {
-  margin: 0;
-  font-size: 10px;
-  line-height: 14px;
-  padding: 0 3px;
-}
-.edit-modal-tip {
-  margin-bottom: 12px;
-}
-.scene-block {
-  margin-top: 8px;
-}
-.scene-label {
   color: var(--text-3);
   font-size: var(--fs-xs);
 }
