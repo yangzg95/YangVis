@@ -292,8 +292,6 @@ onBeforeUnmount(stopFollow)
 
 <style scoped>
 .run-page {
-  max-width: 1080px;
-  margin: 0 auto;
   padding: 20px 24px 48px;
 }
 .page-head {
