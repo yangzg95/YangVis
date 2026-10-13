@@ -161,14 +161,12 @@
                 class="run-jump"
                 @click.stop
               >{{ linkFor(run)?.text }}</a>
-              <!-- 抽屉宽度终究有限：完整现场新开标签页进整页（WorkflowRunView），
+              <!-- 抽屉宽度终究有限：完整现场跳应用内标签进整页（WorkflowRunView），
                    长输入与逐步的输入/输出分组在那里看才不挤。 -->
               <a
-                :href="runPageHref(run)"
-                target="_blank"
-                rel="noopener"
+                href="#"
                 class="run-jump"
-                @click.stop
+                @click.stop.prevent="router.push({ name: 'WorkflowRunView', params: { id: run.id } })"
               >完整现场</a>
               <span class="spacer" />
               <span v-if="run.elapsed_ms != null" class="muted">{{ fmtElapsed(run.elapsed_ms) }}</span>
@@ -300,13 +298,9 @@ const emptyText = computed(() => {
   return props.subject ? '这个对象还没有运行记录' : '还没有运行记录'
 })
 
-/** 业务对象深链与「完整现场」整页：都新开标签页，见 runLinks 与 WorkflowRunView。 */
+/** 业务对象深链：bare 整页，新开浏览器标签，见 runLinks。 */
 function linkFor(run: WorkflowRun) {
   return subjectLink(router, run)
-}
-
-function runPageHref(run: WorkflowRun) {
-  return router.resolve({ name: 'WorkflowRunView', params: { id: run.id } }).href
 }
 
 const liveCaption = computed(() => {

@@ -71,7 +71,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import {
@@ -88,7 +88,21 @@ import { subjectLink } from '@/components/workflow/runLinks'
 const route = useRoute()
 const router = useRouter()
 
-const runId = Number(route.params.id)
+// 顶栏多标签下本组件是 keep-alive 复用的单实例：切到另一条运行的标签不会重跑
+// setup，运行 id 得跟着路由参数换。切去别的页面（参数里没有 id）不动手，
+// 回来还是原来那条运行的现场，不重置折叠态也不重发请求。
+const runId = ref(Number(route.params.id))
+watch(
+  () => route.params.id,
+  (id) => {
+    if (route.name !== 'WorkflowRunView' || id == null || String(id) === String(runId.value)) return
+    stopFollow()
+    runId.value = Number(id)
+    detail.value = null
+    errorText.value = ''
+    void load()
+  },
+)
 const detail = ref<WorkflowRunDetail | null>(null)
 const loading = ref(false)
 const errorText = ref('')
@@ -125,9 +139,14 @@ const headMeta = computed(() => {
 })
 
 async function load() {
+  // 本组件在标签间是同一个实例：切走之后在途的响应回来，不能把另一条运行的
+  // 现场写进当前这份，所以按发起时的 id 认账。
+  const at = runId.value
   loading.value = true
   try {
-    detail.value = await workflowsApi.runDetail(runId)
+    const data = await workflowsApi.runDetail(at)
+    if (runId.value !== at) return
+    detail.value = data
     errorText.value = ''
     // 打开时还在跑就自动接上进度；正在跟就不必再开第二条流。
     if (
@@ -137,9 +156,10 @@ async function load() {
       attachFollow()
     }
   } catch (err) {
+    if (runId.value !== at) return
     errorText.value = (err as { message?: string })?.message || '运行记录加载失败'
   } finally {
-    loading.value = false
+    if (runId.value === at) loading.value = false
   }
 }
 
@@ -184,7 +204,7 @@ function attachFollow() {
   live.status = 'running'
   live.error = null
   live.steps = []
-  abortStream = workflowsApi.followRun(runId, {
+  abortStream = workflowsApi.followRun(runId.value, {
     onRunStart: (data) => {
       live.status = data.status || 'running'
       live.steps = data.steps.map((step) => ({
@@ -210,6 +230,18 @@ function stopFollow() {
   live.status = ''
   live.error = null
 }
+
+// 切去别的标签就停跟随（与轮询页「失活停表」同一惯例）：人不在看，没必要占
+// 一条流；切回来或再进这枚标签时，只要现场还是跑着的就重新接上。
+onDeactivated(() => {
+  if (liveBusy.value) stopFollow()
+})
+onActivated(() => {
+  const run = detail.value
+  if (!liveBusy.value && run && (run.status === 'pending' || run.status === 'running')) {
+    attachFollow()
+  }
+})
 
 // ---- 单步重跑 / 从此步继续 ----------------------------------------------------
 
@@ -239,9 +271,9 @@ async function confirmStepModal(values: Record<string, string>) {
   editModal.submitting = true
   try {
     if (editModal.mode === 'rerun') {
-      await workflowsApi.rerunStep(runId, editModal.key, values)
+      await workflowsApi.rerunStep(runId.value, editModal.key, values)
     } else {
-      await workflowsApi.resumeFromStep(runId, editModal.key, values)
+      await workflowsApi.resumeFromStep(runId.value, editModal.key, values)
     }
   } catch {
     return // 拦截器已提示：400（未知变量/JSON 非法）、409（还没跑完）原因在 message。

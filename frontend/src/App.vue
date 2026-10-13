@@ -150,6 +150,7 @@ import {
   MenuOutlined,
   MessageOutlined,
   PartitionOutlined,
+  PlayCircleOutlined,
   ProfileOutlined,
   RobotOutlined,
   SettingOutlined,
@@ -277,6 +278,16 @@ const EXTRA_TABS: MenuLeaf[] = [
 ]
 const TAB_LEAVES: MenuLeaf[] = [...LEAVES, ...EXTRA_TABS]
 
+// 运行现场是按运行 id 展开的动态标签：一个运行一枚标签，可同时开多枚互相切换。
+// 路径形状与 router 里的 /workflows/runs/:id(\d+) 保持一致。
+const RUN_TAB_PREFIX = '/workflows/runs/'
+function leafForPath(path: string): MenuLeaf | undefined {
+  const known = TAB_LEAVES.find((leaf) => leaf.path === path)
+  if (known) return known
+  const id = path.startsWith(RUN_TAB_PREFIX) ? path.slice(RUN_TAB_PREFIX.length) : ''
+  return /^\d+$/.test(id) ? { path, title: `运行 #${id}`, icon: PlayCircleOutlined } : undefined
+}
+
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
@@ -329,10 +340,9 @@ function restoreOpenTabs(): string[] {
   try {
     const raw: unknown = JSON.parse(localStorage.getItem(OPEN_TABS_KEY) ?? '[]')
     if (Array.isArray(raw)) {
-      const known = new Set(TAB_LEAVES.map((leaf) => leaf.path))
-      // 只恢复还认识的菜单路径（菜单调整后旧路径直接丢弃），并去重。
+      // 只恢复还认识的路径（菜单调整后旧路径直接丢弃；运行现场按 id 现认），并去重。
       const paths = [
-        ...new Set(raw.filter((p): p is string => typeof p === 'string' && known.has(p))),
+        ...new Set(raw.filter((p): p is string => typeof p === 'string' && Boolean(leafForPath(p)))),
       ]
       if (paths.length) {
         return [DEFAULT_TAB_PATH, ...paths.filter((p) => p !== DEFAULT_TAB_PATH)]
@@ -354,18 +364,16 @@ watch(openTabPaths, (paths) => {
   }
 })
 const openTabs = computed(() =>
-  openTabPaths.value
-    .map((path) => TAB_LEAVES.find((leaf) => leaf.path === path))
-    .filter((leaf): leaf is MenuLeaf => Boolean(leaf)),
+  openTabPaths.value.map(leafForPath).filter((leaf): leaf is MenuLeaf => Boolean(leaf)),
 )
 const activeTabKey = computed(() =>
-  TAB_LEAVES.some((leaf) => leaf.path === route.path) ? route.path : DEFAULT_TAB_PATH,
+  leafForPath(route.path) ? route.path : DEFAULT_TAB_PATH,
 )
 
 watch(
   () => route.path,
   (path) => {
-    if (TAB_LEAVES.some((leaf) => leaf.path === path) && !openTabPaths.value.includes(path)) {
+    if (leafForPath(path) && !openTabPaths.value.includes(path)) {
       openTabPaths.value = [...openTabPaths.value, path]
     }
   },

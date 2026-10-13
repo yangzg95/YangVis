@@ -39,12 +39,13 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '工作流配置'},
     },
     {
-        // 运行现场整页：抽屉里的「完整现场」新开标签页进这里，与报告页同一模式。
-        // bare 跳过主布局外壳；不加 public，未登录照样被守卫拦下。
+        // 运行现场整页：抽屉里的「完整现场」跳到这里，在顶栏按运行 id 占一枚
+        // 标签（见 App.vue 的 leafForPath），与「工作流配置」同一模式。不加
+        // bare——留主布局外壳，切走再切回来现场还在；不加 public，未登录被守卫拦下。
         path: '/workflows/runs/:id(\\d+)',
         name: 'WorkflowRunView',
         component: () => import('@/views/WorkflowRunView.vue'),
-        meta: {title: '运行现场', bare: true},
+        meta: {title: '运行现场'},
     },
     {
         path: '/mcp',
