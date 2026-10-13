@@ -150,7 +150,6 @@ import {
   MenuOutlined,
   MessageOutlined,
   PartitionOutlined,
-  PlayCircleOutlined,
   ProfileOutlined,
   RobotOutlined,
   SettingOutlined,
@@ -162,6 +161,7 @@ import zhCN from 'ant-design-vue/es/locale/zh_CN'
 import SidebarNav, { type MenuNode } from '@/components/SidebarNav.vue'
 import GridContextMenu, { type GridMenuEntry } from '@/components/ops/GridContextMenu.vue'
 import { useAuthStore } from '@/stores/auth'
+import { leafForPath as resolveTabLeaf } from '@/utils/appTabs'
 import { storageKeys } from '@/utils/storage'
 import { useIsMobile } from '@/utils/useIsMobile'
 
@@ -279,14 +279,8 @@ const EXTRA_TABS: MenuLeaf[] = [
 const TAB_LEAVES: MenuLeaf[] = [...LEAVES, ...EXTRA_TABS]
 
 // 运行现场是按运行 id 展开的动态标签：一个运行一枚标签，可同时开多枚互相切换。
-// 路径形状与 router 里的 /workflows/runs/:id(\d+) 保持一致。
-const RUN_TAB_PREFIX = '/workflows/runs/'
-function leafForPath(path: string): MenuLeaf | undefined {
-  const known = TAB_LEAVES.find((leaf) => leaf.path === path)
-  if (known) return known
-  const id = path.startsWith(RUN_TAB_PREFIX) ? path.slice(RUN_TAB_PREFIX.length) : ''
-  return /^\d+$/.test(id) ? { path, title: `运行 #${id}`, icon: PlayCircleOutlined } : undefined
-}
+// 识别规则本身抽到 appTabs.ts 走单测，这里只把静态菜单叶注进去。
+const leafForPath = (path: string) => resolveTabLeaf(path, TAB_LEAVES)
 
 const route = useRoute()
 const router = useRouter()
