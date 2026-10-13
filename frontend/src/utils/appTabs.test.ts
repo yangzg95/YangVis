@@ -38,7 +38,25 @@ describe('leafForPath', () => {
     expect(leafForPath('/ops/server/3', staticLeaves)).toBeUndefined()
   })
 
+  it('流程的运行记录按流程 id 展开成动态标签', () => {
+    const leaf = leafForPath('/workflows/12/runs', staticLeaves)
+    expect(leaf).toEqual({
+      path: '/workflows/12/runs',
+      title: '运行记录 #12',
+      icon: expect.anything(),
+    })
+    expect(leafForPath('/workflows/7/runs', staticLeaves)?.title).toBe('运行记录 #7')
+  })
+
+  it('运行记录形态只有整段 id 加 /runs 才认', () => {
+    expect(leafForPath('/workflows/abc/runs', staticLeaves)).toBeUndefined()
+    expect(leafForPath('/workflows/12/run', staticLeaves)).toBeUndefined()
+    expect(leafForPath('/workflows/12/runs/', staticLeaves)).toBeUndefined()
+    expect(leafForPath('/workflows/12/runs/edit', staticLeaves)).toBeUndefined()
+  })
+
   it('空静态叶下仍能认运行标签', () => {
     expect(leafForPath('/workflows/runs/7', [])?.title).toBe('运行 #7')
+    expect(leafForPath('/workflows/7/runs', [])?.title).toBe('运行记录 #7')
   })
 })

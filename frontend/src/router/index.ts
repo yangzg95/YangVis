@@ -48,6 +48,15 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '运行现场'},
     },
     {
+        // 一条流程的整页运行记录：工作流列表的「运行」不再开抽屉，而是到这里，
+        // 顶栏按流程 id 占一枚「运行记录 #id」标签。与运行现场同一模式，
+        // /workflows/runs/:id 那段的 'runs' 不是数字，两条路由不会互相抢。
+        path: '/workflows/:id(\\d+)/runs',
+        name: 'WorkflowRunsPage',
+        component: () => import('@/views/WorkflowRunsPage.vue'),
+        meta: {title: '运行记录'},
+    },
+    {
         path: '/mcp',
         name: 'McpServers',
         component: () => import('@/views/McpServers.vue'),

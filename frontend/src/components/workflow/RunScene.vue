@@ -10,7 +10,7 @@
         <a-tag color="blue" class="scene-group-tag">运行输入</a-tag>
         <span class="muted">{{ inputPairs.length }} 项 · {{ inputPairs.map(([name]) => name).join('、') }}</span>
       </div>
-      <div v-show="inputsOpen">
+      <div v-show="inputsOpen" class="scene-group-body">
         <div v-for="[name, value] in inputPairs" :key="name" class="scene-input">
           <div class="scene-line">
             <span class="scene-field-name">{{ name }}</span>
@@ -82,7 +82,7 @@
               {{ fieldsOf(step).length }} 个变量{{ step.prompt ? ' · 含发给模型的 prompt' : '' }}
             </span>
           </div>
-          <div v-show="isSectionOpen(step, 'in')">
+          <div v-show="isSectionOpen(step, 'in')" class="scene-group-body">
             <div v-if="fieldsOf(step).length" class="scene-block">
               <div class="scene-label">这一步收到的上下文（上游产物按当时落库的结果）</div>
               <div v-for="field in fieldsOf(step)" :key="field.name" class="scene-field">
@@ -132,7 +132,7 @@
               <template v-if="step.parsed"> · 含按契约解析的对象</template>
             </span>
           </div>
-          <div v-show="isSectionOpen(step, 'out')">
+          <div v-show="isSectionOpen(step, 'out')" class="scene-group-body">
             <div v-if="step.output" class="scene-block">
               <div class="scene-line">
                 <div class="scene-label">模型原始输出</div>
@@ -308,10 +308,20 @@ async function copyScene(what: string, text: string) {
 }
 .scene-body {
   margin-top: 8px;
+  /* 步骤体相对步骤头缩进一格（caret 12px + 间隙 8px 对齐到步骤标识下方），
+     展开后「头 → 体」的从属一眼可读。 */
+  margin-left: 20px;
 }
 /* 输入 / 输出分组头：整行可点，标签用色区分方向（蓝=进、绿=出）。 */
 .scene-group {
   margin-top: 10px;
+}
+/* 分组体再往内缩一层，配一根 hairline 竖线：展开内容相对分组头的从属
+   靠结构表达，不靠猜。 */
+.scene-group-body {
+  margin: 4px 0 2px 6px;
+  padding-left: 15px;
+  border-left: 1px solid var(--hairline);
 }
 .scene-group-head {
   display: flex;

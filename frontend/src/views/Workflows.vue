@@ -104,7 +104,7 @@
             <span class="muted">{{ scaleText(record) }}</span>
           </template>
 
-          <!-- 最近一次运行：不点开抽屉也说得出跑没跑、什么状态、多久。
+          <!-- 最近一次运行：不点进运行页也说得出跑没跑、什么状态、多久。
                没跑过给一个破折号——列对齐比留白好读。 -->
           <template v-else-if="column.key === 'last_run'">
             <div v-if="record.last_run" class="wf-run-cell">
@@ -134,8 +134,6 @@
         </template>
       </a-table>
     </template>
-
-    <WorkflowRunsDrawer v-model:open="runsOpen" :workflow="current" @changed="load" />
   </div>
 </template>
 
@@ -147,15 +145,12 @@ import { PlusOutlined } from '@ant-design/icons-vue'
 import { workflowsApi, type Workflow, type WorkflowStep } from '@/api'
 import { fmtElapsed, runStatusColor, runStatusText } from '@/utils/format'
 import { requestEditor } from '@/stores/workflowEditor'
-import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
 
 const router = useRouter()
 
 const workflows = ref<Workflow[]>([])
 const loading = ref(false)
 const loadError = ref('')
-const current = ref<Workflow | null>(null)
-const runsOpen = ref(false)
 /** 清理窗口：与后端启动时那次的默认口径一致，界面上可以临时收紧。 */
 const keepDays = ref(30)
 
@@ -253,8 +248,8 @@ function customRow(workflow: Workflow) {
 }
 
 function openRuns(workflow: Workflow) {
-  current.value = workflow
-  runsOpen.value = true
+  // 不再开抽屉：整页进「运行记录」，在顶栏按流程 id 占一枚应用内标签。
+  router.push({ name: 'WorkflowRunsPage', params: { id: workflow.id } })
 }
 
 async function onDuplicate(workflow: Workflow) {
