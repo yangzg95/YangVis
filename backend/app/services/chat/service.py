@@ -18,7 +18,6 @@ from sqlalchemy.orm import Session
 
 from app.background import fire_and_forget
 from app.config import get_settings
-from app.database import SessionLocal
 from app.errors import CODE_CHAT_NOT_READY, BusinessError
 from app.models.entities import (
     Agent,
@@ -1006,6 +1005,11 @@ async def after_answer_task(owner_id: int, conversation_id: int, history_turns: 
     （与 knowledge.index_document_task 同一形态）。任何一步失败都只记日志，
     下一步照常——全量重算的设计保证下一次成功调用会把错过的补回来。
     """
+    # 延迟导入是有意的：顶层引一次会在进程里存两份 `SessionLocal`，测试 patch
+    # `app.database` 那份动不到模块全局。函数体内导入等于把 patch 面收成一处，
+    # 与 routers/interview.py、slides.py、workflows/exec.py 的后台任务同形。
+    from app.database import SessionLocal
+
     with SessionLocal() as db:
         chat_service = ChatService(db, owner_id)
         memory = MemoryService(db, owner_id)

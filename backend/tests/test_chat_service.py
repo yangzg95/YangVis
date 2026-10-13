@@ -279,10 +279,9 @@ def db(tmp_path, monkeypatch):
     Base.metadata.create_all(bind=engine)
     maker = sessionmaker(bind=engine, future=True)
     monkeypatch.setattr("app.database.SessionLocal", maker)
-    # ``service.py`` 是 ``from app.database import SessionLocal`` 拿的引用，模块全局
-    # 各一份：``after_answer_task`` 认的是 ``chat_module`` 手里那把。只改上面那一处，
-    # 收尾任务就会去连 .env 里的开发库。
-    monkeypatch.setattr(chat_module, "SessionLocal", maker)
+    # 收尾任务是在函数体内 import `SessionLocal` 的，上面这一处就够它认。它要是顶层
+    # import，模块全局里另有一份，patch 动不到，`after_answer_task` 就会去连 .env
+    # 里的开发库——用例照样全绿，读的是真库的 id。
     session = maker()
 
     seed_builtin_agents(session)
@@ -1489,7 +1488,7 @@ def test_wrap_up_runs_on_a_session_it_opened_itself(db, memory, monkeypatch):
         session.close = close
         return session
 
-    monkeypatch.setattr(chat_module, "SessionLocal", spied)
+    monkeypatch.setattr("app.database.SessionLocal", spied)
     wait(chat_module.after_answer_task(OWNER, conv.id, 6))
 
     assert [type(x).__name__ for x in opened[:1]] == ["Session"]
