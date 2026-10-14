@@ -1,5 +1,5 @@
 <template>
-  <div class="show">
+  <div ref="rootRef" class="show">
     <!-- 放映内容就是后端渲染的那一份 HTML（与预览、导出逐字一致）。
          翻页/全屏的交互在文档内部跑，所以 iframe 开 allow-scripts；文本已在
          服务端转义、样式走白名单，脚本是渲染器自带的那一段固定代码。 -->
@@ -46,14 +46,19 @@
         >
           <RightOutlined />
         </a-button>
-        <a-button size="small" type="text" @click="command('fullscreen')">
-          <FullscreenOutlined /> 全屏
+        <a-button size="small" type="text" @click="toggleScreen">
+          <FullscreenExitOutlined v-if="isFullscreen" />
+          <FullscreenOutlined v-else />
+          {{ isFullscreen ? '退出全屏' : '全屏' }}
         </a-button>
         <a-button size="small" type="text" :disabled="!current" @click="openEditor">
           <FormOutlined /> 改这一页
         </a-button>
         <a-button size="small" type="text" @click="onExport">
-          <DownloadOutlined /> 导出
+          <DownloadOutlined /> 导出 HTML
+        </a-button>
+        <a-button size="small" type="text" :disabled="!htmlText" @click="onExportPdf">
+          <FilePdfOutlined /> 导出 PDF
         </a-button>
       </div>
     </header>
@@ -134,7 +139,9 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   DownloadOutlined,
   EditOutlined,
+  FilePdfOutlined,
   FormOutlined,
+  FullscreenExitOutlined,
   FullscreenOutlined,
   LeftOutlined,
   MinusOutlined,
@@ -151,6 +158,7 @@ import {
   type SlidePageInput,
 } from '@/api'
 import { saveBlobResponse } from '@/utils/download'
+import { printSlideDeck } from '@/utils/slidePrint'
 
 // 放映页（bare 整页，从列表或工作台新开标签页进来）。
 //
@@ -238,8 +246,33 @@ function errorText(err: unknown, fallback: string): string {
 
 // ---- 父子页面通信 ------------------------------------------------------------
 
-function command(action: 'goto' | 'next' | 'prev' | 'fullscreen', index?: number) {
+function command(action: 'goto' | 'next' | 'prev', index?: number) {
   frameRef.value?.contentWindow?.postMessage({ __slide: 'command', action, index }, '*')
+}
+
+// 全屏由父页面发起，请求挂在 .show 容器上而不是 iframe 里的那份文档：
+// iframe 是 sandbox 出来的独立源，父页面的点击带来的用户激活不会传进去，
+// 文档里那句 requestFullscreen 会被浏览器直接拒掉（点了没反应就是这个）。
+// 挂在自己容器上还有两处顺带好处：工具条跟着进全屏，「退出全屏」按得着；
+// 舞台四周那条深色带是放映的既定样子，不再被全屏元素自身的底色顶掉。
+const rootRef = ref<HTMLDivElement | null>(null)
+const isFullscreen = ref(false)
+
+async function toggleScreen() {
+  if (document.fullscreenElement) {
+    await document.exitFullscreen().catch(() => undefined)
+    return
+  }
+  try {
+    await rootRef.value?.requestFullscreen()
+  } catch {
+    message.error('浏览器不允许这个页面进入全屏，可以按 F11')
+  }
+}
+
+function onFullscreenChange() {
+  isFullscreen.value = document.fullscreenElement === rootRef.value
+  wake()
 }
 
 function onPageMessage(event: MessageEvent) {
@@ -290,7 +323,7 @@ function onWindowKeydown(event: KeyboardEvent) {
     command('prev')
     wake()
   } else if (event.key === 'f' || event.key === 'F') {
-    command('fullscreen')
+    toggleScreen()
     wake()
   } else {
     wake()
@@ -394,6 +427,13 @@ async function onExport() {
   }
 }
 
+// 导出 PDF 用的是放映这份 HTML（与预览、导出逐字一致），不再取一次后端。
+function onExportPdf() {
+  if (!printSlideDeck(htmlText.value)) {
+    message.warning('浏览器拦住了新标签页，放行弹窗后再导出')
+  }
+}
+
 function goWorkbench() {
   router.push({ name: 'SlideWorkbench', params: { id: deckId } })
 }
@@ -402,6 +442,7 @@ onMounted(async () => {
   window.addEventListener('message', onPageMessage)
   window.addEventListener('keydown', onWindowKeydown)
   window.addEventListener('mousemove', wake)
+  document.addEventListener('fullscreenchange', onFullscreenChange)
   wake()
   await loadAll()
   watchGeneration()
@@ -411,6 +452,7 @@ onUnmounted(() => {
   window.removeEventListener('message', onPageMessage)
   window.removeEventListener('keydown', onWindowKeydown)
   window.removeEventListener('mousemove', wake)
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
   if (pollTimer !== undefined) window.clearInterval(pollTimer)
   if (hideTimer !== undefined) window.clearTimeout(hideTimer)
 })

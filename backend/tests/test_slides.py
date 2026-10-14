@@ -346,6 +346,41 @@ def test_image_page_bounds_the_shot_height():
     assert "max-height:var(--body-h" in slides_html._CSS
 
 
+def _print_vars(doc: str) -> dict:
+    """取出文档尾部那段打印样式里的 ``--print-*``。"""
+    block = re.search(r"<style>@page\{[^}]*\}:root\{(.*?)\}\</style>", doc).group(1)
+    return dict(item.split(":", 1) for item in block.split(";") if item)
+
+
+def test_print_layout_fits_a_named_paper():
+    """导出 PDF 的版面：纸用具名 A4 横版，幻灯片按画幅撑满，讲稿不进纸。
+
+    自定义纸张（``size:297mm 167mm``）只有 Chrome 自己的「另存为 PDF」认，
+    「Microsoft Print to PDF」那类驱动做不出这张纸，会退回竖版 A4 再把整页内容
+    转 90 度 —— 导出来的 PDF 就是横躺着的字。具名尺寸 + landscape 各家都吃。
+    """
+    one = [{"layout": "bullets", "title": "标题", "bullets": ["一条"]}]
+    assert "@page{size:A4 landscape;margin:0}" in _render(pages=one)
+
+    wide = _print_vars(_render(pages=one))
+    assert wide["--print-w"] == "297mm"
+    assert abs(float(wide["--print-h"][:-2]) - 167.06) < 0.1
+    assert abs(float(wide["--print-pad"][:-2]) - 21.47) < 0.1
+    # 4:3 反过来受高度限制：高 210、宽 280，左右留白，上下不剩。
+    tall = _print_vars(_render(theme={"ratio": "4x3"}, pages=one))
+    assert (tall["--print-w"], tall["--print-h"], tall["--print-pad"]) == (
+        "280mm",
+        "210mm",
+        "0mm",
+    )
+
+    css = slides_html._CSS
+    # 屏显那条「按 S 显示备注」的规则是 ``.slide.show-notes .notes``，别拿它当印备注。
+    assert ".notes" not in css.split("@media print{", 1)[1]
+    assert "print-color-adjust:exact" in css, "不强制就印不出背景，封面光晕会整块消失"
+    assert ".slide:last-of-type{page-break-after:auto}" in css
+
+
 def test_fullscreen_stage_keeps_the_theme_background():
     """全屏时 .stage 是画面上层唯一的东西，不补背景就成黑底黑字。
 
@@ -405,10 +440,9 @@ def test_every_page_carries_a_running_header():
     )
     assert doc.count('<header class="rail">') == 2
     assert "DeerFlow 拆解" in doc
-    # 封面是标识页，不标页码；内容页标「当前 / 总数」。
-    cover = doc.split('class="slide slide-cover"', 1)[1].split("</section>", 1)[0]
-    assert "rail-no" not in cover
-    assert "02<i>/</i>02" in doc
+    # 页眉只标主题名，不标页码：封面按标识页处理没有页码，正文从 02 起，
+    # 放映时看着就像漏了一页（页序在工具条与工作台里都有，不必在页眉重复）。
+    assert "rail-no" not in doc
 
 
 def test_kicker_replaces_the_chapter_number_in_the_head():

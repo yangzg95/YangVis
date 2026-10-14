@@ -532,6 +532,9 @@ def render_document(
         f"<title>{deck_label}</title>",
         f"<style>{_CSS}</style>",
         f'<style>:root{{{theme_css};--ar:{ratio}}}</style>',
+        # 打印样式单独一个 style：里面的 ``--print-*`` 要按画幅现算，而 :root
+        # 那个块里混进非自定义属性会破坏「这块只有变量」的约定。
+        f"<style>{_print_page_css(ratio)}</style>",
         "</head>",
         f'<body data-total="{total}">',
         f'<div class="stage" id="stage">\n{body}',
@@ -633,7 +636,7 @@ def _render_page(
             head, _bullet_list(bullets, per_line=28, budget_u=budget_u)
         )
 
-    parts = [_rail(deck_label, index, total), body]
+    parts = [_rail(deck_label), body]
     if layout in TAKEAWAY_LAYOUTS:
         parts.append(_takeaway(page))
     body = "".join(parts)
@@ -645,10 +648,14 @@ def _render_page(
     )
 
 
-def _rail(deck_label: str, index: int, total: int) -> str:
-    """页眉那条 hairline：左边整份的主题名，右边页码（封面不标页码）。"""
-    page_no = f'<span class="rail-no">{index + 1:02d}<i>/</i>{total:02d}</span>' if index else ""
-    return f'<header class="rail"><span class="rail-tag">{deck_label}</span>{page_no}</header>'
+def _rail(deck_label: str) -> str:
+    """页眉那条 hairline：只留整份的主题名。
+
+    右边原来标「当前 / 总数」，但封面按标识页处理不标，于是放映时第一屏空的、
+    第二屏直接冒出 02，看着像漏了一页；页序在放映工具条和工作台的页码列表里都
+    有，页眉这一路就不再重复了。
+    """
+    return f'<header class="rail"><span class="rail-tag">{deck_label}</span></header>'
 
 
 def _wrap_body(head: str, inner: str) -> str:
@@ -893,6 +900,27 @@ def _content_height_u(ratio: str) -> float:
     return 100.0 * float(height) / float(width) - 14.0
 
 
+_PAPER_W_MM, _PAPER_H_MM = 297.0, 210.0  # A4 横版
+
+
+def _print_page_css(ratio: str) -> str:
+    """打印那一段样式：纸固定具名 A4 横版，幻灯片按画幅撑满，余量当上下留白。
+
+    不用 ``size:297mm 167mm`` 这种自定义尺寸：Chrome 自己的「另存为 PDF」认它，
+    「Microsoft Print to PDF」这类驱动做不出这张纸，会退回竖版 A4 再把整页内容转
+    90 度 —— 导出来的 PDF 就是横躺着的字。具名尺寸 + ``landscape`` 各家都吃。
+    """
+    width, _, height = ratio.partition("/")
+    rw, rh = float(width), float(height)
+    slide_w = min(_PAPER_W_MM, _PAPER_H_MM * rw / rh)
+    slide_h = slide_w * rh / rw
+    pad = (_PAPER_H_MM - slide_h) / 2
+    return (
+        "@page{size:A4 landscape;margin:0}"
+        f":root{{--print-w:{slide_w:g}mm;--print-h:{slide_h:g}mm;--print-pad:{pad:g}mm}}"
+    )
+
+
 # 尺寸一律以 --u 为单位，而 --u 是舞台宽度的百分之一：预览面板里 300px 宽和
 # 全屏 1920px 宽下版面比例完全一致，不需要两套字号。容器查询单元拿不到时退回
 # 按视口宽度计（老浏览器上小预览会偏大，但不会散架）。
@@ -943,8 +971,6 @@ font-size:calc(var(--u)*1.4);letter-spacing:.14em;color:var(--muted)}
 .rail::before{content:"";position:absolute;left:0;bottom:-1px;width:calc(var(--u)*7);
 height:calc(var(--u)*.28);background:var(--accent)}
 .rail-tag{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.rail-no{flex-shrink:0;font-variant-numeric:tabular-nums}
-.rail-no i{font-style:normal;opacity:.5;margin:0 .35em}
 /* 结论句：一句「所以呢」贴在页面底部，左边一段强调色竖条把它和正文分开。
    字号 / 行高 / 内边距 / 与正文的间距这四个数写在 _TAKEAWAY_* 里，两边必须一致。 */
 .takeaway{margin:0;padding:calc(var(--u)*0.95) calc(var(--u)*1.6);
@@ -1105,12 +1131,21 @@ background:var(--line);z-index:4}
 .bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
 @media print{
   html,body{height:auto;overflow:visible}
-  body{display:block;background:#fff}
-  .stage{width:100%;aspect-ratio:auto;container-type:normal;--u:1vw;overflow:visible}
+  /* 底色一律照屏显印：不写这条，浏览器打印会把背景优化掉，导出来的 PDF 就少了
+     封面那圈光晕、结论句的底纹这些靠背景表达的东西。 */
+  html{print-color-adjust:exact;-webkit-print-color-adjust:exact}
+  body{display:block;background:var(--bg)}
+  /* 纸和幻灯片的外形尺寸由文档尾部那段按画幅算好的样式给（``--print-*``），这里
+     只管用它。``--u`` 跟着打印宽度折算，字才和屏上是同一个比例。 */
+  .stage{width:var(--print-w);aspect-ratio:auto;container-type:normal;
+  --u:calc(var(--print-w)/100);overflow:visible}
   .nav,.hud,.bar{display:none!important}
-  .slide{position:relative;inset:auto;display:flex!important;aspect-ratio:var(--ar);
-  width:100%;page-break-after:always;animation:none}
-  .notes{display:block}
+  .slide{position:relative;inset:auto;display:flex!important;
+  width:var(--print-w);height:var(--print-h);margin:var(--print-pad) auto 0;
+  page-break-after:always;animation:none;overflow:hidden}
+  /* 末页后面别再顶一张空白纸——导出 PDF 时那张空页就是这么来的。 */
+  .slide:last-of-type{page-break-after:auto}
+  /* 讲稿不进纸：它是放映时按 S 给讲的人看的备注，排进页面会和正文叠成两行字。 */
 }
 """
 
@@ -1151,6 +1186,9 @@ _SCRIPT = r"""
     report();
   }
 
+  // 全屏只接文档自己的 F 键和 HUD 按钮这一个入口。外层放映页要全屏时请求的是
+  // 它自己那个容器：这份文档是 sandbox 出来的独立源，父页面点击带来的用户激活
+  // 传不进来，替它调 requestFullscreen 会被浏览器静默拒掉。
   function toggleFullscreen() {
     if (document.fullscreenElement) { document.exitFullscreen(); }
     else if (stage.requestFullscreen) { stage.requestFullscreen(); }
@@ -1223,7 +1261,6 @@ _SCRIPT = r"""
     if (data.action === 'goto') { show(Number(data.index) || 0); }
     else if (data.action === 'next') { show(index + 1); }
     else if (data.action === 'prev') { show(index - 1); }
-    else if (data.action === 'fullscreen') { toggleFullscreen(); }
   });
 
   // Ctrl+P 导出 PDF：浏览器打印只收当前可见页，先把所有页点亮。

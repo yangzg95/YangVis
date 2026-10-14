@@ -22,6 +22,9 @@
         <a-button size="small" @click="onExport">
           <DownloadOutlined /> 导出 HTML
         </a-button>
+        <a-button size="small" :disabled="!previewHtml" @click="onExportPdf">
+          <FilePdfOutlined /> 导出 PDF
+        </a-button>
         <a-button size="small" type="primary" :loading="saving" @click="onSave">
           <SaveOutlined /> 保存
         </a-button>
@@ -454,6 +457,7 @@ import {
   ArrowUpOutlined,
   DeleteOutlined,
   DownloadOutlined,
+  FilePdfOutlined,
   FundProjectionScreenOutlined,
   MinusOutlined,
   PictureOutlined,
@@ -473,6 +477,7 @@ import {
 } from '@/api'
 import { saveBlobResponse } from '@/utils/download'
 import { fmtSize } from '@/utils/format'
+import { printSlideDeck } from '@/utils/slidePrint'
 import {
   appendArchBlock,
   appendArchLayer,
@@ -847,6 +852,13 @@ async function onExport() {
     await saveBlobResponse(res, `${title.value || 'slides'}.html`)
   } catch (err) {
     message.error(errorText(err, '导出失败'))
+  }
+}
+
+// PDF 打的是预览那一份，也就是已保存的 deck：改了内容没点保存，印出来还是旧的。
+function onExportPdf() {
+  if (!printSlideDeck(previewHtml.value)) {
+    message.warning('浏览器拦住了新标签页，放行弹窗后再导出')
   }
 }
 
