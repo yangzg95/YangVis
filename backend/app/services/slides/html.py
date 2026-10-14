@@ -908,6 +908,13 @@ align-items:center;justify-content:center;font-family:"PingFang SC","Microsoft Y
 -webkit-font-smoothing:antialiased}
 .stage{position:relative;width:min(100vw,calc(100vh*var(--ar)));aspect-ratio:var(--ar);
 container-type:size;overflow:hidden}
+/* 全屏请求的是 .stage，而它平时是透明的、白底由 body 那一层兜着。进了全屏之后
+   body 被压在 ::backdrop 后面，两件事会同时把画面弄黑：浏览器给全屏元素自己刷的
+   一层黑底（UA 样式表里 :fullscreen 那条，作者想压它得同样带 !important），以及
+   舞台以外那条信箱带露出的底色（放映页在 iframe 后面铺的 #05070a）。白底橙字的
+   页面于是变成黑底黑字。两层都按主题补上，换 ink 预设时跟着变深，不用各写一套。 */
+.stage:fullscreen{background:var(--bg)!important}
+.stage:fullscreen::backdrop{background:var(--bg)}
 .slide{position:absolute;inset:0;padding:calc(var(--u)*7) calc(var(--u)*8);
 display:none;flex-direction:column;justify-content:center;gap:calc(var(--u)*2.6);
 animation:fade .28s ease}

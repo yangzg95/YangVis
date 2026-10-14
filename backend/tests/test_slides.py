@@ -346,6 +346,19 @@ def test_image_page_bounds_the_shot_height():
     assert "max-height:var(--body-h" in slides_html._CSS
 
 
+def test_fullscreen_stage_keeps_the_theme_background():
+    """全屏时 .stage 是画面上层唯一的东西，不补背景就成黑底黑字。
+
+    .stage 自己从来不带背景色，白底一直是 body 那一层兜的；进了全屏 body 被压在
+    上层之外。浏览器给全屏元素刷的那层黑底带 !important，作者侧只有同样带
+    !important 才压得住，舞台以外的信箱带还要走 ``::backdrop``。漏掉任何一条，
+    放映按全屏就从白底橙字变成黑底黑字。
+    """
+    css = slides_html._CSS
+    assert ".stage:fullscreen{background:var(--bg)!important}" in css
+    assert ".stage:fullscreen::backdrop{background:var(--bg)}" in css
+
+
 def test_render_downgrades_image_page_without_asset():
     doc = _render(pages=[{"layout": "image", "title": "配图页", "asset_id": "deadbeef"}])
     assert _page_layouts(doc) == ["bullets"], "引用了不存在的图片时降级成要点页，不留破图"
