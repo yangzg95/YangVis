@@ -7,6 +7,8 @@ SQLite 内存库跑 ``SlideService`` 的写入路径，不连任何真实服务�
 """
 import re
 from types import SimpleNamespace
+from typing import get_args
+from typing import get_args
 
 import pytest
 from sqlalchemy import create_engine
@@ -16,7 +18,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base
 from app.errors import BusinessError
 from app.models.entities import SlideDeck
-from app.models.schemas import SlideDeckSave
+from app.models.schemas import SlideDeckSave, SlideLayout
 from app.services.slides import service as slides_module
 from app.services.slides import html as slides_html
 from app.services.slides import store
@@ -226,21 +228,38 @@ def test_sanitize_theme_normalizes_hex_without_hash():
 # ---- 渲染器：放映时的垂直版面 --------------------------------------------------
 
 
+def _rule_selectors(css: str, declaration: str) -> set[str]:
+    """取某条声明所在规则的选择器里的类名。声明串必须在 CSS 里唯一。"""
+    head = css.split(declaration)[0]
+    head = head[head.rindex("}") + 1 :]
+    if "*/" in head:  # 规则前那条注释不算选择器
+        head = head[head.rindex("*/") + 2 :]
+    return {token for token in re.split(r"[,\s]+", head.split("{")[0].strip()) if token}
+
+
 def test_content_page_pins_head_and_centers_body_block():
-    """内容页的标题钉在上沿，正文在剩下的空间里居中。
+    """钉顶版式的四条规则必须把版式列全，漏一个那一页就整块居中。
 
     整块居中会让标题随正文条数上下跳，翻页时每一页标题位置都不同 —— 那就是
-    「放映时居中怪怪的」。
+    「放映时居中怪怪的」。列的是 PINNED_LAYOUTS 本身，加版式时不用再改这里。
     """
-    css = slides_html._CSS
-    assert (
-        ".slide-bullets,.slide-image,.slide-table,.slide-steps{justify-content:flex-start;gap:0}"
-        in css
-    )
-    assert ".slide-bullets .body,.slide-image .body," in css
-    assert ".slide-table .body,.slide-steps .body{margin-top:auto;margin-bottom:auto}" in css
-    # gap 会额外压在 auto 外边距之上，正文上下留白就不对称，所以间距由页头出。
-    assert ".slide-bullets .page-head,.slide-image .page-head," in css
+    for declaration, layouts in (
+        ("justify-content:flex-start;gap:0}", slides_html.PINNED_LAYOUTS),
+        ("margin-top:auto;margin-bottom:auto}", slides_html.PINNED_LAYOUTS),
+        ("margin-bottom:calc(var(--u)*2.6)}", slides_html.PINNED_LAYOUTS),
+        # 结论句的间距同样只在钉顶版式里给；封面本来就不出结论句。
+        ("margin-top:calc(var(--u)*2.2)}", slides_html.PINNED_LAYOUTS),
+    ):
+        selectors = _rule_selectors(slides_html._CSS, declaration)
+        missing = {f".slide-{layout}" for layout in layouts} - selectors
+        assert not missing, f"{declaration} 少了 {missing}"
+
+
+def test_the_schema_offers_exactly_the_renderers_layouts():
+    """接口能收的版式就是渲染器会画的那几种：只在一边加，那页存进来渲染不出来。"""
+    assert set(get_args(SlideLayout)) == slides_html.LAYOUTS
+    assert set(slides_html.PINNED_LAYOUTS) < slides_html.LAYOUTS
+    assert slides_html.TAKEAWAY_LAYOUTS == slides_html.LAYOUTS - {"cover"}
 
 
 def _budget(page: dict, ratio: str = "16 / 9") -> float:
@@ -482,6 +501,9 @@ def test_generation_can_drop_pages_with_nothing_to_show():
         {"layout": "steps", "title": "空壳", "steps": [], "takeaway": "一句话"},
         {"layout": "bullets", "title": "只有标题", "bullets": []},
         {"layout": "image", "title": "配图落空", "asset_id": "nope", "bullets": []},
+        # 结构一格都没填的链路 / 分层页：退化成要点页之后仍然什么都没有。
+        {"layout": "flow", "title": "空链路", "flow": [], "bullets": []},
+        {"layout": "arch", "title": "空分层", "layers": [], "bullets": []},
         {"layout": "section", "title": "章节页照旧"},
     ]
     assert [page["title"] for page in slides_html.sanitize_pages(raw)] == [
@@ -489,6 +511,8 @@ def test_generation_can_drop_pages_with_nothing_to_show():
         "空壳",
         "只有标题",
         "配图落空",
+        "空链路",
+        "空分层",
         "章节页照旧",
     ]
     kept = slides_html.sanitize_pages(raw, drop_empty_content=True)
@@ -539,6 +563,267 @@ def test_sanitize_pages_carries_the_new_fields_through():
     assert len(pages[0]["takeaway"]) == slides_html.MAX_TAKEAWAY
     assert pages[0]["table"] == {"columns": [], "rows": []}
     assert pages[0]["steps"] == []
+    assert pages[0]["flow"] == [] and pages[0]["layers"] == []
+
+
+# ---- 渲染器：链路与分层图 --------------------------------------------------------
+
+
+def test_flow_page_renders_boxes_arrows_and_conditions():
+    doc = _render(
+        pages=[
+            {
+                "layout": "flow",
+                "title": "一次请求怎么走完",
+                "flow": [
+                    {"title": "用户提问", "desc": "网页会话"},
+                    {"title": "意图识别", "desc": "**关键词**挑工具", "via": "命中工具"},
+                    {"title": "执行", "desc": "写命令先确认"},
+                ],
+            }
+        ]
+    )
+    assert _page_layouts(doc) == ["flow"]
+    assert doc.count('<span class="node">') == 3
+    assert doc.count('class="link"') == 2, "箭头永远比格子少一条"
+    assert "<em>命中工具</em>" in doc
+    assert "\N{RIGHTWARDS ARROW}" in doc
+    assert "<strong>关键词</strong>挑工具" in doc, "方框里的说明也吃 **加粗**"
+
+
+def test_flow_and_arch_escape_box_text():
+    doc = _render(
+        pages=[
+            {"layout": "flow", "title": "转义", "flow": [{"title": "<b>甲</b>"}, "乙"]},
+            {
+                "layout": "arch",
+                "title": "转义",
+                "layers": [{"name": '<i>"层"</i>', "blocks": ["&"]}, {"name": "乙"}],
+            },
+        ]
+    )
+    assert "<b>" not in doc
+    assert "&lt;b&gt;甲&lt;/b&gt;" in doc
+    assert "&lt;i&gt;&quot;层&quot;&lt;/i&gt;" in doc
+
+
+def test_flow_and_arch_below_the_minimum_degrade_to_bullets():
+    """一格链路、一层架构在屏幕上不像图，退回要点页——但格子里的话得留下。"""
+    one_node = _render(
+        pages=[
+            {
+                "layout": "flow",
+                "title": "标题",
+                "flow": [{"title": "只有一格", "desc": "一句补充"}],
+            }
+        ]
+    )
+    assert _page_layouts(one_node) == ["bullets"]
+    assert "只有一格：一句补充" in one_node
+    one_layer = _render(
+        pages=[{"layout": "arch", "title": "标题", "layers": [{"name": "接入层", "blocks": ["Web", "小程序"]}]}]
+    )
+    assert _page_layouts(one_layer) == ["bullets"]
+    assert "接入层：Web、小程序" in one_layer
+
+
+def test_arch_page_stacks_layers_top_down():
+    doc = _render(
+        pages=[
+            {
+                "layout": "arch",
+                "title": "系统怎么分层",
+                "layers": [
+                    {"name": "接入层", "blocks": ["Web", "小程序"]},
+                    {"name": "服务层", "blocks": ["**智能体**运行时"]},
+                ],
+            }
+        ]
+    )
+    assert _page_layouts(doc) == ["arch"]
+    assert doc.count('<div class="layer">') == 2
+    assert '<span class="lname">接入层</span>' in doc
+    assert "<strong>智能体</strong>运行时" in doc
+    # 自上而下的顺序就是数组顺序，渲染器不重排。
+    assert doc.index("接入层") < doc.index("服务层")
+
+
+def test_sanitize_flow_caps_count_and_clears_the_last_via():
+    nodes = slides_html.sanitize_flow(
+        [{"title": f"环节{i}", "desc": "说明", "via": "命中"} for i in range(8)]
+    )
+    assert len(nodes) == slides_html.MAX_FLOW
+    assert nodes[0] == {"title": "环节0", "desc": "说明", "via": "命中"}
+    assert nodes[-1]["via"] == "", "最后一格右边没有箭头，条件写了也渲染不出来"
+    assert slides_html.sanitize_flow(["裸串", {"title": "  "}, {"nope": 1}]) == [
+        {"title": "裸串", "desc": "", "via": ""}
+    ]
+    assert slides_html.sanitize_flow(None) == []
+    long = slides_html.sanitize_flow([{"title": "名" * 40, "desc": "字" * 60}])[0]
+    assert len(long["title"]) == slides_html.MAX_FLOW_TITLE
+    assert len(long["desc"]) == slides_html.MAX_FLOW_DESC
+
+
+def test_sanitize_layers_keeps_layers_with_a_name_or_a_block():
+    layers = slides_html.sanitize_layers(
+        [
+            {"name": "接入层", "blocks": ["Web", "小程序", "开放接口", "定时任务", "第五个"]},
+            {"name": "空层", "blocks": []},
+            {"name": "  ", "blocks": [""]},
+            {"blocks": ["只有方块"]},
+            "不是字典",
+        ]
+    )
+    assert layers == [
+        {"name": "接入层", "blocks": ["Web", "小程序", "开放接口", "定时任务"]},
+        {"name": "空层", "blocks": []},
+        {"name": "", "blocks": ["只有方块"]},
+    ]
+    assert slides_html.sanitize_layers({"blocks": "xy"}) == []
+    assert len(slides_html.sanitize_layers([{"name": f"层{i}"} for i in range(9)])) == (
+        slides_html.MAX_ARCH_LAYERS
+    )
+
+
+def test_degraded_flow_keeps_the_pages_own_bullets():
+    """退化时只有本来没要点才搬格子内容，用户自己写的要点最大。"""
+    pages = slides_html.sanitize_pages(
+        [
+            {
+                "layout": "flow",
+                "title": "只剩一格",
+                "bullets": ["已有的要点"],
+                "flow": [{"title": "第一步"}],
+            }
+        ]
+    )
+    assert pages[0]["layout"] == "bullets"
+    assert pages[0]["bullets"] == ["已有的要点"]
+    # 链路结构原样留着：工作台里补上第二格，这一页又是链路页。
+    assert pages[0]["flow"] == [{"title": "第一步", "desc": "", "via": ""}]
+
+
+def test_flow_tier_shortens_the_boxes_it_cannot_fit():
+    """格子越窄越要提前降档：链路是横向排的，宽度得自己算，不像要点那样整行可用。"""
+    nodes = [
+        {"title": "名" * slides_html.MAX_FLOW_TITLE, "desc": "字" * slides_html.MAX_FLOW_DESC, "via": "条件"}
+        for _ in range(slides_html.MAX_FLOW)
+    ]
+    # 5 格 × 满字数时默认档要 24u 多，预算给到 27u 就装得下。
+    assert slides_html._flow_tier(nodes, 27.5) == ""
+    assert slides_html._flow_tier(nodes, 20) == " dense"
+    assert slides_html._flow_tier(nodes, 14) == " denser"
+    # 预算拿不到时不降档（同要点列表的约定：估不出来就别瞎缩）。
+    assert slides_html._flow_tier(nodes, 0) == ""
+    # 页头两行 + 底部结论句把正文挤到 20u，满字的五格链路就得降一档。
+    doc = _render(
+        pages=[
+            {
+                "layout": "flow",
+                "title": "一个占两行的标题写得足够长才作数",
+                "subtitle": "一句足够长的副标题，把页头再占掉一行才看得出现在的预算",
+                "takeaway": "所以链路也要跟着降档",
+                "flow": nodes,
+            }
+        ]
+    )
+    assert 'class="flow dense"' in doc
+    assert 'class="flow">' in _render(
+        pages=[{"layout": "flow", "title": "短页头", "flow": [{"title": "提问"}, {"title": "执行"}]}]
+    ), "内容少就别缩字"
+
+
+def test_arch_tier_shortens_the_rows_it_cannot_fit():
+    layers = [
+        {
+            "name": "名" * slides_html.MAX_ARCH_NAME,
+            "blocks": ["字" * slides_html.MAX_ARCH_BLOCK] * slides_html.MAX_ARCH_BLOCKS,
+        }
+        for _ in range(slides_html.MAX_ARCH_LAYERS)
+    ]
+    assert slides_html._arch_tier(layers, 42) == ""
+    assert slides_html._arch_tier(layers, 36) == " dense"
+    assert slides_html._arch_tier(layers, 30) == " denser"
+    assert slides_html._arch_tier(layers, 0) == ""
+    # 到 denser 还装不下就停：再缩字看不清，那是模型该拆成两页。
+    assert slides_html._arch_tier(layers, 8) == " denser"
+    doc = _render(
+        pages=[{"layout": "arch", "title": "系统怎么分层", "layers": layers}]
+    )
+    assert 'class="arch denser"' in doc
+    thin = [{"name": "接入层", "blocks": ["Web"]}, {"name": "服务层", "blocks": ["运行时"]}]
+    assert slides_html._arch_tier(thin, 27) == ""
+    assert 'class="arch"' in _render(pages=[{"layout": "arch", "title": "分层", "layers": thin}])
+
+
+def test_flow_tier_numbers_match_the_css():
+    """降档表里的字号 / 内边距 / 箭头宽必须和 CSS 写的一致，同 _BULLET_TIERS 的约定。"""
+    css = slides_html._CSS
+    for _suffix, font_u, line_h, pad_y_u in slides_html._FLOW_TIERS:
+        assert f"font-size:calc(var(--u)*{font_u})" in css, font_u
+        assert f"line-height:{line_h}" in css, line_h
+        assert (
+            f"padding:calc(var(--u)*{pad_y_u}) calc(var(--u)*{slides_html._FLOW_PAD_X_U})" in css
+        ), pad_y_u
+    assert f"flex:0 0 calc(var(--u)*{slides_html._FLOW_LINK_W_U})" in css
+    assert f"gap:calc(var(--u)*{slides_html._FLOW_LABEL_GAP_U})" in css
+
+
+def test_arch_tier_numbers_match_the_css():
+    css = slides_html._CSS
+    for _suffix, font_u, line_h, pad_y_u, gap_u in slides_html._ARCH_TIERS:
+        assert f"font-size:calc(var(--u)*{font_u})" in css, font_u
+        assert f"line-height:{line_h}" in css, line_h
+        assert (
+            f"padding:calc(var(--u)*{pad_y_u}) calc(var(--u)*{slides_html._ARCH_PAD_X_U})" in css
+        ), pad_y_u
+        assert f"gap:calc(var(--u)*{gap_u})" in css, gap_u
+    assert f"grid-template-columns:calc(var(--u)*{slides_html._ARCH_NAME_W_U}) 1fr" in css
+    assert f"column-gap:calc(var(--u)*{slides_html._ARCH_COL_GAP_U})" in css
+    assert f"grid-column-gap:calc(var(--u)*{slides_html._ARCH_BLOCK_GAP_U})" in css
+
+
+def test_structured_pages_fit_their_own_limits():
+    """链路 / 分层的字数上限是照着版面倒推的：满字的最坏一页在最紧的一档里也得留下。
+
+    预算按「小标签 + 一行标题 + 一行副标题 + 结论句」这一最常见的满页头算。字号最
+    低那档已经是能读的底线，再挤就不是缩字能救的，是内容本身超了 —— 所以宁可在上
+    限那里就裁掉，别让它顶出舞台、连带把结论条挤出可见区。
+    """
+    budget = slides_html._body_budget_u(
+        {
+            "title": "一行标题",
+            "subtitle": "一行副标题",
+            "takeaway": "一句结论",
+        },
+        slides_html._content_height_u("16/9"),
+    )
+    flow_suffix, flow_font, flow_line_h, flow_pad = slides_html._FLOW_TIERS[-1]
+    nodes = [
+        {
+            "title": "名" * slides_html.MAX_FLOW_TITLE,
+            "desc": "字" * slides_html.MAX_FLOW_DESC,
+            "via": "条" * slides_html.MAX_FLOW_VIA,
+        }
+        for _ in range(slides_html.MAX_FLOW)
+    ]
+    assert slides_html._flow_stack_height(nodes, flow_font, flow_line_h, flow_pad) <= budget
+
+    arch_suffix, arch_font, arch_line_h, arch_pad, arch_gap = slides_html._ARCH_TIERS[-1]
+    layers = [
+        {
+            "name": "名" * slides_html.MAX_ARCH_NAME,
+            "blocks": ["字" * slides_html.MAX_ARCH_BLOCK] * slides_html.MAX_ARCH_BLOCKS,
+        }
+        for _ in range(slides_html.MAX_ARCH_LAYERS)
+    ]
+    assert slides_html._arch_stack_height(layers, arch_font, arch_line_h, arch_pad, arch_gap) <= budget
+    # 反向钉住这条边界：方块多一个字就换成两行，最后一层顶出预算 —— 改上限前先看这里。
+    over = [{**layer, "blocks": [block + "多" for block in layer["blocks"]]} for layer in layers]
+    assert (
+        slides_html._arch_stack_height(over, arch_font, arch_line_h, arch_pad, arch_gap) > budget
+    )
+
 
 
 def test_render_falls_back_for_unknown_layout_and_empty_deck():
@@ -703,7 +988,7 @@ def test_deck_is_scoped_to_owner(db):
 
 
 def test_new_page_fields_survive_the_api_shape(db):
-    """kicker / takeaway / table / steps 必须过得了 SlidePage 的序列化。
+    """kicker / takeaway / table / steps / flow / layers 必须过得了 SlidePage 的序列化。
 
     Pydantic 没声明的字段会被静默丢掉，工作台读不到就编辑一次丢一次内容。
     """
@@ -726,6 +1011,16 @@ def test_new_page_fields_survive_the_api_shape(db):
                 "title": "四步跑通",
                 "steps": [{"title": "新建会话", "desc": "Create Thread"}],
             },
+            {
+                "layout": "flow",
+                "title": "一次请求",
+                "flow": [{"title": "提问", "via": "命中"}, {"title": "执行", "desc": "写命令先确认"}],
+            },
+            {
+                "layout": "arch",
+                "title": "系统分层",
+                "layers": [{"name": "接入层", "blocks": ["Web"]}, {"name": "服务层", "blocks": []}],
+            },
         ],
     )
     detail = _service(db).to_detail(saved)
@@ -733,8 +1028,14 @@ def test_new_page_fields_survive_the_api_shape(db):
     assert detail.slides[0].takeaway == "先挑能验证的任务。"
     assert detail.slides[0].table.columns == ["维度", "起点", "收获"]
     assert detail.slides[1].steps[0].title == "新建会话"
+    assert detail.slides[2].flow[0].via == "命中"
+    assert detail.slides[2].flow[1].desc == "写命令先确认"
+    assert detail.slides[3].layers[1].name == "服务层"
+    assert _page_layouts(saved.html) == ["table", "steps", "flow", "arch"]
     assert "<th>收获</th>" in saved.html
     assert "Create Thread" in saved.html
+    assert '<span class="link">' in saved.html
+    assert '<span class="lname">接入层</span>' in saved.html
 
 
 def test_new_decks_start_on_the_default_light_theme(db):

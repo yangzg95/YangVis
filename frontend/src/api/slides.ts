@@ -18,6 +18,8 @@ export type SlideLayout =
   | 'closing'
   | 'table'
   | 'steps'
+  | 'flow'
+  | 'arch'
 /** amber（白底橙强调）是后端默认预设。 */
 export type SlidePreset = 'amber' | 'ink' | 'teal' | 'paper' | 'violet'
 export type SlideRatio = '16x9' | '4x3'
@@ -41,6 +43,19 @@ export interface SlideStep {
   desc: string
 }
 
+/** 链路图里的一格。``via`` 是走到下一格的条件，画在右侧箭头上；最后一格没有箭头。 */
+export interface SlideFlowNode {
+  title: string
+  desc: string
+  via: string
+}
+
+/** 分层图的一层：``blocks`` 是层内模块名，数组顺序就是页面上自上而下的层序。 */
+export interface SlideArchLayer {
+  name: string
+  blocks: string[]
+}
+
 /** 页面的可编辑部分。新建时不填 sid，由服务端发放。 */
 export interface SlidePageInput {
   layout: SlideLayout
@@ -52,6 +67,10 @@ export interface SlidePageInput {
   bullets?: string[]
   table?: SlideTable
   steps?: SlideStep[]
+  /** 链路图的格子，2-5 格；不足两格时后端把这页降级成要点页。 */
+  flow?: SlideFlowNode[]
+  /** 分层图的层，2-5 层。 */
+  layers?: SlideArchLayer[]
   /** 贴在页面底部的一句话结论。 */
   takeaway?: string | null
   asset_id?: string | null

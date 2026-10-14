@@ -1637,6 +1637,8 @@ SlideLayout = Literal[
     "closing",   # 结尾页
     "table",     # 对比表：表头 + 若干行
     "steps",     # 步骤条：编号 + 标题 + 一句说明
+    "flow",      # 链路图：方框串成一条线，箭头上可带条件
+    "arch",      # 分层图：自上而下的层，每层若干模块
 ]
 # 外观预设与画布比例，同样由渲染器的白名单把关。amber 是默认。
 SlidePreset = Literal["amber", "ink", "teal", "paper", "violet"]
@@ -1667,6 +1669,28 @@ class SlideStep(BaseModel):
     desc: str = Field(default="", max_length=80)
 
 
+class SlideFlowNode(BaseModel):
+    """链路图里的一格。``via`` 是走到下一格的条件，画在右侧箭头上。
+
+    最后一格的 ``via`` 会被渲染器清掉（右边没有箭头），所以前端也别在它上面留输入框。
+    """
+
+    title: str = Field(default="", max_length=16)
+    desc: str = Field(default="", max_length=32)
+    via: str = Field(default="", max_length=10)
+
+
+class SlideArchLayer(BaseModel):
+    """分层图的一层：``blocks`` 是层内的模块名，数组顺序就是自上而下的层序。
+
+    单个方块字符串的长度由渲染器裁（10 字，见 ``html.MAX_ARCH_BLOCK``），与要点
+    列表同一个做法：这里只管条数。
+    """
+
+    name: str = Field(default="", max_length=10)
+    blocks: List[str] = Field(default_factory=list, max_length=4)
+
+
 class SlidePageIn(BaseModel):
     """新增 / 修改一页幻灯片。``sid`` 由服务端发放，前端不填（与面试题的 qid 同）。"""
 
@@ -1680,6 +1704,8 @@ class SlidePageIn(BaseModel):
     bullets: List[str] = Field(default_factory=list, max_length=12)
     table: SlideTable = Field(default_factory=SlideTable)
     steps: List[SlideStep] = Field(default_factory=list, max_length=5)
+    flow: List[SlideFlowNode] = Field(default_factory=list, max_length=5)
+    layers: List[SlideArchLayer] = Field(default_factory=list, max_length=5)
     takeaway: Optional[str] = Field(default=None, max_length=160)
     asset_id: Optional[str] = Field(default=None, max_length=32)
     notes: Optional[str] = Field(default=None, max_length=4000)

@@ -70,12 +70,18 @@
       <div v-if="current" class="editor-body">
         <div class="editor-page">第 {{ pageIndex + 1 }} 页 · {{ layoutText(current.layout) }}</div>
         <a-form layout="vertical">
-          <a-form-item label="版式">
+          <a-form-item v-if="layoutEditable" label="版式">
             <a-select v-model:value="form.layout">
               <a-select-option v-for="item in LAYOUT_OPTIONS" :key="item.value" :value="item.value">
                 {{ item.label }}
               </a-select-option>
             </a-select>
+          </a-form-item>
+          <a-form-item v-else label="版式">
+            <a-input :value="LAYOUT_LABELS[form.layout]" disabled />
+            <div class="muted">
+              这一版的正文是结构化格子，放映里只改标题与讲稿；要改格子请去工作台那一页。
+            </div>
           </a-form-item>
           <a-form-item :label="form.layout === 'quote' ? '金句 / 结论' : '标题'">
             <a-textarea v-model:value="form.title" :rows="2" :maxlength="200" />
@@ -174,14 +180,24 @@ const editorOpen = ref(false)
 // 重绘后回到改之前那一页：iframe 载体会从第 1 页重新开始，先记下目标页码。
 let pendingJump: number | null = null
 
-const LAYOUT_OPTIONS: { value: SlideLayout; label: string }[] = [
-  { value: 'bullets', label: '要点页' },
-  { value: 'cover', label: '封面' },
-  { value: 'section', label: '章节页' },
-  { value: 'image', label: '配图页' },
-  { value: 'quote', label: '金句页' },
-  { value: 'closing', label: '结尾页' },
-]
+/** 全部版式的名字：页面列表要认得每一个，漏一个就显示成「要点页」。 */
+const LAYOUT_LABELS: Record<SlideLayout, string> = {
+  cover: '封面',
+  section: '章节页',
+  bullets: '要点页',
+  image: '配图页',
+  quote: '金句页',
+  closing: '结尾页',
+  table: '对比表',
+  steps: '步骤页',
+  flow: '链路页',
+  arch: '分层图',
+}
+
+/** 放映页的轻编辑只改标题 / 要点 / 配图，结构化的那几版留给工作台。 */
+const LAYOUT_OPTIONS: { value: SlideLayout; label: string }[] = (
+  ['bullets', 'cover', 'section', 'image', 'quote', 'closing'] as SlideLayout[]
+).map((value) => ({ value, label: LAYOUT_LABELS[value] }))
 
 const assets = computed<SlideAsset[]>(() => deck.value?.assets ?? [])
 const current = computed<SlidePage | undefined>(() => deck.value?.slides[pageIndex.value])
@@ -198,9 +214,14 @@ const form = reactive<{
 const showBullets = computed(() =>
   ['bullets', 'image', 'quote', 'closing'].includes(form.layout),
 )
+// 结构化那几版（对比表 / 步骤 / 链路 / 分层）的正文在格子里，放映里没有改格子的入口。
+// 让它们在这里被切成「要点页」等于把整页内容清空，所以版式下拉对这几页直接不收。
+const layoutEditable = computed(() =>
+  LAYOUT_OPTIONS.some((item) => item.value === form.layout),
+)
 
 function layoutText(layout?: string) {
-  return LAYOUT_OPTIONS.find((item) => item.value === layout)?.label || '要点页'
+  return LAYOUT_LABELS[layout as SlideLayout] || '要点页'
 }
 
 function statusText(value: string) {

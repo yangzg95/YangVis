@@ -186,7 +186,7 @@
                 />
                 <a-button
                   size="small"
-                  :disabled="current.table.columns.length >= 4"
+                  :disabled="!canAddColumn(current)"
                   @click="addTableColumn"
                 >
                   <PlusOutlined /> 加列
@@ -195,7 +195,7 @@
                   size="small"
                   type="text"
                   danger
-                  :disabled="current.table.columns.length <= 2"
+                  :disabled="!canRemoveColumn(current)"
                   @click="removeTableColumn"
                 >
                   <MinusOutlined /> 删末列
@@ -217,7 +217,7 @@
               </div>
               <a-button
                 size="small"
-                :disabled="current.table.rows.length >= 6 || !current.table.columns.length"
+                :disabled="!canAddRow(current)"
                 @click="addTableRow"
               >
                 <PlusOutlined /> 加一行
@@ -246,9 +246,107 @@
                   <MinusOutlined />
                 </a-button>
               </div>
-              <a-button size="small" :disabled="current.steps.length >= 5" @click="addStep">
+              <a-button size="small" :disabled="!canAddStep(current)" @click="addStep">
                 <PlusOutlined /> 加一步
               </a-button>
+            </a-form-item>
+            <a-form-item v-if="current.layout === 'flow'" label="链路">
+              <div v-for="(node, ni) in current.flow" :key="`node-${ni}`" class="flow-row">
+                <a-input
+                  :value="node.title"
+                  size="small"
+                  :maxlength="16"
+                  placeholder="环节名"
+                  @update:value="(value: string) => (current!.flow[ni].title = value)"
+                  @change="markDirty"
+                />
+                <a-input
+                  :value="node.desc"
+                  size="small"
+                  :maxlength="32"
+                  placeholder="补充说明（可空）"
+                  @update:value="(value: string) => (current!.flow[ni].desc = value)"
+                  @change="markDirty"
+                />
+                <a-input
+                  :value="node.via"
+                  size="small"
+                  :maxlength="10"
+                  :disabled="isLastFlowNode(current, ni)"
+                  :placeholder="isLastFlowNode(current, ni) ? '末格没有箭头' : '走到下一格的条件（可空）'"
+                  @update:value="(value: string) => (current!.flow[ni].via = value)"
+                  @change="markDirty"
+                />
+                <a-button
+                  size="small"
+                  type="text"
+                  danger
+                  :disabled="!canRemoveStructured(current)"
+                  @click="removeFlowNodeAt(ni)"
+                >
+                  <MinusOutlined />
+                </a-button>
+              </div>
+              <a-button size="small" :disabled="!canAddFlowNode(current)" @click="addFlowNode">
+                <PlusOutlined /> 加一格
+              </a-button>
+              <div class="hint">2-5 个方框等宽横排，条件写在两格之间的箭头上；不足两格时这一页退回要点页。</div>
+            </a-form-item>
+            <a-form-item v-if="current.layout === 'arch'" label="分层">
+              <div v-for="(layer, li) in current.layers" :key="`layer-${li}`" class="layer-group">
+                <div class="layer-row">
+                  <a-input
+                    :value="layer.name"
+                    size="small"
+                    :maxlength="10"
+                    placeholder="层名"
+                    @update:value="(value: string) => (current!.layers[li].name = value)"
+                    @change="markDirty"
+                  />
+                  <a-button
+                    size="small"
+                    type="text"
+                    danger
+                    :disabled="!canRemoveStructured(current)"
+                    @click="removeArchLayerAt(li)"
+                  >
+                    <MinusOutlined />
+                  </a-button>
+                </div>
+                <div class="block-row">
+                  <a-input
+                    v-for="(block, bi) in layer.blocks"
+                    :key="`block-${li}-${bi}`"
+                    :value="block"
+                    size="small"
+                    :maxlength="10"
+                    placeholder="模块"
+                    @update:value="(value: string) => (layer.blocks[bi] = value)"
+                    @change="markDirty"
+                  />
+                  <a-button
+                    size="small"
+                    type="text"
+                    danger
+                    :disabled="!canRemoveArchBlock(layer)"
+                    @click="removeArchBlockAt(li)"
+                  >
+                    <MinusOutlined /> 删末块
+                  </a-button>
+                  <a-button
+                    size="small"
+                    type="text"
+                    :disabled="!canAddArchBlock(layer)"
+                    @click="addArchBlock(li)"
+                  >
+                    <PlusOutlined /> 模块
+                  </a-button>
+                </div>
+              </div>
+              <a-button size="small" :disabled="!canAddArchLayer(current)" @click="addArchLayer">
+                <PlusOutlined /> 加一层
+              </a-button>
+              <div class="hint">2-5 层，顺序就是页面上自上而下；每层 1-4 个模块，名字都短到一眼读完。</div>
             </a-form-item>
             <a-form-item v-if="current.layout === 'image'" label="配图">
               <a-select v-model:value="current.asset_id" allow-clear @change="markDirty">
@@ -370,32 +468,39 @@ import {
   type SlideAsset,
   type SlideDeckDetail,
   type SlideLayout,
-  type SlidePage,
   type SlidePageInput,
-  type SlideStep,
-  type SlideTable,
   type SlideTheme,
 } from '@/api'
 import { saveBlobResponse } from '@/utils/download'
 import { fmtSize } from '@/utils/format'
-
-/**
- * 编辑中的页面。与服务端结构差两点：新加的页还没有 `sid`（保存时由服务端发放），
- * 文本字段在本地一律归一成字符串/数组 —— 表单直接绑它们，省掉满屏的 `|| ''`。
- */
-interface EditablePage {
-  sid?: string
-  layout: SlideLayout
-  kicker: string
-  title: string
-  subtitle: string
-  bullets: string[]
-  table: SlideTable
-  steps: SlideStep[]
-  takeaway: string
-  asset_id: string | null
-  notes: string
-}
+import {
+  appendArchBlock,
+  appendArchLayer,
+  appendBullet,
+  appendColumn,
+  appendFlowNode,
+  appendRow,
+  appendStep,
+  canAddArchBlock,
+  canAddArchLayer,
+  canAddColumn,
+  canAddFlowNode,
+  canAddRow,
+  canAddStep,
+  canRemoveArchBlock,
+  canRemoveColumn,
+  canRemoveStructured,
+  createPage,
+  isLastFlowNode,
+  normalizePage,
+  popArchBlock,
+  removeArchLayer,
+  removeColumn,
+  removeFlowNode,
+  toEditable,
+  topUpForLayout,
+  type EditablePage,
+} from '@/utils/slidePages'
 
 // 幻灯片工作台（bare 整页，从列表新开标签页进来，与数据库问答页同一模式）。
 //
@@ -434,12 +539,14 @@ const assetModal = ref(false)
 const uploading = ref(false)
 
 // 标题钉在上沿、有小标签可填的那几版；其余版式整块居中，页头不放标签。
-const PINNED_LAYOUTS: SlideLayout[] = ['bullets', 'image', 'table', 'steps']
+const PINNED_LAYOUTS: SlideLayout[] = ['bullets', 'image', 'table', 'steps', 'flow', 'arch']
 
 const LAYOUT_OPTIONS: { value: SlideLayout; label: string; hint: string }[] = [
   { value: 'bullets', label: '要点页', hint: '标题写成一句话说完的结论，下面 3-5 条要点支撑它。' },
   { value: 'table', label: '对比表', hint: '2-4 列、最多 6 行的横向对比；表头按列配色，首列是维度名。' },
   { value: 'steps', label: '步骤页', hint: '有先后顺序的动作，2-5 步，每步一个动作加一句说明。' },
+  { value: 'flow', label: '链路页', hint: '一条走到底的链路，2-5 个方框；箭头上可写走到下一格的条件。' },
+  { value: 'arch', label: '分层图', hint: '讲系统的分层，2-5 层自上而下，每层放几个模块名。' },
   { value: 'cover', label: '封面', hint: '整份的第一页。标题是主题，副标题是一句话定位或汇报人。' },
   { value: 'section', label: '章节页', hint: '大标题 + 一句本章要回答的问题。' },
   { value: 'image', label: '配图页', hint: '左文右图。图从「配图」里选，没选图时会自动降级成要点页。' },
@@ -505,49 +612,6 @@ function applyDetail(detail: SlideDeckDetail) {
   if (selected.value >= detail.slides.length) selected.value = Math.max(0, detail.slides.length - 1)
 }
 
-/** normalizePage 的入参：任何来源的页面片段，字段可能缺、也可能是 null。 */
-type RawPage = { [K in keyof EditablePage]?: EditablePage[K] | null }
-
-function toEditable(page: SlidePage): EditablePage {
-  return {
-    sid: page.sid,
-    ...normalizePage(page),
-  }
-}
-
-/**
- * 把任意来源的页面补成表单要的形状。
- *
- * 服务端回来的数据本来就干净，走这里的是「源码」模式里手写的 JSON：字段可能整个
- * 缺失，表格可能是数组也可能是对象。缺省值集中这一处，加字段只改这里。
- */
-function normalizePage(raw: RawPage): Omit<EditablePage, 'sid'> {
-  const table = raw.table
-  return {
-    layout: (raw.layout || 'bullets') as SlideLayout,
-    kicker: raw.kicker ?? '',
-    title: raw.title ?? '',
-    subtitle: raw.subtitle ?? '',
-    bullets: Array.isArray(raw.bullets) ? raw.bullets.map((value) => String(value ?? '')) : [],
-    table: {
-      columns: Array.isArray(table?.columns) ? table!.columns.map((value) => String(value ?? '')) : [],
-      rows: Array.isArray(table?.rows)
-        ? table!.rows.map((row) => (Array.isArray(row) ? row.map((cell) => String(cell ?? '')) : []))
-        : [],
-    },
-    steps: Array.isArray(raw.steps)
-      ? raw.steps.map((step) =>
-          typeof step === 'string'
-            ? { title: step, desc: '' }
-            : { title: step?.title ?? '', desc: step?.desc ?? '' },
-        )
-      : [],
-    takeaway: raw.takeaway ?? '',
-    asset_id: raw.asset_id || null,
-    notes: raw.notes ?? '',
-  }
-}
-
 // 生成是后台任务，从列表页点进来时可能还在跑：状态一跳完就重取一次。
 let pollTimer: number | undefined
 
@@ -582,7 +646,7 @@ function markDirty() {
 }
 
 function addPage() {
-  pages.value.push(normalizePage({ layout: 'bullets' }))
+  pages.value.push(createPage())
   selected.value = pages.value.length - 1
   dirty.value = true
 }
@@ -603,58 +667,72 @@ function movePage(index: number, delta: number) {
   dirty.value = true
 }
 
+// 形状规则（上下限、缺省格子）都在 utils/slidePages 里，这里只负责「改成了就标脏」。
+// 到顶时模块函数返回 false，按钮虽然已经 disabled，双击和源码模式仍然会打到这里。
+
 function addBullet() {
   const page = current.value
   if (!page) return
-  page.bullets = [...(page.bullets || []), '']
+  appendBullet(page)
   markDirty()
 }
 
-// 表格的行列数要始终对齐（渲染器按列数补格，编辑器里先保证形状是对的）。
 function addTableColumn() {
   const page = current.value
-  if (!page || page.table.columns.length >= 4) return
-  page.table.columns.push('')
-  page.table.rows.forEach((row) => row.push(''))
-  markDirty()
+  if (page && appendColumn(page)) markDirty()
 }
 
 function removeTableColumn() {
   const page = current.value
-  if (!page || page.table.columns.length <= 2) return
-  page.table.columns.pop()
-  page.table.rows.forEach((row) => row.pop())
-  markDirty()
+  if (page && removeColumn(page)) markDirty()
 }
 
 function addTableRow() {
   const page = current.value
-  if (!page || !page.table.columns.length || page.table.rows.length >= 6) return
-  page.table.rows.push(page.table.columns.map(() => ''))
-  markDirty()
+  if (page && appendRow(page)) markDirty()
 }
 
 function addStep() {
   const page = current.value
-  if (!page || page.steps.length >= 5) return
-  page.steps.push({ title: '', desc: '' })
-  markDirty()
+  if (page && appendStep(page)) markDirty()
+}
+
+function addFlowNode() {
+  const page = current.value
+  if (page && appendFlowNode(page)) markDirty()
+}
+
+function removeFlowNodeAt(index: number) {
+  const page = current.value
+  if (page && removeFlowNode(page, index)) markDirty()
+}
+
+function addArchLayer() {
+  const page = current.value
+  if (page && appendArchLayer(page)) markDirty()
+}
+
+function removeArchLayerAt(index: number) {
+  const page = current.value
+  if (page && removeArchLayer(page, index)) markDirty()
+}
+
+function addArchBlock(index: number) {
+  const page = current.value
+  if (page && appendArchBlock(page, index)) markDirty()
+}
+
+function removeArchBlockAt(index: number) {
+  const page = current.value
+  if (page && popArchBlock(page, index)) markDirty()
 }
 
 function onLayoutChange() {
   const page = current.value
   if (!page) return
-  page.bullets = page.bullets || []
-  // 切过去先给一副空骨架：表格页一列都没有时「加一行」是灰的，步骤页则一格都填不了。
-  if (page.layout === 'table' && !page.table.columns.length) {
-    page.table = { columns: ['', ''], rows: [['', '']] }
-  }
-  if (page.layout === 'steps' && !page.steps.length) {
-    page.steps = [
-      { title: '', desc: '' },
-      { title: '', desc: '' },
-    ]
-  }
+  // 切过去先给一副空骨架：表格页一列都没有时「加一行」是灰的，步骤页一格都填不了，
+  // 链路和分层不足两格在渲染器里整页退回要点页。已有内容一律不动。
+  topUpForLayout(page)
   markDirty()
 }
 
@@ -1009,21 +1087,38 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   margin-bottom: 6px;
 }
 
-/* 表格与步骤的编辑行：输入框均分一行，删除按钮跟在末尾。 */
+/* 表格、步骤、链路、分层的编辑行：输入框均分一行，删除按钮跟在末尾。 */
 .table-columns,
 .table-row,
-.step-row {
+.step-row,
+.flow-row,
+.layer-row,
+.block-row {
   display: flex;
   align-items: center;
   gap: 6px;
   margin-bottom: 6px;
 }
 
-.table-columns :deep(.ant-input),
 .table-row :deep(.ant-input),
+.flow-row :deep(.ant-input),
+.layer-row :deep(.ant-input),
+.block-row :deep(.ant-input),
+.table-columns :deep(.ant-input),
 .step-row :deep(.ant-input) {
   flex: 1;
   min-width: 0;
+}
+
+/* 一层是一个小组：层名一行，它的模块缩进一行。 */
+.layer-group {
+  padding-left: 10px;
+  border-left: 2px solid var(--line, rgba(0, 0, 0, 0.06));
+  margin-bottom: 8px;
+}
+
+.layer-group .layer-row {
+  margin-bottom: 4px;
 }
 
 .hint {

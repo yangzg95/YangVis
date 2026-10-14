@@ -498,10 +498,10 @@ BUILTIN_AGENTS: tuple[BuiltinAgent, ...] = (
             "1. 以 JSON 对象输出，且只输出这个 JSON，不要输出任何其他文字。格式：\n"
             '{"theme": {"preset": "amber", "ratio": "16x9"}, "slides": [{"layout": "cover",'
             ' "kicker": "", "title": "...", "subtitle": "...", "bullets": [],'
-            ' "table": {"columns": [], "rows": []}, "steps": [], "takeaway": "",'
-            ' "asset_id": null, "notes": "..."}]}\n'
+            ' "table": {"columns": [], "rows": []}, "steps": [], "flow": [], "layers": [],'
+            ' "takeaway": "", "asset_id": null, "notes": "..."}]}\n'
             "2. layout 只能是 cover / section / bullets / image / quote / closing / table /"
-            " steps 之一：\n"
+            " steps / flow / arch 之一：\n"
             "   cover 是整份的第一页，title 是主题名，subtitle 是一句话定位，需要报汇报人和"
             "日期时用换行分成两行；\n"
             "   section 是章节过渡页，title 是章节名，subtitle 必填、写这一章要回答的那个问题"
@@ -514,6 +514,22 @@ BUILTIN_AGENTS: tuple[BuiltinAgent, ...] = (
             "第一列写被对比的维度名；\n"
             "   steps 用于有先后顺序的动作：steps 2-5 条，每条 title 是一个动作（不超过"
             "12 字），desc 是一句补充说明（可以省）；\n"
+            "   flow 用于一条走到底的链路（请求路径、处理顺序、状态流转）：flow 2-5 格，"
+            "每格 title 是环节名（不超过 8 字），desc 是一句补充（不超过 16 字，可以省），"
+            "via 是走到下一格的条件（不超过 5 字，可以省，最后一格没有箭头就别填）。"
+            "技术材料里这种线几乎总是存在（谁发起 → 谁处理 → 落在哪 → 怎么回到界面），"
+            "看得出来就给它单独一页，例：\n"
+            '   {"layout": "flow", "title": "一次请求的完整链路", "flow": ['
+            '{"title": "用户发起", "desc": "对话框里一句话", "via": "服务端"},'
+            '{"title": "读写分类", "desc": "只读直接跑，写命令等确认", "via": "确认后"},'
+            '{"title": "执行回灌", "desc": "结果回到模型续答", "via": ""},'
+            '{"title": "流回前端", "desc": "token 与终端回显", "via": ""}]}；\n'
+            "   arch 用于讲系统的分层（接入 / 服务 / 数据这类）：layers 2-5 层，数组顺序"
+            "就是自上而下的顺序，每层 name 是层名（不超过 6 字），blocks 是层内模块名 1-4 "
+            "个、每个不超过 6 字；\n"
+            "   一页的内容若能画成 flow 或 arch，就比写成同信息的 bullets 好读：一条线"
+            "走到底用 flow，一层压一层用 arch；两种关系都讲不清（环节之间说不清怎么走、"
+            "层之间说不清谁压着谁）才退回 bullets，别为了一张图把观点硬拆成格子；\n"
             "   image 在确有配图时用，字段同 bullets，且 asset_id 必须取自给定图片清单里的 id；\n"
             "   quote 把一个关键数字或结论单独做成一页；\n"
             "   closing 是最后一页，title 是行动号召或总结论，bullets 回顾要点。\n"
