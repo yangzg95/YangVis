@@ -66,7 +66,7 @@ settings = get_settings()
 WORKFLOW_GENERATE = "slide-generation"
 
 # 默认外观，deck 还没生成时也用这套。
-DEFAULT_THEME: Dict[str, Any] = {"preset": "teal", "ratio": "16x9", "accent": None}
+DEFAULT_THEME: Dict[str, Any] = {"preset": "amber", "ratio": "16x9", "accent": None}
 
 
 def _truncate(text: str) -> str:
@@ -356,7 +356,11 @@ class SlideService:
             # 模型给的外观要先过白名单再谈合并：非法 preset / 比例 / 颜色一律
             # 回落默认，不能让任意字符串进到 CSS 里。
             merged_theme = sanitize_theme({**DEFAULT_THEME, **sanitize_theme(theme)})
-            slides = sanitize_pages(pages, [str(a.get("id")) for a in (deck.assets or []) if isinstance(a, dict)])
+            slides = sanitize_pages(
+                pages,
+                [str(a.get("id")) for a in (deck.assets or []) if isinstance(a, dict)],
+                drop_empty_content=True,
+            )
             if not slides:
                 raise ValueError("模型返回的结构里没有任何合法页面")
 

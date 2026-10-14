@@ -9,8 +9,17 @@ import { request } from './http'
 
 export type SlideStatus = 'analyzing' | 'ready' | 'error'
 /** 页面版式；每个版式对应后端渲染器的一个分支，别在这里造新值。 */
-export type SlideLayout = 'cover' | 'section' | 'bullets' | 'image' | 'quote' | 'closing'
-export type SlidePreset = 'ink' | 'teal' | 'paper' | 'violet'
+export type SlideLayout =
+  | 'cover'
+  | 'section'
+  | 'bullets'
+  | 'image'
+  | 'quote'
+  | 'closing'
+  | 'table'
+  | 'steps'
+/** amber（白底橙强调）是后端默认预设。 */
+export type SlidePreset = 'amber' | 'ink' | 'teal' | 'paper' | 'violet'
 export type SlideRatio = '16x9' | '4x3'
 
 export interface SlideTheme {
@@ -20,12 +29,31 @@ export interface SlideTheme {
   accent: string | null
 }
 
+/** 对比表：列名与行，行数/格长超限时由后端裁。 */
+export interface SlideTable {
+  columns: string[]
+  rows: string[][]
+}
+
+/** 步骤条里的一步，``desc`` 可以空。 */
+export interface SlideStep {
+  title: string
+  desc: string
+}
+
 /** 页面的可编辑部分。新建时不填 sid，由服务端发放。 */
 export interface SlidePageInput {
   layout: SlideLayout
+  /** 页头的小类别标签（「核心概念」这类），空时渲染器退回章节序号。 */
+  kicker?: string | null
   title?: string | null
   subtitle?: string | null
+  /** 文本里的 ``**关键词**`` 会渲染成加粗强调，是内容的一部分。 */
   bullets?: string[]
+  table?: SlideTable
+  steps?: SlideStep[]
+  /** 贴在页面底部的一句话结论。 */
+  takeaway?: string | null
   asset_id?: string | null
   notes?: string | null
 }

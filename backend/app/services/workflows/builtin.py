@@ -145,7 +145,7 @@ BUILTIN_WORKFLOWS: tuple[BuiltinWorkflow, ...] = (
                     "主题：{{title}}\n\n"
                     "{{description_note}}{{requirement_note}}{{source_block}}{{asset_block}}"
                     "请依据以上材料产出整份幻灯片的 JSON 结构。"
-                    "页数不超过 {{max_pages}} 页。"
+                    "{{max_pages}} 页是容量上限，不是目标，页数按人设里的材料体量规则定。"
                 ),
                 group_key="compose",
                 sort_order=10,

@@ -233,14 +233,24 @@ def test_content_page_pins_head_and_centers_body_block():
     「放映时居中怪怪的」。
     """
     css = slides_html._CSS
-    assert ".slide-bullets,.slide-image{justify-content:flex-start;gap:0}" in css
-    assert ".slide-bullets>.points,.slide-image>.split{margin-top:auto;margin-bottom:auto}" in css
+    assert (
+        ".slide-bullets,.slide-image,.slide-table,.slide-steps{justify-content:flex-start;gap:0}"
+        in css
+    )
+    assert ".slide-bullets .body,.slide-image .body," in css
+    assert ".slide-table .body,.slide-steps .body{margin-top:auto;margin-bottom:auto}" in css
     # gap 会额外压在 auto 外边距之上，正文上下留白就不对称，所以间距由页头出。
-    assert ".slide-bullets .page-head,.slide-image .page-head{margin-bottom:" in css
+    assert ".slide-bullets .page-head,.slide-image .page-head," in css
+
+
+def _budget(page: dict, ratio: str = "16 / 9") -> float:
+    base = {"title": "", "subtitle": "", "takeaway": ""}
+    base.update(page)
+    return slides_html._body_budget_u(base, slides_html._content_height_u(ratio))
 
 
 def test_bullet_tier_follows_wrapped_lines_not_item_count():
-    budget_16x9 = slides_html._body_budget_u("一个标题", "一句副标题", slides_html._content_height_u("16 / 9"))
+    budget_16x9 = _budget({"title": "一个标题", "subtitle": "一句副标题"})
     # 5 条以内、每条一行：默认档。
     assert slides_html._bullet_tier(["要点" * 4, "短"], 28, budget_16x9) == ""
     # 7 条就撑不住整页高度，降一档。
@@ -257,17 +267,30 @@ def test_bullet_tier_follows_wrapped_lines_not_item_count():
 def test_bullet_tier_uses_the_real_aspect_ratio():
     """4:3 的舞台更高，同样的内容不必按 16:9 压字号。"""
     bullets = [f"要点{i}：说明一个环节" for i in range(7)]
-    wide = slides_html._body_budget_u("标题", "副标题", slides_html._content_height_u("16 / 9"))
-    tall = slides_html._body_budget_u("标题", "副标题", slides_html._content_height_u("4 / 3"))
+    wide = _budget({"title": "标题", "subtitle": "副标题"}, "16 / 9")
+    tall = _budget({"title": "标题", "subtitle": "副标题"}, "4 / 3")
     assert slides_html._bullet_tier(bullets, 28, wide) == " dense"
     assert slides_html._bullet_tier(bullets, 28, tall) == ""
 
 
 def test_body_budget_shrinks_when_title_wraps():
-    flat = slides_html._body_budget_u("短标题", "", slides_html._content_height_u("16 / 9"))
-    wrapped = slides_html._body_budget_u("标题" * 11, "", slides_html._content_height_u("16 / 9"))
+    flat = _budget({"title": "短标题"})
+    wrapped = _budget({"title": "标题" * 11})
     assert abs((flat - wrapped) - 5.04) < 0.01, (flat, wrapped)
-    assert slides_html._body_budget_u("标题", "", 42.25) > slides_html._body_budget_u("标题", "副标题", 42.25)
+    assert _budget({"title": "标题"}) > _budget({"title": "标题", "subtitle": "副标题"})
+
+
+def test_takeaway_earns_its_own_vertical_space():
+    """底部结论句要占掉正文的高度，否则最后一条要点会被顶出舞台。"""
+    without = _budget({"title": "标题"})
+    with_strip = _budget({"title": "标题", "takeaway": "一句结论"})
+    assert abs((without - with_strip) - slides_html._TAKEAWAY_U) < 0.01
+    # 扣的数必须和 CSS 里 .takeaway 写的一致，同 _BULLET_TIERS 的约定。
+    css = slides_html._CSS
+    assert f"font-size:calc(var(--u)*{slides_html._TAKEAWAY_FONT_U})" in css
+    assert f"line-height:{slides_html._TAKEAWAY_LINE_H}" in css
+    assert f"padding:calc(var(--u)*{slides_html._TAKEAWAY_PAD_U})" in css
+    assert f"margin-top:calc(var(--u)*{slides_html._TAKEAWAY_GAP_U})" in css
 
 
 def test_only_full_width_lists_get_tiers():
@@ -325,6 +348,197 @@ def test_render_keeps_asset_with_safe_rel_path():
     )
     assert '<img src="/uploads/slides/7/aa11bb22cc33dd44.png"' in doc
     assert _page_layouts(doc) == ["image"]
+
+
+# ---- 渲染器：新基调（白底橙强调）与页面骨架 --------------------------------------
+
+
+def test_default_preset_is_the_light_one():
+    """默认预设换成 amber 后，没选过外观的 deck 直接就是白底 + 橙色强调。
+
+    表头/步骤用的第二组色（t2/t3/t4）跟着预设一起下发：深色预设下要提亮，
+    不能写死一套色号。
+    """
+    doc = _render(theme={})
+    assert "--bg:#ffffff" in doc
+    assert "--accent:#ea580c" in doc
+    assert "--t2:#2563eb" in doc
+    assert "--t2:" in _render(theme={"preset": "ink"}), "换预设时这组色整体跟着换"
+
+
+def test_every_page_carries_a_running_header():
+    doc = _render(
+        title="DeerFlow 拆解",
+        pages=[{"layout": "cover", "title": "封面"}, {"layout": "bullets", "title": "第二页"}],
+    )
+    assert doc.count('<header class="rail">') == 2
+    assert "DeerFlow 拆解" in doc
+    # 封面是标识页，不标页码；内容页标「当前 / 总数」。
+    cover = doc.split('class="slide slide-cover"', 1)[1].split("</section>", 1)[0]
+    assert "rail-no" not in cover
+    assert "02<i>/</i>02" in doc
+
+
+def test_kicker_replaces_the_chapter_number_in_the_head():
+    doc = _render(
+        pages=[{"layout": "bullets", "title": "标题", "kicker": "核心概念", "bullets": ["一条"]}]
+    )
+    assert '<span class="kicker">核心概念</span>' in doc
+    assert '<span class="chapter">' not in doc
+    # 没给 kicker 时退回章节序号，页头不会空出一格。
+    plain = _render(pages=[{"layout": "bullets", "title": "标题", "bullets": ["一条"]}])
+    assert '<span class="chapter">00</span>' in plain
+
+
+def test_bullet_lead_in_renders_bold():
+    doc = _render(
+        pages=[{"layout": "bullets", "title": "标题", "bullets": ["**先跑通**：再优化"]}]
+    )
+    assert "<li><strong>先跑通</strong>：再优化</li>" in doc
+
+
+def test_bold_markers_cannot_smuggle_markup():
+    """``**`` 只是给已转义的文本包一层 strong，包进去的内容仍然逃不出转义。"""
+    doc = _render(
+        pages=[
+            {
+                "layout": "bullets",
+                "title": "标题",
+                "bullets": ["**<img src=x onerror=alert(1)>**"],
+                "takeaway": "**<script>alert(2)</script>**",
+            }
+        ]
+    )
+    assert "<img src=x" not in doc
+    assert doc.count("<script>") == 1, "文档里唯一的脚本还是那段导航脚本"
+    assert "&lt;img" in doc
+
+
+def test_takeaway_renders_once_per_page_and_skips_cover():
+    doc = _render(
+        pages=[
+            {"layout": "cover", "title": "封面", "takeaway": "封面不放结论条"},
+            {"layout": "bullets", "title": "标题", "bullets": ["一条"], "takeaway": "先跑通。"},
+        ]
+    )
+    assert doc.count('<p class="takeaway">') == 1
+    assert "先跑通。" in doc
+    assert "封面不放结论条" not in doc
+
+
+# ---- 渲染器：对比表与步骤条 ------------------------------------------------------
+
+
+def test_table_page_renders_columns_and_pads_short_rows():
+    doc = _render(
+        pages=[
+            {
+                "layout": "table",
+                "title": "哪些任务适合 Agent",
+                "table": {
+                    "columns": ["维度", "起点", "收获"],
+                    "rows": [["信息调研", "不会写代码", "会"], ["短行"]],
+                },
+            }
+        ]
+    )
+    assert _page_layouts(doc) == ["table"]
+    assert "<th>收获</th>" in doc
+    # 缺的格子补空串：列数不能被行内容带偏，否则整表错位。
+    assert doc.count("<td></td>") == 2
+
+
+def test_steps_page_numbers_every_step():
+    doc = _render(
+        pages=[
+            {
+                "layout": "steps",
+                "title": "第一次使用",
+                "steps": [{"title": "新建会话", "desc": "Create Thread"}, {"title": "写提示词"}],
+            }
+        ]
+    )
+    assert '<span class="no">01</span>' in doc
+    assert '<span class="sd">Create Thread</span>' in doc
+    assert doc.count('<span class="st">') == 2
+    assert '<span class="sd"></span>' not in doc, "没有说明就不渲染那一段"
+
+
+def test_table_and_steps_without_content_degrade_to_bullets():
+    """空表头 / 空步骤在屏幕上只剩一个页头，退回要点页比留空壳好。"""
+    empty_table = _render(pages=[{"layout": "table", "title": "标题", "table": {"rows": []}}])
+    assert _page_layouts(empty_table) == ["bullets"]
+    empty_steps = _render(pages=[{"layout": "steps", "title": "标题", "steps": []}])
+    assert _page_layouts(empty_steps) == ["bullets"]
+
+
+def test_generation_can_drop_pages_with_nothing_to_show():
+    """退化成要点页之后仍然空（真材料里模型就给过空 steps + 空 bullets）：生成侧丢掉。
+
+    开关只给生成用——工作台里用户把一页清空的途中也要留着那一页继续改。
+    """
+    raw = [
+        {"layout": "steps", "title": "有内容", "steps": [{"title": "第一步"}]},
+        {"layout": "steps", "title": "空壳", "steps": [], "takeaway": "一句话"},
+        {"layout": "bullets", "title": "只有标题", "bullets": []},
+        {"layout": "image", "title": "配图落空", "asset_id": "nope", "bullets": []},
+        {"layout": "section", "title": "章节页照旧"},
+    ]
+    assert [page["title"] for page in slides_html.sanitize_pages(raw)] == [
+        "有内容",
+        "空壳",
+        "只有标题",
+        "配图落空",
+        "章节页照旧",
+    ]
+    kept = slides_html.sanitize_pages(raw, drop_empty_content=True)
+    assert [page["title"] for page in kept] == ["有内容", "章节页照旧"]
+    # 只有图片的配图页是有内容的，别跟着一起丢。
+    with_asset = slides_html.sanitize_pages(
+        [{"layout": "image", "title": "有图", "asset_id": "a1", "bullets": []}],
+        ["a1"],
+        drop_empty_content=True,
+    )
+    assert [page["layout"] for page in with_asset] == ["image"]
+
+
+def test_sanitize_table_caps_width_rows_and_pads_cells():
+    data = slides_html.sanitize_table(
+        {
+            "columns": ["a", "b", "c", "d", "e"],
+            "rows": [["1"], ["2", "3", "4", "5", "6"], [], ["4"]] * 2,
+        }
+    )
+    assert data["columns"] == ["a", "b", "c", "d"]
+    # 行数按上限裁（第 7、8 行丢掉），整行全空的丢掉，缺的格子补空串。
+    assert data["rows"] == [
+        ["1", "", "", ""],
+        ["2", "3", "4", "5"],
+        ["4", "", "", ""],
+        ["1", "", "", ""],
+        ["2", "3", "4", "5"],
+    ]
+    assert slides_html.sanitize_table("not a dict") == {"columns": [], "rows": []}
+    assert slides_html.sanitize_table({"columns": ["a"], "rows": "xy"})["rows"] == []
+
+
+def test_sanitize_steps_accepts_bare_strings_and_keeps_both_fields():
+    assert slides_html.sanitize_steps(
+        [{"title": "第一步", "desc": "说明"}, "第二步", {"title": "  "}, "", {"nope": 1}]
+    ) == [{"title": "第一步", "desc": "说明"}, {"title": "第二步", "desc": ""}]
+    assert slides_html.sanitize_steps([{"title": f"第{i}步"} for i in range(9)]) == [
+        {"title": f"第{i}步", "desc": ""} for i in range(5)
+    ]
+
+
+def test_sanitize_pages_carries_the_new_fields_through():
+    pages = slides_html.sanitize_pages(
+        [{"layout": "bullets", "kicker": "  核心概念  ", "takeaway": " x " * 200}]
+    )
+    assert pages[0]["kicker"] == "核心概念"
+    assert len(pages[0]["takeaway"]) == slides_html.MAX_TAKEAWAY
+    assert pages[0]["table"] == {"columns": [], "rows": []}
+    assert pages[0]["steps"] == []
 
 
 def test_render_falls_back_for_unknown_layout_and_empty_deck():
@@ -486,6 +700,45 @@ def test_deck_is_scoped_to_owner(db):
     assert other.list_decks() == []
     with pytest.raises(LookupError):
         other.get_deck(deck.id)
+
+
+def test_new_page_fields_survive_the_api_shape(db):
+    """kicker / takeaway / table / steps 必须过得了 SlidePage 的序列化。
+
+    Pydantic 没声明的字段会被静默丢掉，工作台读不到就编辑一次丢一次内容。
+    """
+    deck = _deck(db)
+    saved = _service(db).save_deck(
+        deck.id,
+        title=None,
+        description=None,
+        theme=None,
+        slides=[
+            {
+                "layout": "table",
+                "title": "哪些任务适合",
+                "kicker": "任务盘点",
+                "takeaway": "先挑能验证的任务。",
+                "table": {"columns": ["维度", "起点", "收获"], "rows": [["调研", "不会", "会"]]},
+            },
+            {
+                "layout": "steps",
+                "title": "四步跑通",
+                "steps": [{"title": "新建会话", "desc": "Create Thread"}],
+            },
+        ],
+    )
+    detail = _service(db).to_detail(saved)
+    assert detail.slides[0].kicker == "任务盘点"
+    assert detail.slides[0].takeaway == "先挑能验证的任务。"
+    assert detail.slides[0].table.columns == ["维度", "起点", "收获"]
+    assert detail.slides[1].steps[0].title == "新建会话"
+    assert "<th>收获</th>" in saved.html
+    assert "Create Thread" in saved.html
+
+
+def test_new_decks_start_on_the_default_light_theme(db):
+    assert _deck(db).theme == {"preset": "amber", "ratio": "16x9", "accent": None}
 
 
 def test_save_deck_assigns_sid_and_rerenders(db):

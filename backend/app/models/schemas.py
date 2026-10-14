@@ -1635,9 +1635,11 @@ SlideLayout = Literal[
     "image",     # 标题 + 要点 + 配图
     "quote",     # 金句 / 结论页
     "closing",   # 结尾页
+    "table",     # 对比表：表头 + 若干行
+    "steps",     # 步骤条：编号 + 标题 + 一句说明
 ]
-# 外观预设与画布比例，同样由渲染器的白名单把关。
-SlidePreset = Literal["ink", "teal", "paper", "violet"]
+# 外观预设与画布比例，同样由渲染器的白名单把关。amber 是默认。
+SlidePreset = Literal["amber", "ink", "teal", "paper", "violet"]
 SlideRatio = Literal["16x9", "4x3"]
 
 
@@ -1645,19 +1647,40 @@ class SlideTheme(BaseModel):
     """一套外观。``accent`` 是可选的强调色覆盖，只收 ``#rgb`` / ``#rrggbb``，
     其余值在渲染器里回落预设色——样式串是直接拼进 CSS 的，必须验白名单。"""
 
-    preset: SlidePreset = "teal"
+    preset: SlidePreset = "amber"
     ratio: SlideRatio = "16x9"
     accent: Optional[str] = Field(default=None, max_length=9)
+
+
+class SlideTable(BaseModel):
+    """对比表的内容。列数、行数与格长上限都在渲染器里裁（模型输出不归 Pydantic 管），
+    这里只挡明显越界的整包请求。"""
+
+    columns: List[str] = Field(default_factory=list, max_length=4)
+    rows: List[List[str]] = Field(default_factory=list, max_length=6)
+
+
+class SlideStep(BaseModel):
+    """步骤条里的一步：``desc`` 可以空。"""
+
+    title: str = Field(default="", max_length=40)
+    desc: str = Field(default="", max_length=80)
 
 
 class SlidePageIn(BaseModel):
     """新增 / 修改一页幻灯片。``sid`` 由服务端发放，前端不填（与面试题的 qid 同）。"""
 
     layout: SlideLayout = "bullets"
+    # kicker 是页头的小类别标签，takeaway 是贴在页面底部的那句结论。
+    kicker: Optional[str] = Field(default=None, max_length=24)
     title: Optional[str] = Field(default=None, max_length=200)
     subtitle: Optional[str] = Field(default=None, max_length=400)
     # 每条 300 字符的上限在 service 里裁剪：Pydantic 管不了 list 元素内部的长度。
+    # 文本里的 ``**关键词**`` 会被渲染成加粗强调，是内容不是样式，原样存。
     bullets: List[str] = Field(default_factory=list, max_length=12)
+    table: SlideTable = Field(default_factory=SlideTable)
+    steps: List[SlideStep] = Field(default_factory=list, max_length=5)
+    takeaway: Optional[str] = Field(default=None, max_length=160)
     asset_id: Optional[str] = Field(default=None, max_length=32)
     notes: Optional[str] = Field(default=None, max_length=4000)
 

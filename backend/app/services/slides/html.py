@@ -27,14 +27,32 @@ from app.services.slides.store import resolve_url
 
 # 单字段长度上限：与 schemas 里的声明一致，在这里再裁一次是因为模型输出不归
 # Pydantic 管（它给什么我们收什么），而渲染器不能相信长度。
+MAX_PAGE_KICKER = 24
 MAX_PAGE_TITLE = 200
 MAX_PAGE_SUBTITLE = 400
 MAX_PAGE_BULLET = 300
 MAX_PAGE_BULLETS = 12
 MAX_PAGE_NOTES = 4000
+MAX_TAKEAWAY = 160
 MAX_DECK_PAGES = 80
 
-LAYOUTS = frozenset({"cover", "section", "bullets", "image", "quote", "closing"})
+# 对比表与步骤条的硬上限：这两个版式不参与字号降档（表格缩字号会糊），装不下
+# 就是模型该拆页，渲染器只负责裁掉越界的部分。
+MAX_TABLE_COLUMNS = 4
+MAX_TABLE_ROWS = 6
+MAX_TABLE_CELL = 40
+MAX_STEPS = 5
+MAX_STEP_TITLE = 40
+MAX_STEP_DESC = 80
+
+LAYOUTS = frozenset(
+    {"cover", "section", "bullets", "image", "quote", "closing", "table", "steps"}
+)
+
+# 标题钉在上沿、正文在剩下的空间里居中的版式；其余版式整块居中。
+PINNED_LAYOUTS = frozenset({"bullets", "image", "table", "steps"})
+# 底部结论句的适用范围：封面是标识页，不放正文性的结论条。
+TAKEAWAY_LAYOUTS = frozenset(LAYOUTS - {"cover"})
 
 # 要点列表的降档表：(类名后缀, 字号 u, 行高倍数, 条目间距 u, 每行字数相对系数)。
 # 单行高度 = 字号 × 行高；系数是该档字号相对默认 2.4u 的倍数（字越小一行塞得越
@@ -47,8 +65,34 @@ _BULLET_TIERS = (
     (" denser", 1.6, 1.35, 0.9, 1.5),
 )
 
+# 底部结论句在垂直方向上的开销：字号 × 行高 + 上下内边距 + 与正文的间距。
+# 它和 _BULLET_TIERS 同一个道理 —— 预算要按版面真实占掉的高度扣，改了 CSS
+# 就得改这里，否则结论条会把最后一条要点顶出舞台。
+_TAKEAWAY_FONT_U = 1.9
+_TAKEAWAY_LINE_H = 1.35
+_TAKEAWAY_PAD_U = 0.95
+_TAKEAWAY_GAP_U = 2.2
+_TAKEAWAY_U = (
+    _TAKEAWAY_FONT_U * _TAKEAWAY_LINE_H + _TAKEAWAY_PAD_U * 2 + _TAKEAWAY_GAP_U
+)
+
 # 主题预设：只放颜色。尺寸一律用 --u（容器宽度的 1%），换预设不会撑破版面。
+# ``t2/t3/t4`` 是对比表表头和步骤条用的第二组色：它们跟 accent 一起按预设给，
+# 深色预设下要提亮，否则小字号的彩色文字在白底够、在黑底糊。
 PRESETS: Dict[str, Dict[str, str]] = {
+    # amber 是默认，也是放映时的基准长相：白纸 + 橙色强调，正文近黑。
+    # 演示文稿要在投影上看，浅底高对比比深色主题更稳。
+    "amber": {
+        "bg": "#ffffff",
+        "surface": "#f7f5f2",
+        "fg": "#14181d",
+        "muted": "#6b7280",
+        "accent": "#ea580c",
+        "line": "rgba(20,24,29,0.10)",
+        "t2": "#2563eb",
+        "t3": "#0d9488",
+        "t4": "#7c3aed",
+    },
     "ink": {
         "bg": "#0d1117",
         "surface": "#161b22",
@@ -56,6 +100,9 @@ PRESETS: Dict[str, Dict[str, str]] = {
         "muted": "#93a1af",
         "accent": "#4c8dff",
         "line": "rgba(255,255,255,0.14)",
+        "t2": "#60a5fa",
+        "t3": "#2dd4bf",
+        "t4": "#a78bfa",
     },
     "teal": {
         "bg": "#ffffff",
@@ -64,6 +111,9 @@ PRESETS: Dict[str, Dict[str, str]] = {
         "muted": "#5a6b74",
         "accent": "#0a7e86",
         "line": "rgba(17,24,31,0.12)",
+        "t2": "#2563eb",
+        "t3": "#7c3aed",
+        "t4": "#0891b2",
     },
     "paper": {
         "bg": "#f7f4ee",
@@ -72,6 +122,9 @@ PRESETS: Dict[str, Dict[str, str]] = {
         "muted": "#6b6157",
         "accent": "#b4632b",
         "line": "rgba(36,31,25,0.14)",
+        "t2": "#1e40af",
+        "t3": "#166534",
+        "t4": "#6d28d9",
     },
     "violet": {
         "bg": "#120a1f",
@@ -80,9 +133,12 @@ PRESETS: Dict[str, Dict[str, str]] = {
         "muted": "#a58cc0",
         "accent": "#8b5cf6",
         "line": "rgba(255,255,255,0.14)",
+        "t2": "#60a5fa",
+        "t3": "#2dd4bf",
+        "t4": "#f472b6",
     },
 }
-DEFAULT_PRESET = "teal"
+DEFAULT_PRESET = "amber"
 
 RATIOS: Dict[str, str] = {"16x9": "16 / 9", "4x3": "4 / 3"}
 DEFAULT_RATIO = "16x9"
@@ -103,6 +159,19 @@ def _text(value: Any, limit: int) -> str:
     if value is None:
         return ""
     return str(value).strip()[:limit]
+
+
+# 要点里的「**引导词**：说明」是这份版面的主要层次手段（参考课件就是这么排的）。
+# 星号本身不会被 html.escape 改动，所以转义之后再替换是安全的：能被包进
+# ``<strong>`` 的只有已经转义过的内容。
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+
+
+def _rich(value: Any, limit: int) -> str:
+    """转义后把成对的 ``**…**`` 变成 ``<strong>``。"""
+    return _BOLD_RE.sub(
+        lambda match: f"<strong>{match.group(1)}</strong>", _e(_text(value, limit))
+    )
 
 
 # ---- 输入清洗 ----------------------------------------------------------------
@@ -142,14 +211,66 @@ def sanitize_bullets(raw: Any) -> List[str]:
     return bullets
 
 
-def sanitize_pages(raw: Any, asset_ids: Iterable[str] = ()) -> List[Dict[str, Any]]:
+def sanitize_table(raw: Any) -> Dict[str, Any]:
+    """对比表清洗：``{columns: [...], rows: [[...], ...]}``。
+
+    行内格子数不足按空串补齐、超出裁掉，保证渲染时每一行都和表头列数对齐；
+    整行全空（模型偶尔留分隔行）直接丢掉。表头缺失时按列数给空串，版式仍成立。
+    """
+    data = raw if isinstance(raw, dict) else {}
+    columns = [
+        _text(item, MAX_TABLE_CELL)
+        for item in (data.get("columns") or [])[:MAX_TABLE_COLUMNS]
+    ][:MAX_TABLE_COLUMNS]
+    width = len(columns)
+    rows: List[List[str]] = []
+    source = data.get("rows")
+    if width and isinstance(source, list):
+        for row in source[:MAX_TABLE_ROWS]:
+            if not isinstance(row, list):
+                continue
+            cells = [_text(cell, MAX_TABLE_CELL) for cell in row[:width]]
+            cells += [""] * (width - len(cells))
+            if any(cells):
+                rows.append(cells)
+    return {"columns": columns, "rows": rows}
+
+
+def sanitize_steps(raw: Any) -> List[Dict[str, str]]:
+    """步骤条清洗：``[{title, desc}, ...]``，``desc`` 可以空。"""
+    source = raw if isinstance(raw, list) else []
+    steps: List[Dict[str, str]] = []
+    for item in source[:MAX_STEPS]:
+        if isinstance(item, dict):
+            title = _text(item.get("title"), MAX_STEP_TITLE)
+            desc = _text(item.get("desc"), MAX_STEP_DESC)
+        else:
+            # 允许直接给一串字符串：只有标题的步骤同样成立。
+            title = _text(item, MAX_STEP_TITLE)
+            desc = ""
+        if title:
+            steps.append({"title": title, "desc": desc})
+    return steps
+
+
+def sanitize_pages(
+    raw: Any,
+    asset_ids: Iterable[str] = (),
+    *,
+    drop_empty_content: bool = False,
+) -> List[Dict[str, Any]]:
     """把模型或前端给的一组页面收敛成合法结构，顺手补齐 ``sid``。
 
     ``sid`` 是页面级编辑的寻址键（与面试题的 ``qid`` 同一理由：数组下标在
     「一边删一边改」时会漂移）。合法形状的沿用，其余重发。
 
     引用了不存在图片的 ``image`` 页降级成 ``bullets`` 页 —— 放映时宁可少一张
-    图，也不要留一个破图框。
+    图，也不要留一个破图框。``table`` / ``steps`` 同理：结构没填全就退回要点页，
+    比在屏幕上留一个只有表头的空壳好。
+
+    ``drop_empty_content`` 只给生成侧：模型偶尔交来一个「什么都没填」的正文页
+    （步骤数组空、要点也空），那种页在屏幕上就是一行标题，收进来不如不要。工作台
+    保存时不开这个开关——用户把一页清空是编辑途中的常态，那页得留着继续改。
     """
     known = {str(item) for item in asset_ids}
     source = raw if isinstance(raw, list) else []
@@ -168,13 +289,27 @@ def sanitize_pages(raw: Any, asset_ids: Iterable[str] = ()) -> List[Dict[str, An
         if layout == "image" and not asset_id:
             layout = "bullets"
         sid = _text(item.get("sid"), 32)
+        layout_data = sanitize_table(item.get("table"))
+        steps_data = sanitize_steps(item.get("steps"))
+        if layout == "table" and not (layout_data["columns"] and layout_data["rows"]):
+            layout = "bullets"
+        if layout == "steps" and not steps_data:
+            layout = "bullets"
+        bullets = sanitize_bullets(item.get("bullets"))
+        if drop_empty_content and layout in PINNED_LAYOUTS:
+            if not (bullets or layout_data["columns"] or steps_data or asset_id):
+                continue
         pages.append(
             {
                 "sid": sid if _SID_RE.match(sid) else f"p{uuid.uuid4().hex[:16]}",
                 "layout": layout,
+                "kicker": _text(item.get("kicker"), MAX_PAGE_KICKER),
                 "title": _text(item.get("title"), MAX_PAGE_TITLE),
                 "subtitle": _text(item.get("subtitle"), MAX_PAGE_SUBTITLE),
-                "bullets": sanitize_bullets(item.get("bullets")),
+                "bullets": bullets,
+                "table": layout_data,
+                "steps": steps_data,
+                "takeaway": _text(item.get("takeaway"), MAX_TAKEAWAY),
                 "asset_id": asset_id,
                 "notes": _text(item.get("notes"), MAX_PAGE_NOTES),
             }
@@ -220,21 +355,25 @@ def render_document(
     ratio = RATIOS[safe_theme["ratio"]]
     # 画幅决定正文能占多高：要点降档与配图的高度上限都用它算，4:3 不该按 16:9 压字。
     content_h_u = _content_height_u(ratio)
+    # 页眉那条 running header 用整份的主题名；已经转义过，页面里直接拼。
+    deck_label = _e(title or "幻灯片")
 
     if safe_pages:
         body = "\n".join(
-            _render_page(index, page, urls, total, content_h_u)
+            _render_page(index, page, urls, total, content_h_u, deck_label)
             for index, page in enumerate(safe_pages)
         )
     else:
         # 还没生成 / 生成失败：给一张只有标题的封面页，放映页不至于白屏。
         body = _render_page(
             0,
-            {"sid": "p0", "layout": "cover", "title": title or "幻灯片",
-             "subtitle": "", "bullets": [], "asset_id": "", "notes": ""},
+            {"sid": "p0", "layout": "cover", "kicker": "", "title": title or "幻灯片",
+             "subtitle": "", "bullets": [], "table": {"columns": [], "rows": []},
+             "steps": [], "takeaway": "", "asset_id": "", "notes": ""},
             urls,
             total,
             content_h_u,
+            deck_label,
         )
 
     colors = dict(PRESETS[safe_theme["preset"]])
@@ -246,7 +385,6 @@ def render_document(
     # 结束，用换行分隔的话 ``--bg`` 会把后面所有声明整个吞进去，变成一个非法
     # 值 —— 于是 body 背景透明、主题永不生效，屏幕上就是一片底色黑。
     theme_css = ";".join(f"--{name}:{value}" for name, value in colors.items())
-    doc_title = _e(title or "幻灯片")
 
     parts = [
         "<!doctype html>",
@@ -254,7 +392,7 @@ def render_document(
         "<head>",
         '<meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">',
-        f"<title>{doc_title}</title>",
+        f"<title>{deck_label}</title>",
         f"<style>{_CSS}</style>",
         f'<style>:root{{{theme_css};--ar:{ratio}}}</style>',
         "</head>",
@@ -279,7 +417,12 @@ def _para(class_name: str, text: str) -> str:
 
 
 def _render_page(
-    index: int, page: Dict[str, Any], urls: Dict[str, str], total: int, content_h_u: float
+    index: int,
+    page: Dict[str, Any],
+    urls: Dict[str, str],
+    total: int,
+    content_h_u: float,
+    deck_label: str,
 ) -> str:
     layout = page["layout"]
     title = _e(page["title"])
@@ -289,7 +432,8 @@ def _render_page(
     chapter = f"{index:02d}"
     image_url = _e(urls.get(page["asset_id"], ""))
     # 页头吃掉多少垂直空间决定要点要不要降档，用未转义的原值估算。
-    budget_u = _body_budget_u(page["title"], page["subtitle"], content_h_u)
+    budget_u = _body_budget_u(page, content_h_u)
+    head = _head(title, subtitle, chapter, page["kicker"])
 
     if layout == "cover":
         body = _stack(
@@ -316,9 +460,10 @@ def _render_page(
         # 也只长到这一步，越高的图只会自己缩下去，不会把整页顶出舞台。
         # 配图页的要点只占左列（约整页宽的三分之一），同样的字数在这里更早溢出。
         split_style = f' style="--body-h:calc(var(--u)*{budget_u:.2f})"'
-        body = (
-            _head(title, subtitle, chapter)
-            + f'<div class="split"{split_style}>{_bullet_list(bullets, per_line=15, budget_u=budget_u)}{figure}</div>'
+        body = _wrap_body(
+            head,
+            f'<div class="split"{split_style}>'
+            f"{_bullet_list(bullets, per_line=15, budget_u=budget_u)}{figure}</div>",
         )
     elif layout == "quote":
         body = _stack(
@@ -338,8 +483,19 @@ def _render_page(
                 _bullet_list(bullets, class_name="closing-points"),
             ],
         )
+    elif layout == "table":
+        body = _wrap_body(head, _table(page["table"]))
+    elif layout == "steps":
+        body = _wrap_body(head, _steps(page["steps"]))
     else:  # bullets
-        body = _head(title, subtitle, chapter) + _bullet_list(bullets, per_line=28, budget_u=budget_u)
+        body = _wrap_body(
+            head, _bullet_list(bullets, per_line=28, budget_u=budget_u)
+        )
+
+    parts = [_rail(deck_label, index, total), body]
+    if layout in TAKEAWAY_LAYOUTS:
+        parts.append(_takeaway(page))
+    body = "".join(parts)
 
     note_tag = f'<aside class="notes">{notes}</aside>' if notes else ""
     return (
@@ -348,15 +504,67 @@ def _render_page(
     )
 
 
+def _rail(deck_label: str, index: int, total: int) -> str:
+    """页眉那条 hairline：左边整份的主题名，右边页码（封面不标页码）。"""
+    page_no = f'<span class="rail-no">{index + 1:02d}<i>/</i>{total:02d}</span>' if index else ""
+    return f'<header class="rail"><span class="rail-tag">{deck_label}</span>{page_no}</header>'
+
+
+def _wrap_body(head: str, inner: str) -> str:
+    """``页头 + .body``：正文包进 ``.body`` 才拿得到上下 auto 外边距，
+    底部那条结论句也就有了贴着下沿的地方。"""
+    return head + f'<div class="body">{inner}</div>'
+
+
+def _takeaway(page: Dict[str, Any]) -> str:
+    text = _rich(page["takeaway"], MAX_TAKEAWAY)
+    return f'<p class="takeaway">{text}</p>' if text else ""
+
+
+def _table(data: Dict[str, Any]) -> str:
+    """对比表：表头按列循环配色，首列是深色标签列。"""
+    head = "".join(f"<th>{_e(cell)}</th>" for cell in data["columns"])
+    rows = "".join(
+        "<tr>" + "".join(f"<td>{_rich(cell, MAX_TABLE_CELL)}</td>" for cell in row) + "</tr>"
+        for row in data["rows"]
+    )
+    return (
+        f'<div class="cmp-wrap"><table class="cmp">'
+        f"<thead><tr>{head}</tr></thead><tbody>{rows}</tbody></table></div>"
+    )
+
+
+def _steps(items: List[Dict[str, str]]) -> str:
+    rows = "".join(
+        '<li><span class="no">{no:02d}</span><span class="st">{title}</span>{desc}</li>'.format(
+            no=i + 1,
+            title=_e(step["title"]),
+            desc=(
+                f'<span class="sd">{_rich(step["desc"], MAX_STEP_DESC)}</span>'
+                if step["desc"]
+                else ""
+            ),
+        )
+        for i, step in enumerate(items)
+    )
+    return f'<ol class="steps">{rows}</ol>'
+
+
 def _stack(class_name: str, parts: List[str]) -> str:
     return f'<div class="stack {class_name}">{"".join(part for part in parts if part)}</div>'
 
 
-def _head(title: str, subtitle: str, chapter: str) -> str:
+def _head(title: str, subtitle: str, chapter: str, kicker: str) -> str:
+    """页头。有小标签时用标签（强调色），没有时退回章节序号。"""
+    label = (
+        f'<span class="kicker">{_e(kicker)}</span>'
+        if kicker
+        else f'<span class="chapter">{chapter}</span>'
+    )
     return (
         '<header class="page-head">'
-        f'<span class="chapter">{chapter}</span>'
-        f'<h2 class="page-title">{title}</h2>'
+        + label
+        + f'<h2 class="page-title">{title}</h2>'
         + _para("page-sub", subtitle)
         + "</header>"
     )
@@ -377,7 +585,7 @@ def _bullet_list(
     """
     if not bullets:
         return ""
-    items = "".join(f"<li>{_e(item)}</li>" for item in bullets)
+    items = "".join(f"<li>{_rich(item, MAX_PAGE_BULLET)}</li>" for item in bullets)
     tier = _bullet_tier(bullets, per_line, budget_u)
     return f'<ul class="{class_name}{tier}">{items}</ul>'
 
@@ -394,20 +602,25 @@ def _bullet_tier(bullets: List[str], per_line: int, budget_u: float) -> str:
     return _BULLET_TIERS[-1][0]
 
 
-def _body_budget_u(title: str, subtitle: str, content_h_u: float) -> float:
+def _body_budget_u(page: Dict[str, Any], content_h_u: float) -> float:
     """内容页的正文还能占多少垂直空间（单位 ``--u``，即舞台宽度的 1%）。
 
     ``content_h_u`` 由 :func:`_content_height_u` 按画幅给出（16:9 是 42.25u，
-    4:3 更高，同样的要点在 4:3 下就不必降档）。页头按它的真实行数扣：章节号
+    4:3 更高，同样的要点在 4:3 下就不必降档）。页头按它的真实行数扣：小标签
     2.4u、标题 4.2u * 1.2 = 5.04u 一行、副标题 2u * 1.5 = 3u 一行，段间 gap
     两处 1.1u，页头下边距 2.6u。标题多换一行，要点就要再降一档 —— 行数只是
-    估算，宁可扣得比实际多一点。
+    估算，宁可扣得比实际多一点。底部有结论句时再扣掉它自己那一条的高度。
     """
+    title = page["title"]
+    subtitle = page["subtitle"]
     title_lines = max(1, -(-len(title) // 20))
     head = 2.4 + 1.1 + title_lines * 5.04
     if subtitle:
         head += 1.1 + max(1, -(-len(subtitle) // 42)) * 3.0
-    return content_h_u - head - 2.6
+    budget = content_h_u - head - 2.6
+    if page["takeaway"]:
+        budget -= _TAKEAWAY_U
+    return budget
 
 
 def _content_height_u(ratio: str) -> float:
@@ -422,8 +635,8 @@ def _content_height_u(ratio: str) -> float:
 # 按视口宽度计（老浏览器上小预览会偏大，但不会散架）。
 _CSS = """
 *,*::before,*::after{box-sizing:border-box}
-:root{--u:1vw;--bg:#fff;--fg:#12222a;--muted:#5a6b74;--accent:#0a7e86;
---surface:#f4f7f7;--line:rgba(17,24,31,.12);--ar:16/9}
+:root{--u:1vw;--bg:#fff;--fg:#14181d;--muted:#6b7280;--accent:#ea580c;
+--surface:#f7f5f2;--line:rgba(20,24,29,.10);--t2:#2563eb;--t3:#0d9488;--t4:#7c3aed;--ar:16/9}
 @supports (container-type:size){:root{--u:1cqw}}
 html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--fg);overflow:hidden;display:flex;
@@ -436,18 +649,45 @@ container-type:size;overflow:hidden}
 display:none;flex-direction:column;justify-content:center;gap:calc(var(--u)*2.6);
 animation:fade .28s ease}
 .slide.is-active{display:flex}
-/* 内容页（要点 / 配图）的标题钉在上边带，正文在剩下的空间里垂直居中。
-   整块居中会让标题随正文多少上下跳 —— 翻页时每一页的标题位置都不一样，
+/* 内容页（要点 / 配图 / 表格 / 步骤）的标题钉在上边带，正文在剩下的空间里垂直
+   居中。整块居中会让标题随正文多少上下跳 —— 翻页时每一页的标题位置都不一样，
    看上去就是「没对齐」；短正文还会整页悬在中间，下面空一大块。 */
-.slide-bullets,.slide-image{justify-content:flex-start;gap:0}
+.slide-bullets,.slide-image,.slide-table,.slide-steps{justify-content:flex-start;gap:0}
 /* 上面把 gap 收了，标题与正文的间距改由页头出：gap 会额外压在 auto 外边距
    之上，正文的上下留白就不对称（看着像往上贴）。 */
-.slide-bullets .page-head,.slide-image .page-head{margin-bottom:calc(var(--u)*2.6)}
-.slide-bullets>.points,.slide-image>.split{margin-top:auto;margin-bottom:auto}
+.slide-bullets .page-head,.slide-image .page-head,
+.slide-table .page-head,.slide-steps .page-head{margin-bottom:calc(var(--u)*2.6)}
+/* 正文包在 .body 里居中，底部结论句才有地方贴着下沿。 */
+.slide-bullets .body,.slide-image .body,
+.slide-table .body,.slide-steps .body{margin-top:auto;margin-bottom:auto}
+.body{display:flex;flex-direction:column;gap:calc(var(--u)*2)}
+/* 页眉那条 hairline 走绝对定位，落在 .slide 的上内边距带里：它不参与 flex，
+   也就不改动 _content_height_u 算出来的正文预算。 */
+.rail{position:absolute;left:calc(var(--u)*8);right:calc(var(--u)*8);
+top:calc(var(--u)*2.6);display:flex;align-items:baseline;justify-content:space-between;
+gap:calc(var(--u)*2);padding-bottom:calc(var(--u)*1);border-bottom:1px solid var(--line);
+font-size:calc(var(--u)*1.4);letter-spacing:.14em;color:var(--muted)}
+.rail::before{content:"";position:absolute;left:0;bottom:-1px;width:calc(var(--u)*7);
+height:calc(var(--u)*.28);background:var(--accent)}
+.rail-tag{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rail-no{flex-shrink:0;font-variant-numeric:tabular-nums}
+.rail-no i{font-style:normal;opacity:.5;margin:0 .35em}
+/* 结论句：一句「所以呢」贴在页面底部，左边一段强调色竖条把它和正文分开。
+   字号 / 行高 / 内边距 / 与正文的间距这四个数写在 _TAKEAWAY_* 里，两边必须一致。 */
+.takeaway{margin:0;padding:calc(var(--u)*0.95) calc(var(--u)*1.6);
+border-left:calc(var(--u)*.45) solid var(--accent);border-radius:calc(var(--u)*.9);
+background:var(--surface);background:color-mix(in srgb,var(--accent) 9%,var(--bg));
+font-size:calc(var(--u)*1.9);line-height:1.35;font-weight:600}
+.slide-bullets .takeaway,.slide-image .takeaway,
+.slide-table .takeaway,.slide-steps .takeaway{margin-top:calc(var(--u)*2.2)}
 @keyframes fade{from{opacity:0;transform:translateY(calc(var(--u)*.8))}to{opacity:1;transform:none}}
 .stack{display:flex;flex-direction:column;gap:calc(var(--u)*2.4)}
 .chapter{font-variant-numeric:tabular-nums;font-size:calc(var(--u)*1.6);
 color:var(--muted);letter-spacing:.16em}
+/* 页头的小标签（「核心概念」「第一个操作」这类类别词）：比章节号更该被看见，
+   所以用强调色而不是灰色。 */
+.kicker{font-size:calc(var(--u)*1.7);font-weight:700;letter-spacing:.1em;
+color:var(--accent)}
 .page-head{display:flex;flex-direction:column;gap:calc(var(--u)*1.1)}
 .page-title{margin:0;font-size:calc(var(--u)*4.2);line-height:1.2;font-weight:700;
 letter-spacing:-.01em;max-width:32em}
@@ -459,6 +699,35 @@ font-size:calc(var(--u)*2.4);line-height:1.5}
 .points li::before,.closing-points li::before{content:"";position:absolute;
 left:0;top:calc(var(--u)*.95);width:calc(var(--u)*1);height:calc(var(--u)*1);
 border-radius:50%;background:var(--accent)}
+/* 引导词加粗：要点 / 表格 / 结论句里的 **关键词** 是页面的第一层视觉层次。 */
+.points li strong,.cmp td strong,.takeaway strong{color:var(--accent);font-weight:700}
+/* 对比表：表头按列循环预设里的第二组色，首列是深色标签列，隔行铺底色。 */
+.cmp-wrap{border:1px solid var(--line);border-radius:calc(var(--u)*1);overflow:hidden}
+.cmp{width:100%;border-collapse:collapse;table-layout:fixed;font-size:calc(var(--u)*1.9)}
+.cmp th,.cmp td{padding:calc(var(--u)*.95) calc(var(--u)*1.5);text-align:left;
+vertical-align:top;overflow-wrap:anywhere}
+.cmp th{font-size:calc(var(--u)*1.7);font-weight:700;letter-spacing:.06em;
+color:var(--muted);border-bottom:1px solid var(--line)}
+.cmp th:nth-child(2){color:var(--accent)}
+.cmp th:nth-child(3){color:var(--t2)}
+.cmp th:nth-child(4){color:var(--t3)}
+.cmp tbody tr:nth-child(odd) td{background:var(--surface)}
+.cmp td{border-bottom:1px solid var(--line);color:var(--muted);line-height:1.45}
+.cmp tbody tr:last-child td{border-bottom:0}
+.cmp td:first-child{color:var(--fg);font-weight:600}
+/* 步骤条：编号圆点 + 左标题 + 右说明，一行一步。 */
+.steps{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;
+gap:calc(var(--u)*1.1)}
+.steps li{display:flex;align-items:center;gap:calc(var(--u)*1.6);
+border:1px solid var(--line);border-radius:calc(var(--u)*.9);background:var(--surface);
+padding:calc(var(--u)*1) calc(var(--u)*1.5)}
+.steps .no{flex-shrink:0;min-width:calc(var(--u)*3);height:calc(var(--u)*3);
+display:inline-flex;align-items:center;justify-content:center;border-radius:999px;
+border:1px solid var(--accent);color:var(--accent);font-size:calc(var(--u)*1.5);
+font-variant-numeric:tabular-nums}
+.steps .st{font-size:calc(var(--u)*2.1);font-weight:700}
+.steps .sd{margin-left:auto;color:var(--muted);font-size:calc(var(--u)*1.8);
+text-align:right}
 .slide-cover,.slide-closing,.slide-section{align-items:flex-start;
 background:radial-gradient(120% 140% at 8% 0%,var(--surface) 0%,var(--bg) 60%)}
 .cover-inner,.closing-inner{gap:calc(var(--u)*3)}
@@ -468,7 +737,7 @@ letter-spacing:-.02em;max-width:24em}
 height:calc(var(--u)*.6);margin-top:calc(var(--u)*2.4);background:var(--accent);
 border-radius:999px}
 .cover-sub,.closing-sub{margin:0;color:var(--muted);font-size:calc(var(--u)*2.6);
-line-height:1.5;max-width:30em}
+line-height:1.5;max-width:30em;white-space:pre-line}
 .section-inner{gap:calc(var(--u)*2)}
 .section-title{margin:0;font-size:calc(var(--u)*6);line-height:1.15;font-weight:800;max-width:22em}
 .section-sub{margin:0;color:var(--muted);font-size:calc(var(--u)*2.4);max-width:30em}

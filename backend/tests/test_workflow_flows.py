@@ -196,6 +196,25 @@ def test_slide_generation_runs_through_the_workflow(db, model_call):
     assert "请依据以上材料产出整份幻灯片的 JSON 结构。" in step.prompt
 
 
+def test_slide_generation_drops_empty_content_pages(db, model_call):
+    """模型给过一个 steps 数组为空、只剩标题和结论句的页：那种页收进 deck 就是白页。"""
+    model_call(
+        '{"theme":{"preset":"amber"},'
+        '"slides":[{"layout":"cover","title":"复盘封面"},'
+        '{"layout":"steps","title":"空壳","steps":[],"takeaway":"一句话"},'
+        '{"layout":"steps","title":"有内容","steps":[{"title":"第一步"}]}]}'
+    )
+    service = SlideService(db, OWNER)
+    deck = _deck(db)
+
+    asyncio.run(service.run_generation(deck.id))
+    _read_after_engine_writes(db)
+
+    detail = service.to_detail(service.get_deck(deck.id))
+    assert [page.title for page in detail.slides] == ["复盘封面", "有内容"]
+    assert detail.theme.preset == "amber"
+
+
 def test_created_deck_belongs_to_its_run(db, model_call):
     """创建时就把运行建出来：接口一返回，界面上的「生成中」已经有了事实源。"""
     model_call(DECK_OUTPUT)
