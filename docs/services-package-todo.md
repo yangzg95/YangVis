@@ -25,9 +25,10 @@
 `tests/test_chat_memory.py` 43、`tests/test_background.py` 1——最后那条是 ④ 把 `fire_and_forget`
 收平时跟着搬出对话套件的；再加 `tests/test_model_config.py` 5 条，钉模型配置的删除语义）。
 2026-10-13 四个测试缺口补完，全量钉在 **912**：`tests/test_netdisk.py` 53、
-`tests/test_auth_users_api.py` 27、`tests/test_agents.py` 30、`tests/test_resume_service.py` 44。
+`tests/test_auth_users_api.py` 27、`tests/test_agents.py` 30、`tests/test_resume_service.py` 44；
+10-14 把 `model_config.py` 那一域也铺满（`tests/test_model_config.py` 5 → 36），现在是 **943**。
 这台机器计时跟着用例数走：670 条 1 分 45 秒、752 条 2 分 14 秒 / 3 分 00 秒、758 条 2 分 10 秒、
-912 条 2 分 50 秒，还是 2 分钟上下量级；
+912 条 2 分 50 秒、943 条 3 分 04 秒，还是 2 到 3 分钟量级；
 上一台记的 4.2 分钟别再引用。（`.venv/Scripts/python.exe -m pytest -q`，venv 在仓库根、不在 backend 下。）
 
 ## 试点定下来的五条形状规则
@@ -203,8 +204,8 @@ memory 引用块 −2 个名字，净零，函数追加在文件尾，于是 19 
    **还了技术债那一刀（解环、合并分节）没法用「只差 import 行」自证**，改用逐行比对函数体：
    从 HEAD 抠出旧节、从新文件抠出搬过去的那节，把刻意差异（删掉的延迟导入、`_memory_logger`
    改名与随之多出的换行）归零后 diff 应当为空——`git diff --numstat` 那时只用来确认改动范围。
-5. `python -c "import app.main"`，再全量 pytest（收包那几刀的基线是 758 passed；四个测试缺口
-   补完之后钉在 **912**，2026-10-13）。
+5. `python -c "import app.main"`，再全量 pytest（收包那几刀的基线是 758 passed；测试缺口
+   一个个补完之后钉在 **943**，2026-10-14）。
 6. 换行按字节核：`echo "lines=$(wc -l < f) cr=$(tr -dc '\r' < f | wc -c)"`，两数相等才算 CRLF。
    `Write` 工具新建的文件落成 LF，得自己转（ops 那刀的 `__init__.py` 就是转完才 39/39）。
    **反过来也成立**：仓库里本来就有 LF 的文件别顺手转成 CRLF——`tests/test_ops_sftp_paste.py`
@@ -225,15 +226,18 @@ memory 引用块 −2 个名字，净零，函数追加在文件尾，于是 19 
   补进镜像的那次实测就是拿来抵这一层的。首次无缓存构建仍未见过。
 - **MySQL 连接池上限**这条要生产库的 `max_connections` 才能定，还欠着。
 - **UI 那条**（一键复制相关）等用户截图验收，不要猜像素。
-- **四个测试缺口全补完了**（2026-10-13）：`netdisk.py` 53 条、auth·users 路由 27 条
+- **五个测试缺口全补完了**（2026-10-13、10-14）：`netdisk.py` 53 条、auth·users 路由 27 条
   （`test_auth_users_api.py`，鉴权链全程是真的、只覆盖 `get_db`）、`agents.py` 30 条
   （`test_agents.py`：内置表形状与交叉引用 6、seed 3、可见性与隔离 5、写路径 5、复制 3、
   路由层 8）、`resume.py` 主体 44 条（`test_resume_service.py`，和既有的
-  `test_resume_workflow.py` 13 条分开）。全量 912 passed。
-  **还空着的只有 `model_config.py`**：现在只钉住了删除语义（5 条），列表、掩码、凭据轮换没用例。
+  `test_resume_workflow.py` 13 条分开）、`model_config.py` 从 5 条扩到 36 条
+  （`test_model_config.py`：列表与默认查询 6、掩码与解密失败 8、凭据轮换 8、测试结论与
+  默认切换 4、路由层 5，原有的引用清理 3 与默认顶上 2 不动）。全量 **943 passed**。
+  **`services/` 这一层的本域用例到此铺满**，剩下的缺口是别的性质的：见上面 MySQL 池上限
+  与 UI 那两条，以及 `routers/` 只有 auth·users·agents·settings 四处有真请求用例。
   已知的：knowledge 89、workflows 四件 139、ops 八件 183、slides 52、ai_gateway 39、mcp 40、
   chat 125（`test_chat_service.py` 82 + `test_chat_memory.py` 43，2026-10-12 补上）加
-  `test_background.py` 1、`test_model_config.py` 5。
+  `test_background.py` 1。
 - **对话用例补出来的三处，全收完了**（2026-10-12、10-13）：① `chat/service.py` 顶层
   `SessionLocal` 已于 10-13 改成 `after_answer_task` 函数内延迟导入，patch 面收成一处；
   ② 删模型配置留悬空引用、收尾任务不接 `LookupError`；③ 同一个 `CODE_CHAT_NOT_READY`
