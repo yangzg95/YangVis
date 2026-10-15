@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar
+from typing import Any, Dict, Generic, List, Literal, Optional, Tuple, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 T = TypeVar("T")
 
@@ -1890,6 +1890,37 @@ class NetdiskSaveTextResult(BaseModel):
 
 # ---- AI 网关 -----------------------------------------------------------------
 
+class AiModelCapability(str, Enum):
+    """Auto 用来判断「这个模型接不接得了这次请求」的硬性能力。
+
+    与 :class:`ModelPurpose` 不是一回事：那边是「用户给自己的助手配了这一类模型」，
+    这边是平台网关里一条上游映射的能力声明。
+    """
+
+    CHAT = "chat"
+    EMBEDDING = "embedding"
+    VISION = "vision"
+    TOOLS = "tools"
+
+
+class AiModelTaskKind(str, Enum):
+    """Auto 用来判断「谁更适合接这次请求」的任务类型；general 是兜底档。"""
+
+    GENERAL = "general"
+    REASONING = "reasoning"
+    CODE = "code"
+    WRITING = "writing"
+    TRANSLATION = "translation"
+
+
+# auto_tags 这一列允许的取值：能力在前、任务类型在后，Auto 按前一组做筛选、
+# 按后一组做排序。词表放在这里（而不是 auto 服务模块）是因为请求校验与管理服务
+# 两边都要读，而 models 层不接任何服务模块。
+AI_AUTO_TAGS: Tuple[str, ...] = tuple(tag.value for tag in AiModelCapability) + tuple(
+    tag.value for tag in AiModelTaskKind
+)
+
+
 class AiChannelCreate(BaseModel):
     model_config = _ALLOW_MODEL_PREFIX
 
@@ -1970,6 +2001,26 @@ class AiApiKeyCreated(BaseModel):
     api_key: str
 
 
+def _normalize_auto_tags(tags: Optional[List[str]]) -> Optional[List[str]]:
+    """去空白、转小写、去重，并拒绝词表之外的标签。
+
+    词表卡死是有原因的：标签写错一个字母，这条路由就永远选不出来，而现象只是
+    「Auto 偶尔不打给我配的那个模型」——排查起来完全没有方向。
+    """
+    if tags is None:
+        return None
+    cleaned: List[str] = []
+    for raw in tags:
+        tag = (raw or "").strip().lower()
+        if not tag:
+            continue
+        if tag not in AI_AUTO_TAGS:
+            raise ValueError(f"未知的模型标签 {raw!r}，可用的是：{', '.join(AI_AUTO_TAGS)}")
+        if tag not in cleaned:
+            cleaned.append(tag)
+    return cleaned
+
+
 class AiModelRouteCreate(BaseModel):
     model_config = _ALLOW_MODEL_PREFIX
 
@@ -1979,6 +2030,11 @@ class AiModelRouteCreate(BaseModel):
     priority: int = Field(default=100, ge=0, le=9999)
     enabled: bool = True
     remark: Optional[str] = Field(default=None, max_length=512)
+    # 参与 Auto 路由：进入 model=auto 的候选池。
+    auto_eligible: bool = False
+    auto_tags: Optional[List[str]] = None
+
+    _clean_tags = field_validator("auto_tags")(_normalize_auto_tags)
 
 
 class AiModelRouteUpdate(BaseModel):
@@ -1990,6 +2046,10 @@ class AiModelRouteUpdate(BaseModel):
     priority: Optional[int] = Field(default=None, ge=0, le=9999)
     enabled: Optional[bool] = None
     remark: Optional[str] = Field(default=None, max_length=512)
+    auto_eligible: Optional[bool] = None
+    auto_tags: Optional[List[str]] = None
+
+    _clean_tags = field_validator("auto_tags")(_normalize_auto_tags)
 
 
 class AiModelRouteItem(BaseModel):
@@ -2003,6 +2063,8 @@ class AiModelRouteItem(BaseModel):
     priority: int = 100
     enabled: bool = True
     remark: Optional[str] = None
+    auto_eligible: bool = False
+    auto_tags: Optional[List[str]] = None
     created_at: datetime
     updated_at: datetime
 
@@ -2022,6 +2084,8 @@ class AiCallLogItem(BaseModel):
     channel_id: Optional[int] = None
     channel_name: Optional[str] = None
     upstream_model: Optional[str] = None
+    # Auto 那次的决策快照（{required, task, source, resolved_model}）；点名模型时为空。
+    auto_route: Optional[Dict[str, Any]] = None
     status_code: int = 0
     success: bool = False
     error: Optional[str] = None

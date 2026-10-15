@@ -172,7 +172,10 @@
             @press-enter="loadRoutes"
           />
           <a-button size="small" @click="loadRoutes">查询</a-button>
-          <span class="hint">同名多通道时按优先级升序依次尝试，上游拒绝或不可达自动转移到下一条。</span>
+          <span class="hint">
+            同名多通道时按优先级升序依次尝试，上游拒绝或不可达自动转移到下一条；勾了「参与
+            Auto」的映射还会进入对外模型名 auto 的候选池。
+          </span>
           <a-button type="primary" class="toolbar-action" @click="openRoute()">
             <PlusOutlined /> 新增路由
           </a-button>
@@ -197,6 +200,13 @@
             </template>
             <template v-else-if="column.key === 'upstream_model'">
               <code class="mono">{{ record.upstream_model || record.model_name }}</code>
+            </template>
+            <template v-else-if="column.key === 'auto'">
+              <a-space v-if="record.auto_eligible" :size="4" wrap>
+                <a-tag color="processing">参与 Auto</a-tag>
+                <a-tag v-for="tag in record.auto_tags || []" :key="tag">{{ autoTagLabel(tag) }}</a-tag>
+              </a-space>
+              <span v-else class="hint">未参与</span>
             </template>
             <template v-else-if="column.key === 'enabled'">
               <a-switch
@@ -444,6 +454,39 @@
         <a-form-item label="启用">
           <a-switch v-model:checked="routeModal.form.enabled" />
         </a-form-item>
+        <a-form-item label="参与 Auto 路由">
+          <a-switch v-model:checked="routeModal.form.auto_eligible" />
+          <div class="hint">
+            打开后调用方写 <code class="mono">model: "auto"</code> 时这条映射才可能被选中，
+            网关按下面的定义自己挑模型。
+          </div>
+        </a-form-item>
+        <template v-if="routeModal.form.auto_eligible">
+          <a-form-item label="能力">
+            <a-select
+              v-model:value="autoCapabilities"
+              mode="multiple"
+              :options="CAPABILITY_OPTIONS"
+              placeholder="这个模型接得了哪些请求"
+            />
+            <div class="hint">
+              硬性门槛：请求里带了图片，就只看了「看图」的候选才进得来；一条都不满足时直接报错，
+              不会硬塞给文本模型。每个模型至少勾一个能力标签。
+            </div>
+          </a-form-item>
+          <a-form-item label="擅长的任务">
+            <a-select
+              v-model:value="autoTasks"
+              mode="multiple"
+              :options="TASK_OPTIONS"
+              placeholder="选填：这个模型适合接哪类活"
+            />
+            <div class="hint">
+              命中任务类型的候选排在前面，同组内仍按优先级；留空表示它只靠优先级参与竞争。
+              请求特征判断不出任务类型时，网关会拿池子里优先级最高的那条问一次（可在后端关掉）。
+            </div>
+          </a-form-item>
+        </template>
         <a-form-item label="备注">
           <a-input v-model:value="routeModal.form.remark" placeholder="选填" />
         </a-form-item>
@@ -503,6 +546,20 @@
             <a-descriptions-item label="上游模型">
               <code class="mono">{{ logDrawer.detail.upstream_model || '—' }}</code>
             </a-descriptions-item>
+            <a-descriptions-item v-if="logDrawer.detail.auto_route" label="Auto 决策" :span="2">
+              <a-space :size="4" wrap>
+                <a-tag v-for="tag in logDrawer.detail.auto_route.required" :key="tag" color="processing">
+                  需要 {{ autoTagLabel(tag) }}
+                </a-tag>
+                <a-tag v-if="logDrawer.detail.auto_route.task" color="warning">
+                  判为 {{ autoTagLabel(logDrawer.detail.auto_route.task) }}
+                </a-tag>
+                <a-tag v-if="logDrawer.detail.auto_route.resolved_model" color="success">
+                  落到 {{ logDrawer.detail.auto_route.resolved_model }}
+                </a-tag>
+                <span class="hint">{{ autoDecisionText(logDrawer.detail.auto_route) }}</span>
+              </a-space>
+            </a-descriptions-item>
             <a-descriptions-item label="通道">{{ logDrawer.detail.channel_name || '—' }}</a-descriptions-item>
             <a-descriptions-item label="密钥">{{ logDrawer.detail.key_name || '—' }}</a-descriptions-item>
             <a-descriptions-item label="Token">
@@ -552,6 +609,7 @@ import { PlusOutlined } from '@ant-design/icons-vue'
 import {
   aiGatewayApi,
   type AiApiKeyItem,
+  type AiAutoTag,
   type AiCallLogItem,
   type AiChannelItem,
   type AiGatewayOverview,
@@ -777,10 +835,43 @@ const routeColumns = [
   { title: '通道', key: 'channel_name', width: 160 },
   { title: '上游模型名', key: 'upstream_model', width: 220 },
   { title: '优先级', dataIndex: 'priority', width: 90 },
+  { title: 'Auto 定义', key: 'auto', width: 240 },
   { title: '启用', key: 'enabled', width: 80 },
   { title: '备注', dataIndex: 'remark', ellipsis: true },
   { title: '操作', key: 'action', width: 150 },
 ]
+
+// Auto 的标签词表，与后端 AI_AUTO_TAGS 一一对应。能力标签决定筛不筛得上，
+// 任务类型标签决定排在谁前面；分成两组是因为它们在路由里干的活不一样。
+const CAPABILITY_OPTIONS = [
+  { value: 'chat', label: '对话 chat' },
+  { value: 'embedding', label: '向量化 embedding' },
+  { value: 'vision', label: '看图 vision' },
+  { value: 'tools', label: '函数调用 tools' },
+]
+const TASK_OPTIONS = [
+  { value: 'general', label: '通用 general' },
+  { value: 'reasoning', label: '推理 reasoning' },
+  { value: 'code', label: '代码 code' },
+  { value: 'writing', label: '写作 writing' },
+  { value: 'translation', label: '翻译 translation' },
+]
+const AUTO_TAG_LABELS: Record<string, string> = Object.fromEntries(
+  [...CAPABILITY_OPTIONS, ...TASK_OPTIONS].map((item) => [item.value, item.label]),
+)
+
+const autoTagLabel = (tag: string) => AUTO_TAG_LABELS[tag] || tag
+
+const AUTO_SOURCE_TEXT: Record<string, string> = {
+  priority: '只按优先级选',
+  llm: '问过任务类型',
+  llm_failed: '问任务类型失败，退回优先级',
+  llm_unclear: '任务类型没认出来，退回优先级',
+}
+
+function autoDecisionText(decision: NonNullable<AiCallLogItem['auto_route']>) {
+  return `候选 ${decision.matched} 条 · ${AUTO_SOURCE_TEXT[decision.source] || decision.source}`
+}
 
 // 已配过的对外模型名，新建路由时给候选，减少打字打错。
 const knownModelOptions = computed(() =>
@@ -804,9 +895,31 @@ const emptyRouteForm = () => ({
   priority: 100,
   enabled: true,
   remark: '',
+  auto_eligible: false,
+  auto_tags: ['chat'] as string[],
 })
 
 const routeModal = reactive({ open: false, loading: false, id: 0, form: emptyRouteForm() })
+
+/**
+ * 「能力」和「任务」各绑一个多选，底下是同一个 auto_tags 数组。拆成两个控件是因为
+ * 它们在 Auto 里干的活不一样（一个筛选、一个排序），混在一个选择器里管理员分不清
+ * 哪个是门槛、哪个是偏好。
+ */
+function tagGroup(values: string[]) {
+  return computed({
+    get: () => routeModal.form.auto_tags.filter((tag) => values.includes(tag)),
+    set: (picked: string[]) => {
+      routeModal.form.auto_tags = [
+        ...picked,
+        ...routeModal.form.auto_tags.filter((tag) => !values.includes(tag)),
+      ]
+    },
+  })
+}
+
+const autoCapabilities = tagGroup(CAPABILITY_OPTIONS.map((item) => item.value))
+const autoTasks = tagGroup(TASK_OPTIONS.map((item) => item.value))
 
 const upstreamModelOptions = computed(() => {
   const channel = channels.value.find((item) => item.id === routeModal.form.channel_id)
@@ -823,6 +936,8 @@ function openRoute(route?: AiModelRouteItem) {
         priority: route.priority,
         enabled: route.enabled,
         remark: route.remark ?? '',
+        auto_eligible: route.auto_eligible,
+        auto_tags: [...(route.auto_tags ?? [])],
       }
     : emptyRouteForm()
   routeModal.open = true
@@ -840,8 +955,17 @@ async function submitRoute() {
     message.warning('请填写对外模型名')
     return
   }
+  if (form.model_name.trim().toLowerCase() === 'auto') {
+    // auto 是网关的保留名，配一条同名路由永远不会被命中，后端也会拒。
+    message.warning('auto 是 Auto 路由的保留名，请换一个对外模型名')
+    return
+  }
   if (!form.channel_id) {
     message.warning('请选择上游通道')
+    return
+  }
+  if (form.auto_eligible && !form.auto_tags.length) {
+    message.warning('参与 Auto 路由至少要给这个模型定义一个标签，例如「对话 chat」')
     return
   }
   routeModal.loading = true
@@ -853,6 +977,8 @@ async function submitRoute() {
       priority: form.priority,
       enabled: form.enabled,
       remark: form.remark || null,
+      auto_eligible: form.auto_eligible,
+      auto_tags: form.auto_eligible ? (form.auto_tags as AiAutoTag[]) : null,
     }
     if (routeModal.id) {
       await aiGatewayApi.updateRoute(routeModal.id, payload)

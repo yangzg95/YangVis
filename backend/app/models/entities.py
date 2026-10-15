@@ -974,6 +974,10 @@ class AiModelRoute(Base):
 
     同一个对外模型名可以有多条映射：按 ``priority`` 升序依次尝试，上游连不上或
     明确拒绝时自动转移到下一条，这就是网关的故障转移能力。
+
+    ``auto_eligible`` 为真的映射还额外服务一个保留名 ``auto``：它不进
+    ``model_name`` 的精确匹配，而是由 Auto 按 ``auto_tags`` 这份「对模型的定义」
+    从候选池里筛出来（见 :mod:`app.services.ai_gateway.auto`）。
     """
 
     __tablename__ = "ai_model_route"
@@ -993,6 +997,13 @@ class AiModelRoute(Base):
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     remark: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # 打开后这条映射进入 ``model="auto"`` 的候选池；关着就只有点名它的请求会打到。
+    auto_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 「对这个模型的定义」：硬性能力（chat/embedding/vision/tools）与擅长的任务类型
+    # （reasoning/code/writing/translation/general）。Auto 靠它决定能不能接、该不该接，
+    # 词表见 app/services/ai_gateway/auto.py；auto_eligible 为假时这两列没人读。
+    auto_tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
@@ -1074,6 +1085,10 @@ class AiCallLog(Base):
     channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     channel_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     upstream_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    # Auto 那次的决策快照：{required, task, source, resolved_model}。点名具体模型
+    # 时为空。没有它，日志里只看得到一堆 "auto"，没法回答「到底分给了谁、为什么」。
+    auto_route: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # 转移失败的尝试：[{channel_id, channel_name, status_code, error, latency_ms}]
     attempts: Mapped[list | None] = mapped_column(JSON, nullable=True)

@@ -183,6 +183,9 @@ def create_route(
         return APIResponse(data=service.create_route(payload))
     except LookupError as exc:
         raise _not_found(exc) from exc
+    except ValueError as exc:
+        # auto 是保留名、参与 Auto 必须有标签，都属于「配置本身不成立」。
+        raise _bad_request(exc) from exc
 
 
 @router.put("/routes/{route_id}", response_model=APIResponse[AiModelRouteItem])
@@ -195,6 +198,8 @@ def update_route(
         return APIResponse(data=service.update_route(route_id, payload))
     except LookupError as exc:
         raise _not_found(exc) from exc
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
 
 
 @router.delete("/routes/{route_id}", response_model=APIResponse[None])

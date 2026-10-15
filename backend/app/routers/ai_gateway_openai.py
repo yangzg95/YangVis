@@ -136,7 +136,7 @@ async def chat_completions(
     try:
         if record.stream:
             upstream, client, status, error_body = await proxy.open_stream(
-                db, record, body, "/chat/completions"
+                db, record, body, proxy.CHAT_PATH
             )
             if upstream is None or client is None:
                 text = error_body.decode("utf-8", errors="replace")
@@ -163,7 +163,7 @@ async def chat_completions(
                 },
             )
 
-        status, content = await proxy.forward_json(db, record, body, "/chat/completions")
+        status, content = await proxy.forward_json(db, record, body, proxy.CHAT_PATH)
     except proxy.GatewayError as exc:
         # 走到这里只可能是「模型没配」这类网关自身的拒绝。
         record.status_code = exc.status_code
@@ -222,7 +222,7 @@ async def embeddings(
     body.pop("stream", None)
 
     try:
-        status, content = await proxy.forward_json(db, record, body, "/embeddings")
+        status, content = await proxy.forward_json(db, record, body, proxy.EMBEDDINGS_PATH)
     except proxy.GatewayError as exc:
         record.status_code = exc.status_code
         record.error = exc.message

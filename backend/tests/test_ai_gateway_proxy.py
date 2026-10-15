@@ -90,7 +90,7 @@ def env(monkeypatch):
     return TestClient(app), Session, plain, install
 
 
-def _ok_json(model: str) -> httpx.Response:
+def _ok_json(model: str, content: str = "上游回答") -> httpx.Response:
     return httpx.Response(
         200,
         json={
@@ -100,7 +100,7 @@ def _ok_json(model: str) -> httpx.Response:
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": "上游回答"},
+                    "message": {"role": "assistant", "content": content},
                     "finish_reason": "stop",
                 }
             ],
@@ -433,3 +433,212 @@ def test_unreachable_upstream_reports_502(env):
         assert log.success is False
         # 两条通道都试过，轨迹里两条都在。
         assert len(log.attempts) == 2
+
+
+# ---- Auto 模型 --------------------------------------------------------------
+
+EYES = "https://eyes.test/v1"
+PLAIN = "https://plain.test/v1"
+STRONG = "https://strong.test/v1"
+
+IMAGE_BODY = {
+    "model": "auto",
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "这张图里有什么"},
+                {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+            ],
+        }
+    ],
+}
+
+
+def _seed_auto(Session, *specs):
+    """铺一套参与 Auto 的通道与路由：(通道名, base_url, 对外模型名, 优先级, 标签)。"""
+    with Session() as db:
+        service = AiGatewayService(db)
+        for channel_name, base_url, model_name, priority, tags in specs:
+            channel = service.create_channel(
+                AiChannelCreate(name=channel_name, base_url=base_url, api_key=f"key-{channel_name}")
+            )
+            service.create_route(
+                AiModelRouteCreate(
+                    model_name=model_name,
+                    channel_id=channel.id,
+                    priority=priority,
+                    auto_eligible=True,
+                    auto_tags=tags,
+                )
+            )
+
+
+def test_auto_hands_an_image_to_the_route_that_sees(env):
+    client, Session, plain, install = env
+    _seed_auto(
+        Session,
+        ("plain", PLAIN, "text-model", 100, ["chat"]),
+        ("eyes", EYES, "vision-model", 200, ["chat", "vision"]),
+    )
+    seen = install(lambda request: _ok_json(json.loads(request.content)["model"]))
+
+    response = client.post(
+        "/v1/chat/completions", headers={"Authorization": f"Bearer {plain}"}, json=IMAGE_BODY
+    )
+
+    assert response.status_code == 200
+    # 优先级更低的纯文本模型被硬性要求筛掉了，而且没人声明任务类型，
+    # 所以一次分类请求都不该发——总共只有这一发出站请求。
+    assert len(seen) == 1
+    assert str(seen[0].url) == f"{EYES}/chat/completions"
+    assert json.loads(seen[0].content)["model"] == "vision-model"
+    assert seen[0].headers["authorization"] == "Bearer key-eyes"
+
+    with Session() as db:
+        log = db.scalar(select(AiCallLog))
+        assert log.model == "auto"
+        assert log.upstream_model == "vision-model"
+        assert log.auto_route["required"] == ["chat", "vision"]
+        assert log.auto_route["task"] is None
+        assert log.auto_route["source"] == "priority"
+        assert log.auto_route["resolved_model"] == "vision-model"
+
+
+def test_auto_asks_the_cheapest_route_what_kind_of_job_this_is(env):
+    client, Session, plain, install = env
+    _seed_auto(
+        Session,
+        ("cheap", PLAIN, "fast-model", 100, ["chat", "general"]),
+        ("strong", STRONG, "code-model", 300, ["chat", "code"]),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if str(payload["messages"][0]["content"]).startswith("你在替网关挑选模型"):
+            return _ok_json("classifier", content="code")
+        return _ok_json(payload["model"])
+
+    seen = install(handler)
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {plain}"},
+        json={"model": "auto", "messages": [{"role": "user", "content": "这个报错怎么修"}]},
+    )
+
+    assert response.status_code == 200
+    # 先问池子里优先级最低的那条，再按回答打给会写代码的那条。
+    assert [str(request.url) for request in seen] == [
+        f"{PLAIN}/chat/completions",
+        f"{STRONG}/chat/completions",
+    ]
+    assert json.loads(seen[1].content)["model"] == "code-model"
+
+    with Session() as db:
+        rows = db.scalars(select(AiCallLog)).all()
+        # 分类那一次不落日志：它是网关替调用方做的决定，不是调用方发起的调用。
+        assert len(rows) == 1
+        log = rows[0]
+        assert log.channel_name == "strong"
+        assert log.auto_route["task"] == "code"
+        assert log.auto_route["source"] == "llm"
+        assert log.auto_route["matched"] == 2
+        assert log.auto_route["resolved_model"] == "code-model"
+
+
+def test_auto_reports_404_when_nothing_declares_the_capability(env):
+    client, Session, plain, install = env
+    _seed_auto(Session, ("plain", PLAIN, "text-model", 100, ["chat"]))
+    seen = install(lambda request: _ok_json("x"))
+
+    response = client.post(
+        "/v1/chat/completions", headers={"Authorization": f"Bearer {plain}"}, json=IMAGE_BODY
+    )
+
+    assert response.status_code == 404
+    error = response.json()["error"]
+    assert error["code"] == "auto_model_not_found"
+    # 报错要说清缺的是哪个标签，否则管理员只能挨条翻路由。
+    assert "vision" in error["message"]
+    assert seen == []
+
+    with Session() as db:
+        log = db.scalar(select(AiCallLog))
+        assert log.success is False
+        assert log.auto_route["matched"] == 0
+
+
+def test_auto_fails_over_within_the_pool(env):
+    client, Session, plain, install = env
+    _seed_auto(
+        Session,
+        ("a", PRIMARY, "fast-model", 100, ["chat"]),
+        ("b", BACKUP, "second-model", 200, ["chat"]),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).startswith(PRIMARY):
+            return httpx.Response(502, json={"error": {"message": "bad gateway"}})
+        return _ok_json("second-model")
+
+    seen = install(handler)
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {plain}"},
+        json={"model": "auto", "messages": [{"role": "user", "content": "你好"}]},
+    )
+
+    assert response.status_code == 200
+    assert [str(request.url) for request in seen] == [
+        f"{PRIMARY}/chat/completions",
+        f"{BACKUP}/chat/completions",
+    ]
+
+    with Session() as db:
+        log = db.scalar(select(AiCallLog))
+        assert log.channel_name == "b"
+        # 决策快照记的是实际应答的那条，不是最初选中的那条。
+        assert log.auto_route["resolved_model"] == "second-model"
+        assert [attempt["channel_name"] for attempt in log.attempts] == ["a"]
+
+
+def test_auto_appears_in_the_model_list_once_someone_opts_in(env):
+    client, Session, plain, install = env
+    install(lambda request: httpx.Response(200, json={}))
+
+    assert "auto" not in [
+        item["id"]
+        for item in client.get("/v1/models", headers={"Authorization": f"Bearer {plain}"})
+        .json()["data"]
+    ]
+
+    _seed_auto(Session, ("plain", PLAIN, "text-model", 100, ["chat"]))
+    ids = [
+        item["id"]
+        for item in client.get("/v1/models", headers={"Authorization": f"Bearer {plain}"}).json()[
+            "data"
+        ]
+    ]
+    assert "auto" in ids
+    assert "text-model" in ids
+
+
+def test_auto_works_for_embeddings_without_any_classification(env):
+    client, Session, plain, install = env
+    _seed_auto(
+        Session,
+        ("talk", PLAIN, "chat-model", 100, ["chat"]),
+        ("vec", EYES, "embed-model", 200, ["embedding"]),
+    )
+    seen = install(lambda request: httpx.Response(200, json={"data": [], "model": "embed-model"}))
+
+    response = client.post(
+        "/v1/embeddings",
+        headers={"Authorization": f"Bearer {plain}"},
+        json={"model": "auto", "input": "一段文本"},
+    )
+
+    assert response.status_code == 200
+    assert len(seen) == 1
+    assert str(seen[0].url) == f"{EYES}/embeddings"
+    assert json.loads(seen[0].content)["model"] == "embed-model"

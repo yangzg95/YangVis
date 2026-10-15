@@ -26,9 +26,15 @@
 收平时跟着搬出对话套件的；再加 `tests/test_model_config.py` 5 条，钉模型配置的删除语义）。
 2026-10-13 四个测试缺口补完，全量钉在 **912**：`tests/test_netdisk.py` 53、
 `tests/test_auth_users_api.py` 27、`tests/test_agents.py` 30、`tests/test_resume_service.py` 44；
-10-14 把 `model_config.py` 那一域也铺满（`tests/test_model_config.py` 5 → 36），现在是 **943**。
+10-14 把 `model_config.py` 那一域也铺满（`tests/test_model_config.py` 5 → 36），到那是 **943**。
+其后 slides 那四刀各自带用例进来，加上 ai_gateway 的 Auto 模型（`services/ai_gateway/` 从此是
+`service.py` + `proxy.py` + `auto.py` + 门面，Auto 的判定全在 `auto.py`、不发网络，分类请求由
+`proxy` 注入回调去发；规则定硬性要求、LLM 只定任务类型，任务类型按稳定排序压过 `priority`），
+全量钉在 **1005**：`test_ai_gateway_auto.py` 24 条是本域新用例，`test_ai_gateway_proxy.py`
+13 → 19 条是端到端那六条（图 → vision、分类往返、无候选 404、池内故障转移、`/v1/models`
+里的 `auto`、向量按能力筛）。
 这台机器计时跟着用例数走：670 条 1 分 45 秒、752 条 2 分 14 秒 / 3 分 00 秒、758 条 2 分 10 秒、
-912 条 2 分 50 秒、943 条 3 分 04 秒，还是 2 到 3 分钟量级；
+912 条 2 分 50 秒、943 条 3 分 04 秒、1005 条 3 分 38 秒，还是 2 到 4 分钟量级；
 上一台记的 4.2 分钟别再引用。（`.venv/Scripts/python.exe -m pytest -q`，venv 在仓库根、不在 backend 下。）
 
 ## 试点定下来的五条形状规则
@@ -205,7 +211,7 @@ memory 引用块 −2 个名字，净零，函数追加在文件尾，于是 19 
    从 HEAD 抠出旧节、从新文件抠出搬过去的那节，把刻意差异（删掉的延迟导入、`_memory_logger`
    改名与随之多出的换行）归零后 diff 应当为空——`git diff --numstat` 那时只用来确认改动范围。
 5. `python -c "import app.main"`，再全量 pytest（收包那几刀的基线是 758 passed；测试缺口
-   一个个补完之后钉在 **943**，2026-10-14）。
+   一个个补完之后钉在 **1005**，2026-10-15）。
 6. 换行按字节核：`echo "lines=$(wc -l < f) cr=$(tr -dc '\r' < f | wc -c)"`，两数相等才算 CRLF。
    `Write` 工具新建的文件落成 LF，得自己转（ops 那刀的 `__init__.py` 就是转完才 39/39）。
    **反过来也成立**：仓库里本来就有 LF 的文件别顺手转成 CRLF——`tests/test_ops_sftp_paste.py`

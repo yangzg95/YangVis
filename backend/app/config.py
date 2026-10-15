@@ -92,6 +92,16 @@ class Settings(BaseSettings):
     # 留空则按管理请求自己的 origin 推导（前后端同源部署时的默认情况）。
     AI_GATEWAY_PUBLIC_ORIGIN: str = ""
 
+    # Auto 模型（对外保留名 ``auto``）：按请求特征 + 路由上定义的标签从候选池里选。
+    # 规则能定出「必须能看图、必须会调工具」，但定不出「这是道数学题还是句寒暄」；
+    # 后者问一次上游模型做分类。关掉它就只按规则与优先级选，不产生这次额外请求。
+    AI_GATEWAY_AUTO_LLM: bool = True
+    # 分类那一次请求的读超时。它在用户请求的关键路径上，宁可退化成「按优先级选」
+    # 也不能把整次调用拖住，所以比转发本身窄得多。
+    AI_GATEWAY_AUTO_CLASSIFY_TIMEOUT: float = 8.0
+    # 喂给分类器的正文上限（取最后一条用户消息）。判断任务类型不需要全文。
+    AI_GATEWAY_AUTO_CLASSIFY_CHARS: int = 1200
+
     # 智能运维
     OPS_SSH_TIMEOUT: float = 15.0
     OPS_CMD_TIMEOUT: float = 20.0

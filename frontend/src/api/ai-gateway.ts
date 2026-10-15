@@ -33,6 +33,28 @@ export interface AiChannelPayload {
   remark?: string | null
 }
 
+/** Auto 判定用的标签：能力标签参与筛选，任务类型标签参与排序。 */
+export type AiAutoTag =
+  | 'chat'
+  | 'embedding'
+  | 'vision'
+  | 'tools'
+  | 'general'
+  | 'reasoning'
+  | 'code'
+  | 'writing'
+  | 'translation'
+
+/** 一次 Auto 调用落进日志的决策快照。 */
+export interface AiAutoDecision {
+  required: string[]
+  task: string | null
+  /** priority=只按优先级，llm=问过任务类型，llm_failed / llm_unclear=问过但没采用。 */
+  source: string
+  matched: number
+  resolved_model?: string
+}
+
 export interface AiModelRouteItem {
   id: number
   model_name: string
@@ -42,6 +64,8 @@ export interface AiModelRouteItem {
   priority: number
   enabled: boolean
   remark: string | null
+  auto_eligible: boolean
+  auto_tags: AiAutoTag[] | null
   created_at: string
   updated_at: string
 }
@@ -53,6 +77,8 @@ export interface AiModelRoutePayload {
   priority?: number
   enabled?: boolean
   remark?: string | null
+  auto_eligible?: boolean
+  auto_tags?: AiAutoTag[] | null
 }
 
 export interface AiApiKeyItem {
@@ -84,6 +110,8 @@ export interface AiCallLogItem {
   channel_id: number | null
   channel_name: string | null
   upstream_model: string | null
+  /** Auto 那次的决策快照；点名具体模型时为 null。 */
+  auto_route: AiAutoDecision | null
   status_code: number
   success: boolean
   error: string | null

@@ -28,7 +28,11 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models.entities import AiApiKey, AiCallLog
-from app.services.ai_gateway.service import (
+from app.services.ai_gateway import auto
+from app.services.ai_gateway.service import (  # noqa: F401 - 端点常量在这里重导出
+    CHAT_ENDPOINT,
+    EMBEDDINGS_ENDPOINT,
+    MODELS_ENDPOINT,
     RouteCandidate,
     resolve_candidates,
     truncate_text,
@@ -39,9 +43,9 @@ logger = logging.getLogger("yangvis.ai_gateway_proxy")
 
 settings = get_settings()
 
-CHAT_ENDPOINT = "chat/completions"
-EMBEDDINGS_ENDPOINT = "embeddings"
-MODELS_ENDPOINT = "models"
+# 上游的相对路径：转发用调用方请求里的那条，Auto 的分类请求自己要打 chat 那条。
+CHAT_PATH = "/chat/completions"
+EMBEDDINGS_PATH = "/embeddings"
 
 # 这些状态码说明「这条通道现在不行」而不是「请求本身有问题」，换一条通道再试
 # 是有意义的。400 不在其中：参数非法换谁都一样，重试只是拖长失败时间。
@@ -95,6 +99,8 @@ class CallRecord:
     channel_id: Optional[int] = None
     channel_name: Optional[str] = None
     upstream_model: Optional[str] = None
+    # Auto 的决策快照（要什么标签、判成什么任务、最终落到哪个模型名）；点名模型时为空。
+    auto_route: Optional[Dict[str, Any]] = None
     attempts: List[Dict[str, Any]] = field(default_factory=list)
     status_code: int = 0
     success: bool = False
@@ -111,6 +117,18 @@ class CallRecord:
     def mark_latency(self) -> None:
         self.latency_ms = int((time.perf_counter() - self.started_at) * 1000)
 
+    def use(self, candidate: RouteCandidate) -> None:
+        """把真正应答的这条候选记进本次调用。
+
+        故障转移时会被后面的候选再覆盖一次；Auto 的决策快照跟着改写，日志里
+        记的才是「实际打了谁」而不是「一开始打算打谁」。
+        """
+        self.channel_id = candidate.channel.id
+        self.channel_name = candidate.channel.name
+        self.upstream_model = candidate.upstream_model
+        if self.auto_route is not None:
+            self.auto_route = {**self.auto_route, "resolved_model": candidate.route.model_name}
+
     def to_entity(self) -> AiCallLog:
         store_payload = settings.AI_GATEWAY_LOG_PAYLOAD
         return AiCallLog(
@@ -123,6 +141,7 @@ class CallRecord:
             channel_id=self.channel_id,
             channel_name=self.channel_name,
             upstream_model=self.upstream_model,
+            auto_route=self.auto_route,
             attempts=self.attempts or None,
             status_code=self.status_code,
             success=self.success,
@@ -282,9 +301,73 @@ class StreamAccumulator:
 # ---- 转发 -------------------------------------------------------------------
 
 
-def _pick_candidates(db: Session, record: CallRecord) -> List[RouteCandidate]:
+def _classify_timeout() -> httpx.Timeout:
+    """分类请求的超时独立一档：转发给模型答复可以等几十秒，帮调用方挑模型不行。"""
+    return httpx.Timeout(
+        settings.AI_GATEWAY_AUTO_CLASSIFY_TIMEOUT,
+        connect=settings.AI_GATEWAY_CONNECT_TIMEOUT,
+    )
+
+
+async def _classify_task(
+    record: CallRecord, candidate: RouteCandidate, text: str
+) -> Optional[str]:
+    """问一次候选模型「这活属于哪一类」，回答解析成任务类型标签。
+
+    刻意不写调用日志：那是网关替调用方做的一次决定，不是调用方发起的一次计费
+    调用，混进日志会把真正要审计的调用淹掉（与 ``GET /v1/models`` 同一个理由）。
+    """
+    body = {
+        "model": candidate.upstream_model,
+        "messages": auto.classify_messages(text),
+        "stream": False,
+        "max_tokens": 8,
+        "temperature": 0,
+    }
+    async with httpx.AsyncClient(timeout=_classify_timeout()) as client:
+        response = await client.post(
+            _upstream_url(candidate, CHAT_PATH),
+            json=body,
+            headers=_upstream_headers(candidate, record),
+        )
+    if response.status_code >= 400:
+        logger.info(
+            "auto classifier got %s from %s, routing by priority instead",
+            response.status_code,
+            candidate.channel.name,
+        )
+        return None
+    try:
+        payload = response.json()
+    except json.JSONDecodeError:
+        return None
+    return auto.parse_task_kind(extract_chat_content(payload))
+
+
+async def _pick_candidates(
+    db: Session, record: CallRecord, body: Dict[str, Any]
+) -> List[RouteCandidate]:
     if not record.model:
         raise GatewayError(400, "请求体缺少 model 字段", code="missing_model")
+
+    if auto.is_auto_model(record.model):
+        candidates, decision = await auto.resolve_auto(
+            db, record.endpoint, body, lambda cand, text: _classify_task(record, cand, text)
+        )
+        # 先记下决策再判空：一条 404 的日志里带着「要什么标签、池子里有几条」，
+        # 管理员才不至于从一句报错话倒推是哪条路由没勾上。
+        record.auto_route = decision
+        if not candidates:
+            required = "、".join(decision["required"])
+            raise GatewayError(
+                404,
+                f"Auto 找不到能处理这次请求的模型：需要标签 {required}。"
+                "请在模型路由里勾选「参与 Auto」并为该模型定义这些能力",
+                error_type="model_not_found",
+                code="auto_model_not_found",
+            )
+        return candidates[: settings.AI_GATEWAY_MAX_ATTEMPTS]
+
     candidates = resolve_candidates(db, record.model)[: settings.AI_GATEWAY_MAX_ATTEMPTS]
     if not candidates:
         raise GatewayError(
@@ -307,7 +390,7 @@ async def forward_json(
     整个响应读完才返回，因此换通道重试对调用方完全透明。命中的通道记在
     ``record`` 上，与日志一起落库。
     """
-    candidates = _pick_candidates(db, record)
+    candidates = await _pick_candidates(db, record, body)
     last: Tuple[int, bytes] = (503, b'{"error":{"message":"no upstream available"}}')
 
     async with httpx.AsyncClient(timeout=_timeout()) as client:
@@ -355,9 +438,7 @@ async def forward_json(
                 last = (response.status_code, response.content)
                 continue
 
-            record.channel_id = candidate.channel.id
-            record.channel_name = candidate.channel.name
-            record.upstream_model = candidate.upstream_model
+            record.use(candidate)
             return response.status_code, response.content
 
     return last[0], last[1]
@@ -374,7 +455,7 @@ async def open_stream(
     成功时前两项非空，调用方负责在生成器的 finally 里关掉它们；失败时 client
     已在此处关闭，错误体可直接回给调用方。
     """
-    candidates = _pick_candidates(db, record)
+    candidates = await _pick_candidates(db, record, body)
     # 流式默认注入 include_usage 拿 token 数；个别上游不认这个字段，撞上之后
     # 就地降级重试同一条通道（记在 tries 里而不是写死一层嵌套）。
     inject_usage = bool(body.get("stream")) and "stream_options" not in body
@@ -423,9 +504,7 @@ async def open_stream(
             continue
 
         if response.status_code < 400:
-            record.channel_id = candidate.channel.id
-            record.channel_name = candidate.channel.name
-            record.upstream_model = candidate.upstream_model
+            record.use(candidate)
             return response, client, response.status_code, b""
 
         error_body = await response.aread()

@@ -53,6 +53,7 @@
 ### 🔌 AI 网关
 - 对外一个统一密钥（`sk-yv-*`），背后可挂多个 OpenAI 兼容的上游厂商通道，平台级共享、仅管理员可管
 - 模型名映射 + 优先级故障转移：同一个对外模型名可绑多条通道，按 `priority` 升序尝试，上游不可达/限流/鉴权失败时自动换下一条（仅在首字节发出前切换）
+- `model: "auto"` 虚拟模型名：调用方不点名，由网关按「这次任务要什么」+「管理员给每条路由的能力定义」自己挑一条路由。硬要求由规则判定（`/v1/embeddings` 要 embedding、请求里带图要 vision、带 `tools` 要 tools），只有任务类型（推理/代码/写作/翻译/普通问答）规则判不了，就挑候选池里优先级最高的那条映射问它一次——这次问答可以整体关掉（`AI_GATEWAY_AUTO_LLM`），超时或答得不像话就退回按 `priority` 选，绝不因此多一个故障点。池子里没有满足硬要求的路由就直接 404 `auto_model_not_found`，不会降级发到不相干的模型上；每次决策（要什么标签、判成什么任务、最后落到哪个上游模型）都存进调用日志的 `auto_route`
 - 两层防自环：通道 `base_url` 保存时校验（本站域名 / localhost / 回环地址一律拒绝），转发出去的请求再盖一个 `X-Yangvis-Gateway` 标记头，入站看到它就回 508 `gateway_loop_detected`——内网别名之类保存时认不出来的情况靠这层兜底，否则请求会在网关里无限递归
 - 端点：`POST /v1/chat/completions`（SSE 流式与非流式）、`POST /v1/embeddings`、`GET /v1/models`，错误体沿用 OpenAI 结构，标准 SDK 改 `base_url` 即可直连
 - 监控与审计：每次调用记录通道、模型、token 数、耗时/首字节耗时、客户端 IP、重试轨迹，正文按 `AI_GATEWAY_LOG_MAX_CHARS` 截断入库（可用 `AI_GATEWAY_LOG_PAYLOAD` 整体关闭）；日志写失败绝不影响调用本身
@@ -183,6 +184,9 @@ npm run dev                   # http://localhost:5173，/api 与网关的 /v1 �
 | `AI_GATEWAY_CONNECT_TIMEOUT` `AI_GATEWAY_READ_TIMEOUT` | 10 / 300 | 网关转发上游的连接/读取超时（秒） |
 | `AI_GATEWAY_LOG_PAYLOAD` `AI_GATEWAY_LOG_MAX_CHARS` | true / 8000 | 是否把请求响应正文写进审计日志、单条正文截断字符数 |
 | `AI_GATEWAY_MAX_ATTEMPTS` | 3 | 单次调用最多尝试几条上游通道 |
+| `AI_GATEWAY_AUTO_LLM` | true | `model: "auto"` 是否允许调用一次上游模型来判任务类型；关掉就只按规则和 `priority` 选 |
+| `AI_GATEWAY_AUTO_CLASSIFY_TIMEOUT` | 8 | 上面那次分类的独立超时（秒），超时/报错都按「没判出来」继续走优先级 |
+| `AI_GATEWAY_AUTO_CLASSIFY_CHARS` | 1200 | 送进分类 prompt 的用户正文截断长度 |
 | `AI_GATEWAY_PUBLIC_ORIGIN` | 空 | 对外公布的站点 origin（如 `https://ai.nanwa.xyz`），概览页据此显示接入地址；留空则按打开控制台时的 origin 推导。`/v1` 由程序拼接 |
 
 ### 上传上限与反代配合
@@ -240,9 +244,9 @@ location ^~ /api/ops/servers/ {
 
 | 对外端点 | 说明 |
 | --- | --- |
-| `POST /v1/chat/completions` | 对话补全，支持 `stream: true` 的 SSE 透传 |
-| `POST /v1/embeddings` | 向量化 |
-| `GET /v1/models` | 列出网关已映射的对外模型名（不计入审计日志） |
+| `POST /v1/chat/completions` | 对话补全，支持 `stream: true` 的 SSE 透传；`model` 可以是 `auto` |
+| `POST /v1/embeddings` | 向量化；`model` 同样可以是 `auto`（此时按 embedding 能力筛候选） |
+| `GET /v1/models` | 列出网关已映射的对外模型名（不计入审计日志）；只要有一条路由勾了「参与 Auto」，`auto` 就会出现在列表里 |
 
 ## AI 网关接入
 
@@ -257,7 +261,7 @@ location ^~ /api/ops/servers/ {
 
 控制台「系统设置 → AI 网关 → 概览」里的「接入地址」是后端算好直接给的，可复制。默认按打开控制台时的 origin 推导；**如果网关走的是另一个域名**，设 `AI_GATEWAY_PUBLIC_ORIGIN=https://ai.<你的域名>`，概览页就会显示那个地址——否则管理员从控制台域名打开页面，看到的会是一个「也能用、但不是对外公布的」地址。
 
-凭据与模型：`api_key` 用「统一密钥」页签签发的 `sk-yv-*`（明文只在创建那一次显示，库里只存 SHA-256 摘要），与控制台登录的 JWT 互不通用；请求里的 `model` 写「模型路由」页签配置的对外模型名，同一个名字可按 `priority` 绑多条上游做故障转移。
+凭据与模型：`api_key` 用「统一密钥」页签签发的 `sk-yv-*`（明文只在创建那一次显示，库里只存 SHA-256 摘要），与控制台登录的 JWT 互不通用；请求里的 `model` 写「模型路由」页签配置的对外模型名，同一个名字可按 `priority` 绑多条上游做故障转移。不想让调用方关心模型名，就写 `auto`，并在路由上勾「参与 Auto」+ 填能力标签（详见上文特性说明）；`auto` 是保留名，不能自己建一条叫它的路由。
 
 ```bash
 curl https://<你的域名>/v1/chat/completions \

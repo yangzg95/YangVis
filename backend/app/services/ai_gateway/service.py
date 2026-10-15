@@ -49,6 +49,18 @@ DISPLAY_PREFIX_LENGTH = len(KEY_PREFIX) + 6
 
 TRUNCATE_MARK = "…[已截断]"
 
+# 网关认识的三种端点。放在这个模块是因为转发的 ``proxy`` 与 Auto 判定都要按它
+# 分流，而两者都必须能引用同一份定义（proxy 直接重导出这三个名字）。
+CHAT_ENDPOINT = "chat/completions"
+EMBEDDINGS_ENDPOINT = "embeddings"
+MODELS_ENDPOINT = "models"
+
+# 对外保留的虚拟模型名：它不对应任何一条 ``ai_model_route``，由 Auto 按每次请求
+# 的任务与路由上定义的能力标签现场决定（见 :mod:`app.services.ai_gateway.auto`）。
+# 放在这里而不是 auto 模块里，是因为「对外有哪些模型名」归本模块管
+# （:func:`list_public_models`），而 auto 模块要读本模块的候选结构。
+AUTO_MODEL_NAME = "auto"
+
 
 # ---- 密钥 -------------------------------------------------------------------
 
@@ -183,6 +195,40 @@ def resolve_candidates(db: Session, model_name: str) -> List[RouteCandidate]:
     return candidates
 
 
+def auto_routes(db: Session) -> List[Tuple[AiModelRoute, AiChannel]]:
+    """Auto 的候选池：开了 ``auto_eligible``、路由与通道都启用的映射。
+
+    查询口径必须跟 :func:`resolve_candidates` 一致（同样跳过停用路由与停用通道，
+    同样按 priority 升序），否则会出现「点名能打通、Auto 选出来却打不通」。
+    """
+    rows = db.execute(
+        select(AiModelRoute, AiChannel)
+        .join(AiChannel, AiChannel.id == AiModelRoute.channel_id)
+        .where(
+            AiModelRoute.auto_eligible.is_(True),
+            AiModelRoute.enabled.is_(True),
+            AiChannel.enabled.is_(True),
+        )
+        .order_by(AiModelRoute.priority.asc(), AiModelRoute.id.asc())
+    ).all()
+    return list(rows)
+
+
+def has_auto_routes(db: Session) -> bool:
+    """候选池非空 —— 决定 ``GET /v1/models`` 要不要把 auto 列出来。"""
+    row = db.execute(
+        select(AiModelRoute.id)
+        .join(AiChannel, AiChannel.id == AiModelRoute.channel_id)
+        .where(
+            AiModelRoute.auto_eligible.is_(True),
+            AiModelRoute.enabled.is_(True),
+            AiChannel.enabled.is_(True),
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+    return row is not None
+
+
 def list_public_models(db: Session) -> List[str]:
     """当前对外可用的模型名（去重、按名字排序），给 ``GET /v1/models`` 用。"""
     rows = db.scalars(
@@ -192,7 +238,12 @@ def list_public_models(db: Session) -> List[str]:
         .distinct()
         .order_by(AiModelRoute.model_name.asc())
     ).all()
-    return list(rows)
+    names = list(rows)
+    # 一条候选都没有时不列 auto：列出来只会让调用方选完拿到一个 404。
+    if has_auto_routes(db) and AUTO_MODEL_NAME not in names:
+        names.append(AUTO_MODEL_NAME)
+        names.sort()
+    return names
 
 
 def find_api_key(db: Session, plain: str) -> Optional[AiApiKey]:
@@ -339,12 +390,14 @@ class AiGatewayService:
         # 着在，调用却报「模型未配置」。所以创建时就把关系钉死。
         self.get_channel(payload.channel_id)
         route = AiModelRoute(
-            model_name=payload.model_name.strip(),
+            model_name=self._public_name(payload.model_name),
             channel_id=payload.channel_id,
             upstream_model=(payload.upstream_model or "").strip() or None,
             priority=payload.priority,
             enabled=payload.enabled,
             remark=payload.remark,
+            auto_eligible=payload.auto_eligible,
+            auto_tags=self._auto_tags(payload.auto_eligible, payload.auto_tags),
         )
         self._db.add(route)
         self._db.commit()
@@ -365,7 +418,7 @@ class AiGatewayService:
             self.get_channel(data["channel_id"])
             route.channel_id = data["channel_id"]
         if data.get("model_name"):
-            route.model_name = data["model_name"].strip()
+            route.model_name = self._public_name(data["model_name"])
         if "upstream_model" in data:
             upstream = (data["upstream_model"] or "").strip()
             route.upstream_model = upstream or None
@@ -376,10 +429,42 @@ class AiGatewayService:
         if data.get("remark") is not None:
             route.remark = data["remark"]
 
+        # 这两个字段要一起判：只改开关时也得保证「进了候选池就有定义」，否则 Auto
+        # 面对一条没有任何标签的路由只能猜。
+        if "auto_eligible" in data or "auto_tags" in data:
+            eligible = route.auto_eligible if "auto_eligible" not in data else bool(data["auto_eligible"])
+            tags = data["auto_tags"] if "auto_tags" in data else route.auto_tags
+            route.auto_eligible = eligible
+            route.auto_tags = self._auto_tags(eligible, tags)
+
         self._db.commit()
         self._db.refresh(route)
         logger.info("updated ai route %s", route.id)
         return self._route_item(route)
+
+    @staticmethod
+    def _public_name(model_name: str) -> str:
+        """对外模型名去空格，并且不许占用 Auto 的保留名。
+
+        ``auto`` 是转发侧的虚拟名，一条真叫 auto 的路由永远不会被命中——管理员
+        只会得到「配置在、点名叫不通」这种最难解释的故障。
+        """
+        name = model_name.strip()
+        if name.lower() == AUTO_MODEL_NAME:
+            raise ValueError(f"{AUTO_MODEL_NAME} 是 Auto 的保留名，不能再作为对外模型名")
+        return name
+
+    @staticmethod
+    def _auto_tags(eligible: bool, tags: Optional[List[str]]) -> Optional[List[str]]:
+        """规范化 Auto 定义里的标签；不开 Auto 就没有这份定义。"""
+        if not eligible:
+            return None
+        cleaned = list(
+            dict.fromkeys((tag or "").strip().lower() for tag in (tags or []) if (tag or "").strip())
+        )
+        if not cleaned:
+            raise ValueError("参与 Auto 路由至少要给这个模型定义一个标签，例如 chat")
+        return cleaned
 
     def get_route(self, route_id: int) -> AiModelRoute:
         route = self._db.get(AiModelRoute, route_id)
