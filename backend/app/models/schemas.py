@@ -1146,6 +1146,29 @@ class DbTableDdl(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+# ---- 一键备份（整库或选表的 DDL + INSERT，存网盘或下载） -------------------------
+
+
+class DbBackupRequest(BaseModel):
+    """备份请求。默认结构 + 数据，只要结构时置 ``structure_only``。
+
+    ``tables`` 是选表备份的名单：给了就只备这几张，空数组 / null 都是整库。
+    """
+
+    structure_only: bool = False
+    tables: Optional[List[str]] = None
+
+
+class DbBackupResult(BaseModel):
+    """备份存进网盘后的落点与规模，前端toast 直接用。"""
+
+    path: str
+    filename: str
+    tables: int
+    rows: int
+    bytes: int
+
+
 # ---- 设计表（表定义编辑：期望定义 → ALTER 预览 → 确认执行） ----------------------
 
 

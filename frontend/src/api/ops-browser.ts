@@ -61,6 +61,16 @@ export interface DbTableDdl {
   ddl: string
 }
 
+/** 一键备份存进网盘后的落点与规模。 */
+export interface DbBackupResult {
+  /** 网盘里的完整路径，/apps/<应用名>/backups/ 之下。 */
+  path: string
+  filename: string
+  tables: number
+  rows: number
+  bytes: number
+}
+
 /** 设计表里的一列期望定义。Extra 只有两种合法取值，所以收成两个布尔位。 */
 export interface DbColumnDef {
   name: string

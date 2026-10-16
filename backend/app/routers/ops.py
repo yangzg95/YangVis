@@ -28,7 +28,13 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import SessionLocal, get_db
 from app.deps import require_admin, require_user, resolve_ws_user
-from app.errors import CODE_OPS_EXEC_FAILED, CODE_OPS_FORBIDDEN, BusinessError
+from app.errors import (
+    CODE_NETDISK_NOT_BOUND,
+    CODE_NETDISK_NOT_CONFIGURED,
+    CODE_OPS_EXEC_FAILED,
+    CODE_OPS_FORBIDDEN,
+    BusinessError,
+)
 from app.models.entities import OpsAuditLog
 from app.models.schemas import (
     APIResponse,
@@ -37,6 +43,8 @@ from app.models.schemas import (
     DbColumnItem,
     DbCompletionTable,
     DbAlterPreview,
+    DbBackupRequest,
+    DbBackupResult,
     DbBatchRequest,
     DbBatchResult,
     DbErd,
@@ -80,7 +88,9 @@ from app.models.schemas import (
     WsTicket,
 )
 from app.security import create_ws_ticket
+from app.services.netdisk import NetdiskService
 from app.services.ops import database as db_ops
+from app.services.ops import db_backup as db_backup
 from app.services.ops import db_data as db_data
 from app.services.ops import db_design as db_design
 from app.services.ops import db_exec as db_exec
@@ -466,6 +476,23 @@ def _parse_json_list(raw: Optional[str], model: Any, name: str) -> list:
         raise ValueError(f"{name} 参数不是合法的 JSON 数组") from None
 
 
+def _parse_json_names(raw: Optional[str], name: str) -> List[str]:
+    """GET 上的表名数组：与 filters 同一种走法，JSON 字符串而不是重复参数。
+
+    表名里允许有逗号，所以不能按分隔符切；非法 JSON 与 ``_parse_json_list`` 一样
+    抛 ValueError，由调用方落成业务错误。
+    """
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+        if not isinstance(payload, list):
+            raise ValueError
+        return [str(item) for item in payload]
+    except (ValueError, TypeError):
+        raise ValueError(f"{name} 参数不是合法的 JSON 数组") from None
+
+
 def _note_browse_success(service: db_ops.OpsDatabaseService, row: Any) -> None:
     """浏览成功本身就是一次连通性证明，把「未测试」翻成正常。
 
@@ -743,6 +770,118 @@ async def export_database_rows(
             "Content-Disposition": _attachment(f"{schema}.{table}.{suffix}"),
             "Cache-Control": "no-store",
         },
+    )
+
+
+# ---- 一键备份（整库或选表的 DDL + INSERT） --------------------------------------
+
+
+@router.get("/databases/{database_id}/schemas/{schema}/backup")
+async def backup_database_download(
+    database_id: int,
+    schema: str,
+    structure_only: bool = Query(default=False),
+    tables: Optional[str] = Query(default=None),
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    """「一键备份」的下载分支：.sql 一边生成一边吐，峰值内存是一批行。
+
+    与表级导出同一套约定：响应体是文件本身而不是信封，所以错误只可能发生在第一批
+    之前；一旦文件开始流传，就只能截断了。
+    """
+    service = db_ops.OpsDatabaseService(db, user.user_id)
+    row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
+    try:
+        selection = _parse_json_names(tables, "tables")
+    except ValueError as exc:
+        raise BusinessError(CODE_OPS_EXEC_FAILED, str(exc)) from exc
+    command = f"[备份 {schema}] {'仅结构' if structure_only else '结构+数据'}"
+    try:
+        session = await db_backup.open_backup(row, schema, structure_only, selection)
+    except db_ops.OpsDbError as exc:
+        _audit(db, user.user_id, row, command, "readonly", False, str(exc))
+        raise _browse_error(exc) from exc
+
+    _audit(
+        db, user.user_id, row,
+        f"{command} {len(session.entries)} 张表 / {session.total_rows} 行",
+        "readonly", True,
+    )
+    _note_browse_success(service, row)
+    return StreamingResponse(
+        db_backup.stream_backup(session),
+        media_type='application/sql; charset="utf-8"',
+        headers={
+            "Content-Disposition": _attachment(db_backup.backup_filename(session)),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.post(
+    "/databases/{database_id}/schemas/{schema}/backup/netdisk",
+    response_model=APIResponse[DbBackupResult],
+)
+async def backup_database_to_netdisk(
+    database_id: int,
+    schema: str,
+    payload: DbBackupRequest,
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> APIResponse[DbBackupResult]:
+    """「一键备份」的网盘分支：整份 .sql 存进 ``/apps/<APP_NAME>/backups/``。
+
+    网盘上传接口只收完整 bytes，这一条因此不走流式，字节上限由
+    ``OPS_BACKUP_MAX_BYTES`` 守。绑定状态先查：读完整库才发现用户没绑网盘，
+    浪费的是一次整库扫描。
+    """
+    service = db_ops.OpsDatabaseService(db, user.user_id)
+    row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
+    netdisk = NetdiskService(db, user.user_id)
+    pan = netdisk.status_view()
+    if not pan.configured:
+        raise BusinessError(CODE_NETDISK_NOT_CONFIGURED, "百度网盘功能未启用，备份只能下载到本地")
+    if not pan.bound:
+        raise BusinessError(CODE_NETDISK_NOT_BOUND, "尚未绑定百度网盘，请先在设置页完成绑定")
+
+    command = f"[备份 {schema} 到网盘] {'仅结构' if payload.structure_only else '结构+数据'}"
+    try:
+        session = await db_backup.open_backup(
+            row, schema, payload.structure_only, payload.tables
+        )
+    except db_ops.OpsDbError as exc:
+        _audit(db, user.user_id, row, command, "readonly", False, str(exc))
+        raise _browse_error(exc) from exc
+
+    filename = db_backup.backup_filename(session)
+    try:
+        raw = await db_backup.collect_backup(session)
+    except db_ops.OpsDbError as exc:
+        _audit(db, user.user_id, row, command, "readonly", False, str(exc))
+        raise _browse_error(exc) from exc
+
+    try:
+        _, path = await netdisk.upload_file(f"backups/{row.id}_{filename}", raw)
+    except Exception as exc:  # noqa: BLE001 - 备份已生成，网盘那头的失败要如实落到审计里
+        _audit(db, user.user_id, row, command, "readonly", False, str(exc))
+        raise
+    _audit(
+        db, user.user_id, row,
+        f"{command} {len(session.entries)} 张表 / {session.total_rows} 行 → {path}",
+        "readonly", True,
+    )
+    _note_browse_success(service, row)
+    logger.info("database %s schema %s backed up to netdisk (%s)", row.id, schema, path)
+    return APIResponse(
+        data=DbBackupResult(
+            path=path,
+            filename=filename,
+            tables=len(session.entries),
+            rows=session.total_rows,
+            bytes=len(raw),
+        ),
+        message="备份已保存到百度网盘",
     )
 
 

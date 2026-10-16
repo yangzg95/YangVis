@@ -9,6 +9,7 @@ import type { AxiosResponse } from 'axios'
 import { request } from './http'
 import type {
   DbAlterPreview,
+  DbBackupResult,
   DbColumnItem,
   DbCompletionTable,
   DbErd,
@@ -438,6 +439,36 @@ export const opsApi = {
       },
       responseType: 'blob',
       // 几十万行在服务端要跑几分钟，全局 30 秒超时会把它误杀。
+      timeout: 0,
+      skipErrorToast: true,
+    }),
+  /**
+   * 「一键备份」的下载分支：整库或选出来的几张表，DDL 与 INSERT 汇成一个 .sql。
+   *
+   * 与 dbRowsExport 同理按 blob 收——响应体是文件而不是信封，失败时才回到信封，
+   * 由 saveBlobResponse 识别成错误。表名单与 filters 一样走 JSON 字符串。
+   */
+  dbBackupDownload: (id: number, schema: string, structureOnly = false, tables?: string[]) =>
+    request<AxiosResponse<Blob>>({
+      url: `/ops/databases/${id}/schemas/${encodeURIComponent(schema)}/backup`,
+      params: {
+        structure_only: structureOnly,
+        ...(tables?.length ? { tables: JSON.stringify(tables) } : {}),
+      },
+      responseType: 'blob',
+      timeout: 0,
+      skipErrorToast: true,
+    }),
+  /**
+   * 「一键备份」的网盘分支：服务端把整份 .sql 攒好再传到百度网盘。
+   *
+   * 一次请求里含整库读取与网盘三段式上传，全局 30 秒超时必然不够。
+   */
+  dbBackupToNetdisk: (id: number, schema: string, structureOnly = false, tables?: string[]) =>
+    request<DbBackupResult>({
+      url: `/ops/databases/${id}/schemas/${encodeURIComponent(schema)}/backup/netdisk`,
+      method: 'POST',
+      data: { structure_only: structureOnly, tables: tables?.length ? tables : null },
       timeout: 0,
       skipErrorToast: true,
     }),

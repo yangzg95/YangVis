@@ -280,6 +280,70 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <!-- 一键备份：整库或选中的几张表，DDL 与 INSERT 汇成一个 .sql。 -->
+    <a-modal v-model:open="backup.open" :title="`备份库 ${backup.schema}`" :footer="null" :width="520">
+      <a-form layout="vertical">
+        <a-form-item label="备份内容">
+          <a-radio-group v-model:value="backup.structureOnly" button-style="solid">
+            <a-radio-button :value="false">结构 + 数据</a-radio-button>
+            <a-radio-button :value="true">仅结构</a-radio-button>
+          </a-radio-group>
+        </a-form-item>
+        <a-form-item>
+          <template #label>
+            <span>备份范围</span>
+            <span class="backup-scope">
+              {{
+                backup.selected.length
+                  ? `已选 ${backup.selected.length} / ${backup.tables.length} 张`
+                  : `整库 ${backup.tables.length} 张`
+              }}
+            </span>
+          </template>
+          <a-select
+            v-model:value="backup.selected"
+            mode="multiple"
+            :options="backupOptions"
+            :loading="backup.tablesLoading"
+            :max-tag-count="2"
+            :disabled="backup.running"
+            show-search
+            placeholder="不选即整库"
+            class="backup-tables"
+          />
+          <a-space size="small">
+            <a-button
+              size="small"
+              type="link"
+              :disabled="!backup.tables.length || backup.running"
+              @click="backup.selected = backup.tables.map((t) => t.name)"
+            >
+              全选
+            </a-button>
+            <a-button
+              size="small"
+              type="link"
+              :disabled="!backup.selected.length || backup.running"
+              @click="backup.selected = []"
+            >
+              清空
+            </a-button>
+          </a-space>
+        </a-form-item>
+      </a-form>
+      <p v-if="backup.tablesError" class="backup-hint">表清单没取到，这次会按整库备份。</p>
+      <p class="backup-hint">
+        每张表先给建表语句，再按批给 INSERT；视图只留定义。备份文件不含 DROP TABLE，
+        还原到已有同名表的库需要先把表清掉。
+      </p>
+      <a-space>
+        <a-button type="primary" :loading="backup.running" @click="runBackup('netdisk')">
+          保存到网盘
+        </a-button>
+        <a-button :disabled="backup.running" @click="runBackup('download')">下载到本地</a-button>
+      </a-space>
+    </a-modal>
   </div>
 </template>
 
@@ -314,11 +378,13 @@ import RedisKeysTab from '@/components/ops/RedisKeysTab.vue'
 import { clampSize, readSize, saveSize, startDragResize } from '@/components/ops/resizer'
 import '@/components/ops/resizer.css'
 import type { TabRequest, TreeMenuEvent, TreeNode } from '@/components/ops/tabs'
+import { saveBlobResponse } from '@/utils/download'
 import { storageKeys } from '@/utils/storage'
 import { useIsMobile } from '@/utils/useIsMobile'
 import {
   opsApi,
   type DatabaseType,
+  type DbTableItem,
   type OpsDatabase,
   type OpsDatabasePayload,
 } from '@/api'
@@ -698,6 +764,7 @@ const menuItems = computed<MenuItem[]>(() => {
       return [
         { key: 'new-query', label: '新建查询' },
         { key: 'open-erd', label: 'ER 图' },
+        { key: 'backup', label: '一键备份' },
         { key: 'refresh', label: '刷新' },
       ]
     case 'table':
@@ -780,12 +847,116 @@ function onMenuClick(key: string) {
     case 'open-erd':
       openTab({ kind: 'erd', conn, schema: node.schema! })
       break
+    case 'backup':
+      openBackup(conn, node.schema!)
+      break
     case 'open-keys':
       openTab({ kind: 'redis-keys', conn, db: node.db ?? 0 })
       break
     case 'open-key':
       openTab({ kind: 'redis-key', conn, db: node.db ?? 0, rkey: node.title })
       break
+  }
+}
+
+// ---- 一键备份 -----------------------------------------------------------------
+
+const backup = reactive({
+  open: false,
+  running: false,
+  connId: 0,
+  schema: '',
+  structureOnly: false,
+  tables: [] as DbTableItem[],
+  tablesLoading: false,
+  tablesError: false,
+  selected: [] as string[],
+})
+
+const BACKUP_TOAST = 'ops-db-backup'
+
+/** 下拉里的候选：库里的表在前、视图在后——视图的 INSERT 本来就不进备份文件。 */
+const backupOptions = computed(() => {
+  const base = backup.tables.filter((t) => t.table_type !== 'VIEW')
+  const views = backup.tables.filter((t) => t.table_type === 'VIEW')
+  return [...base, ...views].map((t) => ({
+    value: t.name,
+    label: t.table_type === 'VIEW' ? `${t.name}（视图）` : t.name,
+  }))
+})
+
+function openBackup(conn: OpsDatabase, schema: string) {
+  backup.connId = conn.id
+  backup.schema = schema
+  backup.structureOnly = false
+  backup.tables = []
+  backup.selected = []
+  backup.tablesError = false
+  backup.open = true
+  loadBackupTables()
+}
+
+/**
+ * 取这一库的表清单供勾选。
+ *
+ * 失败不拦备份：名单为空时提交的就是整库，与加选表之前的行为一致，
+ * 用户仍可照常备份，只是这一次挑不了表。
+ */
+async function loadBackupTables() {
+  const { connId, schema } = backup
+  backup.tablesLoading = true
+  try {
+    const res = await opsApi.dbTables(connId, schema)
+    if (backup.schema !== schema || backup.connId !== connId) return
+    backup.tables = res.items
+  } catch (err: any) {
+    if (backup.schema === schema) backup.tablesError = true
+    toast.error(err?.message || '获取表清单失败')
+  } finally {
+    backup.tablesLoading = false
+  }
+}
+
+/**
+ * 备份这一个库（或选中的几张表）。网盘是主路径（存档留在服务端一侧），下载是同一次生成的另一出口。
+ *
+ * 两条路都不设前端超时：整库读取加上网盘的三段式上传，30 秒的全局默认必然误杀。
+ */
+async function runBackup(target: 'netdisk' | 'download') {
+  if (backup.running) return
+  backup.running = true
+  const scope = backup.structureOnly ? '仅结构' : '结构 + 数据'
+  const picked = backup.selected.length ? `已选 ${backup.selected.length} 张表` : '整库'
+  toast.open({
+    key: BACKUP_TOAST,
+    content: `正在备份 ${backup.schema}（${picked}，${scope}）…`,
+    duration: 0,
+  })
+  const tables = backup.selected.length ? [...backup.selected] : undefined
+  try {
+    if (target === 'netdisk') {
+      const res = await opsApi.dbBackupToNetdisk(
+        backup.connId,
+        backup.schema,
+        backup.structureOnly,
+        tables,
+      )
+      toast.success({ key: BACKUP_TOAST, content: `已保存到网盘：${res.path}`, duration: 8 })
+    } else {
+      const res = await opsApi.dbBackupDownload(
+        backup.connId,
+        backup.schema,
+        backup.structureOnly,
+        tables,
+      )
+      await saveBlobResponse(res, `${backup.schema}.sql`)
+      toast.success({ key: BACKUP_TOAST, content: '备份完成', duration: 2 })
+    }
+    backup.open = false
+  } catch (err: any) {
+    toast.error({ key: BACKUP_TOAST, content: err?.message || '备份失败', duration: 6 })
+  } finally {
+    backup.running = false
   }
 }
 
@@ -1076,6 +1247,24 @@ body.dragging-col .col-resizer::after {
 }
 
 .writable-hint {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+.backup-hint {
+  margin: -8px 0 16px;
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  color: var(--text-3);
+}
+
+.backup-tables {
+  width: 100%;
+}
+
+/* 标签右侧的进度式提示：选了几个 / 一共有几个，勾选时不用自己数。 */
+.backup-scope {
+  margin-left: 8px;
   font-size: var(--fs-xs);
   color: var(--text-3);
 }

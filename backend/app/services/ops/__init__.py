@@ -29,11 +29,14 @@
   DDL / ER 图 / 补全，标识符转义、值参数化、会话只读三层各管各的；
 * :mod:`app.services.ops.db_redis` —— Redis 键浏览与按类型限流的结构化读写；
 * :mod:`app.services.ops.db_data` —— 数据浏览、全量导出与行级写；
+* :mod:`app.services.ops.db_backup` —— 一键备份：整库或选出来的几张表，DDL + INSERT
+  汇成一个 .sql，流式下载或攒成一份传网盘，取数与 INSERT 写法复用 db_data 那一套；
 * :mod:`app.services.ops.db_design` —— 设计表：把期望定义与 information_schema 的
   现状 diff 成 ALTER 语句，预览与执行是两次请求。
 
 依赖单向：safety、actions、database、server、sftp 谁都不接（sftp 只收 server 建好
 的连接对象，不 import 它）；db_exec 接 database 与 safety；db_schema 与 db_redis 在
-db_exec 之上；db_data 与 db_design 最高，接其余 db_* 加 safety。台账那两个模块只碰
+db_exec 之上；db_data 与 db_design 最高，接其余 db_* 加 safety；db_backup 在 db_data
+之上（借用它的取数会话与 INSERT 写法，不开第二条连接通道）。台账那两个模块只碰
 自己的表，碰网络的活全在执行通道里。
 """
