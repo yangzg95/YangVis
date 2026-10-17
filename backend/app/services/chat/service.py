@@ -9,13 +9,16 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Awaitable, Callable, List, Optional, Sequence, Tuple
 
 from sqlalchemy import Select, delete, func, select
 from sqlalchemy.orm import Session
 
+from app import database as app_db
 from app.background import fire_and_forget
 from app.config import get_settings
 from app.errors import CODE_CHAT_NOT_READY, BusinessError
@@ -86,6 +89,12 @@ ABORTED_EMPTY = "（已停止生成）"
 # 执行」就被掐断；不补这句话，用户看到的就像 AI 说到一半没声了，也不
 # 知道发个「继续」就能接着排查。
 STEP_LIMIT_SUFFIX = "\n\n（本轮排查步数已达上限，暂停在此；回复「继续」可接着排查）"
+
+# 单轮回答的总时长上限。运维通道单条命令超时就 120s、ReAct 上限 25 步，最坏
+# 情况一条回答能占住 SSE 流 + 请求级 session + SSH 连接近一小时；加一道整体
+# 墙钟上限兜底，到点就按「步数上限」同款口径收尾（存半截 + 补标记）。
+ANSWER_WALL_CLOCK_LIMIT = 600.0
+TIME_LIMIT_SUFFIX = "\n\n（本轮排查时间已达上限，暂停在此；回复「继续」可接着排查）"
 
 # 附加到每个使用了知识库的 agent prompt 尾部。放在智能体定义外面，是为了
 # 即使用户自己写了个智能体，引用标注机制也能保持一致。
@@ -442,23 +451,59 @@ class ChatService:
         *,
         citations: Optional[List[Citation]] = None,
     ) -> ChatMessage:
+        """同步入口：供同步路由（completions、reject）直接调用。"""
+        message_id = self._persist_message(
+            self._db, self._owner_id, conversation_id, role, content, citations=citations, close_session=False
+        )
+        return self._db.get(ChatMessage, message_id)
+
+    @staticmethod
+    def _persist_message(
+        db: Session,
+        owner_id: int,
+        conversation_id: int,
+        role: str,
+        content: str,
+        *,
+        citations: Optional[List[Citation]] = None,
+        backfill_actions: Optional[List[OpsPendingAction]] = None,
+        close_session: bool = True,
+    ) -> int:
+        """在指定 session 里落一条消息并 commit，返回 message id。
+
+        与 ``add_message`` 同一份逻辑，但 session 由调用方传入：async 路径可以
+        把它丢进 ``asyncio.to_thread``，用自己的 session，不把同步 commit 留在
+        事件循环上；可选的 ``backfill_actions`` 让回填与消息落在同一次 commit
+        里，省掉第二次线程切换。``close_session`` 控制是否在返回前关闭 session：
+        async 路径传 True（自己开的自己关），sync 路径传 False（调用方的 session
+        不该被关掉）。
+        """
         row = ChatMessage(
-            owner_id=self._owner_id,
+            owner_id=owner_id,
             conversation_id=conversation_id,
             role=role,
             content=content,
             citations=[c.model_dump() for c in citations] if citations else None,
         )
-        self._db.add(row)
+        db.add(row)
 
-        # 顺手 touch 一下父记录，好让会话列表按最近活跃时间排序。
-        conversation = self._db.get(ChatConversation, conversation_id)
+        conversation = db.get(ChatConversation, conversation_id)
         if conversation is not None:
             conversation.updated_at = func.now()
 
-        self._db.commit()
-        self._db.refresh(row)
-        return row
+        db.commit()
+        db.refresh(row)
+        message_id = row.id
+
+        if backfill_actions:
+            for action in backfill_actions:
+                merged = db.merge(action)
+                merged.message_id = message_id
+            db.commit()
+
+        if close_session:
+            db.close()
+        return message_id
 
     def update_message_content(self, message_id: int, content: str) -> ChatMessage:
         """改写一条助手消息的正文（目前唯一的入口是用户手动改图）。
@@ -541,7 +586,7 @@ class ChatService:
             # 与 confirm 同一口径：区分「不存在」和「来晚了」。
             ops_actions.get_owned(self._db, self._owner_id, action_id)
             raise BusinessError(409, "该命令已处理，请刷新查看最新状态")
-        Auditor(self._db, self._owner_id, action.target_type).record(
+        Auditor(self._owner_id, action.target_type).record_sync(
             target_id=action.target_id,
             target_name=action.target_name,
             command=action.command,
@@ -850,8 +895,10 @@ class ChatService:
         parts: List[str] = []
         aborted = False
         step_limited = False
+        time_limited = False
         sent_proposals = 0
         sent_execs = 0
+        deadline = time.monotonic() + ANSWER_WALL_CLOCK_LIMIT
 
         stream = executor.astream_events(
             {
@@ -868,6 +915,14 @@ class ChatService:
             async for event in stream:
                 if is_disconnected is not None and await is_disconnected():
                     aborted = True
+                    break
+                if time.monotonic() > deadline:
+                    time_limited = True
+                    logger.warning(
+                        "answer for conversation %s hit the wall-clock limit (%.0fs)",
+                        conversation_id,
+                        ANSWER_WALL_CLOCK_LIMIT,
+                    )
                     break
 
                 kind = event.get("event")
@@ -942,27 +997,31 @@ class ChatService:
             # 把这段残缺的回答存下来，并打上标记。要是存完整文本，那么落库
             # 的会话内容就和用户当时看到的对不上了。
             answer = f"{answer}{ABORTED_SUFFIX}" if answer else ABORTED_EMPTY
-        elif step_limited:
+        elif step_limited or time_limited:
             # 标记同样先补流出去再落库：用户屏幕上看到的和存下来的保持一致，
             # 他也知道发条「继续」就能让模型接着排查。
-            yield "token", STEP_LIMIT_SUFFIX
-            answer = f"{answer}{STEP_LIMIT_SUFFIX}" if answer else STEP_LIMIT_SUFFIX.strip()
+            suffix = STEP_LIMIT_SUFFIX if step_limited else TIME_LIMIT_SUFFIX
+            yield "token", suffix
+            answer = f"{answer}{suffix}" if answer else suffix.strip()
         elif not answer:
             answer = NO_CONTEXT_REPLY
 
-        row = self.add_message(
+        # 消息落库 + 待确认项回填一起丢进工作线程：两者都需要 commit，合在
+        # 同一个 session 里省掉第二次线程切换。self._db 留在事件循环上给后续
+        # 的读取（如果有的话）用，不再被同步 commit 阻塞。
+        actions_to_backfill = (
+            toolbox.pending_proposals if toolbox is not None else None
+        )
+        message_id = await asyncio.to_thread(
+            self._persist_message,
+            app_db.SessionLocal(),
+            self._owner_id,
             conversation_id,
             ROLE_ASSISTANT,
             answer,
             citations=citations or None,
+            backfill_actions=actions_to_backfill,
         )
-
-        # 回填提议对应的 assistant 消息：历史回放时确认卡片要挂在触发它的
-        # 那条回答下面。
-        if toolbox is not None and toolbox.pending_proposals:
-            for action in toolbox.pending_proposals:
-                action.message_id = row.id
-            self._db.commit()
 
         # 一轮问答落库后的收尾（重算会话摘要、提取长期记忆）放到请求之外跑：
         # SSE 流一结束请求级 session 就关了，后台任务自己开 session。它失败
@@ -972,7 +1031,7 @@ class ChatService:
         logger.debug(
             "answer for conversation %s saved as message %s (%d chars, %d citation(s), aborted=%s)",
             conversation_id,
-            row.id,
+            message_id,
             len(answer),
             len(citations),
             aborted,
@@ -982,7 +1041,7 @@ class ChatService:
             # 不发 "done"：客户端已经走了。这里的意义就在于把内容存下来。
             return
 
-        yield "done", {"message_id": row.id, "conversation_id": conversation_id}
+        yield "done", {"message_id": message_id, "conversation_id": conversation_id}
 
 
 def derive_title(question: str) -> str:

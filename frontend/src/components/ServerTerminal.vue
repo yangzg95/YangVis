@@ -1,5 +1,5 @@
 <template>
-  <div class="terminal-wrap" @keydown="onWrapKeydown">
+  <div :class="['terminal-wrap', { 'terminal-light': terminalTheme === 'light' }]" @keydown="onWrapKeydown">
     <div ref="hostEl" class="terminal-host" />
     <!-- Ctrl+F 唤出的终端内容搜索：Enter 下一个、Shift+Enter 上一个、Esc 关闭。 -->
     <div v-if="searchOpen" class="terminal-search">
@@ -78,6 +78,45 @@ let observer: ResizeObserver | null = null
 let generation = 0
 // 用户已键入但还没回车的内容。AI 补提示符时要避开它，免得把半条命令提交上去。
 let pendingLine = ''
+
+// ---- 终端主题切换 -----------------------------------------------------------
+// 深色/浅色两套配色，存 localStorage 持久化。
+const TERMINAL_THEME_KEY = 'yangvis-terminal-theme'
+type TerminalTheme = 'dark' | 'light'
+
+const TERMINAL_THEMES = {
+  dark: {
+    background: '#11181f',
+    foreground: '#d8dee4',
+    cursor: '#3ad6de',
+    selectionBackground: 'rgba(58, 214, 222, 0.25)',
+  },
+  light: {
+    background: '#f5f5f5',
+    foreground: '#1a1a1a',
+    cursor: '#0080ff',
+    selectionBackground: 'rgba(0, 128, 255, 0.2)',
+  },
+} as const
+
+const terminalTheme = ref<TerminalTheme>(
+  (localStorage.getItem(TERMINAL_THEME_KEY) as TerminalTheme) || 'dark',
+)
+
+function applyTheme() {
+  if (!term) return
+  term.options.theme = TERMINAL_THEMES[terminalTheme.value]
+  try {
+    localStorage.setItem(TERMINAL_THEME_KEY, terminalTheme.value)
+  } catch {
+    // 存储被禁用时，这次不记住而已。
+  }
+}
+
+function toggleTerminalTheme() {
+  terminalTheme.value = terminalTheme.value === 'dark' ? 'light' : 'dark'
+  applyTheme()
+}
 
 function write(text: string) {
   term?.write(text)
@@ -353,13 +392,7 @@ onMounted(() => {
     fontFamily: "'IBM Plex Mono', Menlo, Consolas, 'Courier New', monospace",
     cursorBlink: true,
     scrollback: 5000,
-    // 与全局 --ink / --signal-bright 同色系；xterm 主题在 JS 里，用不了 CSS 变量。
-    theme: {
-      background: '#11181f',
-      foreground: '#d8dee4',
-      cursor: '#3ad6de',
-      selectionBackground: 'rgba(58, 214, 222, 0.25)',
-    },
+    theme: TERMINAL_THEMES[terminalTheme.value],
   })
   fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
@@ -437,7 +470,14 @@ watch(
   },
 )
 
-defineExpose({ focus: () => term?.focus(), fit: syncSize, writeAiExec, sendInput })
+defineExpose({
+  focus: () => term?.focus(),
+  fit: syncSize,
+  writeAiExec,
+  sendInput,
+  terminalTheme,
+  toggleTerminalTheme,
+})
 </script>
 
 <style scoped>
@@ -455,6 +495,10 @@ defineExpose({ focus: () => term?.focus(), fit: syncSize, writeAiExec, sendInput
   background: var(--ink);
   border-radius: var(--tool-radius);
   overflow: hidden;
+}
+
+.terminal-wrap.terminal-light {
+  background: #e8e8e8;
 }
 
 .terminal-host {
@@ -541,5 +585,13 @@ defineExpose({ focus: () => term?.focus(), fit: syncSize, writeAiExec, sendInput
 
 .terminal-wrap :deep(.xterm-viewport)::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.2);
+}
+
+.terminal-light :deep(.xterm-viewport)::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.terminal-light :deep(.xterm-viewport)::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.25);
 }
 </style>

@@ -105,7 +105,7 @@ class FakeSSH:
 
         return _Conn()
 
-    async def run_once(self, conn, command, *, timeout=None, limit=None):
+    async def run_once(self, conn, command, *, timeout=None, limit=None, server_id=None):
         self.runs.append((command, timeout))
         return self.exit_status, self.output
 
@@ -390,7 +390,8 @@ def test_propose_lands_pending_and_never_touches_ssh(db, ssh):
     assert rows[0].command == WRITE_CMD
     assert rows[0].reason == "nginx 卡住了"
     assert rows[0].message_id is None, "回答还没落库，只能等 stream_answer 回填"
-    assert box.pending_proposals == rows
+    # detached 对象与 persistent 对象不直接相等，按 id 比对
+    assert [a.id for a in box.pending_proposals] == [r.id for r in rows]
     assert ssh.runs == [], "提议阶段不许执行任何东西"
     assert ssh.connects == 0, "提议也不该顺手开一条 SSH 连接"
     assert audits(db) == [], "提议本身不是一种执行，留痕等在 confirm/reject"

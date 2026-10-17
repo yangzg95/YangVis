@@ -66,15 +66,39 @@
 
       <div v-for="item in items" :key="item.key" :class="['msg', item.kind]">
         <div class="bubble">
-          <div v-if="item.steps.length" class="steps">
-            <a-tag v-for="(step, i) in item.steps" :key="i" color="blue">{{ step }}</a-tag>
-          </div>
-          <!-- 助手回答按 markdown 渲染，用户输入保持纯文本。 -->
-          <div
-            v-if="item.kind === 'assistant'"
-            class="content markdown"
-            v-html="renderCached(item.key, item.text)"
-          />
+          <!-- 助手消息按 chunks 顺序渲染：步骤与文字交替出现；步骤过多时折叠。 -->
+          <template v-if="item.kind === 'assistant'">
+            <div class="chunk-flow">
+              <template v-for="chunk in displayChunks(item)" :key="chunk.index">
+                <button
+                  v-if="chunk.summary"
+                  type="button"
+                  class="step-line step-summary"
+                  @click="toggleSteps(item.key)"
+                >
+                  <span class="step-icon">⚙</span>
+                  <span class="step-text">
+                    {{ chunk.expanded ? '收起步骤' : `已执行 ${chunk.stepCount} 步 · 点击展开` }}
+                  </span>
+                </button>
+                <div v-else-if="chunk.type === 'step'" class="step-line">
+                  <span class="step-icon">⚙</span>
+                  <span class="step-text">{{ chunk.detail }}</span>
+                </div>
+                <div
+                  v-else-if="chunk.type === 'text' && chunk.detail"
+                  class="content markdown"
+                  v-html="renderCached(`${item.key}-${chunk.index}`, chunk.detail)"
+                />
+              </template>
+            </div>
+            <!-- 兜底：如果 chunks 还没数据但 text 有内容（历史回放），整段渲染。 -->
+            <div
+              v-if="!item.chunks.length && item.text"
+              class="content markdown"
+              v-html="renderCached(item.key, item.text)"
+            />
+          </template>
           <div v-else class="content" v-text="item.text" />
           <!-- 写命令确认卡片：挂在触发提议的那条助手气泡下面。 -->
           <ConfirmCard
@@ -98,11 +122,10 @@
         </div>
       </div>
 
-      <div v-if="thinking && !streamingText" class="msg assistant">
-        <div class="bubble">
-          <a-spin size="small" />
-          <span class="thinking-hint">正在排查…</span>
-        </div>
+      <!-- 持久状态指示器：区分 AI 思考中 / 执行命令中 / 空闲。 -->
+      <div v-if="thinking" class="status-bar">
+        <a-spin size="small" />
+        <span>{{ aiStatusText }}</span>
       </div>
 
       <!-- 上翻查看历史时出现：sticky 钉在底部，点击恢复贴底跟随。 -->
@@ -255,17 +278,68 @@ const { schedule, beginStream, endStream, renderCached, clearCache } = useStream
   md.render(text || ''),
 )
 
+/** 一条助手回复由若干 chunk 按到达顺序拼接：步骤标签与文字交替。 */
+interface TalkChunk {
+  type: 'step' | 'text'
+  /** step 时是命令摘要，text 时是这段文字。 */
+  detail: string
+}
+
 interface TalkItem {
   key: string
   /** 落库消息 id：确认卡片按它对位到触发提议的气泡下面。 */
   id?: number
   kind: 'user' | 'assistant'
+  /** 完整文本（用于复制、历史回放兜底渲染）。 */
   text: string
-  steps: string[]
+  /** 按到达顺序排列的步骤与文字片段，用于交错渲染。 */
+  chunks: TalkChunk[]
 }
 
 const items = ref<TalkItem[]>([])
 const draft = ref('')
+
+// ---- 步骤折叠 ---------------------------------------------------------------
+// 一条回答里命令步骤多了会占很多纵向空间。超过阈值默认折叠成一行「已执行 N 步」，
+// 点开展示完整的交错步骤；文字块始终保留，阅读流不受影响。
+const STEP_COLLAPSE_THRESHOLD = 3
+const expandedSteps = ref<Set<string>>(new Set())
+
+function toggleSteps(key: string) {
+  const set = expandedSteps.value
+  if (set.has(key)) set.delete(key)
+  else set.add(key)
+}
+
+interface RenderChunk extends TalkChunk {
+  index: number
+  summary: boolean
+  stepCount: number
+  expanded: boolean
+}
+
+function displayChunks(item: TalkItem): RenderChunk[] {
+  const stepCount = item.chunks.filter((c) => c.type === 'step').length
+  const expanded = expandedSteps.value.has(item.key)
+  const collapsible = stepCount > STEP_COLLAPSE_THRESHOLD
+  const out: RenderChunk[] = []
+  let seenFirstStep = false
+  item.chunks.forEach((chunk, index) => {
+    if (chunk.type !== 'step') {
+      out.push({ ...chunk, index, summary: false, stepCount, expanded })
+      return
+    }
+    if (collapsible && !seenFirstStep) {
+      seenFirstStep = true
+      out.push({ ...chunk, index, summary: true, stepCount, expanded })
+      if (!expanded) return // 折叠态：摘要行代替这一步
+    } else if (collapsible && !expanded) {
+      return // 折叠态：其余步骤隐藏
+    }
+    out.push({ ...chunk, index, summary: false, stepCount, expanded })
+  })
+  return out
+}
 
 // ---- 会话与写命令确认 ---------------------------------------------------------
 // 传输层是主对话那套 SSE（/chat/completions + /chat/actions/{id}/confirm），
@@ -289,8 +363,17 @@ function actionsOf(item: TalkItem): OpsAction[] {
 }
 const thinking = ref(false)
 const streamingText = ref(false)
+/** 当前正在执行的步骤摘要（step 事件到达时写入，下一个 token 到达时清空）。 */
+const currentStepDetail = ref('')
 const scrollEl = ref<HTMLElement | null>(null)
 const inputEl = ref<{ focus: () => void } | null>(null)
+
+/** 持久状态指示文案：区分 AI 在思考、执行命令、还是空闲。 */
+const aiStatusText = computed(() => {
+  if (currentStepDetail.value) return `正在执行：${currentStepDetail.value}`
+  if (streamingText.value) return '正在生成回答…'
+  return '正在思考…'
+})
 
 // ---- 贴底滚动 ---------------------------------------------------------------
 // 与 Chat.vue 同一口径：上翻时流式事件不抢视图，原本贴底才往下跟。
@@ -374,7 +457,7 @@ const nextKey = () => `i${++seq}`
 function currentAnswer(): TalkItem {
   const last = items.value[items.value.length - 1]
   if (last && last.kind === 'assistant') return last
-  const created: TalkItem = { key: nextKey(), kind: 'assistant', text: '', steps: [] }
+  const created: TalkItem = { key: nextKey(), kind: 'assistant', text: '', chunks: [] }
   items.value.push(created)
   return created
 }
@@ -401,6 +484,7 @@ function resetView() {
   thinking.value = false
   streamingText.value = false
   streamingAnswerKey.value = null
+  currentStepDetail.value = ''
   endStream()
   clearCache()
 }
@@ -455,7 +539,7 @@ async function openConversation(id: number) {
       id: m.id,
       kind: m.role,
       text: m.content,
-      steps: [],
+      chunks: [],
     }))
     actions.value = acts.items
     pinToBottom()
@@ -536,16 +620,40 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
     streamingAnswerKey.value = item.key
     return item
   }
+  // 当前文字 chunk 的引用：token 到来时追加到它，step 到来时关闭它。
+  let textChunk: TalkChunk | null = null
+  const ensureTextChunk = (item: TalkItem) => {
+    if (!textChunk || textChunk.type !== 'text') {
+      textChunk = { type: 'text', detail: '' }
+      item.chunks.push(textChunk)
+    }
+    return textChunk
+  }
+  const closeTextChunk = () => {
+    textChunk = null
+  }
   return {
     onStep: (data) => {
-      answer().steps.push(describeStep(data))
+      const item = answer()
+      closeTextChunk()
+      const detail = describeStep(data)
+      currentStepDetail.value = detail
+      item.chunks.push({ type: 'step', detail })
       scrollToBottom()
     },
     onToken: (token) => {
       const item = answer()
       item.text += token
+      const tc = ensureTextChunk(item)
+      tc.detail += token
+      // 收到第一个 token 后，步骤已执行完，清空步骤状态。
+      if (currentStepDetail.value && streamingText.value) {
+        currentStepDetail.value = ''
+      }
       streamingText.value = true
-      beginStream(item.key)
+      // 节流 key 必须与模板 renderCached 的 key 一致（活跃文字块永远是最后一块），
+      // 否则 streamRender 的「同 tick 回旧 HTML」判断对不上，每个 token 都全量重解析。
+      beginStream(`${item.key}-${item.chunks.length - 1}`)
       schedule()
       scrollToBottom()
     },
@@ -562,7 +670,12 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
       // 确认流的 exec：useOpsConfirm 已把结果写回卡片，这里补步骤标签。
       // 只读命令（action_id 为空）在 step 里已经亮过命令，不再重复打标签。
       if (ev.action_id != null) {
-        answer().steps.push(`已执行：${ev.command}（exit ${ev.exit_status ?? '—'}）`)
+        const item = answer()
+        closeTextChunk()
+        item.chunks.push({
+          type: 'step',
+          detail: `已执行：${ev.command}（exit ${ev.exit_status ?? '—'}）`,
+        })
       }
       // 两种 exec 都通知父组件——服务器问答时父组件把命令和输出打到终端窗口。
       emit('exec', {
@@ -593,6 +706,7 @@ function finishStream() {
   thinking.value = false
   streamingText.value = false
   streamingAnswerKey.value = null
+  currentStepDetail.value = ''
   abort = null
   endStream()
 }
@@ -647,7 +761,7 @@ async function ask(question: string) {
     }
   }
 
-  items.value.push({ key: nextKey(), kind: 'user', text: question, steps: [] })
+  items.value.push({ key: nextKey(), kind: 'user', text: question, chunks: [] })
   thinking.value = true
   streamingText.value = false
   pinToBottom()
@@ -868,16 +982,80 @@ defineExpose({
   background: var(--signal-bg-strong);
 }
 
-.steps {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-bottom: 6px;
-}
-
 .thinking-hint {
   margin-left: 8px;
   color: var(--text-3);
+}
+
+/* 持久状态指示器：显示 AI 当前在思考、执行命令还是生成回答。 */
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin: 4px 0 8px;
+  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
+.dark .status-bar {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* 步骤与文字交错流：步骤行紧凑，文字块自然分段。 */
+.chunk-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.step-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(58, 214, 222, 0.08);
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+  line-height: 1.4;
+}
+
+.dark .step-line {
+  background: rgba(58, 214, 222, 0.12);
+}
+
+.step-icon {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.step-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'IBM Plex Mono', Menlo, Consolas, monospace;
+}
+
+/* 折叠摘要行是可点的 button：去掉默认按钮样式，保持与步骤行同宽同底。 */
+.step-summary {
+  width: 100%;
+  padding: 4px 8px;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.step-summary:hover {
+  background: rgba(58, 214, 222, 0.16);
+}
+
+.dark .step-summary:hover {
+  background: rgba(58, 214, 222, 0.2);
 }
 
 /* 气泡操作行（复制）：悬停整条消息才出现。 */

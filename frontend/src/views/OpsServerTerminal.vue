@@ -1,5 +1,5 @@
 <template>
-  <div class="term-page">
+  <div :class="['term-page', { 'term-light': terminalTheme === 'light' }]">
     <header class="term-topbar">
       <div class="topbar-left">
         <a-tooltip title="返回列表">
@@ -28,6 +28,12 @@
         <a-button v-if="terminalStatus === 'closed' && server" size="small" ghost @click="reconnect">
           <ReloadOutlined /> {{ autoReconnecting ? '立即重连' : '重连' }}
         </a-button>
+        <a-tooltip :title="terminalTheme === 'dark' ? '切换浅色主题' : '切换深色主题'">
+          <button type="button" class="icon-btn" @click="terminalRef?.toggleTerminalTheme()">
+            <BulbOutlined v-if="terminalTheme === 'dark'" />
+            <BulbFilled v-else />
+          </button>
+        </a-tooltip>
         <a-button size="small" ghost @click="back">返回列表</a-button>
       </div>
     </header>
@@ -138,7 +144,7 @@
         <div class="ai-body">
           <OpsChat
             target="server"
-            dark
+            :dark="terminalTheme === 'dark'"
             :target-id="server ? serverId : null"
             placeholder="例如：这台机器磁盘为什么满了"
             :empty-hint="loadError || '正在加载服务器信息…'"
@@ -169,6 +175,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeftOutlined,
+  BulbFilled,
+  BulbOutlined,
   CloudServerOutlined,
   DoubleLeftOutlined,
   FolderOutlined,
@@ -222,6 +230,8 @@ const transfers = useTransfersStore()
 const reconnectSeq = ref(0)
 const terminalRef = ref<InstanceType<typeof ServerTerminal> | null>(null)
 const filePanelRef = ref<InstanceType<typeof ServerFilePanel> | null>(null)
+// 终端主题：从 ServerTerminal 组件读取，用于顶栏图标切换。
+const terminalTheme = computed(() => terminalRef.value?.terminalTheme ?? 'dark')
 // 终端还没连上时收到的「送到终端」命令先存着，连上后立即补送。
 let pendingInput = ''
 
@@ -758,5 +768,154 @@ body.dragging-col .ai-resizer::after {
 .conn-text {
   font-size: var(--fs-xs);
   color: var(--text-dark-2);
+}
+
+/* ---- 浅色主题：整页从深色世界切到浅色世界 -------------------------------- */
+.term-light {
+  background: #f0f2f5;
+  color: #1a1a1a;
+}
+
+.term-light .term-topbar {
+  background: #fff;
+  border-bottom-color: #e0e0e0;
+}
+
+.term-light .server-name {
+  color: #1a1a1a;
+}
+
+.term-light .server-name.muted {
+  color: #666;
+}
+
+.term-light .server-addr {
+  color: #666;
+}
+
+.term-light .conn-text {
+  color: #666;
+}
+
+.term-light .term-topbar :deep(.ant-btn-ghost) {
+  color: #333;
+  border-color: rgba(0, 0, 0, 0.2);
+}
+
+.term-light .term-topbar :deep(.ant-btn-ghost:hover) {
+  color: #0080ff;
+  border-color: #0080ff;
+}
+
+.term-light .icon-btn,
+.term-light .rail-btn {
+  color: #666;
+}
+
+.term-light .icon-btn:hover,
+.term-light .rail-btn:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: #1a1a1a;
+}
+
+.term-light .rail-btn.active {
+  background: rgba(0, 128, 255, 0.1);
+  color: #0080ff;
+}
+
+.term-light .term-rail {
+  border-right-color: #e0e0e0;
+}
+
+.term-light .term-files {
+  border-color: #e0e0e0;
+  background: #fff;
+}
+
+.term-light .left-tabs {
+  border-bottom-color: #e0e0e0;
+}
+
+.term-light .left-tab {
+  color: #666;
+}
+
+.term-light .left-tab:hover {
+  color: #1a1a1a;
+}
+
+.term-light .left-tab.active {
+  color: #0080ff;
+}
+
+.term-light .left-tab.active::after {
+  background: #0080ff;
+}
+
+.term-light .tab-badge {
+  background: rgba(0, 128, 255, 0.12);
+  color: #0080ff;
+}
+
+.term-light .left-tab-close {
+  color: #999;
+}
+
+.term-light .left-tab-close:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: #333;
+}
+
+.term-light .term-error {
+  background: #fff;
+  color: #666;
+}
+
+.term-light .term-error-icon {
+  color: #ccc;
+}
+
+.term-light .ai-rail {
+  border-color: #e0e0e0;
+  background: #fff;
+  color: #666;
+}
+
+.term-light .ai-rail:hover {
+  border-color: rgba(0, 128, 255, 0.4);
+  color: #0080ff;
+}
+
+.term-light .term-ai {
+  border-color: #e0e0e0;
+  background: #fff;
+}
+
+.term-light .ai-resizer:hover::after,
+.term-light body.dragging-col .ai-resizer::after {
+  background: rgba(0, 128, 255, 0.5);
+}
+
+.term-light .ai-head {
+  border-bottom-color: #e0e0e0;
+  color: #1a1a1a;
+}
+
+.term-light .term-statusbar {
+  background: #fff;
+  border-top-color: #e0e0e0;
+  color: #666;
+}
+
+.term-light .conn-dot {
+  background: #bbb;
+}
+
+.term-light .conn-dot.connected {
+  background: #52c41a;
+}
+
+.term-light .conn-dot.connecting {
+  background: #faad14;
 }
 </style>

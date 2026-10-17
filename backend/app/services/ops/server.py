@@ -29,6 +29,10 @@ from app.models.schemas import (
 )
 from app.timeutil import db_now
 
+# 缓存服务器操作系统类型：server_id -> "linux" | "other"
+# 用于决定是否使用 timeout(1) 包装命令（仅 Linux 有）
+_server_os_cache: dict[int, str] = {}
+
 logger = logging.getLogger("yangvis.ops_server")
 
 
@@ -338,34 +342,63 @@ async def connect(
     return conn
 
 
+async def detect_server_os(conn: asyncssh.SSHClientConnection) -> str:
+    """检测远端操作系统类型，返回 "linux" 或 "other"。"""
+    try:
+        result = await conn.run("uname -s", check=False)
+        uname_output = (result.stdout or "").strip().lower()
+        return "linux" if "linux" in uname_output else "other"
+    except Exception:
+        # 检测失败时保守地假设为非 Linux
+        return "other"
+
+
 async def run_once(
     conn: asyncssh.SSHClientConnection,
     command: str,
     *,
     timeout: Optional[float] = None,
     limit: Optional[int] = None,
+    server_id: Optional[int] = None,
 ) -> Tuple[int, str]:
     """执行一条命令，返回 ``(exit_status, 合并后的输出)``。
 
     输出被截断到 ``OPS_OUTPUT_LIMIT``：这条通道的另一端是模型的 context，
     一个 ``cat`` 大日志就能把它撑爆。
+
+    超时时远端进程会被 ``timeout(1)`` 杀掉，避免僵尸进程（仅 Linux）。
     """
     settings = get_settings()
     timeout = timeout or settings.OPS_CMD_TIMEOUT
     limit = limit or settings.OPS_OUTPUT_LIMIT
 
+    # 检测操作系统（带缓存）
+    is_linux = False
+    if server_id is not None:
+        if server_id not in _server_os_cache:
+            _server_os_cache[server_id] = await detect_server_os(conn)
+        is_linux = _server_os_cache[server_id] == "linux"
+
+    # Linux 系统用 timeout(1) 包装命令，确保超时时远端进程被杀掉
+    if is_linux:
+        escaped_command = command.replace("'", "'\\''")
+        wrapped_command = f"timeout {int(timeout)}s sh -c '{escaped_command}'"
+    else:
+        wrapped_command = command
+
     try:
         result = await asyncio.wait_for(
-            conn.run(command, check=False), timeout=timeout
+            conn.run(wrapped_command, check=False), timeout=timeout
         )
     except asyncio.TimeoutError:
-        # 只记命令首词：完整命令可能带敏感参数，留痕责任在审计表。
+        # 本地超时（网络问题等），远端 timeout 应该已经杀掉了进程（如果是 Linux）
         logger.debug(
             "command %r on an ssh connection timed out after %.0fs",
             command.split(None, 1)[0] if command.strip() else "",
             timeout,
         )
-        return 124, f"命令执行超过 {timeout:.0f} 秒，已中断"
+        suffix = "" if is_linux else "（远端进程可能仍在运行）"
+        return 124, f"命令执行超过 {timeout:.0f} 秒，已中断{suffix}"
     except asyncssh.Error as exc:
         logger.debug("ssh command failed: %s", exc)
         return 1, f"执行失败：{exc}"
@@ -374,10 +407,68 @@ async def run_once(
     stderr = result.stderr if isinstance(result.stderr, str) else ""
     output = stdout + (f"\n[stderr]\n{stderr}" if stderr.strip() else "")
 
+    exit_status = result.exit_status or 0
+
+    # timeout(1) 不存在（理论上不应该发生，因为已经检测过是 Linux）：回退到不包装的版本
+    if is_linux and exit_status == 127 and _looks_like_timeout_missing(output):
+        logger.debug("timeout(1) not available on Linux, retrying without wrapper")
+        return await _run_without_timeout_wrapper(
+            conn, command, timeout=timeout, limit=limit, is_linux=False
+        )
+
+    # timeout(1) 超时时返回 124，统一成我们的提示
+    if is_linux and exit_status == 124:
+        return 124, f"命令执行超过 {timeout:.0f} 秒，已中断"
+
     if len(output) > limit:
         output = output[:limit] + f"\n…（输出超过 {limit} 字符，已截断）"
 
-    return result.exit_status or 0, output
+    return exit_status, output
+
+
+def _looks_like_timeout_missing(output: str) -> bool:
+    """检查输出是否表明 timeout 命令不存在。"""
+    lower = output.lower()
+    return (
+        "timeout" in lower
+        and ("not found" in lower or "command not found" in lower or "no such file" in lower)
+    )
+
+
+async def _run_without_timeout_wrapper(
+    conn: asyncssh.SSHClientConnection,
+    command: str,
+    *,
+    timeout: float,
+    limit: int,
+    is_linux: bool = False,
+) -> Tuple[int, str]:
+    """不包装 timeout 的执行（用于非 Linux 系统回退）。"""
+    try:
+        result = await asyncio.wait_for(
+            conn.run(command, check=False), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        logger.debug(
+            "command %r timed out after %.0fs (no remote kill)",
+            command.split(None, 1)[0] if command.strip() else "",
+            timeout,
+        )
+        suffix = "" if is_linux else "（远端进程可能仍在运行）"
+        return 124, f"命令执行超过 {timeout:.0f} 秒，已中断{suffix}"
+    except asyncssh.Error as exc:
+        logger.debug("ssh command failed: %s", exc)
+        return 1, f"执行失败：{exc}"
+
+    stdout = result.stdout if isinstance(result.stdout, str) else ""
+    stderr = result.stderr if isinstance(result.stderr, str) else ""
+    output = stdout + (f"\n[stderr]\n{stderr}" if stderr.strip() else "")
+
+    exit_status = result.exit_status or 0
+    if len(output) > limit:
+        output = output[:limit] + f"\n…（输出超过 {limit} 字符，已截断）"
+
+    return exit_status, output
 
 
 async def test_connection(server: OpsServer, service: OpsServerService) -> str:

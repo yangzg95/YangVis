@@ -23,6 +23,7 @@ SSH 连接随一次回答复用、回答结束即关（``aclose``）：一次回
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -31,12 +32,12 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app import database as app_db
 from app.models.entities import OpsAuditLog, OpsDatabase, OpsPendingAction, OpsServer
 from app.models.schemas import DatabaseType
 from app.services.ops import database as db_ops
 from app.services.ops import db_exec as db_exec
 from app.services.ops import server as server_ops
-from app.services.ops.actions import finish_execution
 from app.services.ops.safety import classify_command
 
 logger = logging.getLogger("yangvis.chat_ops")
@@ -52,14 +53,18 @@ TARGET_DATABASE = "database"
 
 
 class Auditor:
-    """把每一次工具执行写进审计表。"""
+    """把每一次工具执行写进审计表。
 
-    def __init__(self, db: Session, owner_id: int, target_type: str) -> None:
-        self._db = db
+    审计是叶子写操作、不需要把 ORM 状态带回调用方，所以每次 record 自己开一个
+    session 并放到工作线程里跑：既不让同步 commit 卡住事件循环（否则会拖慢同
+    loop 上所有并发 SSE 流的心跳），也避免和请求级 session 跨线程混用。
+    """
+
+    def __init__(self, owner_id: int, target_type: str) -> None:
         self._owner_id = owner_id
         self._target_type = target_type
 
-    def record(
+    async def record(
         self,
         *,
         target_id: int,
@@ -71,8 +76,34 @@ class Auditor:
         actor: str = "ai",
         pending_action_id: Optional[int] = None,
     ) -> None:
+        await asyncio.to_thread(
+            self.record_sync,
+            target_id=target_id,
+            target_name=target_name,
+            command=command,
+            verdict=verdict,
+            success=success,
+            error=error,
+            actor=actor,
+            pending_action_id=pending_action_id,
+        )
+
+    def record_sync(
+        self,
+        *,
+        target_id: int,
+        target_name: Optional[str],
+        command: str,
+        verdict: str,
+        success: bool,
+        error: Optional[str] = None,
+        actor: str = "ai",
+        pending_action_id: Optional[int] = None,
+    ) -> None:
+        """同步版本：供本身已跑在工作线程里的调用方（同步路由）直接用。"""
+        db = app_db.SessionLocal()
         try:
-            self._db.add(
+            db.add(
                 OpsAuditLog(
                     owner_id=self._owner_id,
                     target_type=self._target_type,
@@ -86,10 +117,12 @@ class Auditor:
                     pending_action_id=pending_action_id,
                 )
             )
-            self._db.commit()
+            db.commit()
         except Exception:  # pragma: no cover - 审计失败不该拖垮会话
-            self._db.rollback()
+            db.rollback()
             logger.exception("failed to write an audit record")
+        finally:
+            db.close()
 
 
 def render_result(result) -> str:
@@ -142,8 +175,8 @@ class ChatOpsToolbox:
         self._conversation_id = conversation_id
         self._servers = server_ops.OpsServerService(db, owner_id)
         self._databases = db_ops.OpsDatabaseService(db, owner_id)
-        self._server_audit = Auditor(db, owner_id, TARGET_SERVER)
-        self._db_audit = Auditor(db, owner_id, TARGET_DATABASE)
+        self._server_audit = Auditor(owner_id, TARGET_SERVER)
+        self._db_audit = Auditor(owner_id, TARGET_DATABASE)
         self._conns: Dict[int, Any] = {}
         self._target_server_cache: Optional[OpsServer] = None
         self._target_database_cache: Optional[OpsDatabase] = None
@@ -214,7 +247,7 @@ class ChatOpsToolbox:
         try:
             conn = await self._connection(server)
         except server_ops.OpsConnectError as exc:
-            self._server_audit.record(
+            await self._server_audit.record(
                 target_id=server.id,
                 target_name=server.name,
                 command=command,
@@ -230,9 +263,33 @@ class ChatOpsToolbox:
         status, output = await server_ops.run_once(
             conn, command, timeout=settings.OPS_AGENT_CMD_TIMEOUT
         )
+        # run_once 把连接层异常（asyncssh.Error）压成 (1, "执行失败：…")；命令本身
+        # 的非零退出是 check=False 正常返回、不走这条。所以命中这个签名基本就是
+        # 缓存的连接中途断了：换一条新连接重试一次（只读命令重试是幂等安全的）。
+        if status == 1 and output.startswith("执行失败"):
+            stale = self._conns.pop(server.id, None)
+            if stale is not None:
+                stale.close()
+            try:
+                conn = await server_ops.connect(server)
+            except server_ops.OpsConnectError as exc:
+                await self._server_audit.record(
+                    target_id=server.id,
+                    target_name=server.name,
+                    command=command,
+                    verdict="readonly",
+                    success=False,
+                    error=str(exc),
+                )
+                return f"无法连接服务器：{exc}"
+            self._conns[server.id] = conn
+            logger.info("ssh connection to server %s dropped mid-answer; reconnected", server.id)
+            status, output = await server_ops.run_once(
+                conn, command, timeout=settings.OPS_AGENT_CMD_TIMEOUT, server_id=server.id
+            )
         elapsed_ms = int((time.monotonic() - started) * 1000)
         truncated = (output or "(无输出)")[:OUTPUT_LIMIT]
-        self._server_audit.record(
+        await self._server_audit.record(
             target_id=server.id,
             target_name=server.name,
             command=command,
@@ -250,8 +307,8 @@ class ChatOpsToolbox:
         )
         return f"exit={status}\n{truncated}"
 
-    def _refuse_forbidden(self, server: OpsServer, command: str, reason: str) -> str:
-        self._server_audit.record(
+    async def _refuse_forbidden(self, server: OpsServer, command: str, reason: str) -> str:
+        await self._server_audit.record(
             target_id=server.id,
             target_name=server.name,
             command=command,
@@ -265,7 +322,7 @@ class ChatOpsToolbox:
         """只读通道：三道分类，该挡的挡，该指引去 propose 的指引。"""
         verdict = classify_command(command)
         if verdict.kind == "forbidden":
-            return self._refuse_forbidden(server, command, verdict.reason)
+            return await self._refuse_forbidden(server, command, verdict.reason)
         if verdict.kind == "needs_confirm":
             return (
                 f"「{command}」不在只读白名单内（{verdict.reason}），"
@@ -281,7 +338,9 @@ class ChatOpsToolbox:
         """
         verdict = classify_command(command)
         if verdict.kind == "forbidden":
-            return self._refuse_forbidden(server, command, verdict.reason) + "，无法提交确认"
+            return (
+                await self._refuse_forbidden(server, command, verdict.reason)
+            ) + "，无法提交确认"
         if verdict.kind == "readonly":
             # 只读命令没必要打扰用户。
             return await self._exec_server_command(server, command)
@@ -290,18 +349,33 @@ class ChatOpsToolbox:
             # 工具箱总会从 stream_answer 拿到会话 id；走到这说明装配错了。
             raise RuntimeError("propose_command requires a conversation_id")
 
-        action = OpsPendingAction(
-            owner_id=self._owner_id,
-            conversation_id=self._conversation_id,
-            target_type=TARGET_SERVER,
-            target_id=server.id,
-            target_name=server.name,
-            command=command,
-            reason=reason[:512] if reason else None,
-        )
-        self._db.add(action)
-        self._db.commit()
-        self._db.refresh(action)
+        # 在自己的 session 里落库，避免把同步 commit 留在事件循环上。
+        # expunge 之后 action 变成 detached 对象，但所有属性都已加载到内存，
+        # 后续 yield confirm 事件和回填 message_id 都靠它。
+        def _create_action() -> OpsPendingAction:
+            db = app_db.SessionLocal(expire_on_commit=False)
+            try:
+                action = OpsPendingAction(
+                    owner_id=self._owner_id,
+                    conversation_id=self._conversation_id,
+                    target_type=TARGET_SERVER,
+                    target_id=server.id,
+                    target_name=server.name,
+                    command=command,
+                    reason=reason[:512] if reason else None,
+                )
+                db.add(action)
+                db.commit()
+                db.refresh(action)
+                db.expunge(action)
+                return action
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+        action = await asyncio.to_thread(_create_action)
         self.pending_proposals.append(action)
         # 命令全文可能带敏感参数，审计表已有全文，日志只留首词。
         logger.info(
@@ -319,7 +393,7 @@ class ChatOpsToolbox:
         )
 
     async def execute_confirmed(self, action: OpsPendingAction) -> ConfirmedExecResult:
-        """confirm 端点专用：在当前请求自己的 worker 上执行一条已批准的命令。
+        """confirm 端点专用：执行一条已批准的命令并写回结果。
 
         执行结果同时写回 pending 行（续答上下文与历史展示用）和审计表
         （verdict=confirmed，带上 pending_action_id 双向关联）。
@@ -333,7 +407,7 @@ class ChatOpsToolbox:
             server = self._servers.get(action.target_id)
             conn = await self._connection(server)
             status, output = await server_ops.run_once(
-                conn, action.command, timeout=settings.OPS_AGENT_CMD_TIMEOUT
+                conn, action.command, timeout=settings.OPS_AGENT_CMD_TIMEOUT, server_id=server.id
             )
         except (server_ops.OpsConnectError, LookupError) as exc:
             output = f"无法执行：{exc}"
@@ -355,10 +429,30 @@ class ChatOpsToolbox:
                 elapsed_ms,
             )
         truncated = (output or "(无输出)")[:OUTPUT_LIMIT]
-        finish_execution(
-            self._db, action, success=success, result=truncated, exit_status=status
-        )
-        self._server_audit.record(
+
+        # finish_execution 的 DB 写放到工作线程：用自己的 session 重新加载 action，
+        # 避免把同步 commit 留在事件循环上，也不依赖调用方 session 的 ORM 状态。
+        def _finish() -> None:
+            db = app_db.SessionLocal()
+            try:
+                fresh = db.get(OpsPendingAction, action.id)
+                if fresh is None or fresh.status != "approved":
+                    raise RuntimeError(
+                        f"action #{action.id} 状态异常："
+                        f"{getattr(fresh, 'status', 'missing')}"
+                    )
+                fresh.status = "executed" if success else "failed"
+                fresh.result = truncated
+                fresh.exit_status = status
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+        await asyncio.to_thread(_finish)
+        await self._server_audit.record(
             target_id=action.target_id,
             target_name=action.target_name,
             command=action.command,
@@ -380,7 +474,7 @@ class ChatOpsToolbox:
         try:
             result = await db_exec.execute(database, statement)
         except db_ops.OpsDbForbidden as exc:
-            self._db_audit.record(
+            await self._db_audit.record(
                 target_id=database.id,
                 target_name=database.name,
                 command=statement,
@@ -390,7 +484,7 @@ class ChatOpsToolbox:
             )
             return f"该命令被安全策略拒绝：{exc}。只能执行只读查询。"
         except db_ops.OpsDbError as exc:
-            self._db_audit.record(
+            await self._db_audit.record(
                 target_id=database.id,
                 target_name=database.name,
                 command=statement,
@@ -400,7 +494,7 @@ class ChatOpsToolbox:
             )
             return f"执行失败：{exc}"
 
-        self._db_audit.record(
+        await self._db_audit.record(
             target_id=database.id,
             target_name=database.name,
             command=statement,

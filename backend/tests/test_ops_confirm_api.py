@@ -61,7 +61,7 @@ class FakeSSH:
 
         return _Conn()
 
-    async def run_once(self, conn, command, *, timeout=None, limit=None):
+    async def run_once(self, conn, command, *, timeout=None, limit=None, server_id=None):
         self.runs.append(command)
         return 0, "nginx.service is now active"
 

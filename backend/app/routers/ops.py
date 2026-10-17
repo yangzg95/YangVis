@@ -1392,22 +1392,21 @@ def _is_cwd_probe(command: str) -> bool:
     return "697;%s" in command and "$PWD" in command
 
 
-def _record_manual_command(user_id: int, server_id: int, server_name: str, command: str) -> None:
+async def _record_manual_command(user_id: int, server_id: int, server_name: str, command: str) -> None:
     """把终端里手敲的一行命令写进审计表。
 
-    终端 WS 的数据库会话早就关了（长连接不该占连接池），这里用短会话写一条
-    就关。verdict 记 ``manual``：人工输入没有「白名单判定」这回事，success
+    审计自己开短会话并放到工作线程跑（长连接不该占连接池，也不该卡 WS 事件
+    循环）。verdict 记 ``manual``：人工输入没有「白名单判定」这回事，success
     也只是「已送达」，退出码在这条通道上拿不到。
     """
-    with SessionLocal() as db:
-        Auditor(db, user_id, "server").record(
-            target_id=server_id,
-            target_name=server_name,
-            command=command,
-            verdict="manual",
-            success=True,
-            actor="user",
-        )
+    await Auditor(user_id, "server").record(
+        target_id=server_id,
+        target_name=server_name,
+        command=command,
+        verdict="manual",
+        success=True,
+        actor="user",
+    )
 
 
 @router.websocket("/terminal")
@@ -1499,7 +1498,7 @@ async def terminal(
                     continue
             for command in tracker.feed(message):
                 if not _is_cwd_probe(command):
-                    _record_manual_command(user.user_id, audit_target[0], audit_target[1], command)
+                    await _record_manual_command(user.user_id, audit_target[0], audit_target[1], command)
             process.stdin.write(message)
 
     logger.info("terminal tunnel opened: user %s, server %s", user.user_id, server_id)
