@@ -79,7 +79,7 @@
                 <button
                   v-if="chunk.summary"
                   type="button"
-                  :class="['step-line', 'step-summary', { 'reason-summary': chunk.type === 'reason' }]"
+                  class="step-line step-summary"
                   @click="toggleSteps(chunk.runKey)"
                 >
                   <span class="step-icon">{{ chunk.type === 'reason' ? '✦' : '⚙' }}</span>
@@ -127,8 +127,9 @@
             @approve="approveAction"
             @reject="rejectAction"
           />
-          <!-- 复制原始 markdown 文本，贴到别处还能用。 -->
-          <div v-if="item.kind === 'assistant' && item.text" class="bubble-actions">
+          <!-- 复制原始 markdown 文本，贴到别处还能用。流式途中不渲染：那会儿
+               正文还在长，孤零零一个按钮挂在气泡底下像个空框。 -->
+          <div v-if="item.kind === 'assistant' && item.text && !isStreaming(item)" class="bubble-actions">
             <a-tooltip title="复制">
               <button type="button" class="copy-btn" @click="copyItem(item)">
                 <CopyOutlined />
@@ -138,9 +139,10 @@
         </div>
       </div>
 
-      <!-- 持久状态指示器：区分 AI 思考中 / 执行命令中 / 空闲。 -->
-      <div v-if="thinking" class="status-bar">
-        <a-spin size="small" />
+      <!-- 进度指示：一行小字加三个跳动点。刻意不做成带底色的圆角块——它只是
+           「AI 还在干活」的旁白，占一整行反而和真正的回答抢视线。 -->
+      <div v-if="thinking" class="status-line">
+        <span class="pulse"><i /><i /><i /></span>
         <span>{{ aiStatusText }}</span>
       </div>
 
@@ -379,9 +381,9 @@ function displayChunks(item: TalkItem): RenderChunk[] {
     // 命令：≥2 条才折叠（单条命令藏起来省不了空间）；思考：整段可折叠。
     const collapsible = runType === 'step' ? runCount > STEP_COLLAPSE_THRESHOLD : true
     const inSet = expandedSteps.value.has(runKey)
-    // 默认态相反：命令组默认收起（点开展），思考组默认摊开（点收起）。
-    // expandedSteps 存的都是「与默认相反」的那一侧，toggle 一套走。
-    const expanded = runType === 'reason' ? !inSet : inSet
+    // 两组默认都是收起：命令组藏起来省地方，思考组动辄上千行，摊开会把真正的
+    // 结论挤出视口——一轮回答里出现三五段思考是常态，全展开就没法读了。
+    const expanded = inSet
     if (collapsible && !expanded) {
       // 折叠态：整组收成一行摘要，就地待在这组原本的位置。
       out.push({ ...chunk, index: i, summary: true, runCount, runKey, expanded })
@@ -419,6 +421,11 @@ function actionsOf(item: TalkItem): OpsAction[] {
   return actions.value.filter((a) =>
     a.message_id != null ? a.message_id === item.id : item.key === streamingAnswerKey.value,
   )
+}
+
+/** 这条气泡是不是正在流的那条（决定气泡操作行要不要出现）。 */
+function isStreaming(item: TalkItem): boolean {
+  return thinking.value && item.key === streamingAnswerKey.value
 }
 const thinking = ref(false)
 const streamingText = ref(false)
@@ -1092,11 +1099,14 @@ defineExpose({
 
 .bubble {
   max-width: 92%;
-  padding: 8px 10px;
+  padding: 6px 10px;
   border-radius: var(--radius-md);
-  background: #f5f5f5;
+  /* 助手气泡不再铺底。之前正文、步骤、思考、进度、确认卡五种块全带底色，
+     结果最该被看见的正文反而是唯一没底色的，被一圈色块淹没。现在整屏只有
+     用户气泡和确认卡有色，其余一律降级成细线 + 灰字。 */
+  background: transparent;
   font-size: var(--fs-sm);
-  line-height: 1.6;
+  line-height: 1.65;
   word-break: break-word;
 }
 
@@ -1109,49 +1119,77 @@ defineExpose({
   color: var(--text-3);
 }
 
-/* 持久状态指示器：显示 AI 当前在思考、执行命令还是生成回答。 */
-.status-bar {
+/* 进度指示：贴着最后一条气泡的一行小字 + 三个跳动点。做成带底色的整行块时，
+   它每时每刻都在和刚生成的结论抢视线，而它想说的只有「还没说完」。 */
+.status-line {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  margin: 4px 0 8px;
-  border-radius: var(--radius-md);
-  background: rgba(0, 0, 0, 0.04);
+  gap: 7px;
+  padding: 2px 0 4px 10px;
   color: var(--text-3);
   font-size: var(--fs-xs);
 }
 
-.dark .status-bar {
-  background: rgba(255, 255, 255, 0.06);
+.pulse {
+  display: inline-flex;
+  gap: 3px;
 }
 
-/* 步骤与文字交错流：步骤行紧凑，文字块自然分段。 */
+.pulse i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: ops-pulse 1.1s ease-in-out infinite;
+}
+
+.pulse i:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.pulse i:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes ops-pulse {
+  0%,
+  60%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 0.9;
+    transform: translateY(-2px);
+  }
+}
+
+/* 步骤与文字交错流：附属行之间挤紧，正文块自己拉开一段。 */
 .chunk-flow {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 2px;
 }
 
+.chunk-flow .content.markdown {
+  margin-top: 6px;
+}
+
+/* 步骤行：一行等宽小字，无边角无边底。 */
 .step-line {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 6px;
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
-  background: rgba(58, 214, 222, 0.08);
+  padding-left: 2px;
   font-size: var(--fs-xs);
-  color: var(--text-2);
-  line-height: 1.4;
-}
-
-.dark .step-line {
-  background: rgba(58, 214, 222, 0.12);
+  color: var(--text-3);
+  line-height: 1.6;
 }
 
 .step-icon {
-  font-size: 12px;
-  opacity: 0.7;
+  flex: none;
+  font-size: 11px;
+  opacity: 0.5;
 }
 
 .step-text {
@@ -1160,59 +1198,40 @@ defineExpose({
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: 'IBM Plex Mono', Menlo, Consolas, monospace;
+  color: var(--text-2);
 }
 
-/* 折叠摘要行是可点的 button：去掉默认按钮样式，保持与步骤行同宽同底。 */
+/* 折叠摘要行同样是无边底的一行字：可点的提示交给 hover 变色，不靠底色。 */
 .step-summary {
   width: 100%;
-  padding: 4px 8px;
+  padding: 0 0 0 2px;
   border: none;
+  background: transparent;
   text-align: left;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: color 0.15s;
 }
 
-.step-summary:hover {
-  background: rgba(58, 214, 222, 0.16);
+.step-summary:hover .step-icon,
+.step-summary:hover .step-text {
+  color: var(--signal-text);
+  opacity: 1;
 }
 
-.dark .step-summary:hover {
-  background: rgba(58, 214, 222, 0.2);
-}
-
-/* 思考过程：与命令区分开——柔和的紫色，正文可换行、字号略小、左边一道细线。 */
-.reason-summary {
-  background: rgba(150, 120, 220, 0.1);
-}
-
-.reason-summary:hover {
-  background: rgba(150, 120, 220, 0.18);
-}
-
+/* 思考过程：正文的旁白。一道细线 + 更淡的字，不铺底也不斜体——中文斜体既难读
+   又让它看起来比结论更重要。展开后限高自己滚，别把正文顶出视口。 */
 .reason-line {
-  margin: 2px 0;
-  padding: 6px 10px;
-  border-left: 2px solid rgba(150, 120, 220, 0.45);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  background: rgba(150, 120, 220, 0.06);
+  margin: 0;
+  padding: 1px 8px 1px 9px;
+  border-left: 2px solid var(--hairline);
+  background: transparent;
   font-size: var(--fs-xs);
-  line-height: 1.5;
-  color: var(--text-2);
+  line-height: 1.6;
+  color: var(--text-3);
   white-space: pre-wrap;
   word-break: break-word;
-  font-style: italic;
-  /* 思维链动辄上千行，限高让它自己滚，别把正文顶出屏幕。 */
-  max-height: 220px;
+  max-height: 200px;
   overflow-y: auto;
-}
-
-.dark .reason-summary {
-  background: rgba(150, 120, 220, 0.16);
-}
-
-.dark .reason-line {
-  background: rgba(150, 120, 220, 0.12);
-  border-left-color: rgba(170, 140, 240, 0.55);
 }
 
 /* 气泡操作行（复制）：悬停整条消息才出现。 */
@@ -1353,13 +1372,35 @@ defineExpose({
 }
 
 .ops-chat.dark .bubble {
-  background: var(--surface-dark);
+  background: transparent;
   color: var(--text-dark);
 }
 
 .ops-chat.dark .msg.user .bubble {
   background: rgba(58, 214, 222, 0.16);
   color: var(--text-dark);
+}
+
+.ops-chat.dark .status-line {
+  color: var(--text-dark-2);
+}
+
+.ops-chat.dark .step-line {
+  color: rgba(216, 222, 228, 0.42);
+}
+
+.ops-chat.dark .step-text {
+  color: var(--text-dark-2);
+}
+
+.ops-chat.dark .step-summary:hover .step-icon,
+.ops-chat.dark .step-summary:hover .step-text {
+  color: var(--signal-bright);
+}
+
+.ops-chat.dark .reason-line {
+  border-left-color: var(--on-dark-border);
+  color: var(--text-dark-2);
 }
 
 .ops-chat.dark .thinking-hint {

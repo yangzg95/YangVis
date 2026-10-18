@@ -16,7 +16,7 @@
 
 - gunicorn 多 worker 天然不是问题——确认请求落在哪个 worker 都行，反正状态在库里。
 - 刷新页面、换浏览器、进程重启都能恢复卡片（`GET /api/chat/conversations/{id}/actions`）。
-- **挂调试器去看是看不到「卡住的协程」的**，进程完全空闲。整条链路唯一真会阻塞的是 `execute_confirmed` 里的 `run_once`（`services/chat_ops.py:335`，最长 `OPS_AGENT_CMD_TIMEOUT=120s`）。
+- **挂调试器去看是看不到「卡住的协程」的**，进程完全空闲。整条链路唯一真会阻塞的是 `execute_confirmed` 里的 `run_once`（`services/chat_ops.py:335`，最长 `OPS_AGENT_CMD_TIMEOUT=300s`）。
 
 ## 接口
 
@@ -131,7 +131,7 @@ pending ──claim_for_confirm()──► approved ──执行成功──► 
 3. **续答不落 user 消息。** 合成的是 `[系统] 用户已批准…` 旁白，`question_persisted=False`（`chat/service.py:629`）。落 user 消息的话，用户的提问流里会出现一条他没说过的话；不落的话历史里已有的问答仍能给模型来龙去脉。
 4. **`message_id` 只能回填。** 提议发生在流式中途，那条 assistant 消息还没落库，所以列可空，回答落库后再补（`chat/service.py:962`）。
 5. **运维排查会把步数上限撞穿。** 沿用检索的 `MAX_REACT_STEPS=8` 会在排查中途抛 `GraphRecursionError`，用户看到的就是「AI 说到一半突然停了」。挂工具箱时提到 25（`chat/service.py:67`），且真撞上限时不报错，把已流出的内容存下来 + 补一句「回复『继续』可接着排查」（`chat/service.py:88`）。
-6. **AI 通道要更宽的命令超时。** `du`/`find` 在大磁盘上远超交互通道的 20s，用交互超时会误杀。AI 通道单独 `OPS_AGENT_CMD_TIMEOUT=120s`（`chat_ops.py:231`），交互终端不受影响。
+6. **AI 通道要更宽的命令超时。** `du`/`find` 在大磁盘上远超交互通道的 20s，用交互超时会误杀。AI 通道单独 `OPS_AGENT_CMD_TIMEOUT=300s`（`chat_ops.py:231`），交互终端不受影响。
 7. **命令输出撑爆上下文。** 两层截断：传输层 `OPS_OUTPUT_LIMIT=8192`（`ops/server.py:355`），回灌模型前再截到 `OUTPUT_LIMIT=4000`（`chat_ops.py:48`）。模型要细看某一段可以自己加 `tail`/`grep` 再查。
 8. **日志不带命令全文。** 写命令常带敏感参数，全文已在审计表，日志只留首词（`chat_ops.py:307`）。
 9. **SSH 连接别常驻。** 一次回答里复用一条（每条命令重连既慢又刷 auth 日志），回答结束即关——一次回答可能只跑一两条命令，长连接占着不如随用随建。

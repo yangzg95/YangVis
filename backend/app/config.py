@@ -105,9 +105,10 @@ class Settings(BaseSettings):
     # 智能运维
     OPS_SSH_TIMEOUT: float = 15.0
     OPS_CMD_TIMEOUT: float = 20.0
-    # AI 运维助手的单条命令超时。du/find 这类盘点命令在大磁盘上动辄一两分钟，
-    # 用交互通道的 20 秒会被误杀；它只作用于 AI 通道，交互终端不受影响。
-    OPS_AGENT_CMD_TIMEOUT: float = 120.0
+    # AI 运维助手的单条命令超时。du/find 这类盘点命令在大磁盘上动辄几分钟，
+    # 用交互通道的 20 秒会被误杀；120 秒也不够（一次全盘 du 就超），放宽到 5 分钟。
+    # 它只作用于 AI 通道，交互终端不受影响。
+    OPS_AGENT_CMD_TIMEOUT: float = 300.0
     # 单次命令回传给模型的输出上限。终端里人看多少都行，但把几 MB 的日志塞进
     # 上下文既烧钱又会把有用的信息挤掉。
     OPS_OUTPUT_LIMIT: int = 8192
@@ -123,8 +124,10 @@ class Settings(BaseSettings):
     OPS_BACKUP_MAX_BYTES: int = 64 * 1024 * 1024
     # WebSocket 入场票的有效期。它只需要活到握手完成，给 60 秒已经很宽裕。
     OPS_WS_TICKET_TTL: int = 60
-    # AI 提议写操作后等待用户点确认的时间。超时按「未批准」处理。
-    OPS_CONFIRM_TIMEOUT: float = 180.0
+    # AI 提议写操作后等待用户点确认的时间。超时按「未批准」处理。180 秒太紧：
+    # 卡片上那段「影响范围」常常要读要想要，还要去确认目标对不对，读着读着就
+    # 超时了，只能让 AI 重新提议一遍。放宽到 15 分钟。
+    OPS_CONFIRM_TIMEOUT: float = 900.0
     # SFTP 远程文件浏览器。上传按块流式读入（Starlette 对超 1MB 的 multipart
     # 自动落临时盘），这个上限是边传边计数的字节上限，不再是内存上限；
     # 单请求内存占用约为 OPS_SFTP_CHUNK_SIZE × OPS_SFTP_PIPELINE_REQUESTS。

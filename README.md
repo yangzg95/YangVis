@@ -42,7 +42,7 @@
 - SFTP 文件面板：目录浏览、拖拽上传、下载、新建/删除
 - 数据库工作台（MySQL）：多页签查询（Navicat 式批量执行、消息/摘要面板）、SQL 收藏、查询历史、结果网格导出（CSV/JSON/Markdown/INSERT；当前页在前端序列化，全量走服务端分批流式并受 `OPS_EXPORT_MAX_ROWS` 约束）、表结构查看（DDL / 索引 / 外键）、设计表（表单编辑 → ALTER 预览确认 → 执行）、ER 图、数据浏览的行内改值与删除记录
 - Redis 控制台：scan 浏览 + key 详情；连接开启写入后可新建 key、改 string 值（保留原 TTL）、五种类型的元素增删（list 按下标删、hash 覆盖 field、stream 删条目）、EXPIRE/PERSIST、key 列表勾选批量 UNLINK
-- AI 运维助手：自然语言 → 命令/SQL；只读直接执行，写操作必须人工确认后才放行（实现说明见 `docs/ops-chat-confirm-flow.md`）；命令步骤与回答文字按真实顺序交错展示、连续两步及以上自动折叠；模型自带思维链时（如硅基流动 Qwen 思考模式）同步展示可折叠的「思考过程」，历史会话按落库的完整时间线回放步骤与思考，普通模型不显示该栏，也可在模型配置上按服务商关掉；持久状态指示器区分「思考中/执行中/生成中」与卡死；SSH 连接中途断开时自动重连并重试一次（只读命令幂等安全）；单轮回答 600 秒墙钟上限，超时提示用户回复「继续」
+- AI 运维助手：自然语言 → 命令/SQL；只读直接执行，写操作必须人工确认后才放行（实现说明见 `docs/ops-chat-confirm-flow.md`）；命令步骤与回答文字按真实顺序交错展示、连续两步及以上自动折叠；模型自带思维链时（如硅基流动 Qwen 思考模式）同步展示「思考过程」，默认折成一行、点开才看全文，历史会话按落库的完整时间线回放步骤与思考，普通模型不显示该栏，也可在模型配置上按服务商关掉；界面层级上正文是唯一重心，步骤/思考/进度一律降级为无边底的细字行，只有用户气泡与确认卡带底色；底部一行小字区分「思考中/执行中/生成中」与卡死；SSH 连接中途断开时自动重连并重试一次（只读命令幂等安全）；AI 通道单条命令 300 秒超时、确认等待 15 分钟、单轮回答 900 秒墙钟上限，超时提示用户回复「继续」
 - 权限闸门：`ops_write` 权限位控制一切写操作，台账全员共用、只读用户也能查
 - 全量审计：AI 执行的、终端手敲的、SQL 执行的，统一留痕可翻查
 
@@ -174,10 +174,10 @@ npm run dev                   # http://localhost:5173，/api 与网关的 /v1 �
 | `ENCRYPTION_KEY` | **必填** | api_key 的 Fernet 密钥，轮换后旧 key 全部无法解密 |
 | `BOOTSTRAP_ADMIN_USERNAME/PASSWORD` | 空 | 仅 sys_user 为空时建初始管理员 |
 | `KB_MAX_UPLOAD_BYTES` `KB_EMBED_BATCH_SIZE` `KB_SCORE_THRESHOLD` | 10MB / 16 / 0.3 | 知识库入库与检索 |
-| `OPS_SSH_TIMEOUT` `OPS_CMD_TIMEOUT` `OPS_AGENT_CMD_TIMEOUT` | 15 / 20 / 120 | 运维通道超时（秒） |
+| `OPS_SSH_TIMEOUT` `OPS_CMD_TIMEOUT` `OPS_AGENT_CMD_TIMEOUT` | 15 / 20 / 300 | 运维通道超时（秒）：建连 / 交互终端单条命令 / AI 通道单条命令 |
 | `OPS_OUTPUT_LIMIT` `OPS_SQL_ROW_LIMIT` | 8192 / 200 | 回传模型的输出/行数上限 |
 | `OPS_EXPORT_MAX_ROWS` | 200000 | 数据页「导出全部」的单次行数上限，超了直接拒 |
-| `OPS_CONFIRM_TIMEOUT` | 180 | 写操作确认等待时长（秒） |
+| `OPS_CONFIRM_TIMEOUT` | 900 | 写操作确认等待时长（秒），超时按未批准处理 |
 | `OPS_SFTP_MAX_UPLOAD_BYTES` `OPS_SFTP_LIST_LIMIT` | 500MB / 2000 | SFTP 面板的单文件大小上限与单次列目录条数 |
 | `OPS_SFTP_OP_TIMEOUT` `OPS_SFTP_STALL_TIMEOUT` | 30 / 60 | 打开 SFTP 会话的等待上限、传输连续这么久没有新字节进出就判死（秒） |
 | `BAIDU_NETDISK_APP_KEY/SECRET_KEY/APP_NAME` | 空 | 任一为空则网盘功能整体隐藏 |

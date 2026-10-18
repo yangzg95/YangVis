@@ -137,19 +137,22 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .confirm-card {
-  margin-bottom: 10px;
-  padding: 10px;
-  border: 1px solid #ffd591;
-  border-radius: var(--radius-md);
-  background: #fffbe6;
+  margin: 6px 0 10px;
+  padding: 8px 10px;
+  /* 整卡铺橙底 + 橙字，读起来像一屏告警，反而看不出该点哪个按钮。改成
+     左侧一道竖线承重：它仍是这条气泡里唯一有边框的东西，权重够了。 */
+  border: 1px solid var(--hairline);
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius-sm);
+  background: var(--warning-bg);
 }
 
 .confirm-title {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #d46b08;
-  font-size: var(--fs-sm);
+  color: var(--warning);
+  font-size: var(--fs-xs);
   font-weight: 600;
 }
 
@@ -157,7 +160,7 @@ onBeforeUnmount(() => {
   margin-left: auto;
   font-size: var(--fs-xs);
   font-weight: 400;
-  color: #8c6b1f;
+  color: var(--text-3);
 }
 
 .confirm-command {
@@ -171,9 +174,12 @@ onBeforeUnmount(() => {
   word-break: break-all;
 }
 
+/* 理由通常是模型写的一整段「影响范围」，它是说明不是告警：用正文色，
+   强调只留给上面那行命令。 */
 .confirm-reason {
-  color: #8c6b1f;
+  color: var(--text-2);
   font-size: var(--fs-xs);
+  line-height: 1.6;
 }
 
 .confirm-actions {
@@ -186,7 +192,7 @@ onBeforeUnmount(() => {
 
 .confirm-countdown {
   margin-right: auto;
-  color: #8c6b1f;
+  color: var(--text-3);
   font-size: var(--fs-xs);
 }
 
@@ -221,17 +227,21 @@ onBeforeUnmount(() => {
 /* ---- 深色变体（全屏终端页右侧的 AI 面板，与终端 #11181f 同一族） ------ */
 
 .confirm-card.dark {
-  border-color: rgba(250, 173, 20, 0.4);
-  background: rgba(250, 173, 20, 0.08);
+  border-color: var(--on-dark-border);
+  border-left-color: var(--warning-bright);
+  background: rgba(250, 173, 20, 0.06);
 }
 
 .confirm-card.dark .confirm-title {
   color: var(--warning-bright);
 }
 
-.confirm-card.dark .confirm-target,
+.confirm-card.dark .confirm-target {
+  color: var(--text-dark-2);
+}
+
 .confirm-card.dark .confirm-countdown {
-  color: #cfa14a;
+  color: var(--text-dark-2);
 }
 
 .confirm-card.dark .confirm-command {
@@ -240,7 +250,7 @@ onBeforeUnmount(() => {
 }
 
 .confirm-card.dark .confirm-reason {
-  color: #cfa14a;
+  color: var(--text-dark-2);
 }
 
 .confirm-card.dark .confirm-state {
