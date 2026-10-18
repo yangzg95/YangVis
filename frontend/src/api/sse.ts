@@ -22,6 +22,8 @@ export interface StreamHandlers {
   onCitations?: (citations: Citation[]) => void
   onStep?: (data: { tool: string; query: string; input?: Record<string, unknown> }) => void
   onToken?: (token: string) => void
+  /** 会输出思维链的模型发来的推理/思考增量；普通模型不会有这个事件。 */
+  onReason?: (token: string) => void
   onConfirm?: (data: ConfirmEvent) => void
   onExec?: (data: ExecEvent) => void
   onDone?: (data: { message_id: number; conversation_id: number }) => void
@@ -206,6 +208,9 @@ function dispatchSse(
       break
     case 'token':
       handlers.onToken?.(String(data ?? ''))
+      break
+    case 'reason':
+      handlers.onReason?.(String(data ?? ''))
       break
     case 'confirm':
       handlers.onConfirm?.(data)

@@ -270,6 +270,9 @@ class MessageItem(BaseModel):
     role: str
     content: str
     citations: List[Citation] = Field(default_factory=list)
+    # 按到达顺序记录的回答流 [{type: text|step|reason, detail}]。历史回放据此重建
+    # 交错的命令与解说；老消息为 None 时前端退回只渲染 content。
+    timeline: Optional[List[dict]] = None
     created_at: datetime
 
 

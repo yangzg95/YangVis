@@ -143,6 +143,20 @@ def _chunk_text(chunk: object) -> str:
     return "".join(part.get("text", "") for part in text if isinstance(part, dict))
 
 
+def _chunk_reasoning(chunk: object) -> str:
+    """取出一个流式 chunk 里的推理/思考增量（OpenAI 兼容的 reasoning_content）。
+
+    只有会输出思维链的模型才带这个字段，普通模型恒为空。LangChain 把上游返回里
+    非标准字段塞进 ``additional_kwargs``，所以从那里读。
+    """
+    extra = getattr(chunk, "additional_kwargs", None)
+    if isinstance(extra, dict):
+        reasoning = extra.get("reasoning_content")
+        if isinstance(reasoning, str):
+            return reasoning
+    return ""
+
+
 class _CitationRegistry:
     """跨多轮检索给 chunk 分配稳定编号。
 
@@ -440,6 +454,7 @@ class ChatService:
             role=row.role,
             content=row.content,
             citations=[Citation(**item) for item in (row.citations or [])],
+            timeline=row.timeline,
             created_at=row.created_at,
         )
 
@@ -467,6 +482,7 @@ class ChatService:
         *,
         citations: Optional[List[Citation]] = None,
         backfill_actions: Optional[List[OpsPendingAction]] = None,
+        timeline: Optional[List[dict]] = None,
         close_session: bool = True,
     ) -> int:
         """在指定 session 里落一条消息并 commit，返回 message id。
@@ -484,6 +500,7 @@ class ChatService:
             role=role,
             content=content,
             citations=[c.model_dump() for c in citations] if citations else None,
+            timeline=timeline,
         )
         db.add(row)
 
@@ -893,6 +910,18 @@ class ChatService:
         executor = create_agent(client, tools, system_prompt=system)
 
         parts: List[str] = []
+        # 按到达顺序记录整条回答流：文字、执行命令、思考过程。历史回放用它重建
+        # 交错的步骤与解说。只有当它含非纯文字条目（step/reason）时才落库，纯问答
+        # 不重复存 content。
+        timeline: List[dict] = []
+
+        def _merge_text(kind: str, detail: str) -> None:
+            """把连续同类的文字/思考增量并进上一条，与前端交错渲染保持一致。"""
+            if timeline and timeline[-1].get("type") == kind:
+                timeline[-1]["detail"] += detail
+            else:
+                timeline.append({"type": kind, "detail": detail})
+
         aborted = False
         step_limited = False
         time_limited = False
@@ -928,13 +957,15 @@ class ChatService:
                 kind = event.get("event")
                 if kind == "on_tool_start":
                     payload = (event.get("data") or {}).get("input") or {}
-                    yield "step", {
+                    step_event = {
                         "tool": event.get("name") or "",
                         "query": str(payload.get("query", "")),
                         # 完整的工具入参：运维工具的展示文案要取 command/statement，
                         # 由前端按工具名挑字段。
                         "input": payload,
                     }
+                    timeline.append({"type": "step", **step_event})
+                    yield "step", step_event
                 elif kind == "on_tool_end":
                     yield "citations", [c.model_dump() for c in registry.all()]
                     if toolbox is not None and len(toolbox.readonly_execs) > sent_execs:
@@ -965,9 +996,15 @@ class ChatService:
                             }
                         sent_proposals = len(toolbox.pending_proposals)
                 elif kind == "on_chat_model_stream":
-                    text = _chunk_text((event.get("data") or {}).get("chunk"))
+                    chunk = (event.get("data") or {}).get("chunk")
+                    reasoning = _chunk_reasoning(chunk)
+                    if reasoning:
+                        _merge_text("reason", reasoning)
+                        yield "reason", reasoning
+                    text = _chunk_text(chunk)
                     if text:
                         parts.append(text)
+                        _merge_text("text", text)
                         yield "token", text
         except GraphRecursionError:
             # 模型一直在调用工具却不肯收尾。已经流出去的内容照常保存下来，不当成
@@ -1002,9 +1039,15 @@ class ChatService:
             # 他也知道发条「继续」就能让模型接着排查。
             suffix = STEP_LIMIT_SUFFIX if step_limited else TIME_LIMIT_SUFFIX
             yield "token", suffix
+            _merge_text("text", suffix)
             answer = f"{answer}{suffix}" if answer else suffix.strip()
         elif not answer:
             answer = NO_CONTEXT_REPLY
+
+        # 纯文字问答的 timeline 与 content 等价，不重复存；只有含步骤或思考时才落。
+        timeline_to_save = (
+            timeline if any(entry["type"] != "text" for entry in timeline) else None
+        )
 
         # 消息落库 + 待确认项回填一起丢进工作线程：两者都需要 commit，合在
         # 同一个 session 里省掉第二次线程切换。self._db 留在事件循环上给后续
@@ -1021,6 +1064,7 @@ class ChatService:
             answer,
             citations=citations or None,
             backfill_actions=actions_to_backfill,
+            timeline=timeline_to_save,
         )
 
         # 一轮问答落库后的收尾（重算会话摘要、提取长期记忆）放到请求之外跑：

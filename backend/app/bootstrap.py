@@ -157,6 +157,12 @@ def migrate_schema() -> None:
                 conn.execute(text(f"ALTER TABLE chat_conversation {ddl}"))
             logger.info("added chat_conversation.%s", column)
 
+    message_columns = _column_names("chat_message")
+    if message_columns and "timeline" not in message_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE chat_message ADD COLUMN timeline JSON NULL"))
+        logger.info("added chat_message.timeline")
+
     database_columns = _column_names("ops_database")
     if database_columns:
         for column, ddl in (

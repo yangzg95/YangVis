@@ -17,6 +17,9 @@
                 <div class="history-line">
                   <span class="history-title">{{ conv.title }}</span>
                   <!-- stop：不触发菜单项的「打开会话」，也不让下拉收起来。 -->
+                  <a-tooltip title="重命名这段会话">
+                    <EditOutlined class="history-rename" @click.stop="startRename(conv)" />
+                  </a-tooltip>
                   <a-tooltip title="删除这段会话">
                     <DeleteOutlined class="history-del" @click.stop="removeConversation(conv)" />
                   </a-tooltip>
@@ -69,22 +72,35 @@
           <!-- 助手消息按 chunks 顺序渲染：步骤与文字交替出现；步骤过多时折叠。 -->
           <template v-if="item.kind === 'assistant'">
             <div class="chunk-flow">
-              <template v-for="chunk in displayChunks(item)" :key="chunk.index">
+              <template
+                v-for="chunk in displayChunks(item)"
+                :key="chunk.summary ? `sum-${chunk.index}` : `chk-${chunk.index}`"
+              >
                 <button
                   v-if="chunk.summary"
                   type="button"
-                  class="step-line step-summary"
-                  @click="toggleSteps(item.key)"
+                  :class="['step-line', 'step-summary', { 'reason-summary': chunk.type === 'reason' }]"
+                  @click="toggleSteps(chunk.runKey)"
                 >
-                  <span class="step-icon">⚙</span>
+                  <span class="step-icon">{{ chunk.type === 'reason' ? '✦' : '⚙' }}</span>
                   <span class="step-text">
-                    {{ chunk.expanded ? '收起步骤' : `已执行 ${chunk.stepCount} 步 · 点击展开` }}
+                    <template v-if="chunk.type === 'reason'">
+                      {{ chunk.expanded ? '收起思考过程' : '思考过程 · 点击展开' }}
+                    </template>
+                    <template v-else>
+                      {{ chunk.expanded ? `收起 ${chunk.runCount} 步` : `已执行 ${chunk.runCount} 步 · 点击展开` }}
+                    </template>
                   </span>
                 </button>
                 <div v-else-if="chunk.type === 'step'" class="step-line">
                   <span class="step-icon">⚙</span>
                   <span class="step-text">{{ chunk.detail }}</span>
                 </div>
+                <div
+                  v-else-if="chunk.type === 'reason' && chunk.detail"
+                  class="content reason-line"
+                  v-text="chunk.detail"
+                />
                 <div
                   v-else-if="chunk.type === 'text' && chunk.detail"
                   class="content markdown"
@@ -176,6 +192,23 @@
         </a-tooltip>
       </div>
     </div>
+
+    <!-- 会话重命名：从历史列表里的编辑图标唤起。 -->
+    <a-modal
+      v-model:open="renameOpen"
+      title="重命名会话"
+      :confirm-loading="renaming"
+      ok-text="保存"
+      cancel-text="取消"
+      @ok="saveRename"
+    >
+      <a-input
+        v-model:value="renameText"
+        placeholder="给这段会话起个名字"
+        :maxlength="80"
+        @press-enter="saveRename"
+      />
+    </a-modal>
   </div>
 </template>
 
@@ -187,6 +220,7 @@ import {
   ArrowUpOutlined,
   CopyOutlined,
   DeleteOutlined,
+  EditOutlined,
   HistoryOutlined,
   PlusOutlined,
   VerticalAlignBottomOutlined,
@@ -278,10 +312,10 @@ const { schedule, beginStream, endStream, renderCached, clearCache } = useStream
   md.render(text || ''),
 )
 
-/** 一条助手回复由若干 chunk 按到达顺序拼接：步骤标签与文字交替。 */
+/** 一条助手回复由若干 chunk 按到达顺序拼接：步骤、文字、思考交替。 */
 interface TalkChunk {
-  type: 'step' | 'text'
-  /** step 时是命令摘要，text 时是这段文字。 */
+  type: 'step' | 'text' | 'reason'
+  /** step 时是命令摘要，text 时是这段文字，reason 时是这段推理。 */
   detail: string
 }
 
@@ -300,9 +334,10 @@ const items = ref<TalkItem[]>([])
 const draft = ref('')
 
 // ---- 步骤折叠 ---------------------------------------------------------------
-// 一条回答里命令步骤多了会占很多纵向空间。超过阈值默认折叠成一行「已执行 N 步」，
-// 点开展示完整的交错步骤；文字块始终保留，阅读流不受影响。
-const STEP_COLLAPSE_THRESHOLD = 3
+// 一条回答里可能有多波「执行命令」，每波后面紧跟一段解说文字。折叠按波就地收：
+// 只要有 ≥2 条连续命令就默认收成一行「已执行 N 步」，点开看完整列表；单条命令
+// 不折叠（折叠它省不了空间，还把命令藏起来）。文字块始终保留，阅读流不受影响。
+const STEP_COLLAPSE_THRESHOLD = 1
 const expandedSteps = ref<Set<string>>(new Set())
 
 function toggleSteps(key: string) {
@@ -314,30 +349,54 @@ function toggleSteps(key: string) {
 interface RenderChunk extends TalkChunk {
   index: number
   summary: boolean
-  stepCount: number
+  /** 本组连续步骤的条数（摘要行文案用）。 */
+  runCount: number
+  /** 本组折叠状态的键：一条回答里多组命令各自独立展开/收起。 */
+  runKey: string
   expanded: boolean
 }
 
 function displayChunks(item: TalkItem): RenderChunk[] {
-  const stepCount = item.chunks.filter((c) => c.type === 'step').length
-  const expanded = expandedSteps.value.has(item.key)
-  const collapsible = stepCount > STEP_COLLAPSE_THRESHOLD
+  const chunks = item.chunks
   const out: RenderChunk[] = []
-  let seenFirstStep = false
-  item.chunks.forEach((chunk, index) => {
-    if (chunk.type !== 'step') {
-      out.push({ ...chunk, index, summary: false, stepCount, expanded })
-      return
+  let i = 0
+  let runIndex = 0
+  while (i < chunks.length) {
+    const chunk = chunks[i]
+    if (chunk.type === 'text') {
+      out.push({ ...chunk, index: i, summary: false, runCount: 0, runKey: '', expanded: false })
+      i += 1
+      continue
     }
-    if (collapsible && !seenFirstStep) {
-      seenFirstStep = true
-      out.push({ ...chunk, index, summary: true, stepCount, expanded })
-      if (!expanded) return // 折叠态：摘要行代替这一步
-    } else if (collapsible && !expanded) {
-      return // 折叠态：其余步骤隐藏
+    // 收一段「同类型的连续 chunk」为一组：一组命令，或一段思考。文字块把组隔开，
+    // 所以每组对应模型的一轮动作，后面紧跟的解说文字留在原位——折叠必须按组就地
+    // 收，若把整条回答的步骤全堆到顶部，各组命令就和它们各自的解说被拆散了。
+    const runType = chunk.type // 'step' | 'reason'
+    let j = i
+    while (j < chunks.length && chunks[j].type === runType) j += 1
+    const runCount = j - i
+    const runKey = `${item.key}:${runType}:${runIndex}`
+    // 命令：≥2 条才折叠（单条命令藏起来省不了空间）；思考：整段可折叠。
+    const collapsible = runType === 'step' ? runCount > STEP_COLLAPSE_THRESHOLD : true
+    const inSet = expandedSteps.value.has(runKey)
+    // 默认态相反：命令组默认收起（点开展），思考组默认摊开（点收起）。
+    // expandedSteps 存的都是「与默认相反」的那一侧，toggle 一套走。
+    const expanded = runType === 'reason' ? !inSet : inSet
+    if (collapsible && !expanded) {
+      // 折叠态：整组收成一行摘要，就地待在这组原本的位置。
+      out.push({ ...chunk, index: i, summary: true, runCount, runKey, expanded })
+    } else {
+      // 展开态（或本组不折叠）：可折叠时先给一行「收起」摘要，再逐条列出。
+      if (collapsible) {
+        out.push({ ...chunk, index: i, summary: true, runCount, runKey, expanded })
+      }
+      for (let k = i; k < j; k += 1) {
+        out.push({ ...chunks[k], index: k, summary: false, runCount, runKey, expanded })
+      }
     }
-    out.push({ ...chunk, index, summary: false, stepCount, expanded })
-  })
+    runIndex += 1
+    i = j
+  }
   return out
 }
 
@@ -481,6 +540,7 @@ function resetView() {
   items.value = []
   actions.value = []
   snippetBlocks.clear()
+  expandedSteps.value = new Set()
   thinking.value = false
   streamingText.value = false
   streamingAnswerKey.value = null
@@ -539,7 +599,13 @@ async function openConversation(id: number) {
       id: m.id,
       kind: m.role,
       text: m.content,
-      chunks: [],
+      // 后端按到达顺序存了整条回答流（含命令与思考），据此重建交错渲染；
+      // 老消息没有 timeline，退回空 chunks → 模板用 content 兜底整段渲染。
+      chunks: (m.timeline ?? []).map((e) =>
+        e.type === 'step'
+          ? { type: 'step', detail: describeStep({ tool: e.tool ?? '', query: e.query, input: e.input }) }
+          : { type: e.type, detail: e.detail ?? '' },
+      ),
     }))
     actions.value = acts.items
     pinToBottom()
@@ -591,6 +657,43 @@ function removeConversation(conv: Conversation) {
   })
 }
 
+// ---- 会话重命名 ---------------------------------------------------------------
+// 标题原本只从第一个问题自动截断而来，没有改名入口。这里在历史列表每行加了编辑
+// 图标，点开弹一个输入框，保存即调 updateConversation 落库、就地更新列表标题。
+const renameOpen = ref(false)
+const renaming = ref(false)
+const renameText = ref('')
+const renameTarget = ref<Conversation | null>(null)
+
+function startRename(conv: Conversation) {
+  renameTarget.value = conv
+  renameText.value = conv.title
+  renameOpen.value = true
+}
+
+async function saveRename() {
+  const conv = renameTarget.value
+  const title = renameText.value.trim()
+  if (!conv) return
+  if (!title) {
+    toast.warning('名称不能为空')
+    return
+  }
+  renameOpen.value = false
+  if (title === conv.title) return
+  renaming.value = true
+  try {
+    await chatApi.updateConversation(conv.id, { title })
+    const row = history.value.find((c) => c.id === conv.id)
+    if (row) row.title = title
+    toast.success('已重命名')
+  } catch {
+    // 拦截器已提示；标题保持原样。
+  } finally {
+    renaming.value = false
+  }
+}
+
 /** 下拉展开时刷新一次历史：别的标签页聊过的也能看到。 */
 function onHistoryOpen(open: boolean) {
   if (open) void refreshHistory(loadSeq)
@@ -620,17 +723,28 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
     streamingAnswerKey.value = item.key
     return item
   }
-  // 当前文字 chunk 的引用：token 到来时追加到它，step 到来时关闭它。
+  // 当前文字 / 思考 chunk 的引用：同类增量追加到它，异类或步骤到来时关闭它。
   let textChunk: TalkChunk | null = null
+  let reasonChunk: TalkChunk | null = null
   const ensureTextChunk = (item: TalkItem) => {
     if (!textChunk || textChunk.type !== 'text') {
       textChunk = { type: 'text', detail: '' }
+      reasonChunk = null // 开始正文，结束思考段
       item.chunks.push(textChunk)
     }
     return textChunk
   }
+  const ensureReasonChunk = (item: TalkItem) => {
+    if (!reasonChunk || reasonChunk.type !== 'reason') {
+      reasonChunk = { type: 'reason', detail: '' }
+      textChunk = null // 开始思考，结束正文段
+      item.chunks.push(reasonChunk)
+    }
+    return reasonChunk
+  }
   const closeTextChunk = () => {
     textChunk = null
+    reasonChunk = null
   }
   return {
     onStep: (data) => {
@@ -639,6 +753,14 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
       const detail = describeStep(data)
       currentStepDetail.value = detail
       item.chunks.push({ type: 'step', detail })
+      scrollToBottom()
+    },
+    onReason: (token) => {
+      const item = answer()
+      // 思考走 v-text 直接绑定 chunk.detail，改一处即重渲染，不必进 streamRender
+      // 的按拍缓存（那套只管 markdown 块）。
+      ensureReasonChunk(item).detail += token
+      streamingText.value = false // 还在推理阶段，正文尚未开始
       scrollToBottom()
     },
     onToken: (token) => {
@@ -1058,6 +1180,38 @@ defineExpose({
   background: rgba(58, 214, 222, 0.2);
 }
 
+/* 思考过程：与命令区分开——柔和的紫色，正文可换行、字号略小、左边一道细线。 */
+.reason-summary {
+  background: rgba(150, 120, 220, 0.1);
+}
+
+.reason-summary:hover {
+  background: rgba(150, 120, 220, 0.18);
+}
+
+.reason-line {
+  margin: 2px 0;
+  padding: 6px 10px;
+  border-left: 2px solid rgba(150, 120, 220, 0.45);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: rgba(150, 120, 220, 0.06);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-style: italic;
+}
+
+.dark .reason-summary {
+  background: rgba(150, 120, 220, 0.16);
+}
+
+.dark .reason-line {
+  background: rgba(150, 120, 220, 0.12);
+  border-left-color: rgba(170, 140, 240, 0.55);
+}
+
 /* 气泡操作行（复制）：悬停整条消息才出现。 */
 .bubble-actions {
   display: flex;
@@ -1303,6 +1457,26 @@ defineExpose({
 .ops-history-overlay .history-del:hover {
   background: rgba(255, 77, 79, 0.12);
   color: var(--danger-bright);
+}
+
+/* 重命名图标与删除同一交互：悬停整行才显形，hover 各自上色。 */
+.ops-history-overlay .history-rename {
+  flex-shrink: 0;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  color: rgba(0, 0, 0, 0.4);
+  font-size: var(--fs-xs);
+  opacity: 0;
+  transition: all 0.15s;
+}
+
+.ops-history-overlay .ant-dropdown-menu-item:hover .history-rename {
+  opacity: 1;
+}
+
+.ops-history-overlay .history-rename:hover {
+  background: rgba(0, 128, 255, 0.12);
+  color: #0080ff;
 }
 
 .ops-history-overlay .history-meta {

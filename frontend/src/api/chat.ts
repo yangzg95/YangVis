@@ -36,6 +36,8 @@ export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   citations: Citation[]
+  /** 按到达顺序记录的回答流；老消息为 null，前端退回只渲染 content。 */
+  timeline?: Array<{ type: 'text' | 'step' | 'reason'; detail?: string; tool?: string; query?: string; input?: Record<string, unknown> }> | null
   created_at: string
 }
 

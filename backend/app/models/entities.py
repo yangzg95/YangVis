@@ -362,6 +362,11 @@ class ChatMessage(Base):
     # 内容。存下来是为了重新打开会话时依然能看到每段回答的出处。
     citations: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
+    # [{type, detail}] 按到达顺序记录的整条回答流：文字、执行命令、思考过程。
+    # content 只存纯文字，历史回放时若这里有时间线，就按它重建交错的步骤与
+    # 解说；老消息没这列（为 None）时退回只渲染 content。
+    timeline: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )

@@ -442,13 +442,14 @@ onBeforeUnmount(cancelAutoReconnect)
   color: var(--warning-bright);
 }
 
-/* 深色页上的 ghost 按钮默认样式偏亮，压一压。 */
-.term-topbar :deep(.ant-btn-ghost) {
+/* 深色页上的 ghost 按钮默认样式偏亮，压一压。
+   注意 ant-design-vue 4 渲染出的类名是 ant-btn-background-ghost，不是 ant-btn-ghost。 */
+.term-topbar :deep(.ant-btn-background-ghost) {
   color: var(--text-dark);
   border-color: rgba(255, 255, 255, 0.25);
 }
 
-.term-topbar :deep(.ant-btn-ghost:hover) {
+.term-topbar :deep(.ant-btn-background-ghost:hover) {
   color: var(--signal-bright);
   border-color: var(--signal-bright);
 }
@@ -797,12 +798,12 @@ body.dragging-col .ai-resizer::after {
   color: #666;
 }
 
-.term-light .term-topbar :deep(.ant-btn-ghost) {
+.term-light .term-topbar :deep(.ant-btn-background-ghost) {
   color: #333;
   border-color: rgba(0, 0, 0, 0.2);
 }
 
-.term-light .term-topbar :deep(.ant-btn-ghost:hover) {
+.term-light .term-topbar :deep(.ant-btn-background-ghost:hover) {
   color: #0080ff;
   border-color: #0080ff;
 }
