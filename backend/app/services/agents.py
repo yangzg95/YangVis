@@ -38,7 +38,7 @@ class BuiltinAgent:
     use_knowledge: bool
     use_ops: bool
     chat_visible: bool
-    temperature: int
+    temperature: Optional[int]
     sort_order: int
     # 默认关：大多数内置人设是「就事论事」的问答/生成型，注入用户记忆
     # 反而引入与当前问题无关的偏见。只有长期陪伴型的人设显式打开。
@@ -235,7 +235,7 @@ BUILTIN_AGENTS: tuple[BuiltinAgent, ...] = (
         use_knowledge=False,
         use_ops=False,
         chat_visible=False,
-        temperature=20,
+        temperature=None,
         sort_order=50,
     ),
     BuiltinAgent(
@@ -257,7 +257,7 @@ BUILTIN_AGENTS: tuple[BuiltinAgent, ...] = (
         use_knowledge=False,
         use_ops=False,
         chat_visible=False,
-        temperature=20,
+        temperature=None,
         sort_order=60,
     ),
     BuiltinAgent(
@@ -598,6 +598,7 @@ def seed_builtin_agents(db: Session) -> None:
             current.use_ops = builtin.use_ops
             current.use_memory = builtin.use_memory
             current.chat_visible = builtin.chat_visible
+            current.temperature = builtin.temperature
             current.sort_order = builtin.sort_order
             current.is_builtin = True
 
