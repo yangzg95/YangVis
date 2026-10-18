@@ -348,6 +348,18 @@ class ModelPurpose(str, Enum):
     EMBEDDING = "embedding"
 
 
+class ReasoningMode(str, Enum):
+    """思维链的展示方式，只对对话模型有意义。
+
+    ``auto`` 上游发了才展示；``on`` 额外把 ``request_extra`` 并进请求体去要求
+    上游发；``off`` 一律丢弃。
+    """
+
+    AUTO = "auto"
+    ON = "on"
+    OFF = "off"
+
+
 class ModelConfigCreate(BaseModel):
     model_config = _ALLOW_MODEL_PREFIX
 
@@ -357,6 +369,8 @@ class ModelConfigCreate(BaseModel):
     base_url: str = Field(..., min_length=1, max_length=512)
     api_key: str = Field(default="", max_length=512)
     remark: Optional[str] = Field(default=None, max_length=512)
+    reasoning_mode: ReasoningMode = ReasoningMode.AUTO
+    request_extra: Optional[dict[str, Any]] = None
 
 
 class ModelConfigUpdate(BaseModel):
@@ -374,6 +388,8 @@ class ModelConfigUpdate(BaseModel):
     base_url: Optional[str] = Field(default=None, max_length=512)
     api_key: Optional[str] = Field(default=None, max_length=512)
     remark: Optional[str] = Field(default=None, max_length=512)
+    reasoning_mode: Optional[ReasoningMode] = None
+    request_extra: Optional[dict[str, Any]] = None
 
 
 class ModelConfigItem(BaseModel):
@@ -391,6 +407,8 @@ class ModelConfigItem(BaseModel):
     remark: Optional[str] = None
     is_default: bool = False
     vector_size: Optional[int] = None
+    reasoning_mode: ReasoningMode = ReasoningMode.AUTO
+    request_extra: Optional[dict[str, Any]] = None
     last_tested_at: Optional[datetime] = None
     last_test_ok: bool = False
     last_test_error: Optional[str] = None

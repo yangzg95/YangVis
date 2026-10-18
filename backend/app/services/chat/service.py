@@ -146,8 +146,9 @@ def _chunk_text(chunk: object) -> str:
 def _chunk_reasoning(chunk: object) -> str:
     """取出一个流式 chunk 里的推理/思考增量（OpenAI 兼容的 reasoning_content）。
 
-    只有会输出思维链的模型才带这个字段，普通模型恒为空。LangChain 把上游返回里
-    非标准字段塞进 ``additional_kwargs``，所以从那里读。
+    只有会输出思维链的模型才带这个字段，普通模型恒为空。``ChatOpenAI`` 本身会丢掉
+    这个非标准字段，是 ``providers.ReasoningChatOpenAI`` 把它抬进
+    ``additional_kwargs`` 的，所以从这里读。
     """
     extra = getattr(chunk, "additional_kwargs", None)
     if isinstance(extra, dict):

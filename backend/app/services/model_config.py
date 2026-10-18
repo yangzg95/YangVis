@@ -88,6 +88,8 @@ class ModelConfigService:
             base_url=payload.base_url.rstrip("/"),
             api_key_enc=encrypt(payload.api_key),
             remark=payload.remark,
+            reasoning_mode=payload.reasoning_mode.value,
+            request_extra=payload.request_extra,
             is_default=False,
         )
         self._db.add(config)
@@ -120,10 +122,22 @@ class ModelConfigService:
         if data.get("purpose") is not None:
             config.purpose = data["purpose"].value
 
-        credentials_changed = False
+        # 这两项不参与「为空就不动」那套：前端每次都整份表单提交，
+        # request_extra 传 null 就是「清空」，不能当成「没改」。
+        if data.get("reasoning_mode") is not None:
+            config.reasoning_mode = data["reasoning_mode"].value
+        request_extra_changed = False
+        if "request_extra" in data:
+            new_extra = data["request_extra"] or None
+            request_extra_changed = new_extra != config.request_extra
+            config.request_extra = new_extra
+
+        # 换了凭据、或换了要塞进请求体的私有参数，都可能让上游当场报错，
+        # 而探测走的正是同一个客户端，所以两者一样处理。
+        invalidates_last_test = False
         if data.get("base_url"):
             new_url = data["base_url"].rstrip("/")
-            credentials_changed = credentials_changed or new_url != config.base_url
+            invalidates_last_test = invalidates_last_test or new_url != config.base_url
             config.base_url = new_url
 
         # api_key 为空或者是打码后的值，都表示「别动它」。要是把掩码原样写
@@ -132,9 +146,11 @@ class ModelConfigService:
         api_key = data.get("api_key")
         if api_key is not None and api_key != "" and not is_masked(api_key):
             config.api_key_enc = encrypt(api_key)
-            credentials_changed = True
+            invalidates_last_test = True
 
-        if credentials_changed:
+        invalidates_last_test = invalidates_last_test or request_extra_changed
+
+        if invalidates_last_test:
             # 之前那次测试通过，已经不能说明任何问题了。
             config.last_test_ok = False
             config.last_test_error = None
@@ -146,10 +162,10 @@ class ModelConfigService:
         self._db.commit()
         self._db.refresh(config)
         logger.info(
-            "owner %s updated model config %s (credentials_changed=%s)",
+            "owner %s updated model config %s (invalidates_last_test=%s)",
             self._owner_id,
             config.id,
-            credentials_changed,
+            invalidates_last_test,
         )
         return config
 
@@ -268,6 +284,8 @@ class ModelConfigService:
             remark=config.remark,
             is_default=config.is_default,
             vector_size=config.vector_size,
+            reasoning_mode=config.reasoning_mode or "auto",
+            request_extra=config.request_extra,
             last_tested_at=config.last_tested_at,
             last_test_ok=config.last_test_ok,
             last_test_error=config.last_test_error,

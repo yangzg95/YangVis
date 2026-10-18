@@ -163,6 +163,18 @@ def migrate_schema() -> None:
             conn.execute(text("ALTER TABLE chat_message ADD COLUMN timeline JSON NULL"))
         logger.info("added chat_message.timeline")
 
+    model_config_columns = _column_names("model_config")
+    if model_config_columns:
+        for column, ddl in (
+            ("reasoning_mode", "ADD COLUMN reasoning_mode VARCHAR(16) NOT NULL DEFAULT 'auto'"),
+            ("request_extra", "ADD COLUMN request_extra JSON NULL"),
+        ):
+            if column in model_config_columns:
+                continue
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE model_config {ddl}"))
+            logger.info("added model_config.%s", column)
+
     database_columns = _column_names("ops_database")
     if database_columns:
         for column, ddl in (

@@ -286,6 +286,30 @@
             autocomplete="off"
           />
         </a-form-item>
+        <a-form-item v-if="modal.form.purpose === 'chat'" label="思考过程">
+          <a-radio-group v-model:value="modal.form.reasoning_mode" button-style="solid">
+            <a-radio-button value="auto">自动</a-radio-button>
+            <a-radio-button value="on">开启</a-radio-button>
+            <a-radio-button value="off">关闭</a-radio-button>
+          </a-radio-group>
+          <div class="hint">
+            自动＝服务商主动返回思维链才显示；开启＝另外按下方的参数向服务商索要思维链并显示；
+            关闭＝任何思维链都不显示。只有支持深度思考的模型才有内容，
+            普通模型（如各家 flash / turbo 档）本就不产出思维链。
+          </div>
+        </a-form-item>
+        <a-form-item v-if="modal.form.purpose === 'chat'" label="额外请求参数（JSON）">
+          <a-textarea
+            v-model:value="modal.form.request_extra_text"
+            :rows="2"
+            :placeholder="EXTRA_PARAMS_PLACEHOLDER"
+          />
+          <div class="hint">
+            仅在「开启」时原样并入请求体。各家「开启思考」的字段名不一样
+            （enable_thinking / thinking / reasoning_effort），按服务商文档原样填写，
+            保存后用「测试」验证；填错会让这份配置直接调用失败。
+          </div>
+        </a-form-item>
         <a-form-item label="备注">
           <a-textarea v-model:value="modal.form.remark" :rows="2" />
         </a-form-item>
@@ -307,6 +331,7 @@ import {
   type ModelConfig,
   type ModelPurpose,
   type NetdiskStatus,
+  type ReasoningMode,
   type ReadinessStatus,
 } from '@/api'
 import { useAuthStore } from '@/stores/auth'
@@ -347,7 +372,12 @@ const emptyForm = () => ({
   base_url: '',
   api_key: '',
   remark: '',
+  reasoning_mode: 'auto' as ReasoningMode,
+  request_extra_text: '',
 })
+
+// 例子放常量里而不是模板上，免得花括号被 Vue 当插值解析。
+const EXTRA_PARAMS_PLACEHOLDER = '{"thinking": {"type": "enabled"}}'
 
 const modal = reactive({
   open: false,
@@ -394,6 +424,8 @@ function openEdit(m: ModelConfig) {
     // 保留已保存的那把密钥。
     api_key: '',
     remark: m.remark || '',
+    reasoning_mode: m.reasoning_mode || 'auto',
+    request_extra_text: m.request_extra ? JSON.stringify(m.request_extra) : '',
   }
   modal.open = true
 }
@@ -403,6 +435,27 @@ async function submit() {
   if (!title.trim() || !model_name.trim() || !base_url.trim()) {
     message.warning('请填写标题、模型名称、模型地址')
     return
+  }
+
+  // 额外参数是原样透传给服务商的，只能是 JSON 对象；填坏了在这里就拦掉，
+  // 而不是等调用时让上游报一个看不懂的 400。
+  let requestExtra: Record<string, unknown> | null | undefined
+  if (modal.form.purpose === 'chat') {
+    const raw = modal.form.request_extra_text.trim()
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as unknown
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('not an object')
+        }
+        requestExtra = parsed as Record<string, unknown>
+      } catch {
+        message.warning('额外请求参数要写成 JSON 对象，例如 {"thinking": {"type": "enabled"}}')
+        return
+      }
+    } else {
+      requestExtra = modal.editing ? null : undefined
+    }
   }
 
   modal.loading = true
@@ -416,6 +469,9 @@ async function submit() {
       // 编辑时如果密钥留空就整个字段都不传，这样只改其他字段的编辑
       // 不会把已保存的密钥弄丢。
       ...(modal.form.api_key ? { api_key: modal.form.api_key } : {}),
+      ...(modal.form.purpose === 'chat'
+        ? { reasoning_mode: modal.form.reasoning_mode, request_extra: requestExtra }
+        : {}),
     }
 
     if (modal.editing) {

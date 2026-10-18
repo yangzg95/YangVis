@@ -13,10 +13,9 @@ from __future__ import annotations
 import logging
 from typing import List, Optional, Tuple
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage, SystemMessage
+from langchain_core.outputs import ChatGenerationChunk
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-
-from app.config import get_settings
 
 from app.config import get_settings
 from app.crypto import decrypt
@@ -33,6 +32,38 @@ class ProviderError(RuntimeError):
     """上游模型 provider 拒绝了请求，或者根本连不上。"""
 
 
+class ReasoningChatOpenAI(ChatOpenAI):
+    """把 provider 私有的 ``reasoning_content`` 增量搬进 ``additional_kwargs``。
+
+    ``ChatOpenAI`` 只按官方 OpenAI 规范解析响应，DeepSeek / 通义这类思考流用的
+    ``delta.reasoning_content`` 会被直接丢掉（其文档明确写了这一点）。思考过程要
+    能展示，只能在 chunk 转换这一层自己接。上游没发这个字段时行为与普通
+    ``ChatOpenAI`` 完全一致，所以对所有 provider 都是无害的。
+    """
+
+    def _convert_chunk_to_generation_chunk(
+        self,
+        chunk: dict,
+        default_chunk_class: type,
+        base_generation_info: Optional[dict],
+    ) -> Optional[ChatGenerationChunk]:
+        generation_chunk = super()._convert_chunk_to_generation_chunk(
+            chunk, default_chunk_class, base_generation_info
+        )
+        if generation_chunk is None:
+            return None
+
+        choices = chunk.get("choices") or []
+        first = choices[0] if choices else None
+        delta = first.get("delta") if isinstance(first, dict) else None
+        reasoning = delta.get("reasoning_content") if isinstance(delta, dict) else None
+        if isinstance(reasoning, str) and reasoning:
+            message = generation_chunk.message
+            if isinstance(message, AIMessageChunk):
+                message.additional_kwargs["reasoning_content"] = reasoning
+        return generation_chunk
+
+
 def _api_key(config: ModelConfig) -> str:
     # 挂在网关后面的 OpenAI 兼容服务往往不需要 key，但客户端要求这里
     # 必须是个非空字符串。
@@ -42,17 +73,29 @@ def _api_key(config: ModelConfig) -> str:
 def build_chat_model(
     config: ModelConfig,
     *,
-    temperature: float = 0.3,
+    temperature: Optional[float] = 0.3,
     streaming: bool = False,
     timeout: Optional[float] = None,
 ) -> ChatOpenAI:
     """根据已保存的配置创建一个对话客户端。
 
+    ``temperature`` 传 ``None`` 时该字段不会进请求体（langchain 会剔除空值），
+    交给服务商用自己的默认——这是给「只接受特定温度 / 压根不接受该参数」的模型
+    （Kimi、OpenAI o 系列）留的口子。
+
     ``timeout`` 缺省用全局 ``MODEL_HTTP_TIMEOUT``（30s，适合对话与连通性测试）；
     简历分析这类一次性长输出的后台任务应显式传更长的值——非流式调用要等整个
     completion 落地才返回，30s 几乎必然超时。
+
+    ``reasoning_mode`` 决定思维链怎么处理：``off`` 直接用原生 ``ChatOpenAI``，
+    ``reasoning_content`` 在解析层就没了；``auto`` 装上下面的子类，上游发了才展示；
+    ``on`` 除了展示，还把 ``request_extra`` 原样并进请求体——各家「开启思考」的参数名
+    互不相同，所以由配置的人填，代码不猜厂商。
     """
-    return ChatOpenAI(
+    mode = config.reasoning_mode or "auto"
+    extra_body = dict(config.request_extra) if mode == "on" and config.request_extra else None
+    client_cls = ChatOpenAI if mode == "off" else ReasoningChatOpenAI
+    return client_cls(
         model=config.model_name,
         base_url=config.base_url,
         api_key=_api_key(config),
@@ -60,6 +103,7 @@ def build_chat_model(
         streaming=streaming,
         timeout=timeout if timeout is not None else settings.MODEL_HTTP_TIMEOUT,
         max_retries=1,
+        extra_body=extra_body,
     )
 
 
@@ -101,7 +145,11 @@ def _friendly_error(exc: Exception) -> str:
 async def test_chat_model(config: ModelConfig) -> Tuple[bool, str]:
     """发一条最短的 prompt，验证 base_url + api_key + model 在一起能用。"""
     try:
-        client = build_chat_model(config, temperature=0.0)
+        # 探测只验「地址 + 密钥 + 模型名」这三件事，不该顺手规定采样温度：
+        # Kimi 的某些模型只接受 temperature=1，OpenAI o 系列干脆不接受该参数，
+        # 传 0.0 会让它们当场 400，把「模型其实能用」误判成连不通。传 None 让
+        # langchain 把 temperature 整个从请求体里省掉，由服务商套自己的默认值。
+        client = build_chat_model(config, temperature=None)
         result = await client.ainvoke(
             [
                 SystemMessage(content="Reply with the single word: ok"),

@@ -93,6 +93,15 @@ class ModelConfig(Base):
     last_test_ok: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     last_test_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
+    # 思维链怎么处理：``auto``＝上游发了才展示；``on``＝额外把 ``request_extra`` 并进
+    # 请求体再展示；``off``＝解析层直接丢掉，连客户端都不装 reasoning 分支。各家
+    # 「开启思考」的参数名不一样（enable_thinking / thinking.type / reasoning_effort），
+    # 所以 ``request_extra`` 只留一个透传口由配置的人自己填，代码不猜厂商。
+    reasoning_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="auto"
+    )
+    request_extra: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )

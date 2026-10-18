@@ -13,6 +13,9 @@
 - 删除语义：引用它的会话与个人工作流步骤要跟着清空（不清就留悬空 id，主链路撞
   ``LookupError`` 变成用户看不懂的 404）；``workflow_run_step`` 里那一列是「这一步
   当时实际用了哪份」的留痕，不许跟着清；删掉默认那份要顶上另一份验证过的。
+- 思维链开关（``reasoning_mode`` / ``request_extra``）：三态各自选哪种客户端、额外
+  参数只在「开启」时进请求体；这两列前端每次整份回传，所以「没传 / 传 null / 传空
+  对象」三种必须分清，改动参数算作测试态失效，光挪开关不算。
 
 路由层再加一小节，验的是掩码真的带到了线上：响应体里只有 ``sk-****`` 加尾四位。
 
@@ -43,6 +46,7 @@ from app.models.schemas import ModelConfigCreate, ModelConfigUpdate, ModelPurpos
 from app.security import create_access_token, hash_password
 from app.services.chat import ChatService
 from app.services.model_config import ModelConfigService, default_model_config
+from app.services.providers import ChatOpenAI, ReasoningChatOpenAI, build_chat_model
 
 OWNER = 1
 OTHER = 2
@@ -674,3 +678,205 @@ def test_the_model_routes_answer_404_for_another_owners_config(api):
 
     api.db.expire_all()
     assert api.db.get(ModelConfig, config["id"]).title == "线上这份"
+
+
+def test_the_reasoning_switch_survives_a_round_trip_over_http(api):
+    """SPA 存的是整份表单：把已保存的参数原样 PUT 回来，不能把它读成「清空」。"""
+    config = created_over_http(
+        api, reasoning_mode="on", request_extra={"thinking": {"type": "enabled"}}
+    )
+    assert (config["reasoning_mode"], config["request_extra"]) == (
+        "on",
+        {"thinking": {"type": "enabled"}},
+    )
+
+    status_code, envelope, _ = http_body(
+        api,
+        "put",
+        f"/api/settings/models/{config['id']}",
+        api.tokens["admin"],
+        json_body={"title": "只改标题", "reasoning_mode": "on", "request_extra": config["request_extra"]},
+    )
+    assert (status_code, envelope["code"]) == (200, 0)
+    assert envelope["data"]["request_extra"] == {"thinking": {"type": "enabled"}}
+
+    status_code, envelope, _ = http_body(
+        api,
+        "put",
+        f"/api/settings/models/{config['id']}",
+        api.tokens["admin"],
+        json_body={"reasoning_mode": "auto", "request_extra": None},
+    )
+    assert (status_code, envelope["code"]) == (200, 0)
+    assert (envelope["data"]["reasoning_mode"], envelope["data"]["request_extra"]) == (
+        "auto",
+        None,
+    )
+
+
+# ---- 八、思维链开关：三态各走各的客户端，参数只在「开启」时进请求体 ------------
+
+
+def test_a_new_config_defaults_to_auto_and_carries_no_extra_params(db):
+    config = svc(db).create(create_payload(api_key=KEY))
+
+    assert (config.reasoning_mode, config.request_extra) == ("auto", None)
+    item = svc(db).to_item(config)
+    assert (item.reasoning_mode.value, item.request_extra) == ("auto", None)
+
+
+def test_create_keeps_the_switch_and_the_passthrough_object(db):
+    config = svc(db).create(
+        create_payload(
+            api_key=KEY,
+            reasoning_mode="on",
+            request_extra={"thinking": {"type": "enabled"}},
+        )
+    )
+    db.refresh(config)
+
+    assert config.reasoning_mode == "on"
+    assert config.request_extra == {"thinking": {"type": "enabled"}}
+    item = svc(db).to_item(config)
+    assert (item.reasoning_mode.value, item.request_extra) == (
+        "on",
+        {"thinking": {"type": "enabled"}},
+    )
+
+
+def test_an_absent_request_extra_leaves_it_alone_but_null_clears_it(db):
+    """表单每次都整份提交，所以「没传」和「传了个 null」必须是两件事。"""
+    config = svc(db).create(
+        create_payload(api_key=KEY, reasoning_mode="on", request_extra={"thinking": {"type": "enabled"}})
+    )
+    config.last_test_ok = True
+    db.commit()
+
+    untouched = svc(db).update(config.id, ModelConfigUpdate(title="只改标题"))
+    assert untouched.request_extra == {"thinking": {"type": "enabled"}}
+    assert untouched.last_test_ok is True
+
+    cleared = svc(db).update(config.id, ModelConfigUpdate(request_extra=None))
+    assert cleared.request_extra is None
+    # 空对象等同于清空，不该在库里留下一份 {} 让人以为参数还在。
+    emptied = svc(db).update(
+        config.id, ModelConfigUpdate(request_extra={}, reasoning_mode="on")
+    )
+    assert emptied.request_extra is None
+
+
+@pytest.mark.parametrize(
+    "extra,expect_test_ok",
+    [({"thinking": {"type": "disabled"}}, False), ({"thinking": {"type": "enabled"}}, True)],
+)
+def test_only_a_real_change_to_the_params_invalidates_the_last_test(
+    db, extra, expect_test_ok
+):
+    """透传参数会真的进请求体，改对了就等于换了一份没验证过的配置；原样回传不算改。"""
+    config = svc(db).create(
+        create_payload(api_key=KEY, reasoning_mode="on", request_extra={"thinking": {"type": "enabled"}})
+    )
+    config.is_default = True
+    config.last_test_ok = True
+    db.commit()
+
+    updated = svc(db).update(config.id, ModelConfigUpdate(request_extra=extra))
+
+    assert updated.last_test_ok is expect_test_ok
+    assert updated.is_default is (True if expect_test_ok else False)
+
+
+def test_moving_the_switch_by_itself_keeps_the_verified_state(db):
+    """关不关思考跟这份配置通不通没关系，不该逼人重测一次。"""
+    config = svc(db).create(create_payload(api_key=KEY))
+    config.is_default = True
+    config.last_test_ok = True
+    db.commit()
+
+    for mode in ("on", "off", "auto"):
+        updated = svc(db).update(config.id, ModelConfigUpdate(reasoning_mode=mode))
+        assert updated.reasoning_mode == mode
+        assert updated.last_test_ok is True, mode
+        assert updated.is_default is True, mode
+
+
+def test_off_uses_the_plain_client_and_on_is_the_only_mode_that_sends_params(db):
+    """三态各自的行为：off 连解析层都不接 reasoning_content，on 才把参数并进请求体。"""
+    extra = {"thinking": {"type": "enabled"}}
+    on = svc(db).create(
+        create_payload(api_key=KEY, reasoning_mode="on", request_extra=extra)
+    )
+    auto = svc(db).create(create_payload(api_key=KEY, title="自动那份", request_extra=extra))
+    off = svc(db).create(
+        create_payload(
+            api_key=KEY, title="关闭那份", reasoning_mode="off", request_extra=extra
+        )
+    )
+
+    on_client = build_chat_model(on)
+    assert isinstance(on_client, ReasoningChatOpenAI)
+    assert on_client.extra_body == extra
+
+    auto_client = build_chat_model(auto)
+    assert isinstance(auto_client, ReasoningChatOpenAI)
+    # 没选「开启」就不该往请求体里塞私有参数，否则等于替用户猜厂商。
+    assert auto_client.extra_body is None
+
+    off_client = build_chat_model(off)
+    assert isinstance(off_client, ChatOpenAI)
+    assert not isinstance(off_client, ReasoningChatOpenAI)
+    assert off_client.extra_body is None
+
+
+def test_only_the_on_mode_puts_the_params_on_the_wire(db):
+    """``extra_body`` 是 openai SDK 平展进 JSON body 的那一个键，不是客户端字段。
+
+    钉的是 ``_get_request_payload`` 这个接缝：LangChain 若改了实现，这条会红，
+    而它红了就等于「用户填的参数不再上线」——那正是这个开关唯一的存在理由。
+    """
+    from langchain_core.messages import HumanMessage
+
+    extra = {"thinking": {"type": "enabled"}}
+    on = svc(db).create(create_payload(api_key=KEY, reasoning_mode="on", request_extra=extra))
+    auto = svc(db).create(create_payload(api_key=KEY, title="自动那份", reasoning_mode="auto",
+                                         request_extra=extra))
+
+    on_payload = build_chat_model(on)._get_request_payload([HumanMessage(content="hi")])
+    auto_payload = build_chat_model(auto)._get_request_payload([HumanMessage(content="hi")])
+
+    assert on_payload.get("extra_body") == extra
+    # 没选「开启」就不能把私有参数发出去：发给不认识它的服务商是一句 400。
+    assert auto_payload.get("extra_body") is None
+
+
+def test_the_off_mode_drops_the_providers_thinking_stream_at_parse_time(db):
+    """同一个上游增量：装 reasoning 的客户端抬进 additional_kwargs，原生客户端直接丢。
+
+    ``off`` 靠的就是这一步——它不给「思考过程」留任何下游可读的入口，
+    所以落库的 timeline 与 SSE 都不会出现 reason 事件。
+    """
+    from langchain_core.messages import AIMessageChunk
+
+    chunk = {
+        "id": "1",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "unit-test",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"reasoning_content": "先想一想", "content": ""},
+                "finish_reason": None,
+            }
+        ],
+    }
+    on = svc(db).create(create_payload(api_key=KEY, reasoning_mode="on"))
+    off = svc(db).create(create_payload(api_key=KEY, title="关闭那份", reasoning_mode="off"))
+
+    reasoning = build_chat_model(on)._convert_chunk_to_generation_chunk(
+        chunk, AIMessageChunk, None
+    )
+    plain = build_chat_model(off)._convert_chunk_to_generation_chunk(chunk, AIMessageChunk, None)
+
+    assert reasoning.message.additional_kwargs["reasoning_content"] == "先想一想"
+    assert "reasoning_content" not in plain.message.additional_kwargs

@@ -1201,6 +1201,9 @@ defineExpose({
   white-space: pre-wrap;
   word-break: break-word;
   font-style: italic;
+  /* 思维链动辄上千行，限高让它自己滚，别把正文顶出屏幕。 */
+  max-height: 220px;
+  overflow-y: auto;
 }
 
 .dark .reason-summary {
@@ -1272,6 +1275,20 @@ defineExpose({
   position: absolute;
   right: 8px;
   bottom: 8px;
+}
+
+/* antd 的 disabled primary 圆钮会把箭头压到 rgba(0,0,0,.25)，
+   在浅底上只剩一个空圈。这里固定一条可读的描边与箭头色。 */
+.composer-send :deep(.ant-btn[disabled]) {
+  background: #fff;
+  border-color: #c8ced6;
+  color: rgba(0, 0, 0, 0.45);
+}
+
+.ops-chat.dark .composer-send :deep(.ant-btn[disabled]) {
+  background: transparent;
+  border-color: var(--on-dark-border);
+  color: var(--text-dark-2);
 }
 
 .markdown :deep(p) {

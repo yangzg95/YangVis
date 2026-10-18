@@ -8,6 +8,9 @@ import { request } from './http'
 
 export type ModelPurpose = 'chat' | 'embedding'
 
+/** 思维链：auto 上游发了才展示；on 带额外参数并要求展示；off 一律不展示。 */
+export type ReasoningMode = 'auto' | 'on' | 'off'
+
 export interface ModelConfig {
   id: number
   purpose: ModelPurpose
@@ -20,6 +23,9 @@ export interface ModelConfig {
   remark?: string | null
   is_default: boolean
   vector_size?: number | null
+  reasoning_mode?: ReasoningMode
+  /** 仅 reasoning_mode=on 生效：原样并入请求体的私有参数。 */
+  request_extra?: Record<string, unknown> | null
   last_tested_at?: string | null
   last_test_ok: boolean
   last_test_error?: string | null
@@ -34,6 +40,9 @@ export interface ModelConfigPayload {
   base_url: string
   api_key?: string
   remark?: string | null
+  reasoning_mode?: ReasoningMode
+  /** null = 清空；未传 = 保持原值。 */
+  request_extra?: Record<string, unknown> | null
 }
 
 export interface TestResult {

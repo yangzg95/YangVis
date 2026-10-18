@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS model_config (
   last_tested_at  DATETIME      NULL,
   last_test_ok    TINYINT(1)    NOT NULL DEFAULT 0,
   last_test_error VARCHAR(512)  NULL,
+  reasoning_mode  VARCHAR(16)   NOT NULL DEFAULT 'auto' COMMENT '思维链：auto 上游发了才展示 | on 带 request_extra 并要求展示 | off 丢弃',
+  request_extra   JSON          NULL COMMENT '仅 reasoning_mode=on：原样并入请求体的私有参数（enable_thinking / thinking.type 等），代码不猜厂商',
   created_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_owner (owner_id)
@@ -148,6 +150,7 @@ CREATE TABLE IF NOT EXISTS chat_message (
   role            VARCHAR(16)  NOT NULL COMMENT 'user | assistant',
   content         MEDIUMTEXT   NOT NULL,
   citations       JSON         NULL COMMENT '[{"index","doc_id","chunk_id","filename","score","excerpt"}]',
+  timeline        JSON         NULL COMMENT '本轮按真实顺序落库的事件序列，历史回放据此还原步骤与思考过程',
   created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_conv (conversation_id, id),
   KEY idx_owner (owner_id)
@@ -555,3 +558,10 @@ CREATE TABLE IF NOT EXISTS workflow_run_step (
 -- ALTER TABLE resume_comparison    DROP COLUMN status, DROP COLUMN error_msg;
 -- ALTER TABLE resume_toolkit_task  DROP COLUMN status, DROP COLUMN error_msg;
 -- ALTER TABLE slide_deck           DROP COLUMN status, DROP COLUMN error_msg;
+--
+-- AI 运维助手的执行过程回放与思维链开关（都由 migrate_schema() 自动补）：
+-- ALTER TABLE chat_message
+--   ADD COLUMN timeline JSON NULL COMMENT '本轮按真实顺序落库的事件序列';
+-- ALTER TABLE model_config
+--   ADD COLUMN reasoning_mode VARCHAR(16) NOT NULL DEFAULT 'auto' COMMENT 'auto | on | off',
+--   ADD COLUMN request_extra  JSON NULL COMMENT '仅 on：原样并入请求体的私有参数';
