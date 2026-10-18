@@ -142,6 +142,12 @@ docker-compose up -d --build
 
 前端构建产物由 FastAPI 直接托管，非 `/api/*` 请求回退到 `index.html`（SPA history 模式）。
 
+构建镜像走国内源：`node:20-alpine` 取 `docker.1ms.run`、`python:3.12-slim` 取
+`docker.m.daocloud.io`，apt 用 USTC、npm 用 npmmirror、pip 用 tuna。Dockerfile 顶部
+**不钉 `# syntax=` 前端**——这份文件只用经典指令，BuildKit 自带的够用；钉了反而每次
+构建开头要多拉一次外部镜像，镜像站 502 一下整场构建还没开始就挂。若哪天确实用到了
+`RUN --mount` 这类新语法，再把前端镜像换成能访问的源。
+
 ## 本地开发
 
 ```bash

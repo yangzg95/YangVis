@@ -1,4 +1,6 @@
-# syntax=docker.m.daocloud.io/docker/dockerfile:1.6
+# 故意不写 `# syntax=docker/dockerfile:x.y`：本文件只用经典指令（没有 --mount、
+# heredoc、--link），BuildKit 自带的前端就够。钉了它等于每次构建先去镜像站拉一次
+# 前端镜像，那个站一抖（502）整场构建还没开始就失败。
 # ============================================================
 #  Stage 1: build the Vue 3 frontend
 # ============================================================
