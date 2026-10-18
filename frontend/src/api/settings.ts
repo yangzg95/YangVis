@@ -26,6 +26,8 @@ export interface ModelConfig {
   reasoning_mode?: ReasoningMode
   /** 仅 reasoning_mode=on 生效：原样并入请求体的私有参数。 */
   request_extra?: Record<string, unknown> | null
+  /** 0-100 整数，调用时 /100；null=不指定，由智能体或全局默认决定。 */
+  temperature?: number | null
   last_tested_at?: string | null
   last_test_ok: boolean
   last_test_error?: string | null
@@ -43,6 +45,8 @@ export interface ModelConfigPayload {
   reasoning_mode?: ReasoningMode
   /** null = 清空；未传 = 保持原值。 */
   request_extra?: Record<string, unknown> | null
+  /** 0-100 整数；null = 不指定（由智能体或全局默认决定）。 */
+  temperature?: number | null
 }
 
 export interface TestResult {

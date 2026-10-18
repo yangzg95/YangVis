@@ -168,6 +168,7 @@ def migrate_schema() -> None:
         for column, ddl in (
             ("reasoning_mode", "ADD COLUMN reasoning_mode VARCHAR(16) NOT NULL DEFAULT 'auto'"),
             ("request_extra", "ADD COLUMN request_extra JSON NULL"),
+            ("temperature", "ADD COLUMN temperature INT NULL"),
         ):
             if column in model_config_columns:
                 continue
@@ -222,6 +223,18 @@ def migrate_schema() -> None:
             with engine.begin() as conn:
                 conn.execute(text(f"ALTER TABLE agent {ddl}"))
             logger.info("added agent.%s", column)
+
+        # agent.temperature 从 NOT NULL DEFAULT 30 改为 nullable，让智能体能表达
+        # 「跟随模型配置」。先检测当前 nullability，只在 NOT NULL 时执行 MODIFY，保证幂等。
+        inspector = inspect(engine)
+        agent_cols_meta = {c["name"]: c for c in inspector.get_columns("agent")}
+        temp_col = agent_cols_meta.get("temperature")
+        if temp_col and not temp_col["nullable"]:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE agent MODIFY temperature INT NULL DEFAULT NULL")
+                )
+            logger.info("modified agent.temperature to nullable")
 
     resume_columns = _column_names("resume")
     if resume_columns:

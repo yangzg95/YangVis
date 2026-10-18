@@ -622,3 +622,38 @@ def test_duplicate_is_the_way_to_customise_a_builtin_over_http(api):
         json_body={"name": "我调过的人设"},
     )
     assert (edited[0], edited[1]["code"], edited[1]["data"]["name"]) == (200, 0, "我调过的人设")
+
+
+# ---- temperature nullable --------------------------------------------------
+
+
+def test_agent_temperature_can_be_null_on_create(db):
+    """新建智能体时 temperature 可以为 null（跟随模型配置）。"""
+    svc = AgentService(db, OWNER)
+    agent = svc.create(
+        AgentCreate(
+            slug="null-temp",
+            name="Null Temp",
+            system_prompt="test",
+            temperature=None,
+        )
+    )
+    assert agent.temperature is None
+
+
+def test_agent_update_can_set_temperature_back_to_null(db):
+    """显式传 temperature=null 必须能落库，不被 update 的 None 过滤掉。"""
+    svc = AgentService(db, OWNER)
+    agent = svc.create(
+        AgentCreate(
+            slug="explicit-temp",
+            name="Explicit Temp",
+            system_prompt="test",
+            temperature=50,
+        )
+    )
+    assert agent.temperature == 50
+
+    updated = svc.update(agent.id, AgentUpdate(temperature=None))
+    assert updated.temperature is None
+

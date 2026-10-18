@@ -47,7 +47,7 @@ from app.services.chat.memory import (
 )
 from app.services.ops import database as db_ops
 from app.services.ops import server as server_ops
-from app.services.providers import build_chat_model
+from app.services.providers import build_chat_model, resolve_temperature
 
 logger = logging.getLogger("yangvis.chat")
 
@@ -903,7 +903,7 @@ class ChatService:
 
         client = build_chat_model(
             config,
-            temperature=agent.temperature / 100,
+            temperature=resolve_temperature(config, agent.temperature),
             streaming=True,
         )
         # tools 里始终带着 current_datetime，所以对话模型必须支持

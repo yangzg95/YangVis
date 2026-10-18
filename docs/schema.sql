@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS model_config (
   last_test_error VARCHAR(512)  NULL,
   reasoning_mode  VARCHAR(16)   NOT NULL DEFAULT 'auto' COMMENT '思维链：auto 上游发了才展示 | on 带 request_extra 并要求展示 | off 丢弃',
   request_extra   JSON          NULL COMMENT '仅 reasoning_mode=on：原样并入请求体的私有参数（enable_thinking / thinking.type 等），代码不猜厂商',
+  temperature     INT           NULL COMMENT '0-100，除以100传给模型；NULL=不指定，由调用方（智能体或全局默认）决定',
   created_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_owner (owner_id)
@@ -51,7 +52,7 @@ CREATE TABLE IF NOT EXISTS agent (
   use_ops       TINYINT(1)    NOT NULL DEFAULT 0 COMMENT '是否挂运维只读工具（服务器命令/数据库查询）',
   use_memory    TINYINT(1)    NOT NULL DEFAULT 0 COMMENT '是否注入长期记忆并参与记忆提取',
   chat_visible  TINYINT(1)    NOT NULL DEFAULT 1 COMMENT '是否出现在主对话的智能体选择器',
-  temperature   INT           NOT NULL DEFAULT 30 COMMENT '0-100，除以 100 后传给模型',
+  temperature   INT           NULL COMMENT '0-100覆盖模型配置；NULL=跟随模型配置',
   is_builtin    TINYINT(1)    NOT NULL DEFAULT 0,
   enabled       TINYINT(1)    NOT NULL DEFAULT 1,
   sort_order    INT           NOT NULL DEFAULT 0,

@@ -90,6 +90,7 @@ class ModelConfigService:
             remark=payload.remark,
             reasoning_mode=payload.reasoning_mode.value,
             request_extra=payload.request_extra,
+            temperature=payload.temperature,
             is_default=False,
         )
         self._db.add(config)
@@ -131,6 +132,10 @@ class ModelConfigService:
             new_extra = data["request_extra"] or None
             request_extra_changed = new_extra != config.request_extra
             config.request_extra = new_extra
+
+        # temperature 同理：前端显式传 null 表示「清空回不指定」，不是「没改」。
+        if "temperature" in data:
+            config.temperature = data["temperature"]
 
         # 换了凭据、或换了要塞进请求体的私有参数，都可能让上游当场报错，
         # 而探测走的正是同一个客户端，所以两者一样处理。
@@ -286,6 +291,7 @@ class ModelConfigService:
             vector_size=config.vector_size,
             reasoning_mode=config.reasoning_mode or "auto",
             request_extra=config.request_extra,
+            temperature=config.temperature,
             last_tested_at=config.last_tested_at,
             last_test_ok=config.last_test_ok,
             last_test_error=config.last_test_error,

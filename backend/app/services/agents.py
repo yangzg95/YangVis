@@ -688,6 +688,11 @@ class AgentService:
         changed = [field for field, value in data.items() if value is not None]
         for field in changed:
             setattr(agent, field, data[field])
+        # temperature 特殊处理：允许显式设回 NULL（跟随模型配置），不被上面的 None 过滤掉。
+        if "temperature" in data and data["temperature"] is None:
+            agent.temperature = None
+            if "temperature" not in changed:
+                changed.append("temperature")
         self._db.commit()
         self._db.refresh(agent)
         logger.info(

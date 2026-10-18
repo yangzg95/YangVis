@@ -880,3 +880,55 @@ def test_the_off_mode_drops_the_providers_thinking_stream_at_parse_time(db):
 
     assert reasoning.message.additional_kwargs["reasoning_content"] == "先想一想"
     assert "reasoning_content" not in plain.message.additional_kwargs
+
+
+# ---- temperature -----------------------------------------------------------
+
+
+def test_temperature_round_trip_over_http(api):
+    """temperature 能存能取，0-100 整数原样回来。"""
+    config = created_over_http(api, temperature=70)
+    assert config["temperature"] == 70
+
+
+def test_temperature_null_means_unspecified(api):
+    """temperature 留空（null）表示「不指定」，API 返回 null。"""
+    config = created_over_http(api, temperature=None)
+    assert config["temperature"] is None
+
+
+def test_explicit_null_clears_temperature(db):
+    """表单每次都整份提交，显式传 null 必须能清空已保存的温度。"""
+    config = svc(db).create(create_payload(api_key=KEY, temperature=50))
+    assert config.temperature == 50
+
+    updated = svc(db).update(config.id, ModelConfigUpdate(temperature=None))
+    assert updated.temperature is None
+
+
+def test_resolve_temperature_priority(db):
+    """智能体覆盖 > 模型配置 > 全局默认（None）。"""
+    from app.services.providers import resolve_temperature
+
+    config_with_temp = svc(db).create(create_payload(api_key=KEY, temperature=60))
+    config_no_temp = svc(db).create(create_payload(api_key=KEY, title="另一份", temperature=None))
+
+    # 智能体有值：用智能体的
+    assert resolve_temperature(config_with_temp, 30) == 0.3
+    assert resolve_temperature(config_with_temp, 80) == 0.8
+
+    # 智能体 null，模型配置有值：用模型配置的
+    assert resolve_temperature(config_with_temp, None) == 0.6
+
+    # 都 null：返回 None（让 langchain 剔除）
+    assert resolve_temperature(config_no_temp, None) is None
+
+
+def test_build_chat_model_omits_temperature_when_none(db):
+    """temperature=None 时 langchain 应该把该字段从请求体里剔除。"""
+    config = svc(db).create(create_payload(api_key=KEY))
+    client = build_chat_model(config, temperature=None)
+    # _get_request_payload 是 langchain 内部方法，返回发给上游的参数字典。
+    payload = client._get_request_payload([{"role": "user", "content": "hi"}])
+    assert "temperature" not in payload
+

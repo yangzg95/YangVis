@@ -13,7 +13,8 @@ export interface Agent {
   use_ops: boolean
   use_memory: boolean
   chat_visible: boolean
-  temperature: number
+  /** 0-100 整数；null=跟随模型配置。 */
+  temperature: number | null
   is_builtin: boolean
   enabled: boolean
   sort_order: number
@@ -30,7 +31,8 @@ export interface AgentPayload {
   use_ops?: boolean
   use_memory?: boolean
   chat_visible?: boolean
-  temperature?: number
+  /** 0-100 整数；null=跟随模型配置。 */
+  temperature?: number | null
   sort_order?: number
 }
 

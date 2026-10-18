@@ -102,6 +102,10 @@ class ModelConfig(Base):
     )
     request_extra: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
+    # 采样温度：0-100 整数，调用时 /100 传给模型；NULL 表示「不指定」，由调用方
+    # （智能体覆盖或全局默认）决定。embedding 模型不用这个字段。
+    temperature: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )
@@ -146,7 +150,9 @@ class Agent(Base):
     # 由对应模块在后台调用的）不在对话里展示，但停用它们不影响后台调用。
     chat_visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
-    temperature: Mapped[int] = mapped_column(Integer, nullable=False, default=30)  # 0-100
+    # 采样温度：0-100 整数，调用时 /100 传给模型；NULL 表示「跟随模型配置」，
+    # 由 resolve_temperature() 在调用时决定最终值。
+    temperature: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     is_builtin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

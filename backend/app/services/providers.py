@@ -70,6 +70,22 @@ def _api_key(config: ModelConfig) -> str:
     return decrypt(config.api_key_enc) or "not-needed"
 
 
+def resolve_temperature(
+    config: ModelConfig, agent_temperature: Optional[int]
+) -> Optional[float]:
+    """智能体覆盖，模型配置兜底：任一为 0-100 整数则 /100，都没有则返回 None。
+
+    返回 ``None`` 时 langchain 会把 temperature 从请求体里剔除，交给服务商用自己的
+    默认——这是给「只接受特定温度 / 压根不接受该参数」的模型（Kimi、OpenAI o 系列）
+    留的口子。
+    """
+    if agent_temperature is not None:
+        return agent_temperature / 100
+    if config.temperature is not None:
+        return config.temperature / 100
+    return None
+
+
 def build_chat_model(
     config: ModelConfig,
     *,

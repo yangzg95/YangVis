@@ -310,6 +310,20 @@
             保存后用「测试」验证；填错会让这份配置直接调用失败。
           </div>
         </a-form-item>
+        <a-form-item v-if="modal.form.purpose === 'chat'" label="采样温度">
+          <a-input-number
+            v-model:value="modal.form.temperature"
+            :min="0"
+            :max="100"
+            :step="1"
+            placeholder="留空＝不指定（由智能体或默认决定）"
+            style="width: 100%"
+          />
+          <div class="hint">
+            0-100 整数，调用时除以 100 传给模型。留空表示不指定，由智能体的发散度覆盖，
+            或回落到全局默认。Kimi 的某些模型只接受 1，OpenAI o 系列不接受该参数——这类模型留空即可。
+          </div>
+        </a-form-item>
         <a-form-item label="备注">
           <a-textarea v-model:value="modal.form.remark" :rows="2" />
         </a-form-item>
@@ -374,6 +388,7 @@ const emptyForm = () => ({
   remark: '',
   reasoning_mode: 'auto' as ReasoningMode,
   request_extra_text: '',
+  temperature: null as number | null,
 })
 
 // 例子放常量里而不是模板上，免得花括号被 Vue 当插值解析。
@@ -426,6 +441,7 @@ function openEdit(m: ModelConfig) {
     remark: m.remark || '',
     reasoning_mode: m.reasoning_mode || 'auto',
     request_extra_text: m.request_extra ? JSON.stringify(m.request_extra) : '',
+    temperature: m.temperature ?? null,
   }
   modal.open = true
 }
@@ -470,7 +486,11 @@ async function submit() {
       // 不会把已保存的密钥弄丢。
       ...(modal.form.api_key ? { api_key: modal.form.api_key } : {}),
       ...(modal.form.purpose === 'chat'
-        ? { reasoning_mode: modal.form.reasoning_mode, request_extra: requestExtra }
+        ? {
+            reasoning_mode: modal.form.reasoning_mode,
+            request_extra: requestExtra,
+            temperature: modal.form.temperature,
+          }
         : {}),
     }
 

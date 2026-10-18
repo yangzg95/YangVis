@@ -23,7 +23,7 @@ from app.models.entities import Agent, ModelConfig
 from app.models.schemas import ModelPurpose
 from app.services.agents import AgentService
 from app.services.model_config import default_model_config
-from app.services.providers import build_chat_model
+from app.services.providers import build_chat_model, resolve_temperature
 
 logger = logging.getLogger("yangvis.agent_run")
 
@@ -146,7 +146,7 @@ async def run_agent(
         len(tools) if tools else 0,
     )
     model = build_chat_model(
-        config, temperature=agent.temperature / 100, timeout=timeout
+        config, temperature=resolve_temperature(config, agent.temperature), timeout=timeout
     )
     messages = [
         SystemMessage(content=agent.system_prompt),

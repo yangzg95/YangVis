@@ -371,6 +371,7 @@ class ModelConfigCreate(BaseModel):
     remark: Optional[str] = Field(default=None, max_length=512)
     reasoning_mode: ReasoningMode = ReasoningMode.AUTO
     request_extra: Optional[dict[str, Any]] = None
+    temperature: Optional[int] = Field(default=None, ge=0, le=100)
 
 
 class ModelConfigUpdate(BaseModel):
@@ -390,6 +391,7 @@ class ModelConfigUpdate(BaseModel):
     remark: Optional[str] = Field(default=None, max_length=512)
     reasoning_mode: Optional[ReasoningMode] = None
     request_extra: Optional[dict[str, Any]] = None
+    temperature: Optional[int] = Field(default=None, ge=0, le=100)
 
 
 class ModelConfigItem(BaseModel):
@@ -409,6 +411,7 @@ class ModelConfigItem(BaseModel):
     vector_size: Optional[int] = None
     reasoning_mode: ReasoningMode = ReasoningMode.AUTO
     request_extra: Optional[dict[str, Any]] = None
+    temperature: Optional[int] = None
     last_tested_at: Optional[datetime] = None
     last_test_ok: bool = False
     last_test_error: Optional[str] = None
@@ -462,7 +465,7 @@ class AgentCreate(BaseModel):
     use_ops: bool = False
     use_memory: bool = False
     chat_visible: bool = True
-    temperature: int = Field(default=30, ge=0, le=100)
+    temperature: Optional[int] = Field(default=None, ge=0, le=100)
     sort_order: int = Field(default=100, ge=0, le=9999)
 
 
@@ -491,7 +494,7 @@ class AgentItem(BaseModel):
     use_ops: bool
     use_memory: bool
     chat_visible: bool
-    temperature: int
+    temperature: Optional[int]
     is_builtin: bool
     enabled: bool
     sort_order: int

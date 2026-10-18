@@ -119,14 +119,32 @@
           </div>
         </a-form-item>
 
-        <a-form-item :label="`发散度：${modal.form.temperature}`">
+        <a-form-item>
+          <template #label>
+            <div style="display: flex; align-items: center; gap: 8px">
+              <span>发散度</span>
+              <a-switch
+                v-model:checked="modal.form.follow_model"
+                :disabled="modal.readonly"
+                size="small"
+              />
+              <span style="font-size: 12px; color: #888">跟随模型配置</span>
+            </div>
+          </template>
           <a-slider
             v-model:value="modal.form.temperature"
             :min="0"
             :max="100"
-            :disabled="modal.readonly"
+            :disabled="modal.readonly || modal.form.follow_model"
           />
-          <div class="hint">数值越低回答越稳定保守；客服与技术支持建议保持在 30 以下。</div>
+          <div class="hint">
+            <template v-if="modal.form.follow_model">
+              已勾选「跟随模型配置」：该智能体使用模型配置里设定的温度，或回落到全局默认。
+            </template>
+            <template v-else>
+              数值越低回答越稳定保守；客服与技术支持建议保持在 30 以下。
+            </template>
+          </div>
         </a-form-item>
       </a-form>
     </a-modal>
@@ -134,7 +152,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { DownOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import { agentsApi, type Agent } from '@/api'
@@ -159,6 +177,7 @@ const emptyForm = () => ({
   use_memory: false,
   chat_visible: true,
   temperature: 30,
+  follow_model: false,
 })
 
 const modal = reactive({
@@ -168,6 +187,17 @@ const modal = reactive({
   loading: false,
   form: emptyForm(),
 })
+
+// 取消勾选「跟随模型配置」时，如果温度还是 null（理论上不会，但保险起见），
+// 给一个默认值 30，避免提交 null。
+watch(
+  () => modal.form.follow_model,
+  (follow) => {
+    if (!follow && modal.form.temperature === null) {
+      modal.form.temperature = 30
+    }
+  }
+)
 
 const modalTitle = computed(() => {
   if (modal.readonly) return '查看智能体'
@@ -195,7 +225,9 @@ function fillForm(agent: Agent) {
     use_ops: agent.use_ops,
     use_memory: agent.use_memory,
     chat_visible: agent.chat_visible,
-    temperature: agent.temperature,
+    // 如果温度是 null，说明「跟随模型配置」；否则用原值，默认回落到 30。
+    temperature: agent.temperature ?? 30,
+    follow_model: agent.temperature === null,
   }
 }
 
@@ -244,7 +276,8 @@ async function submit() {
       use_ops: modal.form.use_ops,
       use_memory: modal.form.use_memory,
       chat_visible: modal.form.chat_visible,
-      temperature: modal.form.temperature,
+      // 勾选「跟随模型配置」时发 null，否则发滑块值。
+      temperature: modal.form.follow_model ? null : modal.form.temperature,
     }
     if (modal.editing) {
       await agentsApi.update(modal.form.id, payload)
