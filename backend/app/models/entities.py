@@ -102,8 +102,9 @@ class ModelConfig(Base):
     )
     request_extra: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
-    # 采样温度：0-100 整数，调用时 /100 传给模型；NULL 表示「不指定」，由调用方
-    # （智能体覆盖或全局默认）决定。embedding 模型不用这个字段。
+    # 采样温度：0-100 整数，调用时 /100 传给模型。这里是「模型硬约束」——某些
+    # 服务商（Kimi 的某些模型只接受 1）只能在模型这一层规定，设了值就盖过所有智能体。
+    # NULL 表示模型不设限，由智能体的温度决定。embedding 模型不用这个字段。
     temperature: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -150,8 +151,8 @@ class Agent(Base):
     # 由对应模块在后台调用的）不在对话里展示，但停用它们不影响后台调用。
     chat_visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
-    # 采样温度：0-100 整数，调用时 /100 传给模型；NULL 表示「跟随模型配置」，
-    # 由 resolve_temperature() 在调用时决定最终值。
+    # 采样温度：0-100 整数，调用时 /100 传给模型；NULL 表示「跟随模型配置」。
+    # 这是智能体偏好——模型配置里设了温度时以模型为准（见 resolve_temperature()）。
     temperature: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     is_builtin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

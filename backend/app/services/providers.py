@@ -73,16 +73,18 @@ def _api_key(config: ModelConfig) -> str:
 def resolve_temperature(
     config: ModelConfig, agent_temperature: Optional[int]
 ) -> Optional[float]:
-    """智能体覆盖，模型配置兜底：任一为 0-100 整数则 /100，都没有则返回 None。
+    """模型配置是硬约束，智能体是偏好：模型级有值就用它，否则用智能体的，都没有则 None。
+
+    之所以模型优先——「Kimi 只接受 1」这类限制是模型本身的属性，只该在模型配置里
+    设一次；反过来让每个用它的智能体各自留空，等于把模型约束摊给所有消费者去适配。
 
     返回 ``None`` 时 langchain 会把 temperature 从请求体里剔除，交给服务商用自己的
-    默认——这是给「只接受特定温度 / 压根不接受该参数」的模型（Kimi、OpenAI o 系列）
-    留的口子。
+    默认——这是给「压根不接受该参数」的模型（OpenAI o 系列）留的口子。
     """
-    if agent_temperature is not None:
-        return agent_temperature / 100
     if config.temperature is not None:
         return config.temperature / 100
+    if agent_temperature is not None:
+        return agent_temperature / 100
     return None
 
 

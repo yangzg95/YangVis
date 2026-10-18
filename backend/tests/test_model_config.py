@@ -907,18 +907,18 @@ def test_explicit_null_clears_temperature(db):
 
 
 def test_resolve_temperature_priority(db):
-    """智能体覆盖 > 模型配置 > 全局默认（None）。"""
+    """模型配置（硬约束）> 智能体（偏好）> 服务商默认（None）。"""
     from app.services.providers import resolve_temperature
 
     config_with_temp = svc(db).create(create_payload(api_key=KEY, temperature=60))
     config_no_temp = svc(db).create(create_payload(api_key=KEY, title="另一份", temperature=None))
 
-    # 智能体有值：用智能体的
-    assert resolve_temperature(config_with_temp, 30) == 0.3
-    assert resolve_temperature(config_with_temp, 80) == 0.8
+    # 模型配置有值：盖过智能体——「Kimi 只接受 1」这类限制只需在模型这一处设一次
+    assert resolve_temperature(config_with_temp, 30) == 0.6
+    assert resolve_temperature(config_with_temp, 80) == 0.6
 
-    # 智能体 null，模型配置有值：用模型配置的
-    assert resolve_temperature(config_with_temp, None) == 0.6
+    # 模型配置 null：落到智能体的偏好
+    assert resolve_temperature(config_no_temp, 30) == 0.3
 
     # 都 null：返回 None（让 langchain 剔除）
     assert resolve_temperature(config_no_temp, None) is None

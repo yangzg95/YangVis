@@ -108,7 +108,8 @@ def test_every_builtin_row_fits_the_limits_a_user_must_respect():
         assert 0 < len(agent.name) <= 128, agent.slug
         assert len(agent.description or "") <= 512, agent.slug
         assert 0 < len(agent.system_prompt) <= 8000, agent.slug
-        assert 0 <= agent.temperature <= 100, agent.slug
+        # None 是合法值：表示「跟随模型配置」，运维那类人设就该走这个，别替模型规定温度。
+        assert agent.temperature is None or 0 <= agent.temperature <= 100, agent.slug
         assert 0 <= agent.sort_order <= 9999, agent.slug
 
 
