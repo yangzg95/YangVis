@@ -1175,7 +1175,7 @@ defineExpose({
   margin-top: 6px;
 }
 
-/* 步骤行：一行等宽小字，无边角无边底。 */
+/* 步骤行：等宽小字，无边角无边底。 */
 .step-line {
   display: flex;
   align-items: baseline;
@@ -1192,11 +1192,13 @@ defineExpose({
   opacity: 0.5;
 }
 
+/* 命令按内容换行整段摊开：一行裁掉的 ellipsis 让长命令（jq 表达式、带管道的
+   systemctl）在点开后又变成看不到全文的死信息。 */
 .step-text {
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   font-family: 'IBM Plex Mono', Menlo, Consolas, monospace;
   color: var(--text-2);
 }
