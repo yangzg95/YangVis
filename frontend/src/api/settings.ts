@@ -28,6 +28,8 @@ export interface ModelConfig {
   request_extra?: Record<string, unknown> | null
   /** 0-100 整数，调用时 /100；模型级硬约束，设了就盖过智能体；null=不设限，由智能体决定。 */
   temperature?: number | null
+  /** 该模型是否接受图片输入；对话页据此决定能不能发图片。 */
+  supports_vision: boolean
   last_tested_at?: string | null
   last_test_ok: boolean
   last_test_error?: string | null
@@ -47,6 +49,8 @@ export interface ModelConfigPayload {
   request_extra?: Record<string, unknown> | null
   /** 0-100 整数；模型级硬约束，设了就盖过智能体；null=不设限（由智能体决定）。 */
   temperature?: number | null
+  /** 仅对话模型有意义：服务商文档确认支持图片输入时勾选。 */
+  supports_vision?: boolean
 }
 
 export interface TestResult {

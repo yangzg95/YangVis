@@ -107,6 +107,12 @@ class ModelConfig(Base):
     # NULL 表示模型不设限，由智能体的温度决定。embedding 模型不用这个字段。
     temperature: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # 是否接受图片输入。由配置的人按服务商文档声明，不做自动探测：把图片发给
+    # 纯文本模型会被上游整条拒绝，而失败发生在用户已经按下发送之后。
+    supports_vision: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )
@@ -391,6 +397,45 @@ class ChatMessage(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<ChatMessage id={self.id} conv={self.conversation_id} role={self.role!r}>"
+
+
+class ChatAttachment(Base):
+    """一条消息附带的上传文件或图片。
+
+    上传与发送分两步：``/chat/attachments`` 先落一行（``message_id`` 为空），
+    发送时由消息落库流程把它绑到刚创建的 user 消息上。文档在服务端抽取成文本
+    存在 ``text`` 里，原文不入库；图片落盘并由 ``/uploads`` 静态提供，URL 靠
+    随机文件名保证不可猜（与幻灯片配图同一套约定）。
+    """
+
+    __tablename__ = "chat_attachment"
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    conversation_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    # image | file。图片走多模态 image_url，文件只喂抽取出来的文本。
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    mime: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # 图片在媒体目录下的相对路径；文件附件没有原文件，恒为 NULL。
+    rel_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # 文档抽取出的文本（图片为 NULL）。入库时已按字符上限截断，回放时还会再
+    # 按总预算二次裁剪。
+    text: Mapped[str | None] = mapped_column(_LONG_TEXT, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("idx_attachment_message", "message_id"),)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<ChatAttachment id={self.id} kind={self.kind!r} msg={self.message_id}>"
 
 
 class ChatSummary(Base):

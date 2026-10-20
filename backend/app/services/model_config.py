@@ -91,6 +91,7 @@ class ModelConfigService:
             reasoning_mode=payload.reasoning_mode.value,
             request_extra=payload.request_extra,
             temperature=payload.temperature,
+            supports_vision=payload.supports_vision,
             is_default=False,
         )
         self._db.add(config)
@@ -136,6 +137,10 @@ class ModelConfigService:
         # temperature 同理：前端显式传 null 表示「清空回不指定」，不是「没改」。
         if "temperature" in data:
             config.temperature = data["temperature"]
+
+        # 能力声明不是凭据：改了它不影响已经验证过的连通性。
+        if data.get("supports_vision") is not None:
+            config.supports_vision = bool(data["supports_vision"])
 
         # 换了凭据、或换了要塞进请求体的私有参数，都可能让上游当场报错，
         # 而探测走的正是同一个客户端，所以两者一样处理。
@@ -292,6 +297,7 @@ class ModelConfigService:
             reasoning_mode=config.reasoning_mode or "auto",
             request_extra=config.request_extra,
             temperature=config.temperature,
+            supports_vision=config.supports_vision,
             last_tested_at=config.last_tested_at,
             last_test_ok=config.last_test_ok,
             last_test_error=config.last_test_error,

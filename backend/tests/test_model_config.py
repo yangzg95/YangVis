@@ -303,6 +303,13 @@ def test_create_strips_the_trailing_slash_off_the_base_url(db):
     ).base_url == "http://localhost:1/v1"
 
 
+def test_the_vision_flag_survives_create_and_to_item(db):
+    """对话页只从 to_item 看得到这一列；漏掉它等于所有模型都被判成不收图。"""
+    item = svc(db).to_item(svc(db).create(create_payload(supports_vision=True)))
+
+    assert item.supports_vision is True
+
+
 def test_a_stored_key_comes_back_masked_and_never_in_plaintext(db):
     item = svc(db).to_item(svc(db).create(create_payload(api_key=KEY)))
 

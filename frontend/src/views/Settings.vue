@@ -72,6 +72,9 @@
                 {{ record.purpose === 'chat' ? '对话' : '向量' }}
               </a-tag>
               <a-tag v-if="record.is_default" color="green">默认</a-tag>
+              <a-tag v-if="record.purpose === 'chat' && record.supports_vision" color="cyan">
+                图片
+              </a-tag>
             </template>
 
             <template v-else-if="column.key === 'api_key'">
@@ -325,6 +328,15 @@
             像 Kimi 这类「只接受固定温度」的模型在这里填上那个值即可。
           </div>
         </a-form-item>
+        <a-form-item v-if="modal.form.purpose === 'chat'" label="图片理解">
+          <a-checkbox v-model:checked="modal.form.supports_vision">
+            这个模型可以接收图片
+          </a-checkbox>
+          <div class="hint">
+            只有服务商文档明确支持图片输入的视觉模型才勾选。勾选后，对话页才能给这个模型发图片；
+            把图片发给纯文本模型会被上游整条拒绝。
+          </div>
+        </a-form-item>
         <a-form-item label="备注">
           <a-textarea v-model:value="modal.form.remark" :rows="2" />
         </a-form-item>
@@ -390,6 +402,7 @@ const emptyForm = () => ({
   reasoning_mode: 'auto' as ReasoningMode,
   request_extra_text: '',
   temperature: null as number | null,
+  supports_vision: false,
 })
 
 // 例子放常量里而不是模板上，免得花括号被 Vue 当插值解析。
@@ -443,6 +456,7 @@ function openEdit(m: ModelConfig) {
     reasoning_mode: m.reasoning_mode || 'auto',
     request_extra_text: m.request_extra ? JSON.stringify(m.request_extra) : '',
     temperature: m.temperature ?? null,
+    supports_vision: !!m.supports_vision,
   }
   modal.open = true
 }
@@ -491,6 +505,7 @@ async function submit() {
             reasoning_mode: modal.form.reasoning_mode,
             request_extra: requestExtra,
             temperature: modal.form.temperature,
+            supports_vision: modal.form.supports_vision,
           }
         : {}),
     }

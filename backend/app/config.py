@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     # 基于弱相关的文本作答，比什么都不说更糟糕。
     KB_SCORE_THRESHOLD: float = 0.3
 
+    # 对话附件：单条消息最多几个、单个文件多大、文档抽取后留多少字符。
+    # 文本上限同时是 prompt 预算的闸门；回放时还会再按整轮总预算裁剪。
+    CHAT_MAX_ATTACHMENTS: int = 6
+    CHAT_MAX_ATTACHMENT_BYTES: int = 10 * 1024 * 1024  # 10 MB
+    CHAT_MAX_IMAGE_BYTES: int = 5 * 1024 * 1024  # 5 MB，base64 后还有约 1/3 膨胀
+    CHAT_ATTACHMENT_MAX_CHARS: int = 60_000
+
     # 认证（自建；见 docs/智能客服-RAG-设计方案.md §7）
     #
     # AUTH_JWT_SECRET 故意不给可用的默认值：值为空时 create_app() 会在启动阶段

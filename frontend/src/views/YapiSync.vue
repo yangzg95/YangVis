@@ -3,8 +3,9 @@
     <div class="page-title">YApi 同步</div>
     <div class="subtitle">
       扫描本地 Java Spring 源码里的接口，每个 Controller 写入一个 YApi 分类，分类名取
-      Swagger 的 @Tag（没有时用类名）。重复同步时按「HTTP 方法 + 路径」匹配：已存在的接口更新，
-      YApi 中多出来的接口不会被删除。点击接口行可预览入参、请求体与出参结构。
+      Swagger 的 @Tag（没有时用类名）。不勾选任何接口时默认同步全部，勾选后只同步勾选项；
+      重复同步时按「HTTP 方法 + 路径」匹配，已存在的接口更新，YApi 中多出来的接口不会被删除。
+      点击接口行可预览入参、请求体与出参结构。
     </div>
 
     <a-form layout="vertical" class="config-form">
@@ -131,6 +132,24 @@
         </template>
       </a-alert>
 
+      <div v-if="groups.length" class="selection-bar">
+        <span v-if="selectedCount" class="selection-count">
+          已选 {{ selectedCount }} / {{ endpointTotal }} 个接口，仅同步勾选项
+        </span>
+        <span v-else class="selection-count">
+          未勾选：将同步全部 {{ endpointTotal }} 个接口
+        </span>
+        <a-button
+          v-if="selectedCount"
+          type="link"
+          size="small"
+          :disabled="busy"
+          @click="clearSelection"
+        >
+          清空勾选
+        </a-button>
+      </div>
+
       <div v-if="groups.length" class="groups">
         <a-collapse v-model:activeKey="activeKeys">
           <a-collapse-panel
@@ -149,10 +168,11 @@
             <a-table
               :data-source="group.endpoints"
               :row-key="rowKey"
+              :row-selection="groupSelection(group)"
               :custom-row="previewRow"
               size="small"
               :pagination="{ pageSize: 10, size: 'small', hideOnSinglePage: true }"
-              :scroll="{ x: 1080 }"
+              :scroll="{ x: 1130 }"
             >
               <a-table-column title="方法" key="method" :width="86">
                 <template #default="{ record }">
@@ -253,12 +273,16 @@
       :confirm-loading="syncing"
       @ok="doSync"
     >
-      <p>
-        将把 {{ scanResult?.endpoint_count ?? 0 }} 个接口写入
+      <p v-if="selectedCount">
+        将把选中的 {{ selectedCount }} 个接口（共扫描到 {{ endpointTotal }} 个）写入
+        <strong>{{ form.base_url }}</strong>（项目 {{ form.project_id }}）。
+      </p>
+      <p v-else>
+        未勾选具体接口，将把扫描到的 {{ endpointTotal }} 个接口全部写入
         <strong>{{ form.base_url }}</strong>（项目 {{ form.project_id }}）。
       </p>
       <p class="confirm-note">
-        按 HTTP 方法 + 路径匹配：已存在的接口会被更新，YApi 中本地没有的接口不会被删除。
+        已存在的接口按 HTTP 方法 + 路径更新，YApi 中本地没有的接口不会被删除。
       </p>
     </a-modal>
 
@@ -401,11 +425,14 @@ const scanResult = ref<YapiScanResult | null>(null)
 const syncResult = ref<YapiSyncResult | null>(null)
 const confirmOpen = ref(false)
 const activeKeys = ref<string[]>([])
+const selectedKeys = ref<string[]>([])
 const previewOpen = ref(false)
 const previewEndpoint = ref<DisplayEndpoint | null>(null)
 
 const busy = computed(() => scanning.value || syncing.value)
 const scanReady = computed(() => Boolean(form.root_path.trim()))
+const endpointTotal = computed(() => scanResult.value?.endpoints.length ?? 0)
+const selectedCount = computed(() => selectedKeys.value.length)
 const syncReady = computed(
   () =>
     Boolean(scanResult.value) &&
@@ -422,8 +449,17 @@ const previewParams = computed(() =>
 )
 
 const groups = computed<EndpointGroup[]>(() => {
-  const source: DisplayEndpoint[] =
-    syncResult.value?.endpoints ?? scanResult.value?.endpoints ?? []
+  const syncedByKey = new Map(
+    (syncResult.value?.endpoints ?? []).map((item) => [rowKey(item), item]),
+  )
+  const source: DisplayEndpoint[] = (scanResult.value?.endpoints ?? []).map(
+    (endpoint) => {
+      const synced = syncedByKey.get(rowKey(endpoint))
+      return synced
+        ? { ...endpoint, action: synced.action, error: synced.error }
+        : { ...endpoint }
+    },
+  )
   const grouped = new Map<string, EndpointGroup>()
   for (const item of scanResult.value?.categories ?? []) {
     grouped.set(item.category_name, {
@@ -470,6 +506,7 @@ watch(
 
 watch(scanResult, (value) => {
   activeKeys.value = value?.categories.map((item) => item.category_name) ?? []
+  selectedKeys.value = []
 })
 
 function validateCredentials(): boolean {
@@ -545,6 +582,10 @@ async function doSync() {
       base_url: form.base_url.trim(),
       project_id: Number(form.project_id),
       token: form.token.trim(),
+      // 不勾选时省略该字段，后端按「同步全部扫描结果」处理。
+      ...(selectedKeys.value.length
+        ? { endpoint_keys: [...selectedKeys.value] }
+        : {}),
     })
     syncResult.value = result
     if (result.failed) {
@@ -567,10 +608,36 @@ function rowKey(record: DisplayEndpoint) {
   return `${record.http_method} ${record.path}`
 }
 
+function groupSelection(group: EndpointGroup) {
+  const keys = group.endpoints.map(rowKey)
+  const keySet = new Set(keys)
+  return {
+    selectedRowKeys: selectedKeys.value.filter((key) => keySet.has(key)),
+    onChange: (picked: (string | number)[]) => {
+      const next = new Set(selectedKeys.value)
+      for (const key of keys) {
+        next.delete(key)
+      }
+      for (const key of picked) {
+        next.add(String(key))
+      }
+      selectedKeys.value = [...next]
+    },
+  }
+}
+
+function clearSelection() {
+  selectedKeys.value = []
+}
+
 function previewRow(record: DisplayEndpoint) {
   return {
     style: { cursor: 'pointer' },
-    onClick: () => {
+    onClick: (event: MouseEvent) => {
+      // 勾选框自己处理点击，别顺带把预览抽屉打开。
+      if ((event.target as HTMLElement | null)?.closest('.ant-table-selection-column')) {
+        return
+      }
       previewEndpoint.value = record
       previewOpen.value = true
     },
@@ -718,6 +785,20 @@ function formatDuration(ms: number) {
 
 .groups {
   margin-top: 16px;
+}
+
+.selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.selection-count {
+  color: #0a7e86;
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .group-title {

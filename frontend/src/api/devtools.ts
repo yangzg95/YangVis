@@ -58,6 +58,8 @@ export interface YapiSyncPayload extends YapiScanPayload {
   base_url: string
   project_id: number
   token: string
+  /** 「METHOD path」形式；不传表示同步全部扫描结果。 */
+  endpoint_keys?: string[] | null
 }
 
 export type YapiSyncAction = 'created' | 'updated' | 'failed'

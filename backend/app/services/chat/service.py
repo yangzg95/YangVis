@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Awaitable, Callable, List, Optional, Sequence, Tuple
 
@@ -24,12 +25,14 @@ from app.config import get_settings
 from app.errors import CODE_CHAT_NOT_READY, BusinessError
 from app.models.entities import (
     Agent,
+    ChatAttachment,
     ChatConversation,
     ChatMessage,
     ModelConfig,
     OpsPendingAction,
 )
 from app.models.schemas import (
+    ChatAttachmentItem,
     Citation,
     ConversationItem,
     MessageItem,
@@ -41,6 +44,11 @@ from app.services.agents import AgentService
 from app.services.chat_ops import TARGET_SERVER, Auditor, ChatOpsToolbox, OpsTarget
 from app.services.knowledge import KnowledgeService
 from app.services.model_config import default_model_config
+from app.services.chat.attachments import (
+    delete_stored,
+    image_url,
+    read_image_data_url,
+)
 from app.services.chat.memory import (
     MEMORY_RULES,
     MemoryService,
@@ -56,6 +64,11 @@ settings = get_settings()
 # 要回放多少轮历史。够撑住追问（「那第二个呢？」），又不至于让一段旧对话
 # 把检索到的上下文挤出去。
 HISTORY_TURNS = 6
+
+# 附件回放的预算。文档正文按字符数分配、优先最近一轮；图片按张数限制，
+# 超出的旧图片只留一行说明，不会把整轮请求撑爆。
+REPLAY_ATTACHMENT_TEXT_BUDGET = 60_000
+REPLAY_IMAGE_LIMIT = 8
 
 # 每次检索回来的 chunk 数量。
 RETRIEVAL_TOP_K = 8
@@ -159,6 +172,17 @@ def _chunk_reasoning(chunk: object) -> str:
     return ""
 
 
+@dataclass
+class _AttachmentPlan:
+    """一条附件在本轮回放里的形态：展开正文 / 附带图片 / 只留说明。"""
+
+    attachment: ChatAttachment
+    text: Optional[str] = None
+    truncated: bool = False
+    include_image: bool = False
+    note: Optional[str] = None
+
+
 class _CitationRegistry:
     """跨多轮检索给 chunk 分配稳定编号。
 
@@ -203,6 +227,10 @@ class ChatService:
         self._agents = AgentService(db, owner_id)
         self._knowledge = KnowledgeService(db, owner_id)
         self._memory = MemoryService(db, owner_id)
+
+    @property
+    def owner_id(self) -> int:
+        return self._owner_id
 
     # -- 作用域 -------------------------------------------------------------
 
@@ -357,10 +385,28 @@ class ChatService:
 
     def delete_conversation(self, conversation_id: int) -> None:
         row = self.get_conversation(conversation_id)
+
+        # 附件文件先记下来：行删掉并 commit 之后 ORM 属性已不可读。
+        rel_paths = [
+            rel_path
+            for rel_path in self._db.scalars(
+                select(ChatAttachment.rel_path).where(
+                    ChatAttachment.owner_id == self._owner_id,
+                    ChatAttachment.conversation_id == row.id,
+                )
+            ).all()
+            if rel_path
+        ]
         self._db.execute(
             delete(ChatMessage).where(
                 ChatMessage.owner_id == self._owner_id,
                 ChatMessage.conversation_id == row.id,
+            )
+        )
+        self._db.execute(
+            delete(ChatAttachment).where(
+                ChatAttachment.owner_id == self._owner_id,
+                ChatAttachment.conversation_id == row.id,
             )
         )
         # 待确认项跟着会话走：会话没了，挂起的确认卡片也不该留在任何地方。
@@ -375,6 +421,8 @@ class ChatService:
         self._memory.delete_summary(row.id)
         self._db.delete(row)
         self._db.commit()
+        for rel_path in rel_paths:
+            delete_stored(rel_path)
 
     # -- 运维问答会话 ----------------------------------------------------------
 
@@ -447,18 +495,128 @@ class ChatService:
                 .order_by(ChatMessage.id)
             ).all()
         )
-        return [self.to_message(row) for row in rows]
+        attachments = self._attachments_by_message([row.id for row in rows])
+        return [self.to_message(row, attachments.get(row.id)) for row in rows]
 
     @staticmethod
-    def to_message(row: ChatMessage) -> MessageItem:
+    def to_attachment(row: ChatAttachment) -> ChatAttachmentItem:
+        return ChatAttachmentItem(
+            id=row.id,
+            kind=row.kind,
+            filename=row.filename,
+            mime=row.mime,
+            size=row.size,
+            url=image_url(row.rel_path) if row.kind == "image" and row.rel_path else None,
+        )
+
+    @classmethod
+    def to_message(
+        cls, row: ChatMessage, attachments: Optional[Sequence[ChatAttachment]] = None
+    ) -> MessageItem:
         return MessageItem(
             id=row.id,
             role=row.role,
             content=row.content,
             citations=[Citation(**item) for item in (row.citations or [])],
             timeline=row.timeline,
+            attachments=[cls.to_attachment(item) for item in (attachments or [])],
             created_at=row.created_at,
         )
+
+    def _attachments_by_message(
+        self, message_ids: Sequence[int]
+    ) -> dict[int, List[ChatAttachment]]:
+        if not message_ids:
+            return {}
+        rows = list(
+            self._db.scalars(
+                self._scope(select(ChatAttachment), ChatAttachment.owner_id)
+                .where(ChatAttachment.message_id.in_(list(message_ids)))
+                .order_by(ChatAttachment.id)
+            ).all()
+        )
+        grouped: dict[int, List[ChatAttachment]] = {}
+        for row in rows:
+            if row.message_id is not None:
+                grouped.setdefault(row.message_id, []).append(row)
+        return grouped
+
+    def describe_attachments(self, attachment_ids: Sequence[int]) -> List[ChatAttachment]:
+        """按用户传来的顺序取回附件；不存在/已被别的消息占用都会拒绝。
+
+        上传与发送是两次请求，中间可能已经有一轮把同一批附件用掉了。校验放在
+        消息落库之前，避免历史里出现一条引用着别人已验证附件的提问。
+        """
+        ids = list(dict.fromkeys(attachment_ids))
+        if not ids:
+            return []
+        if len(ids) > settings.CHAT_MAX_ATTACHMENTS:
+            raise BusinessError(
+                400, f"一条消息最多附带 {settings.CHAT_MAX_ATTACHMENTS} 个附件"
+            )
+        rows = list(
+            self._db.scalars(
+                self._scope(select(ChatAttachment), ChatAttachment.owner_id)
+                .where(ChatAttachment.id.in_(ids))
+            ).all()
+        )
+        by_id = {row.id: row for row in rows}
+        if len(by_id) != len(ids):
+            # 与 get_conversation 同理：不区分「不存在」与「不是你的」。
+            raise LookupError("附件不存在")
+        ordered = [by_id[item_id] for item_id in ids]
+        if any(row.message_id is not None for row in ordered):
+            raise BusinessError(409, "附件已经被发送过了，请重新上传")
+        return ordered
+
+    @staticmethod
+    def assert_vision_ready(attachments: Sequence[ChatAttachment], config: ModelConfig) -> None:
+        if any(row.kind == "image" for row in attachments) and not config.supports_vision:
+            raise BusinessError(
+                CODE_CHAT_NOT_READY,
+                f"对话模型「{config.title}」未开启图片理解，请换一个视觉模型，"
+                "或到「系统设置 → 模型管理」为该模型勾选「图片理解」。",
+            )
+
+    def create_attachment(
+        self,
+        *,
+        kind: str,
+        filename: str,
+        mime: Optional[str],
+        size: int,
+        rel_path: Optional[str] = None,
+        text: Optional[str] = None,
+    ) -> ChatAttachment:
+        row = ChatAttachment(
+            owner_id=self._owner_id,
+            kind=kind,
+            filename=filename[:255] or "attachment",
+            mime=mime,
+            size=size,
+            rel_path=rel_path,
+            text=text,
+        )
+        self._db.add(row)
+        self._db.commit()
+        self._db.refresh(row)
+        return row
+
+    def delete_attachment(self, attachment_id: int) -> None:
+        """删掉一个还没发出去的附件；已绑定消息的不许删。"""
+        row = self._db.scalar(
+            self._scope(select(ChatAttachment), ChatAttachment.owner_id).where(
+                ChatAttachment.id == attachment_id
+            )
+        )
+        if row is None:
+            raise LookupError("附件不存在")
+        if row.message_id is not None:
+            raise BusinessError(409, "已发送的附件不能删除")
+        rel_path = row.rel_path
+        self._db.delete(row)
+        self._db.commit()
+        delete_stored(rel_path)
 
     def add_message(
         self,
@@ -467,10 +625,21 @@ class ChatService:
         content: str,
         *,
         citations: Optional[List[Citation]] = None,
+        attachment_ids: Optional[Sequence[int]] = None,
     ) -> ChatMessage:
         """同步入口：供同步路由（completions、reject）直接调用。"""
+        attachments = (
+            self.describe_attachments(attachment_ids) if attachment_ids else None
+        )
         message_id = self._persist_message(
-            self._db, self._owner_id, conversation_id, role, content, citations=citations, close_session=False
+            self._db,
+            self._owner_id,
+            conversation_id,
+            role,
+            content,
+            citations=citations,
+            attachments=attachments,
+            close_session=False,
         )
         return self._db.get(ChatMessage, message_id)
 
@@ -485,6 +654,7 @@ class ChatService:
         citations: Optional[List[Citation]] = None,
         backfill_actions: Optional[List[OpsPendingAction]] = None,
         timeline: Optional[List[dict]] = None,
+        attachments: Optional[List[ChatAttachment]] = None,
         close_session: bool = True,
     ) -> int:
         """在指定 session 里落一条消息并 commit，返回 message id。
@@ -505,6 +675,13 @@ class ChatService:
             timeline=timeline,
         )
         db.add(row)
+
+        if attachments:
+            # 先 flush 拿到消息 id，附件与消息落在同一次 commit 里。
+            db.flush()
+            for attachment in attachments:
+                attachment.message_id = row.id
+                attachment.conversation_id = conversation_id
 
         conversation = db.get(ChatConversation, conversation_id)
         if conversation is not None:
@@ -546,14 +723,17 @@ class ChatService:
         self._db.refresh(row)
         return row
 
-    def pop_dangling_user_message(self, conversation_id: int) -> str:
-        """删掉会话末尾那条没得到回答的用户消息，返回它的内容。
+    def pop_dangling_user_message(self, conversation_id: int) -> Tuple[str, List[int]]:
+        """删掉会话末尾那条没得到回答的用户消息，返回 ``(内容, 附件 id)``。
 
         流式回答失败的遗留形态：路由先落库 user 消息再开始生成
         （routers/chat.py 的顺序），失败时 user 在、assistant 不在。
         重试由后端先把它删掉再走正常回答流程（会重新落一条），
         历史里就不会出现两条一模一样的提问。末尾已是 assistant 说明
         上次回答成功了，没有可重试的东西。
+
+        附件不删：先把 message_id 解绑，重试重新落消息时再绑回去，
+        否则这条提问重答之后，当初上传的文件就凭空消失了。
         """
         row = (
             self._db.scalars(
@@ -565,10 +745,13 @@ class ChatService:
         )
         if row is None or row.role != ROLE_USER:
             raise BusinessError(409, "当前会话没有可重试的提问")
+        attachments = self._attachments_by_message([row.id]).get(row.id, [])
+        for attachment in attachments:
+            attachment.message_id = None
         content = row.content
         self._db.delete(row)
         self._db.commit()
-        return content
+        return content, [attachment.id for attachment in attachments]
 
     # -- 运维写命令待确认项 ------------------------------------------------------
 
@@ -783,30 +966,156 @@ class ChatService:
 
         return current_datetime
 
+    def _plan_attachment_context(
+        self,
+        history: Sequence[ChatMessage],
+        attachment_map: dict[int, List[ChatAttachment]],
+        current: Sequence[ChatAttachment],
+        *,
+        supports_vision: bool,
+    ) -> dict[object, List[_AttachmentPlan]]:
+        """给历史与当前附件分配本轮预算，优先保证最近一轮。
+
+        文档正文按字符总预算展开，图片按张数。超出的旧附件不直接丢掉：
+        留一行说明，模型才知道「用户当时确实传过东西」。
+        """
+        groups: List[Tuple[object, Sequence[ChatAttachment]]] = [
+            (row.id, attachment_map[row.id])
+            for row in history
+            if row.role == ROLE_USER and attachment_map.get(row.id)
+        ]
+        if current:
+            groups.append(("current", current))
+
+        text_budget = REPLAY_ATTACHMENT_TEXT_BUDGET
+        image_budget = REPLAY_IMAGE_LIMIT
+        plan: dict[object, List[_AttachmentPlan]] = {}
+
+        for key, attachments in reversed(groups):
+            entries: List[_AttachmentPlan] = []
+            for attachment in attachments:
+                entry = _AttachmentPlan(attachment=attachment)
+                if attachment.kind == "image":
+                    if not supports_vision:
+                        entry.note = "当前模型不支持图片理解，内容未提供"
+                    elif image_budget > 0:
+                        entry.include_image = True
+                        image_budget -= 1
+                    else:
+                        entry.note = "历史图片过多，本轮未附带"
+                else:
+                    text = attachment.text or ""
+                    if not text:
+                        entry.note = "没有可提取的文本"
+                    elif text_budget <= 0:
+                        entry.note = "超出本轮附件上下文预算，未展开"
+                    else:
+                        entry.text = text[:text_budget]
+                        entry.truncated = len(entry.text) < len(text)
+                        text_budget -= len(entry.text)
+                entries.append(entry)
+            plan[key] = entries
+        return plan
+
+    @staticmethod
+    def _human_content(
+        text: str,
+        entries: Sequence[_AttachmentPlan],
+    ) -> object:
+        """把一行 user 消息拼成 langchain 能吃的 content。
+
+        没有图片时仍用纯字符串：纯文本模型对 ``content`` 数组的接受度并不一致。
+        有图片才切成 ``[{type: text}, {type: image_url}]`` 的多模态形态。
+        """
+        blocks: List[str] = []
+        if text.strip():
+            blocks.append(text)
+        image_parts: List[dict] = []
+
+        for entry in entries:
+            attachment = entry.attachment
+            if attachment.kind == "file":
+                if entry.text:
+                    suffix = "（内容过长，已截断）" if entry.truncated else ""
+                    blocks.append(f"[附件：{attachment.filename}]{suffix}\n{entry.text}")
+                else:
+                    blocks.append(
+                        f"[附件：{attachment.filename}]（{entry.note or '内容未随本轮提供'}）"
+                    )
+                continue
+
+            if entry.include_image:
+                data_url = read_image_data_url(attachment.rel_path or "", attachment.mime)
+                if data_url:
+                    blocks.append(f"[图片：{attachment.filename}]")
+                    image_parts.append(
+                        {"type": "image_url", "image_url": {"url": data_url}}
+                    )
+                else:
+                    blocks.append(f"[图片：{attachment.filename}]（文件已不可用）")
+            else:
+                blocks.append(
+                    f"[图片：{attachment.filename}]（{entry.note or '未随本轮提供'}）"
+                )
+
+        combined = "\n\n".join(blocks)
+        if not image_parts:
+            return combined
+        content: List[dict] = []
+        if combined:
+            content.append({"type": "text", "text": combined})
+        content.extend(image_parts)
+        return content
+
     def _replay(
-        self, conversation_id: int, question: str, *, question_persisted: bool = True
+        self,
+        conversation_id: int,
+        question: str,
+        *,
+        question_persisted: bool = True,
+        supports_vision: bool = True,
     ) -> list:
         """把历史和当前问题拼成 ReAct 的初始消息列表。
 
         ``question_persisted`` 标记调用方是否已把这条问题落库：completions
         路由先落库再问（失败重试需要它），confirm 续答的合成上下文则刻意
         不落——两种情况历史里「末尾那条 user 消息」的含义正好相反。
+
+        附件不落进 ``ChatMessage.content``：回放时从附件表取出来再拼。文档
+        展开正文，图片转成 data URL；两者都受 :func:`_plan_attachment_context`
+        的预算约束。
         """
         from langchain_core.messages import AIMessage, HumanMessage
 
         history = self._history(conversation_id)
+        attachment_map = self._attachments_by_message([row.id for row in history])
+
+        current: List[ChatAttachment] = []
         # 刚存下的那个问题已经在历史里了，先丢掉，免得跟下面单独追加的问题
         # 重复一遍。
         if question_persisted and history and history[-1].role == ROLE_USER:
+            current = attachment_map.pop(history[-1].id, [])
             history = history[:-1]
+
+        plan = self._plan_attachment_context(
+            history, attachment_map, current, supports_vision=supports_vision
+        )
 
         messages: list = []
         for row in history:
             if row.role == ROLE_USER:
-                messages.append(HumanMessage(content=row.content))
+                messages.append(
+                    HumanMessage(
+                        content=self._human_content(
+                            row.content, plan.get(row.id, [])
+                        )
+                    )
+                )
             elif row.role == ROLE_ASSISTANT:
                 messages.append(AIMessage(content=row.content))
-        messages.append(HumanMessage(content=question))
+        messages.append(
+            HumanMessage(content=self._human_content(question, plan.get("current", [])))
+        )
         return messages
 
     async def stream_answer(
@@ -934,7 +1243,10 @@ class ChatService:
         stream = executor.astream_events(
             {
                 "messages": self._replay(
-                    conversation_id, question, question_persisted=question_persisted
+                    conversation_id,
+                    question,
+                    question_persisted=question_persisted,
+                    supports_vision=config.supports_vision,
                 )
             },
             config={

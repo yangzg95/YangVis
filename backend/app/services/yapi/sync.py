@@ -28,7 +28,16 @@ def sync_to_yapi(payload: YapiSyncRequest) -> YapiSyncResult:
     scan = scan_java_path(payload.root_path)
     warnings = list(scan.warnings)
 
-    if not scan.endpoints:
+    selected = scan.endpoints
+    if payload.endpoint_keys is not None:
+        wanted = set(payload.endpoint_keys)
+        selected = [
+            endpoint
+            for endpoint in scan.endpoints
+            if _endpoint_key(endpoint) in wanted
+        ]
+
+    if not selected:
         return YapiSyncResult(
             base_url=base_url,
             project_id=payload.project_id,
@@ -37,7 +46,7 @@ def sync_to_yapi(payload: YapiSyncRequest) -> YapiSyncResult:
         )
 
     endpoints_by_category: Dict[str, List[YapiScanEndpoint]] = defaultdict(list)
-    for endpoint in scan.endpoints:
+    for endpoint in selected:
         endpoints_by_category[endpoint.category_name].append(endpoint)
 
     results: List[YapiSyncEndpoint] = []
@@ -52,6 +61,9 @@ def sync_to_yapi(payload: YapiSyncRequest) -> YapiSyncResult:
         existing_interfaces = _interface_map(menu)
 
         for category in scan.categories:
+            endpoints = endpoints_by_category.get(category.category_name)
+            if not endpoints:
+                continue
             category_id = existing_categories.get(category.category_name)
             if category_id is None:
                 category_id = client.add_category(
@@ -60,7 +72,7 @@ def sync_to_yapi(payload: YapiSyncRequest) -> YapiSyncResult:
                 existing_categories[category.category_name] = category_id
                 categories_created += 1
 
-            for endpoint in endpoints_by_category[category.category_name]:
+            for endpoint in endpoints:
                 key = (endpoint.http_method, endpoint.path)
                 was_existing = key in existing_interfaces
                 if not _PATH_PATTERN.match(endpoint.path):
@@ -94,11 +106,16 @@ def sync_to_yapi(payload: YapiSyncRequest) -> YapiSyncResult:
         updated=updated,
         failed=failed,
         categories_created=categories_created,
-        endpoint_count=len(scan.endpoints),
+        endpoint_count=len(selected),
         endpoints=results,
         warnings=warnings,
         duration_ms=int((time.monotonic() - started) * 1000),
     )
+
+
+def _endpoint_key(endpoint: YapiScanEndpoint) -> str:
+    """与前端勾选行的 rowKey 保持一致。"""
+    return f"{endpoint.http_method} {endpoint.path}"
 
 
 def _category_map(menu: List[Dict[str, Any]]) -> Dict[str, Any]:

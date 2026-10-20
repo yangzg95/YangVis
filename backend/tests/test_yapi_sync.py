@@ -72,13 +72,14 @@ def fake_yapi(monkeypatch):
     return FakeYapi
 
 
-def _sync(root_path: str = str(FIXTURE)):
+def _sync(root_path: str = str(FIXTURE), endpoint_keys=None):
     return sync_module.sync_to_yapi(
         YapiSyncRequest(
             root_path=root_path,
             base_url="http://yapi.local/",
             project_id=9,
             token="secret-token",
+            endpoint_keys=endpoint_keys,
         )
     )
 
@@ -106,6 +107,39 @@ def test_sync_maps_controllers_to_categories_and_creates_interfaces(fake_yapi):
     }
     assert actions[("GET", "/api/orders/{id}")] == "updated"
     assert actions[("POST", "/api/orders")] == "created"
+
+
+def test_sync_only_touches_selected_interfaces(fake_yapi):
+    result = _sync(
+        endpoint_keys=["POST /api/orders", "POST /admin/orders/summary"]
+    )
+
+    assert result.endpoint_count == 2
+    assert result.created == 2
+    assert result.updated == 0
+    assert {item["path"] for item in fake_yapi.last.saved} == {
+        "/api/orders",
+        "/admin/orders/summary",
+    }
+    # 只为选中接口涉及的分类建分类，未选中的分类不碰。
+    assert fake_yapi.last.categories == [
+        (
+            "AdminOrder",
+            "Java 包：com.example.shop.admin · Controller：AdminOrderController",
+        )
+    ]
+
+
+def test_sync_with_empty_selection_opens_no_client(monkeypatch):
+    def explode(*_args, **_kwargs):
+        raise AssertionError("没有选中接口时不应连接 YApi")
+
+    monkeypatch.setattr(sync_module, "YapiClient", explode)
+    result = _sync(endpoint_keys=[])
+
+    assert result.endpoint_count == 0
+    assert result.created == 0
+    assert result.endpoints == []
 
 
 def test_interface_payload_carries_params_bodies_and_source(fake_yapi):

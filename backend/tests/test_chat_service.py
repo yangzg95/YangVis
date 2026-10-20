@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 from datetime import datetime, timedelta
 from itertools import count
 from types import SimpleNamespace
@@ -26,6 +28,7 @@ from app.database import Base
 from app.errors import CODE_CHAT_NOT_READY, BusinessError
 from app.models.entities import (
     Agent,
+    ChatAttachment,
     ChatConversation,
     ChatMessage,
     ChatSummary,
@@ -36,6 +39,7 @@ from app.models.entities import (
 from app.models.schemas import Citation, ModelPurpose, SearchHit
 from app.services.agents import AgentService, seed_builtin_agents
 from app.services.chat import ChatService, ROLE_ASSISTANT, ROLE_USER
+from app.services.chat import attachments as attachment_module
 from app.services.chat import service as chat_module
 
 OWNER = 1
@@ -877,7 +881,7 @@ def test_pop_dangling_user_message_only_pops_a_real_leftover(db, tail):
         db.commit()
 
     if tail == "user":
-        assert service.pop_dangling_user_message(conv.id) == "第一次提问"
+        assert service.pop_dangling_user_message(conv.id) == ("第一次提问", [])
         assert messages(db, conv.id) == []
     else:
         with pytest.raises(BusinessError) as exc:
@@ -890,7 +894,7 @@ def test_pop_dangling_user_message_ignores_other_owners_rows(db):
     conv = make_conversation(db)
     svc(db).add_message(conv.id, ROLE_USER, "我的提问")
     make_message(db, conv.id, ROLE_USER, "别人挂在同一个会话上的提问", owner_id=OTHER)
-    assert svc(db).pop_dangling_user_message(conv.id) == "我的提问"
+    assert svc(db).pop_dangling_user_message(conv.id) == ("我的提问", [])
     # 别人的那行还挂着同一个 conversation_id，既没被弹掉也没被删掉。
     assert [row.content for row in messages(db, conv.id, owner_id=OTHER)] == [
         "别人挂在同一个会话上的提问"
@@ -1494,4 +1498,259 @@ def test_wrap_up_runs_on_a_session_it_opened_itself(db, memory, monkeypatch):
     assert [type(x).__name__ for x in opened[:1]] == ["Session"]
     assert "closed" in opened
     assert memory["calls"]  # 用的就是这个 session 读到的会话
+
+
+# ---- 十、对话附件 --------------------------------------------------------------
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+
+
+@pytest.fixture()
+def media(tmp_path, monkeypatch):
+    """图片落盘目录与附件上限都指到临时位置，不碰真实部署的 uploads/。"""
+    monkeypatch.setattr(
+        attachment_module,
+        "settings",
+        SimpleNamespace(
+            upload_media_path=tmp_path,
+            UPLOAD_MEDIA_URL="/uploads",
+            CHAT_ATTACHMENT_MAX_CHARS=60_000,
+            CHAT_MAX_IMAGE_BYTES=1024,
+        ),
+    )
+    return tmp_path
+
+
+def add_file_attachment(service: ChatService, *, text: str = "附件正文", name="notes.txt"):
+    return service.create_attachment(
+        kind="file", filename=name, mime="text/plain", size=len(text), text=text
+    )
+
+
+def add_image_attachment(service: ChatService, *, name="pic.png"):
+    stored = attachment_module.store_image(OWNER, name, PNG)
+    return service.create_attachment(
+        kind="image",
+        filename=name,
+        mime=stored.mime,
+        size=stored.size,
+        rel_path=stored.rel_path,
+    )
+
+
+def test_extract_supports_text_and_code(media):
+    assert attachment_module.extract_file_text("a.py", b"print(1)\r\n") == "print(1)"
+    assert attachment_module.extract_file_text("a.md", "中文".encode()) == "中文"
+
+
+def test_extract_rejects_unsupported_or_empty(media):
+    with pytest.raises(attachment_module.AttachmentError, match="暂不支持"):
+        attachment_module.extract_file_text("a.exe", b"MZ")
+    with pytest.raises(attachment_module.AttachmentError, match="为空"):
+        attachment_module.extract_file_text("a.txt", b"   ")
+
+
+def test_extract_truncates_to_the_configured_budget(media, monkeypatch):
+    monkeypatch.setattr(
+        attachment_module,
+        "settings",
+        SimpleNamespace(
+            upload_media_path=media,
+            UPLOAD_MEDIA_URL="/uploads",
+            CHAT_ATTACHMENT_MAX_CHARS=10,
+        ),
+    )
+    text = attachment_module.extract_file_text("a.txt", ("x" * 50).encode())
+    assert text.startswith("x" * 10)
+    assert "内容过长，已截断" in text
+
+
+def test_extract_reads_docx_paragraphs_and_tables(media):
+    import docx
+
+    document = docx.Document()
+    document.add_paragraph("第一段")
+    table = document.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].text = "甲"
+    table.rows[0].cells[1].text = "乙"
+    buffer = io.BytesIO()
+    document.save(buffer)
+
+    text = attachment_module.extract_file_text("a.docx", buffer.getvalue())
+    assert "第一段" in text
+    assert "甲 | 乙" in text
+
+
+def test_extract_explains_a_scanned_pdf(media):
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+
+    with pytest.raises(attachment_module.AttachmentError, match="扫描件"):
+        attachment_module.extract_file_text("scan.pdf", buffer.getvalue())
+
+
+def test_store_image_uses_a_random_path_and_round_trips(media):
+    stored = attachment_module.store_image(OWNER, "截图.PNG", PNG)
+
+    assert stored.mime == "image/png"
+    assert stored.rel_path.startswith(f"chat/{OWNER}/")
+    assert (media / stored.rel_path).read_bytes() == PNG
+    assert stored.url == f"/uploads/{stored.rel_path}"
+    data_url = attachment_module.read_image_data_url(stored.rel_path, stored.mime)
+    assert data_url is not None
+    prefix, encoded = data_url.split(",", 1)
+    assert prefix == "data:image/png;base64"
+    assert base64.b64decode(encoded) == PNG
+
+
+def test_store_image_rejects_bmp_and_oversize(media):
+    with pytest.raises(attachment_module.AttachmentError, match="PNG / JPEG"):
+        attachment_module.store_image(OWNER, "a.bmp", b"BM" + b"0" * 32)
+    with pytest.raises(attachment_module.AttachmentError, match="上限"):
+        attachment_module.store_image(OWNER, "big.png", PNG + b"x" * 2048)
+
+
+def test_message_binding_lists_attachments_and_refuses_reuse(db, media):
+    conv = make_conversation(db)
+    service = svc(db)
+    file_row = add_file_attachment(service)
+
+    service.add_message(conv.id, ROLE_USER, "看看这个", attachment_ids=[file_row.id])
+
+    items = service.list_messages(conv.id)
+    assert len(items[0].attachments) == 1
+    attachment = items[0].attachments[0]
+    assert (attachment.id, attachment.kind, attachment.filename) == (
+        file_row.id,
+        "file",
+        "notes.txt",
+    )
+    # 同一批附件不能绑到第二条消息上。
+    with pytest.raises(BusinessError) as exc:
+        service.describe_attachments([file_row.id])
+    assert exc.value.code == 409
+
+
+def test_describe_attachments_is_owner_scoped_and_ordered(db, media):
+    one = add_file_attachment(svc(db), name="one.txt")
+    two = add_file_attachment(svc(db), name="two.txt")
+
+    ordered = svc(db).describe_attachments([two.id, one.id])
+    assert [row.id for row in ordered] == [two.id, one.id]
+    with pytest.raises(LookupError):
+        svc(db, OTHER).describe_attachments([one.id])
+
+
+def test_vision_gate_needs_the_model_flag(db, media):
+    config = chat_config(db)
+    image = add_image_attachment(svc(db))
+
+    with pytest.raises(BusinessError) as exc:
+        ChatService.assert_vision_ready([image], config)
+    assert exc.value.code == CODE_CHAT_NOT_READY
+    assert "图片理解" in exc.value.msg
+
+    config.supports_vision = True
+    ChatService.assert_vision_ready([image], config)
+
+
+def test_replay_expands_documents_and_sends_images_multimodal(db, media):
+    conv = make_conversation(db)
+    service = svc(db)
+    file_row = add_file_attachment(service, text="机密内容")
+    image_row = add_image_attachment(service)
+    service.add_message(
+        conv.id, ROLE_USER, "看这两个", attachment_ids=[file_row.id, image_row.id]
+    )
+
+    messages = service._replay(
+        conv.id, "看这两个", question_persisted=True, supports_vision=True
+    )
+
+    # 刚落库的那条提问被单独追加，不能又作为历史出现一遍。
+    assert len(messages) == 1
+    content = messages[-1].content
+    assert isinstance(content, list)
+    text = "".join(part.get("text", "") for part in content if part["type"] == "text")
+    assert "[附件：notes.txt]" in text
+    assert "机密内容" in text
+    assert "[图片：pic.png]" in text
+    image_parts = [part for part in content if part["type"] == "image_url"]
+    assert len(image_parts) == 1
+    assert image_parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_replay_degrades_images_for_a_text_only_model(db, media):
+    conv = make_conversation(db)
+    service = svc(db)
+    image_row = add_image_attachment(service)
+    service.add_message(conv.id, ROLE_USER, "看图", attachment_ids=[image_row.id])
+
+    messages = service._replay(
+        conv.id, "看图", question_persisted=True, supports_vision=False
+    )
+
+    content = messages[-1].content
+    assert isinstance(content, str)
+    assert "不支持图片理解" in content
+
+
+def test_pop_dangling_unbinds_attachments_for_the_retry(db, media):
+    conv = make_conversation(db)
+    service = svc(db)
+    file_row = add_file_attachment(service)
+    service.add_message(conv.id, ROLE_USER, "会失败的提问", attachment_ids=[file_row.id])
+
+    question, attachment_ids = service.pop_dangling_user_message(conv.id)
+    assert question == "会失败的提问"
+    assert attachment_ids == [file_row.id]
+    db.expire_all()
+    assert db.get(ChatAttachment, file_row.id).message_id is None
+
+    # 重试重新落消息时把附件绑回去。
+    service.add_message(conv.id, ROLE_USER, question, attachment_ids=attachment_ids)
+    db.expire_all()
+    assert db.get(ChatAttachment, file_row.id).message_id == messages(db, conv.id)[0].id
+
+
+def test_delete_unbound_attachment_removes_the_file(db, media):
+    service = svc(db)
+    image = add_image_attachment(service)
+    path = media / image.rel_path
+
+    service.delete_attachment(image.id)
+
+    assert not path.exists()
+    assert db.get(ChatAttachment, image.id) is None
+
+
+def test_sent_attachment_cannot_be_deleted(db, media):
+    conv = make_conversation(db)
+    service = svc(db)
+    image = add_image_attachment(service)
+    service.add_message(conv.id, ROLE_USER, "看图", attachment_ids=[image.id])
+
+    with pytest.raises(BusinessError) as exc:
+        service.delete_attachment(image.id)
+    assert exc.value.code == 409
+    assert (media / image.rel_path).exists()
+
+
+def test_delete_conversation_removes_attachment_rows_and_files(db, media):
+    conv = make_conversation(db)
+    service = svc(db)
+    image = add_image_attachment(service)
+    file_row = add_file_attachment(service)
+    service.add_message(conv.id, ROLE_USER, "看图", attachment_ids=[image.id, file_row.id])
+    path = media / image.rel_path
+
+    service.delete_conversation(conv.id)
+
+    assert not path.exists()
+    assert db.scalars(select(ChatAttachment)).all() == []
+
 

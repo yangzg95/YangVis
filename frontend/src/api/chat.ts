@@ -31,13 +31,43 @@ export interface Citation {
   excerpt: string
 }
 
+/** 挂在一条提问上的附件。图片有预览地址，文档只留文件名与大小。 */
+export interface ChatAttachment {
+  id: number
+  kind: 'image' | 'file'
+  filename: string
+  mime: string | null
+  size: number
+  /** 图片的浏览器访问地址；文档与历史遗留图片为 null。 */
+  url: string | null
+}
+
+/**
+ * 一条助手回答按到达顺序记录的时间线条目。
+ * - text：正文增量（连续片段后端已合并）；整条回答的完整文本就是 content，
+ *   时间线渲染时跳过它，只用 reason / step 重建「思考 + 调工具」的过程。
+ * - reason：推理模型的思维链增量，同样按连续片段合并。
+ * - step：一次工具调用，input 是完整入参，展示时按工具名挑关键字段。
+ */
+export interface TimelineEntry {
+  type: 'text' | 'step' | 'reason'
+  detail?: string
+  tool?: string
+  query?: string
+  input?: Record<string, unknown>
+  /** 仅流式期间使用：该工具是否还在执行。历史消息无此字段，按已完成渲染。 */
+  running?: boolean
+}
+
 export interface ChatMessage {
   id: number
   role: 'user' | 'assistant'
   content: string
   citations: Citation[]
   /** 按到达顺序记录的回答流；老消息为 null，前端退回只渲染 content。 */
-  timeline?: Array<{ type: 'text' | 'step' | 'reason'; detail?: string; tool?: string; query?: string; input?: Record<string, unknown> }> | null
+  timeline?: TimelineEntry[] | null
+  /** 这条提问随带了哪些附件（图片原图/文档名）；助手消息恒为空。 */
+  attachments?: ChatAttachment[]
   created_at: string
 }
 
@@ -128,6 +158,29 @@ export const chatApi = {
     request<ChatMessage>({ url: `/chat/messages/${id}`, method: 'PUT', data: { content } }),
 
   /**
+   * 上传一条对话附件，先拿 id 再随提问发出。
+   *
+   * 文档在后端当场抽成文本，图片落盘保留原图；上传完只返回元数据，
+   * 预览图片直接用返回的 url。
+   */
+  uploadAttachment: (file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return request<ChatAttachment>({
+      url: '/chat/attachments',
+      method: 'POST',
+      data: fd,
+      headers: { 'Content-Type': 'multipart/form-data' },
+      // 大文件与 PDF 解析可能超过默认的 30 秒。
+      timeout: 120000,
+      skipErrorToast: true,
+    })
+  },
+  /** 删除一条尚未发送的附件。 */
+  deleteAttachment: (id: number) =>
+    request<null>({ url: `/chat/attachments/${id}`, method: 'DELETE', skipErrorToast: true }),
+
+  /**
    * 以 stream 方式获取回答。
    *
    * 这里刻意绕开上面那个 axios 实例：它的拦截器会去拆一层 JSON envelope，
@@ -137,6 +190,8 @@ export const chatApi = {
   streamCompletion(
     payload: {
       message: string
+      /** 已上传、尚未发送的附件 id，按用户选择顺序排列。 */
+      attachment_ids?: number[]
       conversation_id?: number
       agent_id?: number
       /** 对于需要检索知识库的智能体，后端要求必须带上这个字段。 */

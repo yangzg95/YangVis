@@ -212,11 +212,19 @@
 
           <div v-for="msg in messages" :key="msg.key" :class="['msg', msg.role]">
             <div class="bubble">
+              <!-- 思考与工具调用过程：流式中实时展示，落定后折叠，历史消息
+                   从 timeline 重建。纯问答消息时间线为空，不占位置。 -->
+              <ThinkingTrace
+                v-if="msg.role === 'assistant'"
+                :entries="msg.timeline ?? []"
+                :streaming="msg.key === streamingBubbleKey"
+              />
               <!-- 助手回答按 markdown 渲染，用户输入保持纯文本：用户打的字不该
                    被当成标记语言解释，输入里一个 * 或 # 不应该改变显示效果。
                    流式中的那条走整段渲染（mermaid 围栏多半还没闭合）；落定之后
-                   切分成段，mermaid 块升级成可编辑的图卡片。 -->
-              <div v-if="msg.role === 'assistant'" class="content markdown">
+                   切分成段，mermaid 块升级成可编辑的图卡片。
+                   只有思考过程、还没吐正文时不渲染空的正文容器。 -->
+              <div v-if="msg.role === 'assistant' && msg.content" class="content markdown">
                 <div
                   v-if="msg.key === streamingBubbleKey"
                   v-html="renderCached(msg.key, msg.content)"
@@ -233,7 +241,25 @@
                   </template>
                 </template>
               </div>
-              <div v-else class="content" v-text="msg.content" />
+              <div v-else class="content">
+                <!-- 附件挂在提问上方：图片给缩略图（点开可看原图），文档只露
+                     文件名。只传附件不写字时，气泡里就只有附件。 -->
+                <div v-if="msg.attachments?.length" class="msg-attachments">
+                  <template v-for="att in msg.attachments" :key="att.id ?? att.filename">
+                    <a-image
+                      v-if="att.kind === 'image' && att.url"
+                      :src="att.url"
+                      :width="140"
+                      class="msg-image"
+                    />
+                    <span v-else class="msg-file">
+                      <FileOutlined />
+                      <span class="msg-file-name" :title="att.filename">{{ att.filename }}</span>
+                    </span>
+                  </template>
+                </div>
+                <div v-if="msg.content" v-text="msg.content" />
+              </div>
 
               <!-- 运维写命令的确认卡片：挂在触发提议的那条助手气泡下面。 -->
               <ConfirmCard
@@ -279,11 +305,12 @@
             </div>
           </div>
 
-          <div v-if="streaming && !pendingText" class="msg assistant">
+          <!-- 第一个过程事件（思考/工具/正文）到达前的占位；事件一到，过程就
+               挂到助手气泡自身的时间线上，这个独立占位随即消失。 -->
+          <div v-if="streaming && !streamBubbleShown" class="msg assistant">
             <div class="bubble">
               <a-spin size="small" />
-              <span v-if="currentStep" class="thinking">{{ currentStep }}</span>
-              <span v-else class="thinking">正在思考…</span>
+              <span class="thinking">正在思考…</span>
             </div>
           </div>
 
@@ -303,14 +330,77 @@
         </div>
 
         <div class="composer">
+          <!-- 上传区：回形针常驻，待发附件以缩略图/文件名条展示在上方。
+               图片能否发给当前模型由 attachmentGate 在前端先拦一道。 -->
+          <div class="attach-bar">
+            <a-tooltip :title="`上传文件或图片（最多 ${MAX_ATTACHMENTS} 个）`">
+              <button
+                type="button"
+                class="attach-btn"
+                :disabled="!canSend || pendingAttachments.length >= MAX_ATTACHMENTS"
+                @click="openFilePicker"
+              >
+                <PaperClipOutlined />
+              </button>
+            </a-tooltip>
+            <span class="attach-count" v-if="pendingAttachments.length">
+              {{ pendingAttachments.length }}/{{ MAX_ATTACHMENTS }}
+            </span>
+            <span v-if="attachmentGate" class="attach-warn">{{ attachmentGate }}</span>
+          </div>
+          <input
+            ref="fileInput"
+            type="file"
+            multiple
+            class="file-input"
+            accept=".pdf,.docx,.txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.log,.yaml,.yml,.xml,.toml,.ini,.conf,.properties,.env,.sql,.py,.js,.mjs,.cjs,.ts,.tsx,.jsx,.vue,.java,.kt,.go,.rs,.c,.h,.cpp,.hpp,.cs,.php,.rb,.sh,.bash,.zsh,.bat,.ps1,.html,.htm,.css,.scss,.less,.png,.jpg,.jpeg,.gif,.webp,.bmp"
+            @change="onFilesPicked"
+          />
+          <div v-if="pendingAttachments.length" class="pending-list">
+            <div
+              v-for="att in pendingAttachments"
+              :key="att.key"
+              :class="['pending-item', { 'is-error': att.status === 'error' }]"
+            >
+              <img
+                v-if="att.kind === 'image' && att.previewUrl"
+                :src="att.previewUrl"
+                class="pending-thumb"
+                alt=""
+              />
+              <span v-else class="pending-file-icon"><FileOutlined /></span>
+              <span class="pending-meta">
+                <span class="pending-name" :title="att.filename">{{ att.filename }}</span>
+                <span class="pending-sub">
+                  <a-spin v-if="att.status === 'uploading'" size="small" />
+                  <template v-else-if="att.status === 'error'">
+                    {{ att.error || '上传失败' }}
+                  </template>
+                  <template v-else>{{ formatSize(att.size) }}</template>
+                </span>
+              </span>
+              <button
+                type="button"
+                class="pending-remove"
+                title="移除"
+                @click="removePending(att)"
+              >
+                <CloseOutlined />
+              </button>
+            </div>
+          </div>
           <!-- 行高跟着内容走：短问题只占两行、省出消息区高度，长问题自动
                撑到 8 行后出现内部滚动，不再憋在固定 3 行里。 -->
           <a-textarea
+            ref="composerRef"
             v-model:value="draft"
             :auto-size="{ minRows: 2, maxRows: 8 }"
             :disabled="!canSend"
             :placeholder="composerPlaceholder"
             @keydown.enter.exact="onComposerEnter"
+            @paste="onComposerPaste"
+            @compositionstart="onComposerCompositionStart"
+            @compositionend="onComposerCompositionEnd"
           />
           <div class="composer-actions">
             <!-- 快捷键提示只在输入框为空时出现：开始打字的人已经不需要它了，
@@ -319,7 +409,7 @@
             <a-button v-if="streaming" danger @click="stop">停止</a-button>
             <a-button
               type="primary"
-              :disabled="!canSend || !draft.trim()"
+              :disabled="!canSend || attachmentsBusy || (!draft.trim() && !readyAttachments.length)"
               :loading="streaming"
               @click="send"
             >
@@ -336,9 +426,12 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { message as toast, Empty } from 'ant-design-vue'
 import {
+  CloseOutlined,
   CopyOutlined,
   DeleteOutlined,
   EditOutlined,
+  FileOutlined,
+  PaperClipOutlined,
   PlusOutlined,
   RobotOutlined,
   SearchOutlined,
@@ -347,6 +440,7 @@ import {
 import { useRoute, useRouter } from 'vue-router'
 import MermaidCard from '@/components/MermaidCard.vue'
 import ConfirmCard from '@/components/ConfirmCard.vue'
+import ThinkingTrace from '@/components/ThinkingTrace.vue'
 import { useAuthStore } from '@/stores/auth'
 import { createMarkdown } from '@/utils/markdown'
 import { useOpsConfirm, actionFromConfirm } from '@/utils/useOpsConfirm'
@@ -364,12 +458,15 @@ import {
   knowledgeApi,
   settingsApi,
   type Agent,
+  type ChatAttachment,
   type Citation,
   type Conversation,
   type KbProject,
   type KnowledgeType,
   type ModelConfig,
   type OpsAction,
+  type StreamHandlers,
+  type TimelineEntry,
 } from '@/api'
 
 const router = useRouter()
@@ -394,6 +491,10 @@ interface Bubble {
   role: 'user' | 'assistant'
   content: string
   citations: Citation[]
+  /** 思考与工具调用的交错时间线；用户消息恒无此字段，纯问答也为空。 */
+  timeline?: TimelineEntry[]
+  /** 用户提问时带的附件；助手消息恒为空。 */
+  attachments?: ChatAttachment[]
   /** 这条提问的回答失败过，界面上给出重试入口。 */
   failed?: boolean
 }
@@ -401,6 +502,13 @@ interface Bubble {
 // 正在流式追加的那条气泡的 key。它在模板里走整段 markdown 渲染（图围栏多半
 // 还没闭合），finish() 清空后切换成分段渲染，mermaid 块此时才升级成图卡片。
 const streamingBubbleKey = ref<string | null>(null)
+// 流式气泡是否已经进了消息列表（第一个思考/工具/正文事件到达时上线）。
+// 上线之前显示独立的「正在思考…」占位，上线之后过程挂在气泡自身的时间线上。
+const streamBubbleShown = computed(
+  () =>
+    !!streamingBubbleKey.value &&
+    messages.value.some((m) => m.key === streamingBubbleKey.value),
+)
 
 // ---- 运维写命令确认 ----------------------------------------------------------
 // 当前会话的全部待确认项（含已处理的），确认卡片挂在触发提议的那条助手气泡
@@ -495,12 +603,235 @@ async function submitRename() {
 }
 
 const draft = ref('')
+const composerRef = ref<{ blur: () => void } | null>(null)
 const streaming = ref(false)
 const pendingText = ref('')
-// 模型当前正在调用什么工具。ReAct 下它可能查好几轮，把这个过程露出来，
-// 免得用户对着一个转圈的图标干等，不知道后台在忙什么。
-const currentStep = ref('')
 const scrollEl = ref<HTMLElement | null>(null)
+
+// ---- 待发附件 ---------------------------------------------------------------
+// 上传与发送是两次请求：先拿到服务端 id 做预览/移除，发送时只带 id 列表。
+// 数量与大小上限跟后端 settings.CHAT_* 对齐，超限在这里就拦掉。
+const MAX_ATTACHMENTS = 6
+const MAX_FILE_BYTES = 10 * 1024 * 1024
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024
+const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']
+const FILE_EXTENSIONS = [
+  'pdf', 'docx',
+  'txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'jsonl', 'log',
+  'yaml', 'yml', 'xml', 'toml', 'ini', 'conf', 'properties', 'env',
+  'sql', 'py', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'vue',
+  'java', 'kt', 'go', 'rs', 'c', 'h', 'cpp', 'hpp', 'cs',
+  'php', 'rb', 'sh', 'bash', 'zsh', 'bat', 'ps1',
+  'html', 'htm', 'css', 'scss', 'less',
+]
+
+interface PendingAttachment {
+  /** 本地行标识：上传回来之前没有服务端 id。 */
+  key: string
+  id?: number
+  kind: 'image' | 'file'
+  filename: string
+  mime: string | null
+  size: number
+  /** 图片预览地址：上传中为 blob URL，成功后换成服务端 URL。 */
+  previewUrl?: string
+  status: 'uploading' | 'ready' | 'error'
+  error?: string
+}
+
+const fileInput = ref<HTMLInputElement | null>(null)
+const pendingAttachments = ref<PendingAttachment[]>([])
+
+const readyAttachments = computed(() =>
+  pendingAttachments.value.filter((a) => a.status === 'ready'),
+)
+const attachmentsBusy = computed(() =>
+  pendingAttachments.value.some((a) => a.status !== 'ready'),
+)
+const imageVisionBlocked = computed(
+  () =>
+    readyAttachments.value.some((a) => a.kind === 'image') &&
+    !activeModelSupportsVision.value,
+)
+/** 附件区的一句话状态：为空表示当前这批可以随消息发出。 */
+const attachmentGate = computed(() => {
+  if (!pendingAttachments.value.length) return ''
+  if (pendingAttachments.value.some((a) => a.status === 'uploading')) {
+    return '附件正在上传…'
+  }
+  if (pendingAttachments.value.some((a) => a.status === 'error')) {
+    return '有附件上传失败，请移除后重试'
+  }
+  if (imageVisionBlocked.value) return '当前模型未开启图片理解，图片不能发送'
+  return ''
+})
+
+function fileExtension(name: string): string {
+  const index = name.lastIndexOf('.')
+  return index >= 0 ? name.slice(index + 1).toLowerCase() : ''
+}
+
+function isImageFile(file: File): boolean {
+  return file.type.startsWith('image/') || IMAGE_EXTENSIONS.includes(fileExtension(file.name))
+}
+
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${bytes} B`
+}
+
+/** 上传失败时的可读原因：业务拒绝走 envelope，网络错误走 Error。 */
+function errorText(err: unknown): string {
+  if (err && typeof err === 'object' && 'message' in err) {
+    const text = (err as { message?: unknown }).message
+    if (typeof text === 'string' && text) return text
+  }
+  return '上传失败，请稍后重试'
+}
+
+/** 前端先做一遍格式/大小检查，省得把大文件传完才被后端拒绝。 */
+function validateFile(file: File): string {
+  const image = isImageFile(file)
+  if (image) {
+    if (fileExtension(file.name) === 'bmp') return '图片请使用 PNG / JPEG / GIF / WebP 格式'
+    if (file.size > MAX_IMAGE_BYTES) {
+      return `图片超过 ${MAX_IMAGE_BYTES / 1024 / 1024}MB 上限`
+    }
+    return ''
+  }
+  if (!FILE_EXTENSIONS.includes(fileExtension(file.name))) {
+    return '暂不支持该文件格式'
+  }
+  if (file.size > MAX_FILE_BYTES) {
+    return `文件超过 ${MAX_FILE_BYTES / 1024 / 1024}MB 上限`
+  }
+  return ''
+}
+
+function openFilePicker() {
+  fileInput.value?.click()
+}
+
+function onFilesPicked(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  // 清空 value：同一个文件连选两次也要能再次触发 change。
+  input.value = ''
+  if (files.length) void addFiles(files)
+}
+
+function onComposerPaste(event: ClipboardEvent) {
+  const files = Array.from(event.clipboardData?.files ?? [])
+  if (!files.length) return
+  // 有文件时拦下默认粘贴：截图否则会被编码成一串图片字符塞进输入框。
+  event.preventDefault()
+  void addFiles(files)
+}
+
+async function addFiles(files: File[]) {
+  const slots = MAX_ATTACHMENTS - pendingAttachments.value.length
+  if (slots <= 0) {
+    toast.warning(`最多上传 ${MAX_ATTACHMENTS} 个附件`)
+    return
+  }
+  if (files.length > slots) {
+    toast.warning(`最多上传 ${MAX_ATTACHMENTS} 个附件，超出部分已忽略`)
+  }
+  for (const file of files.slice(0, slots)) {
+    const problem = validateFile(file)
+    if (problem) {
+      toast.warning(`${file.name}：${problem}`)
+      continue
+    }
+    const kind = isImageFile(file) ? 'image' : 'file'
+    const item: PendingAttachment = {
+      key: `p${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind,
+      filename: file.name,
+      mime: file.type || null,
+      size: file.size,
+      previewUrl: kind === 'image' ? URL.createObjectURL(file) : undefined,
+      status: 'uploading',
+    }
+    pendingAttachments.value.push(item)
+    void uploadAttachment(item, file)
+  }
+}
+
+async function uploadAttachment(item: PendingAttachment, file: File) {
+  try {
+    const uploaded = await chatApi.uploadAttachment(file)
+    const live = pendingAttachments.value.find((a) => a.key === item.key)
+    if (!live) {
+      // 上传途中被移除了：把刚建好的服务端行也删掉，别留孤儿。
+      void chatApi.deleteAttachment(uploaded.id).catch(() => undefined)
+      return
+    }
+    live.id = uploaded.id
+    live.filename = uploaded.filename
+    live.mime = uploaded.mime
+    live.size = uploaded.size
+    live.status = 'ready'
+    if (live.kind === 'image') {
+      if (live.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(live.previewUrl)
+      live.previewUrl = uploaded.url ?? undefined
+    }
+  } catch (err) {
+    const live = pendingAttachments.value.find((a) => a.key === item.key)
+    if (!live) return
+    live.status = 'error'
+    live.error = errorText(err)
+  }
+}
+
+function releasePending(item: PendingAttachment, remote: boolean) {
+  if (item.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(item.previewUrl)
+  if (remote && item.id) void chatApi.deleteAttachment(item.id).catch(() => undefined)
+}
+
+function removePending(item: PendingAttachment) {
+  const index = pendingAttachments.value.indexOf(item)
+  if (index === -1) return
+  pendingAttachments.value.splice(index, 1)
+  releasePending(item, true)
+}
+
+/** 发出去之后服务端会绑定这些行，remote 传 false；丢弃未发附件时才删远端。 */
+function clearPending({ remote = false } = {}) {
+  const items = pendingAttachments.value
+  pendingAttachments.value = []
+  for (const item of items) releasePending(item, remote)
+}
+
+/** 发送快照：只取已上传成功的，图片的预览地址此时已是服务端 URL。 */
+function attachmentSnapshot(): ChatAttachment[] {
+  return readyAttachments.value.map((a) => ({
+    id: a.id as number,
+    kind: a.kind,
+    filename: a.filename,
+    mime: a.mime,
+    size: a.size,
+    url: a.kind === 'image' ? a.previewUrl ?? null : null,
+  }))
+}
+
+/** 失败重试且后端没有这条记录时，把附件放回待发区，别让用户重传一遍。 */
+function restorePending(attachments: ChatAttachment[]) {
+  for (const att of attachments) {
+    if (att.id == null) continue
+    pendingAttachments.value.push({
+      key: `p${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: att.id,
+      kind: att.kind,
+      filename: att.filename,
+      mime: att.mime,
+      size: att.size,
+      previewUrl: att.kind === 'image' && att.url ? att.url : undefined,
+      status: 'ready',
+    })
+  }
+}
 
 // ---- 贴底滚动 ---------------------------------------------------------------
 // 用户上翻查看历史时，新 token 不该硬把视图拽回底部；只有原本贴着底，
@@ -530,30 +861,112 @@ function pinToBottom() {
   scrollToBottom()
 }
 
-// 每种工具调用配一句进度文案。运维工具的关键信息在 input.command / input.statement
-// 里（检索的在 input.query），统一从这里取，别在各处重复 if-else。
-function stepText(tool: string, input?: Record<string, unknown>): string {
-  const arg = (key: string) => {
-    const value = input?.[key]
-    return typeof value === 'string' && value.length <= 80 ? value : ''
+// ---- 回答时间线：思考过程 + 工具调用过程 -------------------------------------
+// 流式期间按到达顺序累积，渲染成交错的「思考 / 调工具」时间线；落库后后端按
+// 同一结构存在消息的 timeline 字段里，历史回放直接用它重建。
+function appendReason(bubble: Bubble, delta: string) {
+  const timeline = (bubble.timeline ??= [])
+  const last = timeline[timeline.length - 1]
+  // 与后端 timeline 的合并口径一致：连续的推理增量并进同一条，
+  // 中间被工具调用隔开的思考才另起一段。
+  if (last && last.type === 'reason') {
+    last.detail = `${last.detail ?? ''}${delta}`
+  } else {
+    timeline.push({ type: 'reason', detail: delta })
   }
-  switch (tool) {
-    case 'search_knowledge_base':
-      return `正在检索：${arg('query')}`
-    case 'current_datetime':
-      return '正在查询当前时间…'
-    case 'list_servers':
-      return '正在查看服务器列表…'
-    case 'run_server_command':
-      return `正在服务器上执行：${arg('command')}`
-    case 'list_databases':
-      return '正在查看数据库列表…'
-    case 'run_database_query':
-      return '正在执行只读查询…'
-    case 'propose_command':
-      return `正在提议执行：${arg('command')}`
-    default:
-      return '正在调用工具…'
+}
+
+function appendStep(bubble: Bubble, tool: string, input?: Record<string, unknown>) {
+  // 新工具开始意味着上一个已经返回：把之前还在转圈的步骤全部收掉，
+  // 只保留最新一个处于进行中。
+  const timeline = (bubble.timeline ??= [])
+  for (const entry of timeline) {
+    if (entry.type === 'step' && entry.running) entry.running = false
+  }
+  timeline.push({
+    type: 'step',
+    tool,
+    query: typeof input?.query === 'string' ? input.query : '',
+    input,
+    running: true,
+  })
+}
+
+function settleSteps(bubble: Bubble) {
+  for (const entry of bubble.timeline ?? []) {
+    if (entry.type === 'step') entry.running = false
+  }
+}
+
+/**
+ * 首答 / 重试 / 确认后续答三条流共用的 SSE 回调：思考增量、工具步骤、正文
+ * token、确认卡片与落定收尾都走同一套。差异只在出错后各自怎么收拾本地状态，
+ * 由 onFailed 传入。
+ */
+function makeStreamHandlers(
+  bubble: Bubble,
+  streamActions: OpsAction[],
+  onFailed: (message: string) => void,
+): StreamHandlers {
+  // 第一个过程事件（思考 / 工具 / 正文 / 提议）到达就让气泡上线，不必再等
+  // 第一个正文 token——思考与调工具本身就是要展示的内容。失败时在 onError
+  // 里把没有正文的空气泡撤掉，不会留下空助手消息。
+  const ensureBubble = () => {
+    if (!messages.value.includes(bubble)) messages.value.push(bubble)
+  }
+  return {
+    onCitations: (citations) => {
+      bubble.citations = citations
+    },
+    onStep: ({ tool, input }) => {
+      ensureBubble()
+      appendStep(bubble, tool, input)
+      scrollToBottom()
+    },
+    onReason: (delta) => {
+      ensureBubble()
+      appendReason(bubble, delta)
+      scrollToBottom()
+    },
+    onToken: (token) => {
+      ensureBubble()
+      // 开始吐正文说明这一轮工具都返回了；之后若再调工具，新的 step 会重新转圈。
+      settleSteps(bubble)
+      pendingText.value += token
+      bubble.content = pendingText.value
+      schedule()
+      scrollToBottom()
+    },
+    onConfirm: (data) => {
+      // 模型提议写命令后可能直接结束本轮、一个 token 都不吐：先保证
+      // 气泡存在，确认卡片才有地方挂。
+      ensureBubble()
+      const action = actionFromConfirm(data, activeId.value)
+      actions.value.push(action)
+      streamActions.push(action)
+      scrollToBottom()
+    },
+    onDone: ({ message_id }) => {
+      // 记下落库 id，这条气泡里的图才可以手动改（改完要能回写到这条消息）。
+      bubble.id = message_id
+      settleSteps(bubble)
+      // 回填本轮提议的 message_id：卡片从「流式气泡」改挂到落库消息上，
+      // 与历史回放的定位方式一致。
+      for (const a of streamActions) a.message_id = message_id
+      finish()
+      void loadConversations()
+    },
+    onError: ({ message }) => {
+      toast.error(message)
+      settleSteps(bubble)
+      // 只收到思考/工具过程、一个字正文都没吐、也没提议写命令：撤掉空气泡，
+      // 后续交给 onFailed（挂重试入口等）。有确认卡片的气泡要留下来挂卡片。
+      if (!bubble.content && !streamActions.length) {
+        const index = messages.value.indexOf(bubble)
+        if (index >= 0) messages.value.splice(index, 1)
+      }
+      onFailed(message)
+    },
   }
 }
 
@@ -572,10 +985,20 @@ const needsKnowledge = computed(() => activeAgent.value?.use_knowledge ?? false)
 // 只有测通过的模型才真的能用，其余的摆进下拉里只会换来发送时一条报错。
 const usableModels = computed(() => chatModels.value.filter((m) => m.last_test_ok))
 const modelOptions = computed(() =>
-  usableModels.value.map((m) => ({ value: m.id, label: m.title })),
+  usableModels.value.map((m) => ({
+    value: m.id,
+    // 图片能力直接标在选择器里：用户不必先传一张图才知道这个模型收不收。
+    label: m.supports_vision ? `${m.title}（图片）` : m.title,
+  })),
 )
 const defaultModelConfigId = computed(
   () => usableModels.value.find((m) => m.is_default)?.id ?? usableModels.value[0]?.id,
+)
+const activeModelConfig = computed(
+  () => usableModels.value.find((m) => m.id === activeModelConfigId.value) || null,
+)
+const activeModelSupportsVision = computed(
+  () => !!activeModelConfig.value?.supports_vision,
 )
 
 const projectOptions = computed(() =>
@@ -694,8 +1117,9 @@ async function selectConversation(id: number) {
   if (streaming.value) return
   const seq = ++convLoadSeq
   activeId.value = id
-  // 草稿不跨会话带过去：那是写给上一个人的话。
+  // 草稿与待发附件都不跨会话带过去：那是写给上一个人的话。
   draft.value = ''
+  clearPending({ remote: true })
   clearRenderCaches()
   let data
   let acts
@@ -713,6 +1137,9 @@ async function selectConversation(id: number) {
     role: m.role,
     content: m.content,
     citations: m.citations,
+    // 老消息没有 timeline：空数组，时间线不渲染，只显示正文。
+    timeline: m.timeline ?? [],
+    attachments: m.attachments ?? [],
   }))
   actions.value = acts.items
   const conv = conversations.value.find((c) => c.id === id)
@@ -742,6 +1169,7 @@ function startNew() {
   messages.value = []
   actions.value = []
   draft.value = ''
+  clearPending({ remote: true })
   clearRenderCaches()
 }
 
@@ -870,28 +1298,80 @@ watch(
 
 // ---- 发送 ------------------------------------------------------------------
 
+// 输入法合成期间按发送要缓一缓：这时 v-model 里还没有合成窗口里的文字，
+// 而 ant-design-vue 会在 compositionend 里把原文回填进 v-model。直接发的话
+// 一是消息缺最后一段，二是发送时的清空随后被回填覆盖，看起来像「已发出但
+// 输入框没清空」。先挂起发送，等合成结束、回填落定后再走正常发送。
+let composerComposing = false
+let pendingSend = false
+
+// 回答流式期间输入框是禁用的，用户不可能往里写字；这段时间 v-model 被任何
+// 事件回写（禁用引发的失焦 change、输入法 compositionend 回填）都算脏数据，
+// 直接清掉，保证「消息发出去 = 输入框变空」。
+watch(draft, (v) => {
+  if (streaming.value && v) draft.value = ''
+})
+
+function onComposerCompositionStart() {
+  composerComposing = true
+}
+
+function onComposerCompositionEnd() {
+  composerComposing = false
+  if (pendingSend) {
+    pendingSend = false
+    // 回填是同步事件链的一部分，nextTick 再发读到的就是完整文本。
+    void nextTick(send)
+  }
+}
+
 function onComposerEnter(e: KeyboardEvent) {
   // 中文输入法里按 Enter 是选词、不是发送：这种 keydown 的 isComposing 为 true。
   // 不拦的话消息会被提前发出去，随后输入法把整段文字回填进输入框，
   // 看起来就像「发出去了但没清空」。preventDefault 也只在真正发送时才调，
-  // 否则会把选词那一次 Enter 吞掉。
-  if (e.isComposing) return
+  // 否则会把选词那一次 Enter 吞掉。keyCode 229 是输入法还在处理按键的
+  // 标记，部分输入法提交候选的那次 Enter 只报 229、不报 isComposing。
+  if (e.isComposing || e.keyCode === 229) return
   e.preventDefault()
   send()
 }
 
 function send() {
+  if (composerComposing) {
+    pendingSend = true
+    // 主动结束合成，免得点了发送却在等输入法自己提交；blur 会让它马上
+    // 补一次 compositionend，发送在下一拍继续。
+    composerRef.value?.blur()
+    return
+  }
+  // 先失焦再清空：发送会把输入框禁用，禁用使聚焦的 textarea 失焦并触发
+  // change，antd 在 change 里把失焦瞬间的旧值回写进 v-model，正好盖掉这次
+  // 清空——表现为消息发出去了、输入框还留着整段原文。
+  composerRef.value?.blur()
   const question = draft.value.trim()
-  if (!question || !canSend.value) return
+  const attachments = readyAttachments.value
+  if ((!question && !attachments.length) || !canSend.value) return
+  if (attachmentsBusy.value) {
+    toast.warning('附件还在上传，请稍候')
+    return
+  }
+  if (imageVisionBlocked.value) {
+    toast.warning('当前模型未开启图片理解，请换用支持图片的模型或移除图片')
+    return
+  }
 
+  const snapshot = attachmentSnapshot()
   const userBubble: Bubble = {
     key: `u${Date.now()}`,
     role: 'user',
     content: question,
     citations: [],
+    attachments: snapshot,
   }
   messages.value.push(userBubble)
   draft.value = ''
+  // 附件即将随消息绑定到服务端，这里只清本地预览，不发删除请求。
+  clearPending()
   pinToBottom()
 
   streaming.value = true
@@ -902,6 +1382,7 @@ function send() {
     role: 'assistant',
     content: '',
     citations: [],
+    timeline: [],
   }
   // 本轮流里提议的待确认项：done 时统一回填 message_id。
   const streamActions: OpsAction[] = []
@@ -911,6 +1392,7 @@ function send() {
   abort = chatApi.streamCompletion(
     {
       message: question,
+      ...(snapshot.length ? { attachment_ids: snapshot.map((a) => a.id) } : {}),
       conversation_id: activeId.value ?? undefined,
       agent_id: activeAgentId.value,
       model_config_id: activeModelConfigId.value,
@@ -926,49 +1408,12 @@ function send() {
       onMeta: ({ conversation_id }) => {
         activeId.value = conversation_id
       },
-      onCitations: (citations) => {
-        bubble.citations = citations
-      },
-      onStep: ({ tool, input }) => {
-        // 模型每发起一次工具调用就换一行状态。它可能会查好几轮，只显示当前
-        // 这一轮：这是个进度提示，不是操作日志。
-        currentStep.value = stepText(tool, input)
-      },
-      onToken: (token) => {
-        // 第一个 token 一到就说明它不查了、开始作答了。
-        currentStep.value = ''
-        // bubble 要等第一个 token 到了才 push 进去，这样请求失败时也不会
-        // 在界面上留下一条空的助手消息。
-        if (!pendingText.value) messages.value.push(bubble)
-        pendingText.value += token
-        bubble.content = pendingText.value
-        schedule()
-        scrollToBottom()
-      },
-      onConfirm: (data) => {
-        // 模型提议写命令后可能直接结束本轮、一个 token 都不吐：先保证
-        // 气泡存在，确认卡片才有地方挂。
-        if (!messages.value.includes(bubble)) messages.value.push(bubble)
-        const action = actionFromConfirm(data, activeId.value)
-        actions.value.push(action)
-        streamActions.push(action)
-        scrollToBottom()
-      },
-      onDone: ({ message_id }) => {
-        // 记下落库 id，这条气泡里的图才可以手动改（改完要能回写到这条消息）。
-        bubble.id = message_id
-        // 回填本轮提议的 message_id：卡片从「流式气泡」改挂到落库消息上，
-        // 与历史回放的定位方式一致。
-        for (const a of streamActions) a.message_id = message_id
-        finish()
-        void loadConversations()
-      },
-      onError: ({ message }) => {
-        toast.error(message)
+      ...makeStreamHandlers(bubble, streamActions, () => {
         // 提问还在、回答没落成：挂上「可重试」标记，别让用户重新打一遍。
+        // 工厂已弹过错误提示、撤掉了没有正文的空气泡。
         userBubble.failed = true
         finish()
-      },
+      }),
     },
   )
 }
@@ -981,10 +1426,11 @@ function retryMessage(msg: Bubble) {
   if (idx === -1) return
 
   // meta 都没收到过的失败（网络层就断了）：后端大概率没有这条记录，
-  // 删掉本地气泡、把内容放回发送框重走正常发送。
+  // 删掉本地气泡、把内容和附件放回发送框重走正常发送。
   if (!activeId.value) {
     messages.value.splice(idx, 1)
     draft.value = msg.content
+    if (msg.attachments?.length) restorePending(msg.attachments)
     send()
     return
   }
@@ -1001,48 +1447,22 @@ function retryMessage(msg: Bubble) {
     role: 'assistant',
     content: '',
     citations: [],
+    timeline: [],
   }
   const streamActions: OpsAction[] = []
   beginStream(bubble.key)
   streamingBubbleKey.value = bubble.key
   pinToBottom()
 
-  abort = chatApi.streamRetry(activeId.value, {
-    onCitations: (citations) => {
-      bubble.citations = citations
-    },
-    onStep: ({ tool, input }) => {
-      currentStep.value = stepText(tool, input)
-    },
-    onToken: (token) => {
-      currentStep.value = ''
-      if (!pendingText.value) messages.value.push(bubble)
-      pendingText.value += token
-      bubble.content = pendingText.value
-      schedule()
-      scrollToBottom()
-    },
-    onConfirm: (data) => {
-      if (!messages.value.includes(bubble)) messages.value.push(bubble)
-      const action = actionFromConfirm(data, activeId.value)
-      actions.value.push(action)
-      streamActions.push(action)
-      scrollToBottom()
-    },
-    onDone: ({ message_id }) => {
-      bubble.id = message_id
-      for (const a of streamActions) a.message_id = message_id
-      finish()
-      void loadConversations()
-    },
-    onError: ({ message }) => {
-      toast.error(message)
-      // 又失败了：残文清掉，提问重新挂回「可重试」。
+  abort = chatApi.streamRetry(
+    activeId.value,
+    makeStreamHandlers(bubble, streamActions, () => {
+      // 又失败了：残文（含只有过程的空气泡）清掉，提问重新挂回「可重试」。
       messages.value.splice(idx + 1)
       msg.failed = true
       finish()
-    },
-  })
+    }),
+  )
 }
 
 // 确认一条写命令：exec 结果由 useOpsConfirm 写回卡片，这里把续答接进一个
@@ -1061,6 +1481,7 @@ function approveAction(action: OpsAction) {
     role: 'assistant',
     content: '',
     citations: [],
+    timeline: [],
   }
   const streamActions: OpsAction[] = []
   beginStream(bubble.key)
@@ -1072,38 +1493,9 @@ function approveAction(action: OpsAction) {
       // 执行结果写回卡片后滚到底，让输出块进入视野。
       scrollToBottom()
     },
-    onStep: ({ tool, input }) => {
-      currentStep.value = stepText(tool, input)
-    },
-    onCitations: (citations) => {
-      bubble.citations = citations
-    },
-    onToken: (token) => {
-      currentStep.value = ''
-      if (!pendingText.value) messages.value.push(bubble)
-      pendingText.value += token
-      bubble.content = pendingText.value
-      schedule()
-      scrollToBottom()
-    },
-    onConfirm: (data) => {
-      // 续答里模型又提议了新的写命令：挂到续答气泡下，同一条管线。
-      if (!messages.value.includes(bubble)) messages.value.push(bubble)
-      const act = actionFromConfirm(data, activeId.value)
-      actions.value.push(act)
-      streamActions.push(act)
-      scrollToBottom()
-    },
-    onDone: ({ message_id }) => {
-      bubble.id = message_id
-      for (const a of streamActions) a.message_id = message_id
+    ...makeStreamHandlers(bubble, streamActions, () => {
       finish()
-      void loadConversations()
-    },
-    onError: ({ message }) => {
-      toast.error(message)
-      finish()
-    },
+    }),
   })
 }
 
@@ -1112,14 +1504,23 @@ function rejectAction(action: OpsAction) {
 }
 
 function stop() {
+  const key = streamingBubbleKey.value
   abort?.()
   finish()
+  if (key) {
+    const index = messages.value.findIndex((m) => m.key === key)
+    const bubble = index >= 0 ? messages.value[index] : null
+    // 一个正文 token 都没吐、也没提议写命令就被停掉：撤掉只有过程的空气泡。
+    // 后端在 aborted 分支不发 done，这条本地气泡本来也挂不上落库消息。
+    if (bubble && !bubble.content && !actions.value.some((a) => a.message_id == null)) {
+      messages.value.splice(index, 1)
+    }
+  }
 }
 
 function finish() {
   streaming.value = false
   pendingText.value = ''
-  currentStep.value = ''
   abort = null
   streamingBubbleKey.value = null
   // 收尾推一次全量渲染：停止/出错时残文也要以完整 markdown 落定。
@@ -1371,6 +1772,35 @@ onUnmounted(() => abort?.())
 .msg.user .bubble {
   background: var(--signal-bg-strong);
 }
+/* 提问附件：图片给缩略图（ant-image 自带点击预览），文档只露文件名。 */
+.msg-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.msg-image {
+  display: block;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+}
+.msg-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 2px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+}
+.msg-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .content {
   white-space: pre-wrap;
   word-break: break-word;
@@ -1440,6 +1870,129 @@ onUnmounted(() => abort?.())
   position: relative;
   border-top: 1px solid #f0f0f0;
   padding-top: 12px;
+}
+/* 上传入口：常驻在输入框上方一行。就一个回形针，不抢视觉重量。 */
+.attach-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  margin-bottom: 4px;
+}
+.attach-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-3);
+  font-size: var(--fs-base);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.attach-btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--signal-text);
+}
+.attach-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.attach-count {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+.attach-warn {
+  font-size: var(--fs-xs);
+  color: var(--warning);
+}
+.file-input {
+  display: none;
+}
+/* 待发附件条：缩略图 + 文件名 + 大小/进度，移除按钮固定在行尾。 */
+.pending-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.pending-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 260px;
+  padding: 4px 6px 4px 4px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.pending-item.is-error {
+  border-color: var(--danger-soft);
+  background: var(--danger-bg);
+}
+.pending-thumb {
+  display: block;
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 4px;
+}
+.pending-file-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  background: var(--paper);
+  color: var(--text-3);
+  font-size: var(--fs-lg);
+}
+.pending-meta {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.pending-name {
+  overflow: hidden;
+  font-size: var(--fs-xs);
+  color: var(--text-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pending-sub {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+.pending-item.is-error .pending-sub {
+  color: var(--danger);
+}
+.pending-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.pending-remove:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--danger);
 }
 /* 按钮和提示悬浮在输入框右下角，不再单独占一行；给 textarea 右侧留出
    空隙，避免输入的长文本钻到按钮底下。打字时提示已隐藏、只剩发送按钮，

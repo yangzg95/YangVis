@@ -169,6 +169,7 @@ def migrate_schema() -> None:
             ("reasoning_mode", "ADD COLUMN reasoning_mode VARCHAR(16) NOT NULL DEFAULT 'auto'"),
             ("request_extra", "ADD COLUMN request_extra JSON NULL"),
             ("temperature", "ADD COLUMN temperature INT NULL"),
+            ("supports_vision", "ADD COLUMN supports_vision BOOLEAN NOT NULL DEFAULT 0"),
         ):
             if column in model_config_columns:
                 continue

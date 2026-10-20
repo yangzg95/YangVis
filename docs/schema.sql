@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS model_config (
   reasoning_mode  VARCHAR(16)   NOT NULL DEFAULT 'auto' COMMENT '思维链：auto 上游发了才展示 | on 带 request_extra 并要求展示 | off 丢弃',
   request_extra   JSON          NULL COMMENT '仅 reasoning_mode=on：原样并入请求体的私有参数（enable_thinking / thinking.type 等），代码不猜厂商',
   temperature     INT           NULL COMMENT '0-100，除以100传给模型；模型级硬约束，设了就盖过智能体；NULL=不设限，由智能体决定',
+  supports_vision TINYINT(1)    NOT NULL DEFAULT 0 COMMENT '仅 chat：是否接受图片输入（由配置的人按服务商文档声明）',
   created_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_owner (owner_id)
@@ -156,6 +157,23 @@ CREATE TABLE IF NOT EXISTS chat_message (
   KEY idx_conv (conversation_id, id),
   KEY idx_owner (owner_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='对话消息';
+
+CREATE TABLE IF NOT EXISTS chat_attachment (
+  id              BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id        BIGINT       NOT NULL,
+  conversation_id BIGINT       NULL COMMENT '发送后回填；未发送的附件为 NULL',
+  message_id      BIGINT       NULL COMMENT '绑定的 user 消息 id；NULL 表示尚未发送',
+  kind            VARCHAR(8)   NOT NULL COMMENT 'image | file',
+  filename        VARCHAR(255) NOT NULL COMMENT '仅展示用，不参与路径拼接',
+  mime            VARCHAR(128) NULL,
+  size            INT          NOT NULL DEFAULT 0 COMMENT '字节',
+  rel_path        VARCHAR(512) NULL COMMENT '图片在媒体目录下的相对路径；文件附件为 NULL',
+  text            MEDIUMTEXT   NULL COMMENT '文档抽取出的正文；图片为 NULL',
+  created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_attachment_owner (owner_id),
+  KEY idx_attachment_conversation (conversation_id),
+  KEY idx_attachment_message (message_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='对话附件：文档存抽取文本，图片存原文件';
 
 CREATE TABLE IF NOT EXISTS chat_summary (
   conversation_id BIGINT PRIMARY KEY COMMENT 'chat_conversation.id，一个会话至多一行',
@@ -566,3 +584,7 @@ CREATE TABLE IF NOT EXISTS workflow_run_step (
 -- ALTER TABLE model_config
 --   ADD COLUMN reasoning_mode VARCHAR(16) NOT NULL DEFAULT 'auto' COMMENT 'auto | on | off',
 --   ADD COLUMN request_extra  JSON NULL COMMENT '仅 on：原样并入请求体的私有参数';
+--
+-- 对话附件与图片理解（chat_attachment 由 create_all 自动创建，DDL 见上文）：
+-- ALTER TABLE model_config
+--   ADD COLUMN supports_vision TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否接受图片输入';

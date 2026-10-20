@@ -5,7 +5,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any, Dict, Generic, List, Literal, Optional, Tuple, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 T = TypeVar("T")
 
@@ -265,6 +265,21 @@ class Citation(BaseModel):
     excerpt: str = ""
 
 
+class ChatAttachmentItem(BaseModel):
+    """一条消息附带的上传文件或图片。
+
+    文件只回展示用的元信息，正文留在服务端（回放时直接拼给模型）；图片额外
+    带 ``url`` 供前端缩略图使用。
+    """
+
+    id: int
+    kind: str
+    filename: str
+    mime: Optional[str] = None
+    size: int
+    url: Optional[str] = None
+
+
 class MessageItem(BaseModel):
     id: int
     role: str
@@ -273,6 +288,7 @@ class MessageItem(BaseModel):
     # 按到达顺序记录的回答流 [{type: text|step|reason, detail}]。历史回放据此重建
     # 交错的命令与解说；老消息为 None 时前端退回只渲染 content。
     timeline: Optional[List[dict]] = None
+    attachments: List[ChatAttachmentItem] = Field(default_factory=list)
     created_at: datetime
 
 
@@ -295,7 +311,9 @@ class CompletionRequest(BaseModel):
     # 上限对齐手动改消息（上面 MessageUpdate.content）的 20000：报告页
     # 「发起对话」会把整份报告（含改进意见）作为首条消息发出；库字段是
     # _LONG_TEXT，没有更紧的约束。
-    message: str = Field(..., min_length=1, max_length=20000)
+    message: str = Field(default="", max_length=20000)
+    # 先上传拿到的附件 id。允许「只发附件不写字」，但两者不能都为空。
+    attachment_ids: List[int] = Field(default_factory=list, max_length=8)
     conversation_id: Optional[int] = None
     agent_id: Optional[int] = None
 
@@ -307,6 +325,12 @@ class CompletionRequest(BaseModel):
     # 想用哪份对话模型配置回答。不传则沿用会话记住的那份，会话也没记住
     # 就用「设置」里的默认对话模型。
     model_config_id: Optional[int] = None
+
+    @model_validator(mode="after")
+    def _require_question_or_attachment(self) -> "CompletionRequest":
+        if not self.message.strip() and not self.attachment_ids:
+            raise ValueError("请输入问题或上传附件")
+        return self
 
 
 class OpsConversationRequest(BaseModel):
@@ -372,6 +396,8 @@ class ModelConfigCreate(BaseModel):
     reasoning_mode: ReasoningMode = ReasoningMode.AUTO
     request_extra: Optional[dict[str, Any]] = None
     temperature: Optional[int] = Field(default=None, ge=0, le=100)
+    # 由配置的人按服务商文档声明；只影响对话页是否允许上传图片。
+    supports_vision: bool = False
 
 
 class ModelConfigUpdate(BaseModel):
@@ -392,6 +418,7 @@ class ModelConfigUpdate(BaseModel):
     reasoning_mode: Optional[ReasoningMode] = None
     request_extra: Optional[dict[str, Any]] = None
     temperature: Optional[int] = Field(default=None, ge=0, le=100)
+    supports_vision: Optional[bool] = None
 
 
 class ModelConfigItem(BaseModel):
@@ -412,6 +439,7 @@ class ModelConfigItem(BaseModel):
     reasoning_mode: ReasoningMode = ReasoningMode.AUTO
     request_extra: Optional[dict[str, Any]] = None
     temperature: Optional[int] = None
+    supports_vision: bool = False
     last_tested_at: Optional[datetime] = None
     last_test_ok: bool = False
     last_test_error: Optional[str] = None
@@ -2296,6 +2324,8 @@ class YapiSyncRequest(YapiScanRequest):
     base_url: str = Field(..., min_length=1, max_length=512)
     project_id: int = Field(..., ge=1)
     token: str = Field(..., min_length=1, max_length=512)
+    # 「METHOD path」形式的接口键；不传表示同步全部（服务层调用），传空列表表示一个都不同步。
+    endpoint_keys: Optional[List[str]] = None
 
 
 class YapiSyncEndpoint(YapiScanEndpoint):

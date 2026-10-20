@@ -100,6 +100,7 @@ def test_sync_forwards_payload_and_returns_report(client, monkeypatch):
             "base_url": "http://yapi.local",
             "project_id": 9,
             "token": "secret-token",
+            "endpoint_keys": ["POST /api/orders"],
         },
     )
 
@@ -109,6 +110,7 @@ def test_sync_forwards_payload_and_returns_report(client, monkeypatch):
     assert body["data"]["updated"] == 1
     assert captured["payload"].project_id == 9
     assert captured["payload"].token == "secret-token"
+    assert captured["payload"].endpoint_keys == ["POST /api/orders"]
 
 
 def test_sync_reports_yapi_error_in_envelope(client, monkeypatch):

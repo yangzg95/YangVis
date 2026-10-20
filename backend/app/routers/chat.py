@@ -4,16 +4,18 @@ from __future__ import annotations
 import logging
 from typing import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.database import get_db
 from app.deps import require_user
 from app.errors import BusinessError
 from app.models.entities import ChatConversation
 from app.models.schemas import (
     APIResponse,
+    ChatAttachmentItem,
     CompletionRequest,
     ConversationCreate,
     ConversationItem,
@@ -26,11 +28,31 @@ from app.models.schemas import (
     OpsConversationRequest,
 )
 from app.services.chat import ROLE_USER, ChatService, derive_title
+from app.services.chat.attachments import (
+    AttachmentError,
+    extract_file_text,
+    store_image,
+)
+from app.services.uploads import (
+    content_length_exceeds,
+    oversize_message,
+    read_upload_limited,
+)
 from app.sse import SSE_HEADERS, sse_event, with_heartbeat
 
 logger = logging.getLogger("yangvis.chat")
 
+settings = get_settings()
+
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+
+
+def _display_filename(raw: str | None) -> str:
+    """只保留文件名本身：展示用，绝不参与任何路径拼接。"""
+    name = (raw or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+    return (name or "attachment")[:255]
 
 
 def get_service(
@@ -284,6 +306,69 @@ def update_message(
     return APIResponse(data=ChatService.to_message(row))
 
 
+# ---- Attachments -------------------------------------------------------------
+
+@router.post("/attachments", response_model=APIResponse[ChatAttachmentItem])
+async def upload_attachment(
+    request: Request,
+    file: UploadFile = File(...),
+    service: ChatService = Depends(get_service),
+) -> APIResponse[ChatAttachmentItem]:
+    """上传一条对话附件：图片保留原文件，文档当场抽成文本。
+
+    上传与发送分两次请求：前端先拿到附件 id 做预览，发送时只带 id 列表。
+    没有挂到消息上的附件可以直接删除；发送成功的会随消息留下。
+    """
+    limit = settings.CHAT_MAX_ATTACHMENT_BYTES
+    if content_length_exceeds(request.headers.get("content-length"), limit):
+        return APIResponse(code=-1, message=oversize_message(limit))
+    raw = await read_upload_limited(file, limit)
+    if raw is None:
+        return APIResponse(code=-1, message=oversize_message(limit))
+    if not raw:
+        return APIResponse(code=-1, message="文件内容为空")
+
+    filename = _display_filename(file.filename)
+    content_type = (file.content_type or "").lower()
+    is_image = content_type.startswith("image/") or filename.lower().endswith(
+        _IMAGE_EXTENSIONS
+    )
+    try:
+        if is_image:
+            stored = store_image(service.owner_id, filename, raw)
+            row = service.create_attachment(
+                kind="image",
+                filename=filename,
+                mime=stored.mime,
+                size=stored.size,
+                rel_path=stored.rel_path,
+            )
+        else:
+            text = extract_file_text(filename, raw)
+            row = service.create_attachment(
+                kind="file",
+                filename=filename,
+                mime=content_type or None,
+                size=len(raw),
+                text=text,
+            )
+    except AttachmentError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    return APIResponse(data=ChatService.to_attachment(row))
+
+
+@router.delete("/attachments/{attachment_id}", response_model=APIResponse[None])
+def delete_attachment(
+    attachment_id: int,
+    service: ChatService = Depends(get_service),
+) -> APIResponse[None]:
+    try:
+        service.delete_attachment(attachment_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return APIResponse(data=None, message="deleted")
+
+
 # ---- Streaming completion ---------------------------------------------------
 
 @router.post("/completions")
@@ -304,11 +389,18 @@ async def completions(
     async def stream() -> AsyncIterator[str]:
         conversation = None  # 异常可能发生在会话建出来之前，错误日志里要容忍它
         try:
+            # 附件校验先行：批次不对（已发过、不属于本用户）时连会话都不该建，
+            # 否则侧栏会留下一个没有内容的空会话。
+            attachments = service.describe_attachments(payload.attachment_ids)
             agent = service.resolve_agent(payload.agent_id)
 
             if payload.conversation_id is None:
+                # 只传附件不写字时，标题退回用第一个附件的文件名。
+                title = derive_title(question) or derive_title(
+                    f"附件：{attachments[0].filename}"
+                )
                 conversation = service.create_conversation(
-                    title=derive_title(question),
+                    title=title,
                     agent_id=agent.id,
                     project_id=payload.project_id,
                     type_ids=payload.type_ids,
@@ -330,6 +422,8 @@ async def completions(
             # 模型在会话落库之后才确定：这次点名了就用点名的，否则沿用会话
             # 记住的那份，都没有才退回「设置」里的默认配置。
             config = service.require_chat_config(conversation.model_config_id)
+            # 图片交给纯文本模型会被上游整条拒绝，拦在这里给出能看懂的原因。
+            service.assert_vision_ready(attachments, config)
 
             project_id = conversation.project_id
             type_ids = conversation.type_ids
@@ -348,7 +442,12 @@ async def completions(
                 },
             )
 
-            service.add_message(conversation.id, ROLE_USER, question)
+            service.add_message(
+                conversation.id,
+                ROLE_USER,
+                question,
+                attachment_ids=payload.attachment_ids,
+            )
 
             async for event, data in service.stream_answer(
                 conversation_id=conversation.id,
@@ -400,11 +499,28 @@ async def retry_last_answer(
     async def stream() -> AsyncIterator[str]:
         try:
             conversation = service.get_conversation(conversation_id)
-            # 先删后问：拿不到悬空提问（比如上次其实成功了）直接报错事件。
-            question = service.pop_dangling_user_message(conversation.id)
-
+            # 先解析智能体与模型，再动悬空的提问：模型不可用时不该把用户
+            # 已经写下的问题从历史里删掉。
             agent = service.resolve_agent(conversation.agent_id)
             config = service.require_chat_config(conversation.model_config_id)
+
+            # 拿不到悬空提问（比如上次其实成功了）直接报错事件。
+            question, attachment_ids = service.pop_dangling_user_message(
+                conversation.id
+            )
+            attachments = service.describe_attachments(attachment_ids)
+            try:
+                service.assert_vision_ready(attachments, config)
+            except BusinessError:
+                # 两次尝试之间模型被改成不支持图片：把提问带着附件原样放回，
+                # 别让历史里凭空少一条。
+                service.add_message(
+                    conversation.id,
+                    ROLE_USER,
+                    question,
+                    attachment_ids=attachment_ids,
+                )
+                raise
 
             yield sse_event(
                 "meta",
@@ -417,7 +533,12 @@ async def retry_last_answer(
                 },
             )
 
-            service.add_message(conversation.id, ROLE_USER, question)
+            service.add_message(
+                conversation.id,
+                ROLE_USER,
+                question,
+                attachment_ids=attachment_ids,
+            )
 
             async for event, data in service.stream_answer(
                 conversation_id=conversation.id,
