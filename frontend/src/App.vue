@@ -143,6 +143,7 @@ import {
   BuildOutlined,
   CloseOutlined,
   CloudServerOutlined,
+  CodeOutlined,
   DatabaseOutlined,
   FundProjectionScreenOutlined,
   HomeOutlined,
@@ -153,6 +154,7 @@ import {
   ProfileOutlined,
   RobotOutlined,
   SettingOutlined,
+  SyncOutlined,
   TeamOutlined,
   ToolOutlined,
   UserOutlined,
@@ -209,6 +211,15 @@ const MENU: MenuNode[] = [
     children: [
       { path: '/ops/server', title: '服务器' },
       { path: '/ops/database', title: '数据库', icon: DatabaseOutlined },
+    ],
+  },
+  {
+    // 面向开发流程的工具，不产生运行结果，所以单独成组而不是塞进 AI 构建。
+    path: '/devtools',
+    title: '开发工具',
+    icon: CodeOutlined,
+    children: [
+      { path: '/devtools/yapi', title: 'YApi 同步', icon: SyncOutlined },
     ],
   },
   {

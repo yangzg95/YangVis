@@ -32,6 +32,7 @@ from app.routers import (
     auth,
     chat,
     dashboard,
+    devtools,
     interview,
     knowledge,
     mcp,
@@ -124,6 +125,7 @@ app.include_router(slides.router, prefix=API_PREFIX)
 app.include_router(netdisk.router, prefix=API_PREFIX)
 app.include_router(mcp.router, prefix=API_PREFIX)
 app.include_router(ai_gateway.router, prefix=API_PREFIX)
+app.include_router(devtools.router, prefix=API_PREFIX)
 # 对外的 OpenAI 兼容端点挂在站点根的 /v1 下（不带 /api 前缀），调用方填的
 # base_url 就是 http://<host>:<port>/v1，与各家 SDK 的默认约定一致。
 app.include_router(ai_gateway_openai.router)

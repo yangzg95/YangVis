@@ -2232,3 +2232,85 @@ class DashboardSummary(BaseModel):
     ai_channel_count: Optional[int] = None
     ai_call_count_today: Optional[int] = None
     ai_token_count_today: Optional[int] = None
+
+
+# ---- 开发工具 · YApi 同步 ----------------------------------------------------
+
+
+class YapiScanRequest(BaseModel):
+    """本地 Java 源码根目录；后端所在机器上的路径。"""
+
+    root_path: str = Field(..., min_length=1, max_length=2048)
+
+
+class YapiEndpointParam(BaseModel):
+    name: str
+    location: Literal["query", "path", "header", "body", "form"]
+    type: str
+    required: bool = False
+    description: str = ""
+    example: str = ""
+
+
+class YapiScanEndpoint(BaseModel):
+    package: str
+    category_name: str
+    controller: str
+    method: str
+    title: str
+    http_method: str
+    path: str
+    tag: str = ""
+    summary: str = ""
+    description: str = ""
+    source: str
+    line: int = 0
+    params: List[YapiEndpointParam] = Field(default_factory=list)
+    request_body_type: Literal["json", "form", ""] = ""
+    request_body_schema: Optional[Dict[str, Any]] = None
+    response_schema: Optional[Dict[str, Any]] = None
+
+
+class YapiScanCategory(BaseModel):
+    """YApi 分类：一个 Controller 一个分类，名字来自 Swagger 注解。"""
+
+    category_name: str
+    package: str
+    controllers: List[str] = Field(default_factory=list)
+    controller_count: int = 0
+    endpoint_count: int = 0
+
+
+class YapiScanResult(BaseModel):
+    root_path: str
+    java_files: int = 0
+    controller_count: int = 0
+    endpoint_count: int = 0
+    categories: List[YapiScanCategory] = Field(default_factory=list)
+    endpoints: List[YapiScanEndpoint] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    duration_ms: int = 0
+
+
+class YapiSyncRequest(YapiScanRequest):
+    base_url: str = Field(..., min_length=1, max_length=512)
+    project_id: int = Field(..., ge=1)
+    token: str = Field(..., min_length=1, max_length=512)
+
+
+class YapiSyncEndpoint(YapiScanEndpoint):
+    action: Literal["created", "updated", "failed"]
+    error: Optional[str] = None
+
+
+class YapiSyncResult(BaseModel):
+    base_url: str
+    project_id: int
+    created: int = 0
+    updated: int = 0
+    failed: int = 0
+    categories_created: int = 0
+    endpoint_count: int = 0
+    endpoints: List[YapiSyncEndpoint] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    duration_ms: int = 0
