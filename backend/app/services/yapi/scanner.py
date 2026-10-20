@@ -1182,10 +1182,12 @@ class JavaSourceScanner:
                 wrapper = ref.base
             first = ref.args[0]
             if _simple_name(first.base) in ("Void", "void"):
-                return self._unified_response(controller, wrapper)
+                return self._wrapped_response(controller, wrapper, None)
             ref = first
         if not ref.array_dims and _simple_name(ref.base) in ("void", "Void"):
             return None
+        if wrapper:
+            return self._wrapped_response(controller, wrapper, ref)
         return self.builder.for_ref(
             ref,
             controller,
@@ -1195,16 +1197,19 @@ class JavaSourceScanner:
             type_vars=frozenset(controller.type_params),
         )
 
-    def _unified_response(
-        self, controller: JavaType, wrapper: Optional[str]
+    def _wrapped_response(
+        self,
+        controller: JavaType,
+        wrapper: Optional[str],
+        data_ref: Optional[TypeRef],
     ) -> Optional[Dict[str, Any]]:
-        """Result<Void> 没有业务数据，但仍返回统一包装，不能整个响应留空。"""
+        """出参保留统一包装：能读到包装类源码就按源码展开，否则按约定结构补全。"""
         if not wrapper:
             return None
         wrapper_type = self.index.resolve(TypeRef(wrapper), controller)
         if wrapper_type is not None:
             schema = self.builder.for_ref(
-                TypeRef(wrapper_type.fqn, [TypeRef("Void")]),
+                TypeRef(wrapper_type.fqn, [data_ref or TypeRef("Void")]),
                 controller,
                 depth=0,
                 seen=frozenset({controller.fqn}),
@@ -1213,19 +1218,32 @@ class JavaSourceScanner:
             )
             if schema and schema.get("properties"):
                 return schema
-        return {
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "integer",
-                    "format": "int32",
-                    "description": "响应码，0 表示成功",
-                },
-                "message": {"type": "string", "description": "响应信息"},
-                "traceId": {"type": "string", "description": "链路追踪 ID"},
-                "success": {"type": "boolean", "description": "是否成功"},
+
+        data_schema = (
+            self.builder.for_ref(
+                data_ref,
+                controller,
+                depth=0,
+                seen=frozenset({controller.fqn}),
+                bindings={},
+                type_vars=frozenset(controller.type_params),
+            )
+            if data_ref is not None
+            else None
+        )
+        properties: Dict[str, Any] = {
+            "code": {
+                "type": "integer",
+                "format": "int32",
+                "description": "响应码，0 表示成功",
             },
+            "message": {"type": "string", "description": "响应信息"},
+            "traceId": {"type": "string", "description": "链路追踪 ID"},
+            "success": {"type": "boolean", "description": "是否成功"},
         }
+        if data_schema is not None:
+            properties["data"] = data_schema
+        return {"type": "object", "properties": properties}
 
     # -- 其它 -----------------------------------------------------------------
 

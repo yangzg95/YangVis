@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, Depends
 
@@ -13,11 +14,22 @@ from app.models.schemas import (
     YapiSyncRequest,
     YapiSyncResult,
 )
+from app.services.directory_dialog import DirectoryDialogError, pick_directory
 from app.services.yapi import YapiError, scan_java_path, sync_to_yapi
 
 logger = logging.getLogger("yangvis.devtools")
 
 router = APIRouter(prefix="/devtools", tags=["devtools"])
+
+
+@router.post("/pick-directory", response_model=APIResponse[Optional[str]])
+def pick_local_directory(
+    _user: object = Depends(require_user),
+) -> APIResponse[Optional[str]]:
+    try:
+        return APIResponse(data=pick_directory())
+    except DirectoryDialogError as exc:
+        return APIResponse(code=-1, message=str(exc))
 
 
 @router.post("/yapi/scan", response_model=APIResponse[YapiScanResult])

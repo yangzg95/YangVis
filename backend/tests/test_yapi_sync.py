@@ -120,7 +120,9 @@ def test_interface_payload_carries_params_bodies_and_source(fake_yapi):
     assert create["req_body_type"] == "json"
     assert create["req_body_is_json_schema"] is True
     assert json.loads(create["req_body_other"])["required"] == ["buyerName"]
-    assert json.loads(create["res_body"]) == {"type": "integer", "format": "int64"}
+    create_body = json.loads(create["res_body"])
+    assert set(create_body["properties"]) == {"code", "message", "data"}
+    assert create_body["properties"]["data"]["type"] == "integer"
     assert "Controller：OrderController.create()" in create["desc"]
     assert "源码：src/main/java/com/example/shop/order/OrderController.java:" in create["desc"]
 
@@ -150,7 +152,7 @@ def test_interface_payload_carries_params_bodies_and_source(fake_yapi):
     headers = {item["name"]: item for item in page["req_headers"]}
     assert headers["X-Tenant"]["required"] == "1"
     assert page["res_body_is_json_schema"] is True
-    records = json.loads(page["res_body"])["properties"]["records"]
+    records = json.loads(page["res_body"])["properties"]["data"]["properties"]["records"]
     assert records["items"]["properties"]["orderNo"]["type"] == "string"
 
 

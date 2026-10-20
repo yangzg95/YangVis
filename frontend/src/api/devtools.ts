@@ -83,6 +83,13 @@ export interface YapiSyncResult {
 // 扫描/同步都在后端同步执行：大仓库扫描可能几十秒，逐条写 YApi 更久，
 // 所以超时单独放宽，不跟全局 30s 走。
 export const devtoolsApi = {
+  pickDirectory: () =>
+    request<string | null>({
+      url: '/devtools/pick-directory',
+      method: 'POST',
+      // 弹窗会一直等到用户选择或取消，超时跟扫描一样放宽。
+      timeout: 330000,
+    }),
   scanYapi: (payload: YapiScanPayload) =>
     request<YapiScanResult>({
       url: '/devtools/yapi/scan',

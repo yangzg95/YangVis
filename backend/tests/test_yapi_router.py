@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.deps import require_user
 from app.models.schemas import CurrentUser, YapiSyncResult
 from app.routers import devtools
+from app.services.directory_dialog import DirectoryDialogError
 from app.services.yapi.client import YapiError
 
 FIXTURE = Path(__file__).parent / "fixtures" / "yapi_demo"
@@ -46,6 +47,36 @@ def test_scan_reports_bad_path_in_envelope(client):
     body = response.json()
     assert body["code"] == -1
     assert "路径不存在" in body["message"]
+
+
+def test_pick_directory_returns_selected_path(client, monkeypatch):
+    monkeypatch.setattr(devtools, "pick_directory", lambda: r"D:\code\demo")
+    response = client.post("/api/devtools/pick-directory")
+
+    body = response.json()
+    assert body["code"] == 0
+    assert body["data"] == r"D:\code\demo"
+
+
+def test_pick_directory_cancel_returns_empty_data(client, monkeypatch):
+    monkeypatch.setattr(devtools, "pick_directory", lambda: None)
+    response = client.post("/api/devtools/pick-directory")
+
+    body = response.json()
+    assert body["code"] == 0
+    assert body["data"] is None
+
+
+def test_pick_directory_reports_unavailable_dialog(client, monkeypatch):
+    def fail():
+        raise DirectoryDialogError("当前后端环境无法弹出系统目录选择框，请手动填写路径")
+
+    monkeypatch.setattr(devtools, "pick_directory", fail)
+    response = client.post("/api/devtools/pick-directory")
+
+    body = response.json()
+    assert body["code"] == -1
+    assert "无法弹出" in body["message"]
 
 
 def test_sync_forwards_payload_and_returns_report(client, monkeypatch):

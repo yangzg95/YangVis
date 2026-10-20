@@ -36,14 +36,16 @@ def test_scans_controllers_and_skips_non_source(scanned):
     assert all("test-only" not in item.path for item in scanned.endpoints)
 
 
-def test_generic_response_wrapper_is_unwrapped(scanned):
+def test_generic_response_keeps_result_wrapper(scanned):
     endpoint = _by_key(scanned)[("GET", "/api/orders/{id}")]
     assert endpoint.title.startswith("查询订单详情")
     assert [(item.name, item.location) for item in endpoint.params] == [("id", "path")]
     assert endpoint.source == "src/main/java/com/example/shop/order/OrderController.java"
     assert endpoint.line > 0
 
-    properties = endpoint.response_schema["properties"]
+    schema = endpoint.response_schema
+    assert set(schema["properties"]) == {"code", "message", "data"}
+    properties = schema["properties"]["data"]["properties"]
     assert set(properties) == {
         "id",
         "createdAt",
@@ -85,7 +87,7 @@ def test_page_response_keeps_item_type(scanned):
     assert params["X-Tenant"].location == "header"
     assert params["X-Tenant"].required is True
 
-    records = endpoint.response_schema["properties"]["records"]
+    records = endpoint.response_schema["properties"]["data"]["properties"]["records"]
     assert records["type"] == "array"
     assert records["items"]["properties"]["orderNo"]["type"] == "string"
 
@@ -98,7 +100,7 @@ def test_multipart_params_land_in_form(scanned):
     assert params["file"].location == "form"
     assert params["file"].type == "file"
     assert params["remark"].location == "form"
-    assert endpoint.response_schema == {"type": "string"}
+    assert endpoint.response_schema["properties"]["data"]["type"] == "string"
 
 
 def test_void_wrappers_keep_unified_envelope(scanned):
@@ -153,8 +155,16 @@ public class DemoController {
     result = scan_java_path(str(tmp_path))
 
     schema = result.endpoints[0].response_schema
-    assert set(schema["properties"]) == {"list", "total", "pageNum", "pageSize", "pages"}
-    items = schema["properties"]["list"]["items"]
+    assert set(schema["properties"]) == {
+        "code",
+        "message",
+        "traceId",
+        "success",
+        "data",
+    }
+    page = schema["properties"]["data"]
+    assert set(page["properties"]) == {"list", "total", "pageNum", "pageSize", "pages"}
+    items = page["properties"]["list"]["items"]
     assert items["properties"]["name"]["type"] == "string"
     assert not any("PageResult" in warning for warning in result.warnings)
 

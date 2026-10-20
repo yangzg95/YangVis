@@ -4,7 +4,7 @@
     <div class="subtitle">
       扫描本地 Java Spring 源码里的接口，每个 Controller 写入一个 YApi 分类，分类名取
       Swagger 的 @Tag（没有时用类名）。重复同步时按「HTTP 方法 + 路径」匹配：已存在的接口更新，
-      YApi 中多出来的接口不会被删除。
+      YApi 中多出来的接口不会被删除。点击接口行可预览入参、请求体与出参结构。
     </div>
 
     <a-form layout="vertical" class="config-form">
@@ -42,15 +42,26 @@
         </a-col>
         <a-col :span="24">
           <a-form-item label="本地源码路径" required>
-            <a-input
-              v-model:value="form.root_path"
-              placeholder="后端所在机器上的目录，例如 D:\code\demo\src\main\java"
-              :disabled="busy"
-              allow-clear
-            />
+            <div class="path-picker">
+              <a-input
+                v-model:value="form.root_path"
+                placeholder="后端所在机器上的目录，例如 D:\code\demo\src\main\java"
+                :disabled="busy || picking"
+                allow-clear
+                style="flex: 1"
+              />
+              <a-button
+                :loading="picking"
+                :disabled="busy"
+                @click="onPickDirectory"
+              >
+                <FolderOpenOutlined /> 选择目录
+              </a-button>
+            </div>
             <div class="field-hint">
               填到包的上级目录即可；路径下可以有任意层级的包，每一级都能包含接口。
               扫描会跳过 target、build、src/test 等目录。
+              「选择目录」弹出的是后端所在机器的系统对话框，也可以直接粘贴路径。
             </div>
           </a-form-item>
         </a-col>
@@ -59,13 +70,13 @@
 
     <div class="toolbar">
       <a-space wrap>
-        <a-button :loading="scanning" :disabled="!scanReady || syncing" @click="onScan">
+        <a-button :loading="scanning" :disabled="!scanReady || syncing || picking" @click="onScan">
           <ScanOutlined /> 扫描接口
         </a-button>
         <a-button
           type="primary"
           :loading="syncing"
-          :disabled="!syncReady || scanning"
+          :disabled="!syncReady || scanning || picking"
           @click="openSyncConfirm"
         >
           <CloudUploadOutlined /> 同步到 YApi
@@ -138,6 +149,7 @@
             <a-table
               :data-source="group.endpoints"
               :row-key="rowKey"
+              :custom-row="previewRow"
               size="small"
               :pagination="{ pageSize: 10, size: 'small', hideOnSinglePage: true }"
               :scroll="{ x: 1080 }"
@@ -249,15 +261,112 @@
         按 HTTP 方法 + 路径匹配：已存在的接口会被更新，YApi 中本地没有的接口不会被删除。
       </p>
     </a-modal>
+
+    <a-drawer
+      v-model:open="previewOpen"
+      width="760"
+      placement="right"
+    >
+      <template #title>
+        <a-space v-if="previewEndpoint" :size="8">
+          <a-tag :color="methodColor(previewEndpoint.http_method)">
+            {{ previewEndpoint.http_method }}
+          </a-tag>
+          <span class="preview-path">{{ previewEndpoint.path }}</span>
+        </a-space>
+        <span v-else>接口预览</span>
+      </template>
+
+      <template v-if="previewEndpoint">
+        <a-descriptions bordered size="small" :column="1">
+          <a-descriptions-item label="名称">
+            {{ previewEndpoint.title }}
+          </a-descriptions-item>
+          <a-descriptions-item label="Controller">
+            {{ previewEndpoint.controller }}.{{ previewEndpoint.method }}()
+          </a-descriptions-item>
+          <a-descriptions-item label="分类">
+            {{ previewEndpoint.category_name }}
+          </a-descriptions-item>
+          <a-descriptions-item label="Java 包">
+            {{ previewEndpoint.package || '(默认包)' }}
+          </a-descriptions-item>
+          <a-descriptions-item label="源码">
+            {{ previewEndpoint.source }}:{{ previewEndpoint.line }}
+          </a-descriptions-item>
+          <a-descriptions-item
+            v-if="previewEndpoint.description || previewEndpoint.summary"
+            label="说明"
+          >
+            {{ previewEndpoint.description || previewEndpoint.summary }}
+          </a-descriptions-item>
+          <a-descriptions-item v-if="previewEndpoint.action" label="同步结果">
+            <a-tag v-if="previewEndpoint.action === 'created'" color="green">新增</a-tag>
+            <a-tag v-else-if="previewEndpoint.action === 'updated'" color="blue">更新</a-tag>
+            <a-tag v-else color="red">失败</a-tag>
+            <span
+              v-if="previewEndpoint.action === 'failed' && previewEndpoint.error"
+              class="preview-error"
+            >
+              {{ previewEndpoint.error }}
+            </span>
+          </a-descriptions-item>
+        </a-descriptions>
+
+        <div class="preview-section-title">入参</div>
+        <a-table
+          v-if="previewParams.length"
+          :data-source="previewParams"
+          :row-key="paramRowKey"
+          size="small"
+          :pagination="false"
+        >
+          <a-table-column title="名称" data-index="name" :width="150" />
+          <a-table-column title="位置" key="location" :width="90">
+            <template #default="{ record }">
+              {{ locationLabel(record.location) }}
+            </template>
+          </a-table-column>
+          <a-table-column title="类型" data-index="type" :width="150" />
+          <a-table-column title="必填" key="required" :width="70">
+            <template #default="{ record }">{{ record.required ? '是' : '否' }}</template>
+          </a-table-column>
+          <a-table-column title="说明" data-index="description" />
+          <a-table-column title="示例" data-index="example" :width="120" />
+        </a-table>
+        <span v-else class="muted">无参数</span>
+
+        <div class="preview-section-title">请求体</div>
+        <pre
+          v-if="previewEndpoint.request_body_schema"
+          class="schema-preview"
+        >{{ prettySchema(previewEndpoint.request_body_schema) }}</pre>
+        <span
+          v-else-if="previewEndpoint.request_body_type === 'form'"
+          class="muted"
+        >
+          表单字段见上方入参列表
+        </span>
+        <span v-else class="muted">无请求体</span>
+
+        <div class="preview-section-title">出参</div>
+        <pre
+          v-if="previewEndpoint.response_schema"
+          class="schema-preview"
+        >{{ prettySchema(previewEndpoint.response_schema) }}</pre>
+        <span v-else class="muted">无返回</span>
+      </template>
+    </a-drawer>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { CloudUploadOutlined, ScanOutlined } from '@ant-design/icons-vue'
+import { CloudUploadOutlined, FolderOpenOutlined, ScanOutlined } from '@ant-design/icons-vue'
 import {
   devtoolsApi,
+  type YapiEndpointParam,
   type YapiParamLocation,
   type YapiScanEndpoint,
   type YapiScanResult,
@@ -287,10 +396,13 @@ const form = reactive({
 
 const scanning = ref(false)
 const syncing = ref(false)
+const picking = ref(false)
 const scanResult = ref<YapiScanResult | null>(null)
 const syncResult = ref<YapiSyncResult | null>(null)
 const confirmOpen = ref(false)
 const activeKeys = ref<string[]>([])
+const previewOpen = ref(false)
+const previewEndpoint = ref<DisplayEndpoint | null>(null)
 
 const busy = computed(() => scanning.value || syncing.value)
 const scanReady = computed(() => Boolean(form.root_path.trim()))
@@ -304,6 +416,9 @@ const syncReady = computed(
 )
 const warnings = computed(
   () => syncResult.value?.warnings ?? scanResult.value?.warnings ?? [],
+)
+const previewParams = computed(() =>
+  (previewEndpoint.value?.params ?? []).filter((param) => param.location !== 'body'),
 )
 
 const groups = computed<EndpointGroup[]>(() => {
@@ -341,6 +456,8 @@ watch(
   () => {
     scanResult.value = null
     syncResult.value = null
+    previewOpen.value = false
+    previewEndpoint.value = null
   },
 )
 
@@ -369,6 +486,21 @@ function validateCredentials(): boolean {
     return false
   }
   return true
+}
+
+async function onPickDirectory() {
+  if (picking.value) return
+  picking.value = true
+  try {
+    const path = await devtoolsApi.pickDirectory()
+    if (path) {
+      form.root_path = path
+    }
+  } catch {
+    // 错误提示由 http 拦截器统一弹出。
+  } finally {
+    picking.value = false
+  }
 }
 
 async function onScan() {
@@ -405,6 +537,7 @@ function openSyncConfirm() {
 async function doSync() {
   if (!scanResult.value) return
   confirmOpen.value = false
+  previewOpen.value = false
   syncing.value = true
   try {
     const result = await devtoolsApi.syncYapi({
@@ -432,6 +565,24 @@ async function doSync() {
 
 function rowKey(record: DisplayEndpoint) {
   return `${record.http_method} ${record.path}`
+}
+
+function previewRow(record: DisplayEndpoint) {
+  return {
+    style: { cursor: 'pointer' },
+    onClick: () => {
+      previewEndpoint.value = record
+      previewOpen.value = true
+    },
+  }
+}
+
+function paramRowKey(record: YapiEndpointParam) {
+  return `${record.location}:${record.name}`
+}
+
+function prettySchema(schema: Record<string, unknown>) {
+  return JSON.stringify(schema, null, 2)
 }
 
 function methodColor(method: string) {
@@ -532,6 +683,11 @@ function formatDuration(ms: number) {
   font-size: 12px;
 }
 
+.path-picker {
+  display: flex;
+  gap: 8px;
+}
+
 .field-hint {
   margin-top: 4px;
   line-height: 1.5;
@@ -603,5 +759,34 @@ function formatDuration(ms: number) {
   color: #5a6572;
   font-size: 13px;
   margin-bottom: 0;
+}
+
+.preview-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+
+.preview-error {
+  color: #c0392b;
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+.preview-section-title {
+  font-weight: 600;
+  margin: 20px 0 8px;
+}
+
+.schema-preview {
+  margin: 0;
+  padding: 12px;
+  max-height: 320px;
+  overflow: auto;
+  background: #f6f8fa;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 </style>
