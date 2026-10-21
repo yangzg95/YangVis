@@ -12,6 +12,7 @@ from app.models.entities import KbProject, KnowledgeType, SysUser
 from app.security import hash_password
 from app.services.agents import seed_builtin_agents
 from app.services.knowledge import reset_stale_indexing
+from app.services.tools import validate_registry as validate_local_tool_registry
 from app.services.ops.actions import reset_stale_ops_actions
 from app.services.workflows.builtin import seed_builtin_workflows
 from app.services.workflows.runs import prune_runs, reset_stale_runs
@@ -150,6 +151,8 @@ def migrate_schema() -> None:
             ("model_config_id", "ADD COLUMN model_config_id BIGINT NULL"),
             ("ops_target_type", "ADD COLUMN ops_target_type VARCHAR(16) NULL"),
             ("ops_target_id", "ADD COLUMN ops_target_id BIGINT NULL"),
+            ("local_tool_keys", "ADD COLUMN local_tool_keys JSON NULL"),
+            ("mcp_server_ids", "ADD COLUMN mcp_server_ids JSON NULL"),
         ):
             if column in conversation_columns:
                 continue
@@ -355,6 +358,17 @@ def _backfill_default_projects() -> None:
 
         db.commit()
         logger.info("backfilled knowledge types into default projects for %d owner(s)", len(owner_ids))
+
+
+def validate_local_tools() -> None:
+    """发现代码注册的本地工具并完成校验。
+
+    工具以代码为唯一事实源（services/tools/builtins/），启动时扫一遍：
+    重名、保留名冲突、非法命名、缺注解、docstring 不合规直接拒绝启动，
+    而不是等到对话里勾选时才暴露。
+    """
+    count = validate_local_tool_registry()
+    logger.info("validated %d local tool(s)", count)
 
 
 def seed_agents() -> None:

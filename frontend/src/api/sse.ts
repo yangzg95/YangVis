@@ -18,6 +18,9 @@ export interface StreamHandlers {
     project_id: number | null
     type_ids: number[] | null
     model_config_id: number | null
+    /** 本轮生效的工具选择（meta 在提问落库后发出，已含本次覆盖）。 */
+    local_tool_keys: string[] | null
+    mcp_server_ids: number[] | null
   }) => void
   onCitations?: (citations: Citation[]) => void
   onStep?: (data: { tool: string; query: string; input?: Record<string, unknown> }) => void

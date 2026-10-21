@@ -13,7 +13,6 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Awaitable, Callable, List, Optional, Sequence, Tuple
 
 from sqlalchemy import Select, delete, func, select
@@ -28,6 +27,7 @@ from app.models.entities import (
     ChatAttachment,
     ChatConversation,
     ChatMessage,
+    McpServer,
     ModelConfig,
     OpsPendingAction,
 )
@@ -43,7 +43,15 @@ from app.services.ops import actions as ops_actions
 from app.services.agents import AgentService
 from app.services.chat_ops import TARGET_SERVER, Auditor, ChatOpsToolbox, OpsTarget
 from app.services.knowledge import KnowledgeService
+from app.services.mcp.tools import McpToolBundle, open_bundle, resolve_servers
 from app.services.model_config import default_model_config
+from app.services.tools import (
+    ToolContext,
+    build_local_tools,
+    cap_tool_output,
+    ensure_unique_tool_names,
+    validate_keys as validate_local_tool_keys,
+)
 from app.services.chat.attachments import (
     delete_stored,
     image_url,
@@ -84,12 +92,6 @@ OPS_REACT_STEPS = 25
 
 ROLE_USER = "user"
 ROLE_ASSISTANT = "assistant"
-
-# 相对时间（「今天」「本周」）一律按北京时间换算。用固定偏移而不是
-# zoneinfo：Windows 没有 IANA 时区库，ZoneInfo("Asia/Shanghai") 在开发机上
-# 得额外装 tzdata 才能跑。
-_LOCAL_TZ = timezone(timedelta(hours=8))
-_WEEKDAYS = "一二三四五六日"
 
 NO_CONTEXT_REPLY = "知识库中未找到相关内容，无法回答这个问题。"
 
@@ -304,12 +306,29 @@ class ChatService:
                 project_id=row.project_id,
                 type_ids=row.type_ids,
                 model_config_id=row.model_config_id,
+                local_tool_keys=row.local_tool_keys,
+                mcp_server_ids=row.mcp_server_ids,
                 message_count=int(counts.get(row.id, 0)),
                 created_at=row.created_at,
                 updated_at=row.updated_at,
             )
             for row in rows
         ]
+
+    def _validate_owned_mcp_servers(self, mcp_ids: Sequence[int]) -> None:
+        """工具挂载保存时的归属校验：存在且属于本人即可，停用放行。
+
+        与工作流保存（workflows/defs.py）同一口径：允许先挂载后启用，停用项
+        在问答运行时由 resolve_servers 再挡一道。
+        """
+        owned = self._db.scalars(
+            select(McpServer.id).where(
+                McpServer.owner_id == self._owner_id,
+                McpServer.id.in_(mcp_ids),
+            )
+        ).all()
+        if len(set(owned)) != len(set(mcp_ids)):
+            raise ValueError("挂载了不存在或不属于本人的 MCP 服务，请重新选择")
 
     def get_conversation(self, conversation_id: int) -> ChatConversation:
         row = self._db.scalar(
@@ -330,6 +349,8 @@ class ChatService:
         project_id: Optional[int] = None,
         type_ids: Optional[Sequence[int]] = None,
         model_config_id: Optional[int] = None,
+        local_tool_keys: Optional[Sequence[str]] = None,
+        mcp_server_ids: Optional[Sequence[int]] = None,
     ) -> ChatConversation:
         if agent_id is not None:
             self._agents.get(agent_id)  # 校验可见性，不通过则抛 LookupError
@@ -337,6 +358,12 @@ class ChatService:
             self._knowledge.get_project(project_id)  # 已按 owner 限定，抛 LookupError
         if model_config_id is not None:
             self.require_chat_config(model_config_id)
+        local_keys = list(dict.fromkeys(local_tool_keys)) if local_tool_keys else None
+        mcp_ids = list(dict.fromkeys(mcp_server_ids)) if mcp_server_ids else None
+        if local_keys:
+            validate_local_tool_keys(local_keys)
+        if mcp_ids:
+            self._validate_owned_mcp_servers(mcp_ids)
 
         row = ChatConversation(
             owner_id=self._owner_id,
@@ -345,6 +372,8 @@ class ChatService:
             project_id=project_id,
             type_ids=list(type_ids) if type_ids else None,
             model_config_id=model_config_id,
+            local_tool_keys=local_keys,
+            mcp_server_ids=mcp_ids,
         )
         self._db.add(row)
         self._db.commit()
@@ -360,6 +389,8 @@ class ChatService:
         project_id: Optional[int] = None,
         type_ids: Optional[Sequence[int]] = None,
         model_config_id: Optional[int] = None,
+        local_tool_keys: Optional[Sequence[str]] = None,
+        mcp_server_ids: Optional[Sequence[int]] = None,
     ) -> ChatConversation:
         row = self.get_conversation(conversation_id)
         if title is not None:
@@ -379,6 +410,17 @@ class ChatService:
         if model_config_id is not None:
             self.require_chat_config(model_config_id)
             row.model_config_id = model_config_id
+        # 与 type_ids 同口径：None=保持不动，[]=清空；非空先校验再写。
+        if local_tool_keys is not None:
+            keys = list(dict.fromkeys(local_tool_keys)) or None
+            if keys:
+                validate_local_tool_keys(keys)
+            row.local_tool_keys = keys
+        if mcp_server_ids is not None:
+            mcp_ids = list(dict.fromkeys(mcp_server_ids)) or None
+            if mcp_ids:
+                self._validate_owned_mcp_servers(mcp_ids)
+            row.mcp_server_ids = mcp_ids
         self._db.commit()
         self._db.refresh(row)
         return row
@@ -945,27 +987,6 @@ class ChatService:
 
         return search_knowledge_base
 
-    @staticmethod
-    def _datetime_tool():
-        """查询当前日期时间的工具。
-
-        模型自己不知道「今天」是哪天。问题里一旦出现相对时间（今天、本周、
-        最近），不论是作答还是组织检索词，都得先把它换算成具体日期。
-        """
-        from langchain_core.tools import tool
-
-        @tool
-        def current_datetime() -> str:
-            """获取当前的日期和时间（北京时间）。
-
-            问题涉及「今天」「现在」「本周」「最近」等相对时间时调用，先把
-            相对时间换算成具体日期再继续。
-            """
-            now = datetime.now(_LOCAL_TZ)
-            return f"{now:%Y-%m-%d %H:%M:%S} 星期{_WEEKDAYS[now.weekday()]}"
-
-        return current_datetime
-
     def _plan_attachment_context(
         self,
         history: Sequence[ChatMessage],
@@ -1164,7 +1185,9 @@ class ChatService:
         )
 
         registry = _CitationRegistry()
-        tools: list = [self._datetime_tool()]
+        # 没有勾任何工具（也不检索知识库、不挂运维箱）时就是空列表：时间工具
+        # 已经改成会话级可选的本地工具，不再强制挂载。
+        tools: list = []
         system = agent.system_prompt
 
         # 长期记忆与会话摘要注入在规则后缀之前：硬约束（引用、写确认）要留在
@@ -1198,6 +1221,13 @@ class ChatService:
                 target=target,
                 conversation_id=conversation_id,
             )
+            # 运维嵌入面板没有工具选择器：时间工具随工具箱继续默认挂载，
+            # 保持「运维 AI 永远知道现在几点」的旧行为（主对话则改为显式勾选）。
+            tools.extend(
+                build_local_tools(
+                    ["current_datetime"], ToolContext(self._owner_id, conversation_id)
+                )
+            )
             tools.extend(toolbox.tools())
             system = f"{system}\n\n{_OPS_RULES}{toolbox.prompt_suffix()}"
 
@@ -1211,13 +1241,50 @@ class ChatService:
             tools.append(self._search_tool(registry, project_id, type_ids))
             system = f"{system}\n\n{_CITATION_RULES}"
 
+        # 会话级勾选的可选工具：本地方法（代码注册）+ 挂载的 MCP 服务。
+        # MCP 连接在首事件之前打开，失败直接走 error 帧（同工作流）；连接束在
+        # 下面的 finally 里关闭，stdio 子进程随之回收。
+        mcp_bundle: Optional[McpToolBundle] = None
+        if conversation.local_tool_keys:
+            # 运维会话已默认挂过 current_datetime：会话选择里再出现同名 key 时
+            # 跳过，而不是让末尾的查重把整轮回答挡掉。
+            mounted = {getattr(tool, "name", "") for tool in tools}
+            keys = [
+                key
+                for key in dict.fromkeys(conversation.local_tool_keys)
+                if key not in mounted
+            ]
+            if keys:
+                tools.extend(
+                    build_local_tools(
+                        keys, ToolContext(self._owner_id, conversation_id)
+                    )
+                )
+        if conversation.mcp_server_ids:
+            try:
+                servers = resolve_servers(
+                    self._db, self._owner_id, conversation.mcp_server_ids
+                )
+            except LookupError as exc:
+                raise LookupError(f"选择的 MCP 服务不可用：{exc}，请在工具选择中移除后重试") from exc
+            except ValueError as exc:
+                raise ValueError(f"{exc}，请重新启用或在工具选择中移除后重试") from exc
+            try:
+                mcp_bundle = await open_bundle(servers)
+            except Exception as exc:  # noqa: BLE001 - 连接失败要落成用户看得懂的 error 帧
+                raise ValueError(f"MCP 服务连接失败：{exc}") from exc
+            tools.extend(cap_tool_output(tool) for tool in mcp_bundle.tools)
+        # 生效集合（内置/本地/MCP）内不许重名：模型面对两个同名工具的行为不可控。
+        ensure_unique_tool_names(tools)
+
         client = build_chat_model(
             config,
             temperature=resolve_temperature(config, agent.temperature),
             streaming=True,
         )
-        # tools 里始终带着 current_datetime，所以对话模型必须支持
-        # function calling——这是引入时间工具后不再保留的兼容路径。
+        # tools 为空（没勾选、不检索、不挂运维箱）时 create_agent 不会调用
+        # bind_tools，纯文本问答不再强制模型支持 function calling；一旦挂了
+        # 任一工具，模型就必须支持。
         executor = create_agent(client, tools, system_prompt=system)
 
         parts: List[str] = []
@@ -1250,7 +1317,13 @@ class ChatService:
                 )
             },
             config={
-                "recursion_limit": OPS_REACT_STEPS if toolbox is not None else MAX_REACT_STEPS
+                # 运维排查与 MCP 多工具调用都可能连续多轮，统一放宽到 25；
+                # 只挂本地小工具时循环复杂度不变，维持普通上限。
+                "recursion_limit": (
+                    OPS_REACT_STEPS
+                    if toolbox is not None or mcp_bundle is not None
+                    else MAX_REACT_STEPS
+                )
             },
             version="v2",
         )
@@ -1337,6 +1410,9 @@ class ChatService:
             # 这次回答期间建立的 SSH 连接一并收掉。
             if toolbox is not None:
                 await toolbox.aclose()
+            # MCP 连接束（含 stdio 子进程）LIFO 关闭。
+            if mcp_bundle is not None:
+                await mcp_bundle.__aexit__(None, None, None)
 
         # 存的就是流出去的全部文本。模型偶尔会在调用工具前先说一句「我查一下
         # 资料」，那句话也留着：它确实出现在了用户屏幕上，落库内容跟用户看到

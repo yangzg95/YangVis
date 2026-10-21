@@ -86,22 +86,14 @@ def create_conversation(
             project_id=payload.project_id,
             type_ids=payload.type_ids,
             model_config_id=payload.model_config_id,
+            local_tool_keys=payload.local_tool_keys,
+            mcp_server_ids=payload.mcp_server_ids,
         )
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    return APIResponse(
-        data=ConversationItem(
-            id=row.id,
-            title=row.title,
-            agent_id=row.agent_id,
-            project_id=row.project_id,
-            type_ids=row.type_ids,
-            model_config_id=row.model_config_id,
-            message_count=0,
-            created_at=row.created_at,
-            updated_at=row.updated_at,
-        )
-    )
+    except ValueError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    return APIResponse(data=_conversation_item(row))
 
 
 @router.put("/conversations/{conversation_id}", response_model=APIResponse[ConversationItem])
@@ -118,21 +110,14 @@ def update_conversation(
             project_id=payload.project_id,
             type_ids=payload.type_ids,
             model_config_id=payload.model_config_id,
+            local_tool_keys=payload.local_tool_keys,
+            mcp_server_ids=payload.mcp_server_ids,
         )
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    return APIResponse(
-        data=ConversationItem(
-            id=row.id,
-            title=row.title,
-            agent_id=row.agent_id,
-            project_id=row.project_id,
-            type_ids=row.type_ids,
-            model_config_id=row.model_config_id,
-            created_at=row.created_at,
-            updated_at=row.updated_at,
-        )
-    )
+    except ValueError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    return APIResponse(data=_conversation_item(row))
 
 
 @router.delete("/conversations/{conversation_id}", response_model=APIResponse[None])
@@ -191,6 +176,8 @@ def _conversation_item(
         project_id=row.project_id,
         type_ids=row.type_ids,
         model_config_id=row.model_config_id,
+        local_tool_keys=row.local_tool_keys,
+        mcp_server_ids=row.mcp_server_ids,
         message_count=message_count,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -405,18 +392,28 @@ async def completions(
                     project_id=payload.project_id,
                     type_ids=payload.type_ids,
                     model_config_id=payload.model_config_id,
+                    local_tool_keys=payload.local_tool_keys,
+                    mcp_server_ids=payload.mcp_server_ids,
                 )
             else:
                 conversation = service.get_conversation(payload.conversation_id)
                 # An omitted scope on a follow-up means "keep using what this
                 # thread was already grounded in", not "search everything".
-                # 模型同理：没点名就沿用会话记住的那份。
-                if payload.project_id is not None or payload.model_config_id is not None:
+                # 模型/工具同理：没点名就沿用会话记住的那份，显式传了（含空数组）
+                # 才覆盖——空数组就是清空。
+                if (
+                    payload.project_id is not None
+                    or payload.model_config_id is not None
+                    or payload.local_tool_keys is not None
+                    or payload.mcp_server_ids is not None
+                ):
                     conversation = service.update_conversation(
                         conversation.id,
                         project_id=payload.project_id,
                         type_ids=payload.type_ids,
                         model_config_id=payload.model_config_id,
+                        local_tool_keys=payload.local_tool_keys,
+                        mcp_server_ids=payload.mcp_server_ids,
                     )
 
             # 模型在会话落库之后才确定：这次点名了就用点名的，否则沿用会话
@@ -439,6 +436,8 @@ async def completions(
                     "project_id": project_id,
                     "type_ids": type_ids,
                     "model_config_id": conversation.model_config_id,
+                    "local_tool_keys": conversation.local_tool_keys,
+                    "mcp_server_ids": conversation.mcp_server_ids,
                 },
             )
 
@@ -466,6 +465,10 @@ async def completions(
             yield sse_event("error", {"code": exc.code, "message": exc.msg})
         except LookupError as exc:
             yield sse_event("error", {"code": 404, "message": str(exc)})
+        except ValueError as exc:
+            # 工具选择失效（本地工具下线、MCP 停用/删除/连不上、工具名冲突）：
+            # 文案本身已经是给用户看的操作指引，不要再套「回答生成失败」。
+            yield sse_event("error", {"code": -1, "message": str(exc)})
         except Exception as exc:  # noqa: BLE001 - the stream must not just stop
             logger.exception(
                 "chat completion failed for conversation %s",
@@ -530,6 +533,8 @@ async def retry_last_answer(
                     "project_id": conversation.project_id,
                     "type_ids": conversation.type_ids,
                     "model_config_id": conversation.model_config_id,
+                    "local_tool_keys": conversation.local_tool_keys,
+                    "mcp_server_ids": conversation.mcp_server_ids,
                 },
             )
 
@@ -555,6 +560,9 @@ async def retry_last_answer(
             yield sse_event("error", {"code": exc.code, "message": exc.msg})
         except LookupError as exc:
             yield sse_event("error", {"code": 404, "message": str(exc)})
+        except ValueError as exc:
+            # 工具选择失效（MCP 停用/删除/连不上、本地工具下线、工具名冲突）。
+            yield sse_event("error", {"code": -1, "message": str(exc)})
         except Exception as exc:  # noqa: BLE001 - the stream must not just stop
             logger.exception("chat retry failed for conversation %s", conversation_id)
             yield sse_event("error", {"code": -1, "message": f"重试失败：{exc}"})

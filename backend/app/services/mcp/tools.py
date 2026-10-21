@@ -12,6 +12,7 @@ API 已对照 mcp==1.30.0 / langchain-mcp-adapters==0.3.2 源码核实：
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -53,6 +54,94 @@ def server_prefix(name: str) -> str:
     return _UNSAFE_NAME.sub("_", name).strip("_") or "mcp"
 
 
+def _flatten_exc_leaves(exc: BaseException) -> List[BaseException]:
+    """递归展开 ExceptionGroup（anyio TaskGroup 的失败形态），返回叶子异常。"""
+    leaves: List[BaseException] = []
+
+    def walk(node: BaseException) -> None:
+        if isinstance(node, BaseExceptionGroup):
+            for child in node.exceptions:
+                walk(child)
+        else:
+            leaves.append(node)
+
+    walk(exc)
+    return leaves
+
+
+async def _buffer_error_response(response: httpx.Response) -> None:
+    """httpx 响应钩子：非 2xx 响应在报错前先把 body 读进缓存。
+
+    MCP SDK 在 ``raise_for_status()`` 后随 ``async with`` 立刻关闭响应流，
+    事后从 HTTPStatusError.response 读 body 只会得到 StreamClosed；必须在
+    钩子（raise 之前）缓存下来。只处理错误响应：成功的 SSE 是长流，aread
+    会一直阻塞到流结束。
+    """
+    if response.status_code >= 400:
+        try:
+            await response.aread()
+        except Exception:  # noqa: BLE001 - 读不到 body 也不影响状态码报错
+            pass
+
+
+def _format_http_status_error(exc: httpx.HTTPStatusError) -> str:
+    """HTTP 非 2xx：状态码 + URL，并尽量带上响应体里的服务端原因。"""
+    response = exc.response
+    message = f"HTTP {response.status_code} {response.reason_phrase}：{response.request.url}"
+    try:
+        body = (response.text or "").strip()
+    except httpx.ResponseNotRead:
+        body = ""
+    if body:
+        # 千帆这类网关把具体原因（InvalidHTTPAuthHeader 等）塞在 JSON/plain 体里。
+        detail: object = body
+        try:
+            data = json.loads(body)
+        except ValueError:
+            pass
+        else:
+            if isinstance(data, dict):
+                detail = (
+                    data.get("message")
+                    or data.get("error_message")
+                    or data.get("error")
+                    or body
+                )
+        message = f"{message}；服务端返回：{str(detail)[:300]}"
+    return message
+
+
+def describe_connection_error(exc: BaseException) -> str:
+    """把连接失败异常转成可读原因。
+
+    MCP SDK 的传输层错误被 anyio TaskGroup 包成
+    "unhandled errors in a TaskGroup (1 sub-exception)"，直接展示毫无信息量；
+    这里拆到叶子异常：HTTP 错误带状态码和响应体，网络错误带类型，其余取 str。
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        # get_cancelled_exc_class 在 anyio 4 里要求当前线程跑着事件循环；
+        # 离线单测（同步调用）没有循环，退回 asyncio.CancelledError。
+        try:
+            cancelled: tuple = (anyio.get_cancelled_exc_class(),)
+        except Exception:  # noqa: BLE001 - 仅取取消异常类型，失败走回退
+            cancelled = (asyncio.CancelledError,)
+        leaves = [
+            leaf for leaf in _flatten_exc_leaves(exc) if not isinstance(leaf, cancelled)
+        ]
+        if not leaves:
+            return str(exc)
+        # 有 HTTP 响应的错误信息最全，优先展示。
+        leaves.sort(key=lambda leaf: 0 if isinstance(leaf, httpx.HTTPStatusError) else 1)
+        exc = leaves[0]
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        return _format_http_status_error(exc)
+    if isinstance(exc, httpx.RequestError):
+        return f"网络请求失败（{type(exc).__name__}）：{exc}"
+    text = str(exc)
+    return text or f"{type(exc).__name__}（无错误信息）"
+
+
 def _secret_dict(blob: Optional[bytes]) -> Dict[str, str]:
     """解密一个密钥袋，并把值统一成 str。"""
     if not blob:
@@ -90,8 +179,13 @@ async def _enter_transport(
     if server.transport == TRANSPORT_HTTP:
         # httpx client 的生命周期也交给 stack：streamable_http_client 对
         # 外部传入的 client 不负责关闭。
+        # 响应钩子把非 2xx 的 body 提前缓存，否则 SDK raise 完就关流，
+        # 测试报错只能拿到状态码、拿不到千帆这类网关返回的具体原因。
         client = await stack.enter_async_context(
-            httpx.AsyncClient(headers=headers or None)
+            httpx.AsyncClient(
+                headers=headers or None,
+                event_hooks={"response": [_buffer_error_response]},
+            )
         )
         read, write, _session_id = await stack.enter_async_context(
             streamable_http_client(server.url, http_client=client)
@@ -122,6 +216,10 @@ async def _enter_session(
             f"MCP 服务「{server.name}」连接超时（{CONNECT_TIMEOUT:.0f} 秒），"
             "请检查启动命令、参数或服务地址"
         ) from exc
+    except Exception as exc:
+        # 传输层错误被 TaskGroup 包着，拆出真正的叶子原因（401/连接被拒等）。
+        # 错误响应体已由 httpx 响应钩子 _buffer_error_response 提前缓存。
+        raise RuntimeError(describe_connection_error(exc)) from exc
     return session
 
 
@@ -259,6 +357,7 @@ async def test_connection(server: McpServer) -> Tuple[bool, str, int]:
         async with McpToolBundle() as bundle:
             count = await bundle.add_server(server)
     except Exception as exc:  # noqa: BLE001 - 测试接口就是要把原因带回去
-        logger.info("mcp test connection failed for %s: %s", server.name, exc)
-        return False, str(exc)[:1024], 0
+        message = describe_connection_error(exc)
+        logger.info("mcp test connection failed for %s: %s", server.name, message)
+        return False, message[:1024], 0
     return True, f"连接成功，发现 {count} 个工具", count

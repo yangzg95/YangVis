@@ -201,6 +201,38 @@
               />
             </template>
             <span v-else-if="activeAgent" class="agent-hint">不检索知识库</span>
+            <!-- 会话级可选工具：本地方法（后端代码注册）+ 挂载的 MCP 服务，
+                 两个来源都为空时整个选择器不渲染。 -->
+            <a-select
+              v-if="localToolOptions.length || mcpToolOptions.length"
+              v-model:value="toolSelection"
+              size="small"
+              mode="multiple"
+              style="min-width: 150px; max-width: 260px"
+              placeholder="选择工具"
+              :max-tag-count="2"
+              allow-clear
+              :disabled="streaming"
+            >
+              <a-select-opt-group v-if="localToolOptions.length" label="本地工具">
+                <a-select-option
+                  v-for="opt in localToolOptions"
+                  :key="opt.value"
+                  :value="opt.value"
+                >
+                  {{ opt.label }}
+                </a-select-option>
+              </a-select-opt-group>
+              <a-select-opt-group v-if="mcpToolOptions.length" label="MCP 服务">
+                <a-select-option
+                  v-for="opt in mcpToolOptions"
+                  :key="opt.value"
+                  :value="opt.value"
+                >
+                  {{ opt.label }}
+                </a-select-option>
+              </a-select-opt-group>
+            </a-select>
           </a-space>
         </div>
 
@@ -452,17 +484,22 @@ import {
 } from '@/utils/messageSegments'
 import { copyText } from '@/utils/clipboard'
 import { loadReportForChat } from '@/utils/report'
+import { registerToolLabels } from '@/utils/chatTools'
 import {
   agentsApi,
   chatApi,
   knowledgeApi,
+  mcpApi,
   settingsApi,
+  toolsApi,
   type Agent,
   type ChatAttachment,
   type Citation,
   type Conversation,
   type KbProject,
   type KnowledgeType,
+  type LocalTool,
+  type McpServer,
   type ModelConfig,
   type OpsAction,
   type StreamHandlers,
@@ -556,6 +593,30 @@ const projects = ref<KbProject[]>([])
 const activeProjectId = ref<number | null>(null)
 const types = ref<KnowledgeType[]>([])
 const selectedTypeIds = ref<number[]>([])
+// 会话级可选工具目录：本地工具来自代码注册（只读目录），MCP 服务来自 /mcp 管理页。
+const localTools = ref<LocalTool[]>([])
+const mcpServers = ref<McpServer[]>([])
+// 选择器的复合值：local:<key> / mcp:<id>。本地 key 受 ^[a-z0-9_]+$ 约束，冒号无碰撞。
+const toolSelection = ref<string[]>([])
+const localToolOptions = computed(() =>
+  localTools.value.map((tool) => ({ label: tool.title, value: `local:${tool.key}` })),
+)
+// 停用的 MCP 不进选择器：选了也会在发送时被后端挡住，不如一开始就不给选。
+const mcpToolOptions = computed(() =>
+  mcpServers.value
+    .filter((server) => server.enabled)
+    .map((server) => ({ label: server.name, value: `mcp:${server.id}` })),
+)
+const selectedLocalToolKeys = computed(() =>
+  toolSelection.value
+    .filter((value) => value.startsWith('local:'))
+    .map((value) => value.slice('local:'.length)),
+)
+const selectedMcpServerIds = computed(() =>
+  toolSelection.value
+    .filter((value) => value.startsWith('mcp:'))
+    .map((value) => Number(value.slice('mcp:'.length))),
+)
 const conversations = ref<Conversation[]>([])
 // 首屏骨架用：第一次拉取完成前不亮「还没有会话」空态。
 const convsLoaded = ref(false)
@@ -1109,6 +1170,22 @@ async function loadConversations() {
   }
 }
 
+// 工具目录：本地工具目录同时登记思考时间线里的中文标题（utils/chatTools）。
+// 两个来源各自独立失败、互不连坐（MCP 列表挂了不影响本地工具可选）。
+async function loadToolCatalogs() {
+  const [localResult, mcpResult] = await Promise.allSettled([
+    toolsApi.listLocal(),
+    mcpApi.list(),
+  ])
+  if (localResult.status === 'fulfilled') {
+    localTools.value = localResult.value.items
+    registerToolLabels(localTools.value)
+  }
+  if (mcpResult.status === 'fulfilled') {
+    mcpServers.value = mcpResult.value.items
+  }
+}
+
 // 切换会话的竞态守卫：快速连点时慢响应不得覆盖新选择。
 // 序号管「后发起的覆盖先发起的」，id 比对管「等响应期间又切走了」。
 let convLoadSeq = 0
@@ -1158,6 +1235,20 @@ async function selectConversation(id: number) {
     conv?.model_config_id && usableModels.value.some((m) => m.id === conv.model_config_id)
       ? conv.model_config_id
       : defaultModelConfigId.value
+  // 恢复会话记住的工具选择，但按现存目录裁剪：本地工具下线、MCP 被删除/停用的
+  // 勾选项直接消失（同 type_ids/model 的裁剪哲学），免得发送时才被后端挡回。
+  const aliveLocalKeys = new Set(localTools.value.map((tool) => tool.key))
+  const aliveMcpIds = new Set(
+    mcpServers.value.filter((server) => server.enabled).map((server) => server.id),
+  )
+  toolSelection.value = [
+    ...(conv?.local_tool_keys ?? [])
+      .filter((key) => aliveLocalKeys.has(key))
+      .map((key) => `local:${key}`),
+    ...(conv?.mcp_server_ids ?? [])
+      .filter((id) => aliveMcpIds.has(id))
+      .map((id) => `mcp:${id}`),
+  ]
   pinToBottom()
 }
 
@@ -1253,6 +1344,9 @@ async function handleReportDiscuss() {
         needsKnowledge.value && selectedTypeIds.value.length
           ? [...selectedTypeIds.value]
           : undefined,
+      // 工具选择与普通发送同口径：建会话时就把当前勾选记住。
+      local_tool_keys: selectedLocalToolKeys.value,
+      mcp_server_ids: selectedMcpServerIds.value,
     })
   } catch {
     // 拦截器已弹错；内容放输入框，用户可手动重试。
@@ -1403,10 +1497,18 @@ function send() {
         needsKnowledge.value && selectedTypeIds.value.length
           ? [...selectedTypeIds.value]
           : undefined,
+      // 工具选择每轮显式带数组：空数组就是清空（与不传=沿用会话选择相对）。
+      local_tool_keys: selectedLocalToolKeys.value,
+      mcp_server_ids: selectedMcpServerIds.value,
     },
     {
-      onMeta: ({ conversation_id }) => {
+      onMeta: ({ conversation_id, local_tool_keys, mcp_server_ids }) => {
         activeId.value = conversation_id
+        // 以服务端落库后的选择为准回写选择器（自动建会话的首问也由此记住）。
+        toolSelection.value = [
+          ...(local_tool_keys ?? []).map((key) => `local:${key}`),
+          ...(mcp_server_ids ?? []).map((id) => `mcp:${id}`),
+        ]
       },
       ...makeStreamHandlers(bubble, streamActions, () => {
         // 提问还在、回答没落成：挂上「可重试」标记，别让用户重新打一遍。
@@ -1564,6 +1666,7 @@ onMounted(async () => {
       loadChatModels(),
       loadConversations(),
       loadProjects(),
+      loadToolCatalogs(),
     ])
   } finally {
     booting.value = false

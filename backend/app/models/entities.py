@@ -352,6 +352,11 @@ class ChatConversation(Base):
     # 本次会话选用的对话模型配置；为 null 表示跟随「设置」里的默认对话模型。
     model_config_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
+    # 会话级记住的可选工具：本地工具 key（services/tools 注册）与挂载的
+    # mcp_server.id 列表；NULL/空数组都表示未选。与 workflow.mcp_server_ids 同义。
+    local_tool_keys: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    mcp_server_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
     # 绑定的运维目标（server | database + ops_server/ops_database 的 id）。
     # 为 null 表示普通对话；有值表示这是从运维页发起的问答会话，工具箱绑定到
     # 这一个目标上，且不出现在主对话的会话列表里。

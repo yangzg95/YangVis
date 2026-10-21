@@ -75,11 +75,14 @@ def merge_secret(existing_blob: Optional[bytes], incoming: Dict[str, str]) -> by
 
 
 # 远端 type 字段（2025-03-26 规约）到内部传输名的映射。
+# key 统一走 lower()，所以驼峰 streamableHttp 归一成 streamablehttp——
+# 千帆/Cline 导出的文档用的就是这个写法。
 _REMOTE_TYPE_ALIASES = {
     "sse": TRANSPORT_SSE,
     "http": TRANSPORT_HTTP,
     "streamable-http": TRANSPORT_HTTP,
     "streamable_http": TRANSPORT_HTTP,
+    "streamablehttp": TRANSPORT_HTTP,
 }
 
 

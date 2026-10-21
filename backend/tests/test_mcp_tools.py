@@ -21,7 +21,12 @@ from app.services.mcp import (
     read_secret,
     validate_transport_fields,
 )
-from app.services.mcp.tools import plan_step_tools, resolve_servers, server_prefix
+from app.services.mcp.tools import (
+    describe_connection_error,
+    plan_step_tools,
+    resolve_servers,
+    server_prefix,
+)
 
 OWNER = 1
 
@@ -268,6 +273,34 @@ def test_server_prefix():
     assert server_prefix("--") == "mcp"
     assert server_prefix("中文") == "mcp"
     assert server_prefix("ok") == "ok"
+
+
+def test_describe_connection_error_unwraps_http_status_group():
+    # 千帆 401 的真实形态：TaskGroup 里包一个 httpx.HTTPStatusError，
+    # 响应体是 text/plain 的 {"code": ..., "message": "..."}。
+    import httpx
+
+    request = httpx.Request("POST", "https://x/mcp")
+    response = httpx.Response(
+        401,
+        request=request,
+        text='{"code":216003,"message":"[Code: InvalidHTTPAuthHeader]"}',
+        headers={"content-type": "text/plain"},
+    )
+    group = ExceptionGroup(
+        "unhandled errors in a TaskGroup (1 sub-exception)",
+        [httpx.HTTPStatusError("Client error '401'", request=request, response=response)],
+    )
+
+    message = describe_connection_error(group)
+
+    assert "TaskGroup" not in message
+    assert "401" in message
+    assert "InvalidHTTPAuthHeader" in message
+
+
+def test_describe_connection_error_passes_plain_exception_through():
+    assert describe_connection_error(RuntimeError("连接被拒绝")) == "连接被拒绝"
 
 
 # ---- SDK 工具转换契约（FastMCP 内存对连，无外网无真实进程）---------------------

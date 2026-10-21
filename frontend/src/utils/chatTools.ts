@@ -8,6 +8,17 @@
 
 const MAX_ARG_LENGTH = 80
 
+/**
+ * 本地工具的中文标题登记表：Chat 页挂载时把后端工具目录灌进来，
+ * key 是工具名（如 generate_uuid）。MCP 工具名没有目录，走默认兜底。
+ */
+const localToolTitles = new Map<string, string>()
+
+/** 用后端本地工具目录刷新标题表，重复注册直接覆盖。 */
+export function registerToolLabels(tools: { key: string; title: string }[]): void {
+  for (const tool of tools) localToolTitles.set(tool.key, tool.title)
+}
+
 function stringArg(input: Record<string, unknown> | undefined, key: string): string {
   const value = input?.[key]
   return typeof value === 'string' ? value : ''
@@ -64,7 +75,11 @@ export function toolLabel(
       const command = shortArg(input, 'command')
       return command ? `执行 Redis 只读命令：${command}` : '执行 Redis 只读命令'
     }
-    default:
+    default: {
+      // 后端代码注册的本地工具按目录里的中文标题显示；MCP 与未知工具兜底。
+      const localTitle = tool ? localToolTitles.get(tool) : undefined
+      if (localTitle) return localTitle
       return tool ? `调用工具：${tool}` : '调用工具'
+    }
   }
 }

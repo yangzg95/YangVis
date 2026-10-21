@@ -20,6 +20,7 @@ from app.bootstrap import (
     reset_stale_jobs,
     seed_agents,
     seed_workflows,
+    validate_local_tools,
     validate_settings,
 )
 from app.config import get_settings
@@ -43,6 +44,7 @@ from app.routers import (
     resume,
     settings as settings_router,
     slides,
+    tools,
     users,
     workflows,
 )
@@ -66,6 +68,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         ("validate_settings", lambda: validate_settings(settings)),
         ("create_tables", create_tables),
         ("migrate_schema", migrate_schema),
+        # 迁移之后校验本地工具注册表：坏工具名/重名/docstring 不合规启动即失败。
+        ("validate_local_tools", validate_local_tools),
         ("bootstrap_admin", lambda: bootstrap_admin(settings)),
         ("seed_agents", seed_agents),
         ("seed_workflows", seed_workflows),
@@ -124,6 +128,7 @@ app.include_router(interview.router, prefix=API_PREFIX)
 app.include_router(slides.router, prefix=API_PREFIX)
 app.include_router(netdisk.router, prefix=API_PREFIX)
 app.include_router(mcp.router, prefix=API_PREFIX)
+app.include_router(tools.router, prefix=API_PREFIX)
 app.include_router(ai_gateway.router, prefix=API_PREFIX)
 app.include_router(devtools.router, prefix=API_PREFIX)
 # 对外的 OpenAI 兼容端点挂在站点根的 /v1 下（不带 /api 前缀），调用方填的

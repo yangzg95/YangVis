@@ -1070,16 +1070,8 @@ def test_search_tool_reraises_after_logging(db, kb, caplog):
     assert len(kb["searches"]) == 1
 
 
-def test_datetime_tool_answers_in_beijing_time(db):
-    tool = svc(db)._datetime_tool()
-    text = tool.invoke({})
-    # 「今天」按北京时间换算：格式是 YYYY-MM-DD HH:MM:SS 星期X。
-    assert len(text) == 23 and text[10] == " " and text.startswith("20")
-    weekday = text.split("星期")[1]
-    assert weekday in chat_module._WEEKDAYS
-    stamp = datetime.strptime(text.split(" 星期")[0], "%Y-%m-%d %H:%M:%S")
-    now_local = datetime.now(chat_module._LOCAL_TZ).replace(tzinfo=None)
-    assert abs((now_local - stamp).total_seconds()) < 120
+# 时间工具已改为注册制本地工具（services/tools/builtins/datetime_tools.py），
+# 它的输出格式在 tests/test_local_tools.py 里钉。
 
 
 # ---- 八、stream_answer：进循环之前的校验与循环之后的落库 ------------------------
@@ -1155,16 +1147,17 @@ def test_answer_needs_a_conversation_you_own(db, agent_env):
     assert agent_env["model_kwargs"] == []
 
 
-def test_answer_hands_the_model_only_the_datetime_tool_until_knowledge_is_on(db, agent_env):
+def test_answer_mounts_no_tools_until_knowledge_or_selection_is_on(db, agent_env):
+    # 时间工具改为会话级可选后，什么都没勾选的普通会话生效集合为空。
     conv = make_conversation(db)
     run_answer(db, conv, make_agent(db), agent_env, [token("答")])
-    assert agent_env["captured"]["tools"] == ["current_datetime"]
+    assert agent_env["captured"]["tools"] == []
 
     agent_env["captured"].clear()
     run_answer(
         db, conv, make_agent(db, use_knowledge=True), agent_env, [token("答")], project_id=5
     )
-    assert agent_env["captured"]["tools"] == ["current_datetime", "search_knowledge_base"]
+    assert agent_env["captured"]["tools"] == ["search_knowledge_base"]
 
 
 def test_answer_streams_at_the_agents_temperature(db, agent_env):

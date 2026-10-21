@@ -319,7 +319,8 @@ def test_create_defaults_a_row_into_the_users_space(db):
         False,
         True,
     )
-    assert agent.temperature == 30
+    # 不传 temperature 即落 NULL：语义是「跟随模型配置」，不替模型规定温度。
+    assert agent.temperature is None
     assert service(db, OTHER).get_by_slug("my-agent") is None
 
 

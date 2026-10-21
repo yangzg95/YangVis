@@ -63,6 +63,12 @@ const routes: RouteRecordRaw[] = [
         meta: {title: 'MCP 服务'},
     },
     {
+        path: '/tools/local',
+        name: 'LocalTools',
+        component: () => import('@/views/LocalTools.vue'),
+        meta: {title: '本地工具'},
+    },
+    {
         path: '/devtools/yapi',
         name: 'YapiSync',
         component: () => import('@/views/YapiSync.vue'),

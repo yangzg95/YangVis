@@ -134,6 +134,8 @@ def test_parse_bare_dict_and_remote_type_aliases(db):
             "srv-sse": {"type": "sse", "url": "http://x/sse", "headers": {"A": "b"}},
             "srv-http": {"type": "streamable-http", "url": "http://x/mcp"},
             "srv-http2": {"type": "http", "url": "http://x/mcp2"},
+            # 千帆/Cline 导出的驼峰写法。
+            "srv-http3": {"type": "streamableHttp", "url": "http://x/mcp3"},
         }
     }
     entries, errors = parse_mcp_config(doc)
@@ -142,6 +144,7 @@ def test_parse_bare_dict_and_remote_type_aliases(db):
     assert entries[0].headers == {"A": "b"}
     assert entries[1].transport == "streamable_http"
     assert entries[2].transport == "streamable_http"
+    assert entries[3].transport == "streamable_http"
 
 
 def test_parse_infers_remote_type_when_type_missing(db):

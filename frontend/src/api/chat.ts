@@ -7,6 +7,15 @@ import { streamSse, type StreamHandlers } from './sse'
 
 // ---- 对话 ------------------------------------------------------------------
 
+/**
+ * 会话级记住的可选工具：本地工具 key（后端代码注册）与挂载的 MCP 服务 id。
+ * 与 agent/model_config/project 同口径：不传=保持不动，传空数组=清空。
+ */
+export interface ConversationToolSelection {
+  local_tool_keys?: string[] | null
+  mcp_server_ids?: number[] | null
+}
+
 export interface Conversation {
   id: number
   title: string
@@ -17,6 +26,10 @@ export interface Conversation {
   type_ids: number[] | null
   /** 本会话选用的对话模型配置；null 表示跟随设置里的默认对话模型。 */
   model_config_id: number | null
+  /** 会话勾选的本地工具；null/空数组都表示未选。 */
+  local_tool_keys: string[] | null
+  /** 会话勾选挂载的 MCP 服务 id；null/空数组都表示未选。 */
+  mcp_server_ids: number[] | null
   message_count: number
   created_at: string
   updated_at: string
@@ -130,7 +143,7 @@ export const chatApi = {
       project_id?: number
       type_ids?: number[]
       model_config_id?: number
-    } = {},
+    } & ConversationToolSelection = {},
   ) => request<Conversation>({ url: '/chat/conversations', method: 'POST', data: payload }),
   updateConversation: (
     id: number,
@@ -140,7 +153,7 @@ export const chatApi = {
       project_id?: number
       type_ids?: number[]
       model_config_id?: number
-    },
+    } & ConversationToolSelection,
   ) =>
     request<Conversation>({
       url: `/chat/conversations/${id}`,
@@ -200,6 +213,9 @@ export const chatApi = {
       type_ids?: number[]
       /** 点名用哪份对话模型配置；不传则沿用会话记住的或默认配置。 */
       model_config_id?: number
+      /** 本轮勾选的本地工具/MCP 服务；不传=沿用会话已记住的选择，[]=清空。 */
+      local_tool_keys?: string[]
+      mcp_server_ids?: number[]
     },
     handlers: StreamHandlers,
   ): () => void {

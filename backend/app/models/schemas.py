@@ -228,6 +228,9 @@ class ConversationCreate(BaseModel):
     project_id: Optional[int] = None
     type_ids: Optional[List[int]] = None
     model_config_id: Optional[int] = None
+    # 会话级记住的可选工具：本地工具 key 与 MCP 服务 id。空数组=清空，不传=不动。
+    local_tool_keys: Optional[List[str]] = None
+    mcp_server_ids: Optional[List[int]] = None
 
 
 class ConversationUpdate(BaseModel):
@@ -238,6 +241,8 @@ class ConversationUpdate(BaseModel):
     project_id: Optional[int] = None
     type_ids: Optional[List[int]] = None
     model_config_id: Optional[int] = None
+    local_tool_keys: Optional[List[str]] = None
+    mcp_server_ids: Optional[List[int]] = None
 
 
 class ConversationItem(BaseModel):
@@ -249,6 +254,8 @@ class ConversationItem(BaseModel):
     project_id: Optional[int] = None
     type_ids: Optional[List[int]] = None
     model_config_id: Optional[int] = None
+    local_tool_keys: Optional[List[str]] = None
+    mcp_server_ids: Optional[List[int]] = None
     message_count: int = 0
     created_at: datetime
     updated_at: datetime
@@ -326,6 +333,11 @@ class CompletionRequest(BaseModel):
     # 就用「设置」里的默认对话模型。
     model_config_id: Optional[int] = None
 
+    # 本轮生效的工具选择。显式带数组（含空数组）时在追问时更新会话：
+    # None=沿用会话已记住的选择，[]=清空。
+    local_tool_keys: Optional[List[str]] = None
+    mcp_server_ids: Optional[List[int]] = None
+
     @model_validator(mode="after")
     def _require_question_or_attachment(self) -> "CompletionRequest":
         if not self.message.strip() and not self.attachment_ids:
@@ -361,6 +373,27 @@ class OpsActionItem(BaseModel):
     timeout_seconds: int
     created_at: datetime
     resolved_at: Optional[datetime] = None
+
+
+class LocalToolParamItem(BaseModel):
+    """本地工具目录里的一个参数说明。"""
+
+    name: str
+    description: str = ""
+    type: str
+    required: bool
+    default: Optional[Any] = None
+
+
+class LocalToolItem(BaseModel):
+    """本地工具目录条目：代码注册结果的只读投影，没有任何写接口。"""
+
+    key: str
+    title: str
+    description: str
+    params: List[LocalToolParamItem] = Field(default_factory=list)
+    source: str
+    is_async: bool
 
 
 # ---- 设置 / 模型配置 ------------------------------------------------

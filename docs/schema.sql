@@ -138,6 +138,8 @@ CREATE TABLE IF NOT EXISTS chat_conversation (
   project_id    BIGINT       NULL COMMENT 'kb_project.id，检索边界',
   type_ids      JSON         NULL COMMENT '[knowledge_type.id]，NULL 表示项目下全部知识类型',
   model_config_id BIGINT     NULL COMMENT 'model_config.id，本会话选用的对话模型；NULL 表示跟随默认配置',
+  local_tool_keys JSON       NULL COMMENT '会话级勾选的本地工具 key（services/tools 注册），NULL/空数组表示未选',
+  mcp_server_ids  JSON       NULL COMMENT '会话级挂载的 mcp_server.id 列表，与 workflow.mcp_server_ids 同义',
   ops_target_type VARCHAR(16) NULL COMMENT 'server | database；NULL 表示普通对话',
   ops_target_id   BIGINT      NULL COMMENT 'ops_server.id | ops_database.id，绑定运维目标的问答会话',
   created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -546,6 +548,11 @@ CREATE TABLE IF NOT EXISTS workflow_run_step (
 -- ALTER TABLE chat_conversation
 --   ADD COLUMN ops_target_type VARCHAR(16) NULL COMMENT 'server | database；NULL 表示普通对话',
 --   ADD COLUMN ops_target_id   BIGINT      NULL COMMENT 'ops_server.id | ops_database.id';
+--
+-- 对话可选工具（本地工具 + MCP 服务，会话级记住；都由 migrate_schema() 自动补）：
+-- ALTER TABLE chat_conversation
+--   ADD COLUMN local_tool_keys JSON NULL COMMENT '勾选的本地工具 key',
+--   ADD COLUMN mcp_server_ids  JSON NULL COMMENT '挂载的 mcp_server.id 列表';
 --
 -- ALTER TABLE ops_audit_log
 --   ADD COLUMN pending_action_id BIGINT NULL COMMENT 'ops_pending_action.id';
