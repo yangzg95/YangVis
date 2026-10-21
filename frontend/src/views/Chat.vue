@@ -455,7 +455,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { message as toast, Empty } from 'ant-design-vue'
 import {
   CloseOutlined,
@@ -925,6 +925,21 @@ function pinToBottom() {
 // ---- 回答时间线：思考过程 + 工具调用过程 -------------------------------------
 // 流式期间按到达顺序累积，渲染成交错的「思考 / 调工具」时间线；落库后后端按
 // 同一结构存在消息的 timeline 字段里，历史回放直接用它重建。
+
+// 流式助手气泡：创建时就包成 reactive。SSE 回调闭包一直拿着这个引用往
+// timeline / content 上追加，若 push 进 messages 的是裸对象，闭包里的 raw
+// 引用绕过 Vue 代理陷阱，思考/工具增量不会触发重渲染（表现为时间线冻在
+// 第一帧、头部永远「思考中…」，直到正文 token 借别的刷新才解冻）。
+function newAssistantBubble(): Bubble {
+  return reactive<Bubble>({
+    key: `a${Date.now()}`,
+    role: 'assistant',
+    content: '',
+    citations: [],
+    timeline: [],
+  })
+}
+
 function appendReason(bubble: Bubble, delta: string) {
   const timeline = (bubble.timeline ??= [])
   const last = timeline[timeline.length - 1]
@@ -937,7 +952,12 @@ function appendReason(bubble: Bubble, delta: string) {
   }
 }
 
-function appendStep(bubble: Bubble, tool: string, input?: Record<string, unknown>) {
+function appendStep(
+  bubble: Bubble,
+  tool: string,
+  input?: Record<string, unknown>,
+  runId = '',
+) {
   // 新工具开始意味着上一个已经返回：把之前还在转圈的步骤全部收掉，
   // 只保留最新一个处于进行中。
   const timeline = (bubble.timeline ??= [])
@@ -949,8 +969,29 @@ function appendStep(bubble: Bubble, tool: string, input?: Record<string, unknown
     tool,
     query: typeof input?.query === 'string' ? input.query : '',
     input,
+    run_id: runId,
     running: true,
   })
+}
+
+// 工具返回：按 run_id 找回步骤挂上结果并停止转圈；没有 run_id（兼容旧帧）
+// 时挂到最后一个还没结果的步骤，与后端的兜底配对同口径。
+function attachStepResult(
+  bubble: Bubble,
+  runId: string,
+  output: string,
+  isError: boolean,
+) {
+  const timeline = bubble.timeline ?? []
+  let target: TimelineEntry | undefined
+  if (runId) target = [...timeline].reverse().find((e) => e.type === 'step' && e.run_id === runId)
+  if (!target) {
+    target = [...timeline].reverse().find((e) => e.type === 'step' && e.output == null)
+  }
+  if (!target) return
+  target.output = output
+  target.is_error = isError
+  target.running = false
 }
 
 function settleSteps(bubble: Bubble) {
@@ -979,9 +1020,13 @@ function makeStreamHandlers(
     onCitations: (citations) => {
       bubble.citations = citations
     },
-    onStep: ({ tool, input }) => {
+    onStep: ({ tool, input, run_id }) => {
       ensureBubble()
-      appendStep(bubble, tool, input)
+      appendStep(bubble, tool, input, run_id)
+      scrollToBottom()
+    },
+    onStepResult: ({ run_id, output, is_error }) => {
+      attachStepResult(bubble, run_id, output, is_error)
       scrollToBottom()
     },
     onReason: (delta) => {
@@ -1471,13 +1516,7 @@ function send() {
   streaming.value = true
   pendingText.value = ''
 
-  const bubble: Bubble = {
-    key: `a${Date.now()}`,
-    role: 'assistant',
-    content: '',
-    citations: [],
-    timeline: [],
-  }
+  const bubble = newAssistantBubble()
   // 本轮流里提议的待确认项：done 时统一回填 message_id。
   const streamActions: OpsAction[] = []
   beginStream(bubble.key)
@@ -1544,13 +1583,7 @@ function retryMessage(msg: Bubble) {
   streaming.value = true
   pendingText.value = ''
 
-  const bubble: Bubble = {
-    key: `a${Date.now()}`,
-    role: 'assistant',
-    content: '',
-    citations: [],
-    timeline: [],
-  }
+  const bubble = newAssistantBubble()
   const streamActions: OpsAction[] = []
   beginStream(bubble.key)
   streamingBubbleKey.value = bubble.key
@@ -1578,13 +1611,7 @@ function approveAction(action: OpsAction) {
   streaming.value = true
   pendingText.value = ''
 
-  const bubble: Bubble = {
-    key: `a${Date.now()}`,
-    role: 'assistant',
-    content: '',
-    citations: [],
-    timeline: [],
-  }
+  const bubble = newAssistantBubble()
   const streamActions: OpsAction[] = []
   beginStream(bubble.key)
   streamingBubbleKey.value = bubble.key

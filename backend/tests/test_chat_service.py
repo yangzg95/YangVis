@@ -1198,7 +1198,7 @@ def test_prompt_stays_the_persona_plus_rules_with_nothing_to_inject(db, agent_en
     )
 
 
-def test_answer_emits_step_then_citations_then_tokens_then_done(db, agent_env, kb):
+def test_answer_emits_step_result_citations_then_tokens_then_done(db, agent_env, kb):
     conv = make_conversation(db)
     kb["hits"] = [hit(1, filename="a.md", content="nginx 502 常见于上游超时"), hit(2, filename="b.md")]
     agent = make_agent(db, use_knowledge=True)
@@ -1222,9 +1222,11 @@ def test_answer_emits_step_then_citations_then_tokens_then_done(db, agent_env, k
 
     assert [name for name, _ in events] == [
         "step",
+        "step_result",
         "citations",
         "token",
         "step",
+        "step_result",
         "citations",
         "token",
         "done",
@@ -1233,18 +1235,22 @@ def test_answer_emits_step_then_citations_then_tokens_then_done(db, agent_env, k
         "tool": "search_knowledge_base",
         "query": "nginx 502",
         "input": {"query": "nginx 502"},
+        # 打桩事件不带 run_id：开始事件落空串，结束事件走兜底配对。
+        "run_id": "",
     }
+    # 没带 run_id 的 on_tool_end 挂到最后一个还没结果的步骤。
+    assert events[1][1] == {"run_id": "", "output": "x", "is_error": False}
     # citations 帧是「累积到当前为止的完整列表」，客户端整体替换。
-    assert [c["index"] for c in events[1][1]] == [1, 2]
-    assert [c["index"] for c in events[4][1]] == [1, 2]
+    assert [c["index"] for c in events[2][1]] == [1, 2]
+    assert [c["index"] for c in events[6][1]] == [1, 2]
     assert kb["searches"][1] == {
         "query": "上游超时",
         "top_k": chat_module.RETRIEVAL_TOP_K,
         "project_id": 5,
         "type_ids": [3],
     }
-    assert events[2][1] == "先说一句「我查一下」。"
-    assert events[6][1] == {"message_id": messages(db, conv.id)[-1].id, "conversation_id": conv.id}
+    assert events[3][1] == "先说一句「我查一下」。"
+    assert events[8][1] == {"message_id": messages(db, conv.id)[-1].id, "conversation_id": conv.id}
 
 
 def test_answer_saves_what_the_user_saw_plus_the_sources(db, agent_env, kb):

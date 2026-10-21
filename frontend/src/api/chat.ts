@@ -68,6 +68,12 @@ export interface TimelineEntry {
   tool?: string
   query?: string
   input?: Record<string, unknown>
+  /** LangChain 工具运行 id：step 与 step_result 靠它配对（并行调用不串）。 */
+  run_id?: string
+  /** 工具返回的文本预览（后端已截断）；执行中的步骤还没有这个字段。 */
+  output?: string
+  /** 工具是否抛错返回（LangChain ToolMessage.status == 'error'）。 */
+  is_error?: boolean
   /** 仅流式期间使用：该工具是否还在执行。历史消息无此字段，按已完成渲染。 */
   running?: boolean
 }

@@ -23,7 +23,14 @@ export interface StreamHandlers {
     mcp_server_ids: number[] | null
   }) => void
   onCitations?: (citations: Citation[]) => void
-  onStep?: (data: { tool: string; query: string; input?: Record<string, unknown> }) => void
+  onStep?: (data: {
+    tool: string
+    query: string
+    input?: Record<string, unknown>
+    run_id?: string
+  }) => void
+  /** 一次工具调用返回：把结果预览挂回同 run_id 的步骤卡片。 */
+  onStepResult?: (data: { run_id: string; output: string; is_error: boolean }) => void
   onToken?: (token: string) => void
   /** 会输出思维链的模型发来的推理/思考增量；普通模型不会有这个事件。 */
   onReason?: (token: string) => void
@@ -208,6 +215,9 @@ function dispatchSse(
       break
     case 'step':
       handlers.onStep?.(data ?? { tool: '', query: '' })
+      break
+    case 'step_result':
+      handlers.onStepResult?.(data ?? { run_id: '', output: '', is_error: false })
       break
     case 'token':
       handlers.onToken?.(String(data ?? ''))

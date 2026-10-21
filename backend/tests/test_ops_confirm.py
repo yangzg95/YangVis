@@ -971,7 +971,8 @@ def test_ops_answer_emits_step_then_exec_then_confirm_then_done(db, agent_env):
     events = run_answer(db, conv, "ops-assistant")
     names = [name for name, _ in events]
 
-    assert names[:2] == ["step", "citations"]
+    # 工具开始发 step、返回先补一帧 step_result 再发 citations/exec。
+    assert names[:2] == ["step", "step_result"]
     assert names.index("exec") < names.index("confirm") < names.index("done")
     confirm = dict(events[names.index("confirm")][1])
     assert confirm["action_id"] == action.id

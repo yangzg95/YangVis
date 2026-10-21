@@ -76,10 +76,19 @@ export function toolLabel(
       return command ? `执行 Redis 只读命令：${command}` : '执行 Redis 只读命令'
     }
     default: {
-      // 后端代码注册的本地工具按目录里的中文标题显示；MCP 与未知工具兜底。
+      // 后端代码注册的本地工具按目录里的中文标题显示。
       const localTitle = tool ? localToolTitles.get(tool) : undefined
       if (localTitle) return localTitle
-      return tool ? `调用工具：${tool}` : '调用工具'
+      if (tool) {
+        // MCP 工具名是「服务前缀_工具原名」（见后端 server_prefix），拆成
+        // 「MCP 服务 / 工具」两段展示；没有下划线的未知工具走通用兜底。
+        const splitAt = tool.indexOf('_')
+        if (splitAt > 0) {
+          return `MCP ${tool.slice(0, splitAt)} / ${tool.slice(splitAt + 1)}`
+        }
+        return `调用工具：${tool}`
+      }
+      return '调用工具'
     }
   }
 }

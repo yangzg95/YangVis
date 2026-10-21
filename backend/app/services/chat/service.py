@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -172,6 +173,75 @@ def _chunk_reasoning(chunk: object) -> str:
         if isinstance(reasoning, str):
             return reasoning
     return ""
+
+
+# 时间线里工具结果只做「回看过程」用，不回灌模型（那是 tools.cap_tool_output
+# 的活，上限 8000）；2000 字够看清结果头尾，SSE 帧与 timeline JSON 也不会被撑大。
+TIMELINE_OUTPUT_LIMIT = 2000
+_TIMELINE_TRUNCATE_NOTICE = "…（工具输出过长，已截断）"
+
+
+def _tool_result_text(result: object) -> str:
+    """把 on_tool_end 的结果统一成展示用字符串。
+
+    LangChain 给的是 ``ToolMessage``（内容在 ``.content``）；MCP 适配器可能给
+    内容块列表（文本块 + 资源块）。非字符串结果 JSON 序列化。
+    """
+    content = getattr(result, "content", result)
+    if isinstance(content, list):
+        pieces: List[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    pieces.append(str(block.get("text", "")))
+                else:
+                    pieces.append(json.dumps(block, ensure_ascii=False, default=str))
+            else:
+                pieces.append(str(block))
+        content = "\n".join(piece for piece in pieces if piece)
+    if isinstance(content, str):
+        text = content
+    elif content is None:
+        text = ""
+    else:
+        text = json.dumps(content, ensure_ascii=False, default=str)
+    if len(text) > TIMELINE_OUTPUT_LIMIT:
+        text = text[:TIMELINE_OUTPUT_LIMIT] + _TIMELINE_TRUNCATE_NOTICE
+    return text
+
+
+def _attach_step_result(
+    timeline: List[dict], event: dict, result: object
+) -> Optional[dict]:
+    """把一次工具返回挂到对应的 timeline 步骤上，返回要推给前端的事件载荷。
+
+    优先按 ``run_id`` 配对（并行工具调用也不会串）；事件里没有 run_id（测试
+    打桩、兼容旧行为）时退回「最后一个还没结果的步骤」。找不到归属就不发。
+    """
+    run_id = event.get("run_id")
+    target: Optional[dict] = None
+    if run_id:
+        for entry in reversed(timeline):
+            if entry.get("type") == "step" and entry.get("run_id") == run_id:
+                target = entry
+                break
+    if target is None:
+        for entry in reversed(timeline):
+            if entry.get("type") == "step" and "output" not in entry:
+                target = entry
+                break
+    if target is None:
+        return None
+    output = _tool_result_text(result)
+    # ToolMessage.status：工具抛异常被 LangChain 接住时为 "error"。
+    is_error = getattr(result, "status", None) == "error"
+    target["output"] = output
+    target["is_error"] = is_error
+    return {
+        "run_id": target.get("run_id") or "",
+        "output": output,
+        "is_error": is_error,
+    }
 
 
 @dataclass
@@ -1350,10 +1420,18 @@ class ChatService:
                         # 完整的工具入参：运维工具的展示文案要取 command/statement，
                         # 由前端按工具名挑字段。
                         "input": payload,
+                        # 与 on_tool_end 配对的凭据：并行工具调用时靠它认门。
+                        "run_id": event.get("run_id") or "",
                     }
                     timeline.append({"type": "step", **step_event})
                     yield "step", step_event
                 elif kind == "on_tool_end":
+                    # 工具结果挂回步骤并立刻推给前端：时间线能逐次展示「调用 →
+                    # 返回」，而不是只有一行转圈圈的工具名。
+                    result = (event.get("data") or {}).get("output")
+                    result_event = _attach_step_result(timeline, event, result)
+                    if result_event is not None:
+                        yield "step_result", result_event
                     yield "citations", [c.model_dump() for c in registry.all()]
                     if toolbox is not None and len(toolbox.readonly_execs) > sent_execs:
                         # 只读命令也发 exec（action_id 为空表示未经确认的直接

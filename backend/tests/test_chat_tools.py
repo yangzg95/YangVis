@@ -19,6 +19,7 @@ LangChain 工具**，所以本地工具的构建壳与 MCP 的截断壳都跑了
 from __future__ import annotations
 
 import asyncio
+import uuid
 from types import SimpleNamespace
 from typing import List
 
@@ -64,6 +65,8 @@ class ScriptedStream:
         self._tools = {getattr(tool, "name", ""): tool for tool in tools}
         self._env = env
         self._index = 0
+        # 同名工具的 call/end 按栈配对 run_id，与真实 astream_events 同口径。
+        self._run_ids: dict = {}
 
     def __aiter__(self):
         return self
@@ -75,11 +78,25 @@ class ScriptedStream:
         self._index += 1
         if isinstance(step, tuple) and step[0] == "call":
             _, name, args = step
+            run_id = uuid.uuid4().hex
+            self._run_ids.setdefault(name, []).append(run_id)
             output = await self._tools[name].ainvoke(args)
             self._env["tool_outputs"].append((name, output))
-            return {"event": "on_tool_start", "name": name, "data": {"input": args}}
+            return {
+                "event": "on_tool_start",
+                "name": name,
+                "run_id": run_id,
+                "data": {"input": args},
+            }
         if isinstance(step, tuple) and step[0] == "end":
-            return {"event": "on_tool_end", "name": step[1], "data": {"output": "ok"}}
+            name = step[1]
+            run_id = self._run_ids.get(name, [""]).pop(0)
+            return {
+                "event": "on_tool_end",
+                "name": name,
+                "run_id": run_id,
+                "data": {"output": "ok"},
+            }
         kind, text = step
         return {
             "event": "on_chat_model_stream",
@@ -357,16 +374,28 @@ def test_local_tools_are_mounted_run_for_real_and_recorded(db, runtime):
     assert name == "generate_uuid" and len(output.split(", ")) == 2
 
     steps = [payload for event, payload in events if event == "step"]
-    assert steps == [{"tool": "generate_uuid", "query": "", "input": {"count": 2}}]
+    assert len(steps) == 1 and steps[0]["tool"] == "generate_uuid"
+    assert steps[0]["query"] == "" and steps[0]["input"] == {"count": 2}
+    run_id = steps[0]["run_id"]
+    assert isinstance(run_id, str) and run_id
+    # 工具返回要逐次推 step_result，run_id 与开始事件对得上。
+    results = [payload for event, payload in events if event == "step_result"]
+    assert results == [{"run_id": run_id, "output": "ok", "is_error": False}]
     assert events[-1][0] == "done"
     assert events[-1][1]["conversation_id"] == conv.id
     assert isinstance(events[-1][1]["message_id"], int)
 
     saved = assistant_messages(db, conv.id)
     assert len(saved) == 1
-    assert {"type": "step", "tool": "generate_uuid", "query": "", "input": {"count": 2}} in (
-        saved[0].timeline or []
-    )
+    assert {
+        "type": "step",
+        "tool": "generate_uuid",
+        "query": "",
+        "input": {"count": 2},
+        "run_id": run_id,
+        "output": "ok",
+        "is_error": False,
+    } in (saved[0].timeline or [])
     assert runtime["closes"] == ["stream"]
 
 
@@ -429,8 +458,13 @@ def test_mcp_tools_are_mounted_capped_and_bundle_closed(db, runtime, monkeypatch
     assert runtime["captured"]["tools"] == ["calc_add"]
     assert runtime["tool_outputs"] == [("calc_add", "5")]
     assert runtime["captured"]["recursion_limit"] == chat_module.OPS_REACT_STEPS
-    assert [p for e, p in events if e == "step"] == [
-        {"tool": "calc_add", "query": "", "input": {"a": 2, "b": 3}}
+    steps = [p for e, p in events if e == "step"]
+    assert len(steps) == 1
+    assert steps[0]["tool"] == "calc_add"
+    assert steps[0]["query"] == "" and steps[0]["input"] == {"a": 2, "b": 3}
+    assert isinstance(steps[0]["run_id"], str) and steps[0]["run_id"]
+    assert [p for e, p in events if e == "step_result"] == [
+        {"run_id": steps[0]["run_id"], "output": "ok", "is_error": False}
     ]
     assert bundle.exits == 1
 
