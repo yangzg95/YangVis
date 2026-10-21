@@ -55,11 +55,24 @@
           </a-tag>
         </template>
       </a-table-column>
-      <a-table-column key="test" title="连通测试" :width="170">
+      <a-table-column key="test" title="连通测试" :width="200">
         <template #default="{ record }">
-          <span v-if="record.last_test_ok === true" class="test-ok">
-            已通过 · {{ formatTime(record.last_test_at) }}
-          </span>
+          <template v-if="record.last_test_ok === true">
+            <a-button
+              v-if="record.tools?.length"
+              type="link"
+              size="small"
+              class="tools-link"
+              @click="openTools(record)"
+            >
+              <AppstoreOutlined />
+              {{ record.tools.length }} 个工具
+            </a-button>
+            <span v-else class="test-ok">已通过 · {{ formatTime(record.last_test_at) }}</span>
+            <div v-if="record.tools?.length" class="test-time">
+              {{ formatTime(record.last_test_at) }}
+            </div>
+          </template>
           <a-tooltip v-else-if="record.last_test_ok === false" :title="record.last_test_msg">
             <span class="test-failed">未通过 · {{ formatTime(record.last_test_at) }}</span>
           </a-tooltip>
@@ -207,19 +220,91 @@
         </template>
       </a-alert>
     </a-modal>
+
+    <a-drawer
+      v-model:open="toolsDrawer.open"
+      placement="right"
+      width="640"
+      :title="`发现的工具 · ${toolsServer?.name ?? ''}`"
+    >
+      <template v-if="toolsServer">
+        <div class="tools-sub">
+            <span class="tools-time">
+              测试于 {{ formatTime(toolsServer.last_test_at) }} · 重新测试可刷新清单
+            </span>
+            <a-button
+              size="small"
+              :loading="testingId === toolsServer.id"
+              @click="onTest(toolsServer.id)"
+            >
+              重新测试
+            </a-button>
+          </div>
+
+          <a-alert
+            v-if="toolsServer.last_test_ok === false"
+            type="error"
+            show-icon
+            class="tools-failed"
+            :message="toolsServer.last_test_msg || '连接失败'"
+          />
+
+          <a-empty
+            v-if="!drawerTools.length"
+            description="暂无工具快照，请先通过连通测试"
+          />
+
+          <div v-else class="tool-cards">
+            <div v-for="tool in drawerTools" :key="tool.name" class="tool-card">
+              <div class="tool-head">
+                <AppstoreOutlined class="tool-icon" />
+                <span class="tool-name">{{ tool.name }}</span>
+              </div>
+              <div v-if="tool.description" class="tool-desc">{{ tool.description }}</div>
+              <div v-if="toolParams(tool).length" class="param-list">
+                <div
+                  v-for="param in toolParams(tool)"
+                  :key="param.name"
+                  class="param-line"
+                >
+                  <span class="param-name">{{ param.name }}</span>
+                  <span v-if="param.required" class="param-required" title="必填">*</span>
+                  <span class="param-type">{{ param.type }}</span>
+                  <span v-if="param.description" class="param-desc">
+                    — {{ param.description }}
+                  </span>
+                  <span v-if="param.enumText" class="param-meta">
+                    （可选值 {{ param.enumText }}）
+                  </span>
+                  <span v-else-if="param.hasDefault" class="param-meta">
+                    （默认 {{ param.defaultText }}）
+                  </span>
+                </div>
+              </div>
+              <div v-else class="param-none">无参数</div>
+            </div>
+          </div>
+      </template>
+    </a-drawer>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { Modal, message } from 'ant-design-vue'
-import { DownloadOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons-vue'
+import {
+  AppstoreOutlined,
+  DownloadOutlined,
+  PlusOutlined,
+  UploadOutlined,
+} from '@ant-design/icons-vue'
 import dayjs from 'dayjs'
 import {
   mcpApi,
   type McpConflictStrategy,
   type McpImportReport,
   type McpServer,
+  type McpToolSnapshot,
   type McpTransport,
 } from '@/api'
 import SecretRows from '@/components/SecretRows.vue'
@@ -373,6 +458,70 @@ async function onTest(id: number) {
   }
 }
 
+// ---- 发现的工具抽屉 -----------------------------------------------------------
+
+const toolsDrawer = reactive({ open: false, serverId: 0 })
+
+const toolsServer = computed(() =>
+  servers.value.find((server) => server.id === toolsDrawer.serverId) ?? null,
+)
+// 数据源始终是列表：抽屉里「重新测试」+ load() 后快照自动刷新。
+const drawerTools = computed<McpToolSnapshot[]>(() => toolsServer.value?.tools ?? [])
+
+function openTools(server: McpServer) {
+  toolsDrawer.serverId = server.id
+  toolsDrawer.open = true
+}
+
+interface ToolParamView {
+  name: string
+  type: string
+  required: boolean
+  description: string
+  enumText: string
+  hasDefault: boolean
+  defaultText: string
+}
+
+/** 默认值/枚举的目录展示：对象数组收成一行 JSON，其余转字符串。 */
+function formatDefault(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'object' && value !== null) {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return String(value)
+    }
+  }
+  return String(value)
+}
+
+/** 把工具的 JSON Schema 展开成逐行参数视图（口径对齐本地工具目录）。 */
+function toolParams(tool: McpToolSnapshot): ToolParamView[] {
+  const schema = (tool.input_schema ?? {}) as Record<string, unknown>
+  const properties =
+    (schema.properties as Record<string, Record<string, unknown> | undefined> | undefined) ?? {}
+  const required = new Set(
+    Array.isArray(schema.required) ? (schema.required as unknown[]) : [],
+  )
+  return Object.entries(properties).map(([name, rawDef]) => {
+    const def = rawDef ?? {}
+    let type = def.type
+    if (Array.isArray(type)) type = (type as unknown[]).join(' | ')
+    const enumValues = Array.isArray(def.enum) ? (def.enum as unknown[]) : undefined
+    return {
+      name,
+      // 缺 type（少见，如纯 anyOf 定义）时统一标 any。
+      type: typeof type === 'string' && type ? type : 'any',
+      required: required.has(name),
+      description: typeof def.description === 'string' ? def.description : '',
+      enumText: enumValues ? enumValues.map(formatDefault).join(' | ') : '',
+      hasDefault: 'default' in def && def.default !== undefined,
+      defaultText: 'default' in def ? formatDefault(def.default) : '',
+    }
+  })
+}
+
 async function onDelete(id: number) {
   try {
     await mcpApi.remove(id)
@@ -511,6 +660,96 @@ onMounted(load)
 }
 .test-none {
   color: var(--text-3);
+}
+.tools-link {
+  height: auto;
+  padding: 0;
+  font-family: var(--font-mono, monospace);
+}
+.test-time {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
+.tools-sub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.tools-time {
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+}
+.tools-failed {
+  margin-bottom: 12px;
+}
+.tool-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.tool-card {
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.tool-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tool-icon {
+  color: var(--text-3);
+}
+.tool-name {
+  font-family: var(--font-mono, monospace);
+  font-weight: 600;
+  color: var(--text-1);
+}
+.tool-desc {
+  margin-top: 4px;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.param-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 8px;
+}
+.param-line {
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+.param-name {
+  font-family: var(--font-mono, monospace);
+  color: var(--text-1);
+}
+.param-required {
+  margin-left: 2px;
+  color: #cf1322;
+}
+.param-type {
+  margin-left: 6px;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+.param-desc {
+  margin-left: 6px;
+  color: var(--text-2);
+}
+.param-meta {
+  color: var(--text-3);
+}
+.param-none {
+  margin-top: 8px;
+  color: var(--text-3);
+  font-size: var(--fs-sm);
 }
 .stdio-alert {
   margin-bottom: 16px;

@@ -19,7 +19,7 @@ from app.models.schemas import (
     McpServerCreate,
     McpServerItem,
     McpServerUpdate,
-    TestResult,
+    McpTestResult,
 )
 from app.services.mcp import McpServerService, export_document
 from app.services.mcp.tools import test_connection
@@ -126,17 +126,17 @@ def delete_mcp_server(
     return APIResponse(data=None, message="deleted")
 
 
-@router.post("/{server_id}/test", response_model=APIResponse[TestResult])
+@router.post("/{server_id}/test", response_model=APIResponse[McpTestResult])
 async def test_mcp_server(
     server_id: int,
     service: McpServerService = Depends(get_service),
-) -> APIResponse[TestResult]:
-    """连通性测试：真正建立连接并 initialize，回传发现的工具数或失败原因。"""
+) -> APIResponse[McpTestResult]:
+    """连通性测试：真正建立连接并 initialize，回传发现的工具快照或失败原因。"""
     try:
         server = service.require(server_id)
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    ok, message, _count = await test_connection(server)
-    service.record_test(server, ok=ok, message=message)
-    return APIResponse(data=TestResult(success=ok, message=message))
+    ok, message, tools = await test_connection(server)
+    service.record_test(server, ok=ok, message=message, tools=tools)
+    return APIResponse(data=McpTestResult(success=ok, message=message, tools=tools))

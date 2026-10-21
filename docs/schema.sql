@@ -432,6 +432,7 @@ CREATE TABLE IF NOT EXISTS mcp_server (
   last_test_at DATETIME     NULL,
   last_test_ok TINYINT(1)   NULL,
   last_test_msg VARCHAR(1024) NULL,
+  tools_snapshot JSON       NULL COMMENT '最近一次连通测试发现的工具快照 [{name,description,input_schema}]',
   created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uk_mcp_owner_name (owner_id, name),
@@ -595,3 +596,7 @@ CREATE TABLE IF NOT EXISTS workflow_run_step (
 -- 对话附件与图片理解（chat_attachment 由 create_all 自动创建，DDL 见上文）：
 -- ALTER TABLE model_config
 --   ADD COLUMN supports_vision TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否接受图片输入';
+--
+-- MCP 连通测试的工具快照（migrate_schema() 自动补）：
+-- ALTER TABLE mcp_server
+--   ADD COLUMN tools_snapshot JSON NULL COMMENT '最近一次测试发现的工具 [{name,description,input_schema}]';

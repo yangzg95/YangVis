@@ -798,12 +798,31 @@ class McpServerUpdate(BaseModel):
     remark: Optional[str] = Field(default=None, max_length=512)
 
 
+class McpToolSnapshotItem(BaseModel):
+    """连通测试时从 MCP 服务发现的一个工具的快照。"""
+
+    name: str
+    description: str = ""
+    # 原始 JSON Schema（properties/required/type/...），页面自行渲染参数。
+    input_schema: Dict[str, Any] = Field(default_factory=dict)
+
+
+class McpTestResult(BaseModel):
+    """MCP 连通性探测结果：成功时带回本次发现的工具快照。"""
+
+    success: bool
+    message: str
+    tools: List[McpToolSnapshotItem] = Field(default_factory=list)
+
+
 class McpServerItem(McpServerBase):
     id: int
     owner_id: int
     last_test_at: Optional[datetime] = None
     last_test_ok: Optional[bool] = None
     last_test_msg: Optional[str] = None
+    # 最近一次测试成功时发现的工具；未测/失败/连接信息已变更后为 None。
+    tools: Optional[List[McpToolSnapshotItem]] = None
     created_at: datetime
     updated_at: datetime
     # 密钥袋解密失败（密钥轮换或数据损坏）时置 True，界面提示重新填写。

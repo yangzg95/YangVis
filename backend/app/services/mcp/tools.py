@@ -19,7 +19,7 @@ import os
 import re
 from contextlib import AsyncExitStack
 from datetime import timedelta
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import anyio
 import httpx
@@ -351,13 +351,38 @@ def plan_step_tools(
     return plan
 
 
-async def test_connection(server: McpServer) -> Tuple[bool, str, int]:
-    """连通性探测：成功返回工具数，失败返回原因。"""
+async def snapshot_server_tools(session: ClientSession) -> List[Dict[str, Any]]:
+    """tools/list 的可落库投影：名称、描述、入参 JSON Schema。
+
+    展示走原始 schema（不走 langchain 转换），保留 properties/required/enum
+    等完整信息供前端渲染。
+    """
+    result = await session.list_tools()
+    return [
+        {
+            "name": tool.name,
+            "description": tool.description or "",
+            "input_schema": tool.inputSchema or {},
+        }
+        for tool in result.tools
+    ]
+
+
+async def discover_server(server: McpServer) -> List[Dict[str, Any]]:
+    """连一个服务并返回工具快照；initialize/list_tools 的错误按连接错误抛出。"""
+    async with AsyncExitStack() as stack:
+        session = await _enter_session(stack, server)
+        return await snapshot_server_tools(session)
+
+
+async def test_connection(
+    server: McpServer,
+) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """连通性探测：成功返回工具快照，失败返回（原因, 空列表）。"""
     try:
-        async with McpToolBundle() as bundle:
-            count = await bundle.add_server(server)
+        tools = await discover_server(server)
     except Exception as exc:  # noqa: BLE001 - 测试接口就是要把原因带回去
         message = describe_connection_error(exc)
         logger.info("mcp test connection failed for %s: %s", server.name, message)
-        return False, message[:1024], 0
-    return True, f"连接成功，发现 {count} 个工具", count
+        return False, message[:1024], []
+    return True, f"连接成功，发现 {len(tools)} 个工具", tools

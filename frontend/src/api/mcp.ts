@@ -23,10 +23,26 @@ export interface McpServer {
   last_test_at?: string | null
   last_test_ok?: boolean | null
   last_test_msg?: string | null
+  /** 最近一次测试成功时发现的工具快照；未测/失败/连接信息已变更后为 null。 */
+  tools?: McpToolSnapshot[] | null
   created_at: string
   updated_at: string
   /** 密文解密失败时为 true，需要重新填写密钥。 */
   secret_error?: boolean
+}
+
+/** 连通测试时从 MCP 服务发现的一个工具快照。 */
+export interface McpToolSnapshot {
+  name: string
+  description: string
+  /** 原始 JSON Schema，参数渲染时取 properties / required。 */
+  input_schema: Record<string, unknown>
+}
+
+export interface McpTestResult {
+  success: boolean
+  message: string
+  tools: McpToolSnapshot[]
 }
 
 /** MCP 服务的编辑载荷：env/headers 填明文，掩码或空值的语义见页面说明。 */
@@ -66,9 +82,9 @@ export const mcpApi = {
   update: (id: number, payload: Partial<McpServerPayload>) =>
     request<McpServer>({ url: `/mcp/${id}`, method: 'PUT', data: payload }),
   remove: (id: number) => request<null>({ url: `/mcp/${id}`, method: 'DELETE' }),
-  /** 真正建立连接并 initialize：成功报工具数，失败报原因。 */
+  /** 真正建立连接并 initialize：成功带回工具快照，失败报原因。 */
   test: (id: number) =>
-    request<{ success: boolean; message: string }>({
+    request<McpTestResult>({
       url: `/mcp/${id}/test`,
       method: 'POST',
     }),

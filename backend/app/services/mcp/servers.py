@@ -278,9 +278,10 @@ class McpServerService:
 
         after = _connection_signature(server)
         if before != after:
-            # 旧测试结果说明的是旧连接。
+            # 旧测试结果说明的是旧连接，旧端点发现的工具快照一并作废。
             server.last_test_ok = None
             server.last_test_msg = None
+            server.tools_snapshot = None
 
         self._db.commit()
         self._db.refresh(server)
@@ -407,12 +408,24 @@ class McpServerService:
 
     # -- 测试状态 -----------------------------------------------------------
 
-    def record_test(self, server: McpServer, *, ok: bool, message: str) -> None:
+    def record_test(
+        self,
+        server: McpServer,
+        *,
+        ok: bool,
+        message: str,
+        tools: Optional[List[dict]] = None,
+    ) -> None:
         server.last_test_at = db_now()
         server.last_test_ok = ok
         server.last_test_msg = message[:1024]
+        # 失败时不保留旧快照：清单描述的是「这次连上后」的服务。
+        server.tools_snapshot = tools if ok else None
         self._db.commit()
-        logger.info("mcp server %s connectivity test: ok=%s", server.id, ok)
+        logger.info(
+            "mcp server %s connectivity test: ok=%s tools=%s",
+            server.id, ok, len(tools) if ok else 0,
+        )
 
     # -- 序列化 -------------------------------------------------------------
 
@@ -448,6 +461,7 @@ class McpServerService:
             last_test_at=server.last_test_at,
             last_test_ok=server.last_test_ok,
             last_test_msg=server.last_test_msg,
+            tools=server.tools_snapshot,
             created_at=server.created_at,
             updated_at=server.updated_at,
             secret_error=secret_error,

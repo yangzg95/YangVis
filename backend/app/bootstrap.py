@@ -289,6 +289,13 @@ def migrate_schema() -> None:
             conn.execute(text("ALTER TABLE workflow_step ADD COLUMN mcp_server_ids JSON NULL"))
         logger.info("added workflow_step.mcp_server_ids")
 
+    # MCP 连通测试发现的工具快照，随 last_test_* 展示/作废。
+    mcp_columns = _column_names("mcp_server")
+    if mcp_columns and "tools_snapshot" not in mcp_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE mcp_server ADD COLUMN tools_snapshot JSON NULL"))
+        logger.info("added mcp_server.tools_snapshot")
+
     # Auto 模型：路由上的「对模型的定义」与日志上的决策快照。
     route_columns = _column_names("ai_model_route")
     if route_columns:

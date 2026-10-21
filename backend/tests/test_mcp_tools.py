@@ -26,6 +26,7 @@ from app.services.mcp.tools import (
     plan_step_tools,
     resolve_servers,
     server_prefix,
+    snapshot_server_tools,
 )
 
 OWNER = 1
@@ -199,11 +200,49 @@ def test_switching_transport_drops_the_other_secret_bag(db):
 def test_connection_change_resets_the_old_test_result(db):
     service = McpServerService(db, OWNER)
     server = service.create(_stdio_create())
-    service.record_test(server, ok=True, message="连接成功")
+    service.record_test(
+        server, ok=True, message="连接成功", tools=[{"name": "t", "description": "", "input_schema": {}}]
+    )
 
     service.update(server.id, McpServerUpdate(command="python3"))
 
     assert server.last_test_ok is None and server.last_test_msg is None
+    assert server.tools_snapshot is None
+
+
+def test_record_test_persists_snapshot_on_success_and_clears_on_failure(db):
+    service = McpServerService(db, OWNER)
+    server = service.create(_stdio_create())
+    tools = [
+        {
+            "name": "echo",
+            "description": "回声",
+            "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}},
+        }
+    ]
+
+    service.record_test(server, ok=True, message="连接成功，发现 1 个工具", tools=tools)
+    item = service.to_item(server)
+    assert item.tools is not None and len(item.tools) == 1
+    assert item.tools[0].name == "echo"
+    assert item.tools[0].input_schema["properties"]["text"] == {"type": "string"}
+
+    # 失败不能留下旧清单。
+    service.record_test(server, ok=False, message="HTTP 401")
+    assert server.tools_snapshot is None
+    assert service.to_item(server).tools is None
+
+
+def test_non_connection_update_keeps_the_snapshot(db):
+    service = McpServerService(db, OWNER)
+    server = service.create(_stdio_create())
+    service.record_test(
+        server, ok=True, message="ok", tools=[{"name": "t", "description": "", "input_schema": {}}]
+    )
+
+    # 只改名称/备注：连接没变，快照保留。
+    service.update(server.id, McpServerUpdate(name="改名后的时间服务"))
+    assert server.tools_snapshot is not None
 
 
 # ---- 传输字段校验 ------------------------------------------------------------
@@ -327,6 +366,38 @@ def test_fastmcp_tools_load_and_invoke_contract():
             return await tools[0].ainvoke({"a": 2, "b": 3})
 
     assert "5" in str(asyncio.run(drive()))
+
+
+def test_snapshot_server_tools_keeps_name_description_and_input_schema():
+    from mcp.server.fastmcp import FastMCP
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    mcp = FastMCP("docs")
+
+    @mcp.tool()
+    async def search(query: str, limit: int = 5) -> str:
+        """搜索文档。
+
+        Args:
+            query: 查询词。
+            limit: 返回条数。
+        """
+        return query
+
+    async def drive():
+        async with create_connected_server_and_client_session(mcp) as session:
+            return await snapshot_server_tools(session)
+
+    snapshots = asyncio.run(drive())
+
+    assert [tool["name"] for tool in snapshots] == ["search"]
+    snapshot = snapshots[0]
+    assert snapshot["description"].startswith("搜索文档")
+    properties = snapshot["input_schema"]["properties"]
+    assert set(properties) == {"query", "limit"}
+    assert properties["query"]["type"] == "string"
+    assert properties["limit"]["type"] == "integer"
+    assert snapshot["input_schema"]["required"] == ["query"]
 
 
 # ---- run_agent 有界工具循环 --------------------------------------------------

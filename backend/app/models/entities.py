@@ -579,6 +579,9 @@ class McpServer(Base):
     last_test_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_test_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     last_test_msg: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # 最近一次连通测试发现的工具快照：[{name, description, input_schema}]，
+    # 随 last_test_* 一起作废/刷新。
+    tools_snapshot: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
