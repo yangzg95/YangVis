@@ -815,6 +815,29 @@ class McpTestResult(BaseModel):
     tools: List[McpToolSnapshotItem] = Field(default_factory=list)
 
 
+class McpToolCallRequest(BaseModel):
+    """页面上的方法测试：指定工具名与一组入参，现场调用一次。"""
+
+    tool_name: str = Field(..., min_length=1, max_length=128)
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+
+
+class McpToolCallResult(BaseModel):
+    """tools/call 结果：参数与结果都不落库，仅回传展示。
+
+    工具自身报错（协议正常、isError=True）时 success 仍为 True，
+    由 ``is_error`` 区分；连接/协议失败时 success=False 并带 message。
+    """
+
+    success: bool
+    message: str = ""
+    is_error: bool = False
+    # 原始内容块（text/image/audio/resourceLink/embeddedResource），
+    # 块类型看 type 字段，页面按类型渲染。
+    content: List[Dict[str, Any]] = Field(default_factory=list)
+    structured_content: Optional[Dict[str, Any]] = None
+
+
 class McpServerItem(McpServerBase):
     id: int
     owner_id: int
@@ -1749,6 +1772,53 @@ class ResumeToolkitItem(BaseModel):
 class ResumeToolkitDetail(ResumeToolkitItem):
     inputs: Dict[str, Any] = {}
     report: Optional[str] = None
+
+
+# ---- 智能办公 · 在线简历编辑器 -------------------------------------------------
+
+# 五个可排序模块的键；顺序契约与 services/resume_builder.py、前端 resumeDoc.ts 共用。
+ResumeDocModule = Literal["profile", "companies", "projects", "educations", "skills"]
+
+
+class ResumeDocCreate(BaseModel):
+    """新建在线简历；文档结构用默认骨架，不在创建时让前端传。"""
+
+    title: str = Field(..., min_length=1, max_length=128)
+
+
+class ResumeDocUpdate(BaseModel):
+    """标题与文档内容都可单独改：编辑器保存传 doc，重命名只传 title。"""
+
+    title: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    doc: Optional[Dict[str, Any]] = None
+
+
+class ResumeDocItem(BaseModel):
+    """列表行：不带 doc 大字段。"""
+
+    id: int
+    title: str
+    updated_at: datetime
+    created_at: datetime
+
+
+class ResumeDocDetail(ResumeDocItem):
+    doc: Dict[str, Any]
+
+
+class ResumeDocAiRequest(BaseModel):
+    """简历编辑器里的流式 AI 请求（帮写 / 润色 / 整份体检）。
+
+    doc_id 提供整份简历上下文（可空：空文档也能先帮写）；module + item_id
+    定位「帮写的是哪个模块的哪一条」；selection 是用户在富文本里选中的原文。
+    """
+
+    doc_id: Optional[int] = None
+    module: ResumeDocModule
+    # write=按已有信息生成/扩写描述；polish=润色当前描述；check=整份体检（markdown）。
+    action: Literal["write", "polish", "check"]
+    item_id: Optional[str] = Field(default=None, max_length=64)
+    selection: Optional[str] = Field(default=None, max_length=20000)
 
 
 # ---- 智能办公 · 幻灯片 ---------------------------------------------------------

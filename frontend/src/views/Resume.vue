@@ -15,7 +15,53 @@
       </template>
     </a-alert>
 
-    <a-tabs v-model:activeKey="activeTab" class="resume-tabs">
+    <a-tabs v-model:activeKey="activeTab" class="resume-tabs" @change="onTabChange">
+      <!-- ================= 在线简历 ================= -->
+      <a-tab-pane key="docs" tab="在线简历">
+        <div class="toolbar">
+          <span class="muted">共 {{ docList.length }} 份在线简历，模块可自由排序、一键导出 PDF</span>
+          <a-button type="primary" :loading="creatingDoc" @click="createDoc">
+            <PlusOutlined /> 新建简历
+          </a-button>
+        </div>
+
+        <a-table
+          :columns="docColumns"
+          :data-source="docList"
+          :loading="loadingDocs"
+          row-key="id"
+          size="middle"
+          :pagination="false"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'title'">
+              <div class="cell-title">{{ record.title }}</div>
+              <div class="cell-sub">在线编辑 · 最后保存 {{ formatTime(record.updated_at) }}</div>
+            </template>
+            <template v-else-if="column.key === 'updated_at'">
+              <span class="muted">{{ formatTime(record.updated_at) }}</span>
+            </template>
+            <template v-else-if="column.key === 'actions'">
+              <a-space :size="4" wrap>
+                <a-button size="small" type="primary" @click="openDoc(record)">编辑</a-button>
+                <a-button size="small" type="link" @click="openRenameDoc(record)">重命名</a-button>
+                <a-popconfirm
+                  title="确认删除这份在线简历？删除后不可恢复。"
+                  ok-text="删除"
+                  cancel-text="取消"
+                  @confirm="removeDoc(record)"
+                >
+                  <a-button size="small" type="link" danger>删除</a-button>
+                </a-popconfirm>
+              </a-space>
+            </template>
+          </template>
+          <template #emptyText>
+            <a-empty :image="simpleEmpty" description="还没有在线简历，新建一份开始编辑" />
+          </template>
+        </a-table>
+      </a-tab-pane>
+
       <!-- ================= 简历列表 ================= -->
       <a-tab-pane key="resumes" tab="简历列表">
         <div class="toolbar">
@@ -339,6 +385,23 @@
       </a-form>
     </a-modal>
 
+    <!-- ================= 在线简历重命名 ================= -->
+    <a-modal
+      v-model:open="docRename.open"
+      title="重命名简历"
+      :confirm-loading="docRename.loading"
+      ok-text="保存"
+      cancel-text="取消"
+      @ok="submitRenameDoc"
+    >
+      <a-input
+        v-model:value="docRename.title"
+        :maxlength="128"
+        placeholder="简历标题"
+        @pressEnter="submitRenameDoc"
+      />
+    </a-modal>
+
     <!-- ================= 对比确认弹窗 ================= -->
     <a-modal
       v-model:open="compareModal.open"
@@ -488,6 +551,7 @@ import {
   InboxOutlined,
   LoadingOutlined,
   PayCircleOutlined,
+  PlusOutlined,
   QuestionCircleOutlined,
   RocketOutlined,
   SwapOutlined,
@@ -496,8 +560,10 @@ import {
 import type { UploadFile } from 'ant-design-vue'
 import {
   resumeApi,
+  resumeBuilderApi,
   settingsApi,
   type ResumeComparisonItem,
+  type ResumeDocItem,
   type ResumeItem,
   type ResumeStatus,
   type ResumeToolkitCreate,
@@ -640,7 +706,92 @@ const TOOL_DEFS: ToolDef[] = [
 // ---- 状态 -------------------------------------------------------------------
 
 const chatReady = ref(true)
-const activeTab = ref('resumes')
+const activeTab = ref('docs')
+
+// ---- 在线简历（自主编辑工作台）--------------------------------------------------
+
+const docList = ref<ResumeDocItem[]>([])
+const loadingDocs = ref(false)
+const creatingDoc = ref(false)
+const docsLoaded = ref(false)
+const docRename = reactive({ open: false, loading: false, id: 0, title: '' })
+
+const docColumns = [
+  { key: 'title', title: '简历', dataIndex: 'title', ellipsis: true },
+  { key: 'updated_at', title: '更新时间', dataIndex: 'updated_at', width: 220 },
+  { key: 'actions', title: '操作', width: 220 },
+]
+
+async function loadDocs(force = false) {
+  if (loadingDocs.value || (docsLoaded.value && !force)) return
+  loadingDocs.value = true
+  try {
+    const result = await resumeBuilderApi.list()
+    docList.value = result.items
+    docsLoaded.value = true
+  } catch {
+    // 拦截器已弹提示。
+  } finally {
+    loadingDocs.value = false
+  }
+}
+
+async function createDoc() {
+  creatingDoc.value = true
+  try {
+    const detail = await resumeBuilderApi.create('未命名简历')
+    await loadDocs(true)
+    openDoc(detail)
+  } catch (err) {
+    message.error(errorText(err, '创建失败'))
+  } finally {
+    creatingDoc.value = false
+  }
+}
+
+function openDoc(record: ResumeDocItem) {
+  // 工作台 bare 整页，新开标签页避开 keep-alive 多实例（同幻灯片工作台）。
+  const href = router.resolve({ name: 'ResumeBuilder', params: { id: record.id } }).href
+  window.open(href, '_blank', 'noopener')
+}
+
+function openRenameDoc(record: ResumeDocItem) {
+  docRename.id = record.id
+  docRename.title = record.title
+  docRename.open = true
+}
+
+async function submitRenameDoc() {
+  if (!docRename.title.trim()) {
+    message.warning('请输入标题')
+    return
+  }
+  docRename.loading = true
+  try {
+    await resumeBuilderApi.update(docRename.id, { title: docRename.title.trim() })
+    message.success('已保存')
+    docRename.open = false
+    await loadDocs(true)
+  } catch (err) {
+    message.error(errorText(err, '保存失败'))
+  } finally {
+    docRename.loading = false
+  }
+}
+
+async function removeDoc(record: ResumeDocItem) {
+  try {
+    await resumeBuilderApi.remove(record.id)
+    message.success('已删除')
+    await loadDocs(true)
+  } catch (err) {
+    message.error(errorText(err, '删除失败'))
+  }
+}
+
+function onTabChange(key: string) {
+  if (key === 'docs') void loadDocs()
+}
 
 const resumes = ref<ResumeItem[]>([])
 const loadingResumes = ref(false)
@@ -1194,7 +1345,13 @@ function errorText(err: unknown, fallback: string): string {
 }
 
 onMounted(async () => {
-  await Promise.all([loadReadiness(), loadResumes(), loadComparisons(), loadToolkit()])
+  await Promise.all([
+    loadReadiness(),
+    loadDocs(),
+    loadResumes(),
+    loadComparisons(),
+    loadToolkit(),
+  ])
   syncPolling()
 })
 

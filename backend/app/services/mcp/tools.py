@@ -386,3 +386,61 @@ async def test_connection(
         logger.info("mcp test connection failed for %s: %s", server.name, message)
         return False, message[:1024], []
     return True, f"连接成功，发现 {len(tools)} 个工具", tools
+
+
+def describe_tool_call_error(exc: BaseException) -> str:
+    """tools/call 失败原因：JSON-RPC 错误带 code/message，其余走连接错误口径。"""
+    # 延迟导入：McpError 只在调用失败的分支上用得到。
+    from mcp.shared.exceptions import McpError
+
+    # 传输层可能把异常包在 ExceptionGroup 里（见 describe_connection_error），
+    # 先在叶子里找 McpError：协议错误比网络噪声信息更准。
+    candidate = exc
+    if isinstance(exc, BaseExceptionGroup):
+        leaves = [
+            leaf
+            for leaf in _flatten_exc_leaves(exc)
+            if isinstance(leaf, McpError)
+        ]
+        if leaves:
+            candidate = leaves[0]
+
+    if isinstance(candidate, McpError):
+        error = candidate.error
+        message = f"工具返回错误（code {error.code}）：{error.message}"
+        if error.data:
+            message = f"{message}；{str(error.data)[:300]}"
+        return message
+    return describe_connection_error(exc)
+
+
+def project_tool_result(result: Any) -> Dict[str, Any]:
+    """CallToolResult 的可 JSON 化投影：内容块原样落盘、保留结构化输出。
+
+    内容块（text/image/audio/resourceLink/embeddedResource）走 pydantic
+    序列化，块类型由 ``type`` 字段区分，前端按类型渲染；工具自己报错
+    （isError=True）不是协议失败，照样投影回去。
+    """
+    return {
+        "is_error": bool(result.isError),
+        # 块类型判别值：text/image/audio/resource_link/resource（内嵌资源）。
+        "content": [
+            block.model_dump(mode="json", exclude_none=True)
+            for block in result.content
+        ],
+        "structured_content": result.structuredContent,
+    }
+
+
+async def call_server_tool(
+    server: McpServer, tool_name: str, arguments: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """连一次服务执行 tools/call，返回结果投影；不写任何库。
+
+    每次调用独立建连：方法测试是页面上的低频手工操作，不值得为它维护
+    长连接池。连接/协议错误按原样抛出，由路由转成 success=False。
+    """
+    async with AsyncExitStack() as stack:
+        session = await _enter_session(stack, server)
+        result = await session.call_tool(tool_name, arguments or None)
+        return project_tool_result(result)

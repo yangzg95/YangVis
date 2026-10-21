@@ -45,6 +45,32 @@ export interface McpTestResult {
   tools: McpToolSnapshot[]
 }
 
+/** tools/call 返回的内容块；判别字段 type：text/image/audio/resource_link/resource。 */
+export interface McpContentBlock {
+  type: string
+  /** text 块的文本。 */
+  text?: string
+  /** image/audio 块的 base64 数据与 MIME。 */
+  data?: string
+  mimeType?: string
+  /** resource_link 块的字段。 */
+  uri?: string
+  name?: string
+  /** resource（内嵌资源）块的内容。 */
+  resource?: Record<string, unknown>
+  annotations?: Record<string, unknown>
+  [key: string]: unknown
+}
+
+export interface McpToolCallResult {
+  /** 连接/协议是否成功；工具自身报错时仍为 true，看 is_error。 */
+  success: boolean
+  message?: string
+  is_error: boolean
+  content: McpContentBlock[]
+  structured_content?: Record<string, unknown> | null
+}
+
 /** MCP 服务的编辑载荷：env/headers 填明文，掩码或空值的语义见页面说明。 */
 export interface McpServerPayload {
   name: string
@@ -87,6 +113,13 @@ export const mcpApi = {
     request<McpTestResult>({
       url: `/mcp/${id}/test`,
       method: 'POST',
+    }),
+  /** 方法测试：按入参现场调用一个工具，参数与结果都不落库。 */
+  callTool: (id: number, toolName: string, arguments_: Record<string, unknown>) =>
+    request<McpToolCallResult>({
+      url: `/mcp/${id}/tools/call`,
+      method: 'POST',
+      data: { tool_name: toolName, arguments: arguments_ },
     }),
   /** 导出 mcpServers 标准文档：ids 为空导出全部。 */
   exportConfig: (ids?: number[]) => {

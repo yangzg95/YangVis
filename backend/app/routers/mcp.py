@@ -20,9 +20,15 @@ from app.models.schemas import (
     McpServerItem,
     McpServerUpdate,
     McpTestResult,
+    McpToolCallRequest,
+    McpToolCallResult,
 )
 from app.services.mcp import McpServerService, export_document
-from app.services.mcp.tools import test_connection
+from app.services.mcp.tools import (
+    call_server_tool,
+    describe_tool_call_error,
+    test_connection,
+)
 
 logger = logging.getLogger("yangvis.mcp")
 
@@ -140,3 +146,34 @@ async def test_mcp_server(
     ok, message, tools = await test_connection(server)
     service.record_test(server, ok=ok, message=message, tools=tools)
     return APIResponse(data=McpTestResult(success=ok, message=message, tools=tools))
+
+
+@router.post("/{server_id}/tools/call", response_model=APIResponse[McpToolCallResult])
+async def call_mcp_tool(
+    server_id: int,
+    payload: McpToolCallRequest,
+    service: McpServerService = Depends(get_service),
+) -> APIResponse[McpToolCallResult]:
+    """方法测试：按入参现场调用一个工具，回传原始内容块；参数与结果不落库。"""
+    try:
+        server = service.require(server_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    try:
+        result = await call_server_tool(server, payload.tool_name, payload.arguments)
+    except Exception as exc:  # noqa: BLE001 - 测试接口要把失败原因带回页面
+        message = describe_tool_call_error(exc)
+        logger.info(
+            "mcp tool call failed for %s/%s: %s",
+            server.name, payload.tool_name, message,
+        )
+        return APIResponse(data=McpToolCallResult(success=False, message=message[:1024]))
+    return APIResponse(
+        data=McpToolCallResult(
+            success=True,
+            is_error=result["is_error"],
+            content=result["content"],
+            structured_content=result["structured_content"],
+        )
+    )

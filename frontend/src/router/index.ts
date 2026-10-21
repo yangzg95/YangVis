@@ -97,6 +97,14 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '简历'},
     },
     {
+        // 在线简历工作台：整页编辑（模块导航 + 表单 + A4 实时预览），bare 跳过
+        // 主布局外壳，从简历列表新开标签页进来，与幻灯片工作台同一模式。
+        path: '/office/resume-builder/:id(\\d+)',
+        name: 'ResumeBuilder',
+        component: () => import('@/views/ResumeBuilder.vue'),
+        meta: {title: '简历编辑', bare: true},
+    },
+    {
         path: '/office/slides',
         name: 'Slides',
         component: () => import('@/views/Slides.vue'),

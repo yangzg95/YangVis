@@ -259,6 +259,15 @@
               <div class="tool-head">
                 <AppstoreOutlined class="tool-icon" />
                 <span class="tool-name">{{ tool.name }}</span>
+                <a-button
+                  type="link"
+                  size="small"
+                  class="tool-test-btn"
+                  @click="openToolTest(toolsServer?.id ?? 0, tool)"
+                >
+                  <ThunderboltOutlined />
+                  方法测试
+                </a-button>
               </div>
               <div v-if="tool.description" class="tool-desc">{{ tool.description }}</div>
               <div v-if="toolParams(tool).length" class="param-list">
@@ -286,16 +295,123 @@
           </div>
       </template>
     </a-drawer>
+
+    <a-modal
+      v-model:open="toolTest.open"
+      :title="`方法测试 · ${toolTest.tool?.name ?? ''}`"
+      width="780px"
+      ok-text="执行"
+      cancel-text="关闭"
+      :confirm-loading="toolTest.loading"
+      @ok="runToolTest"
+    >
+      <template v-if="toolTest.tool">
+        <div v-if="toolTest.tool.description" class="tt-desc">
+          {{ toolTest.tool.description }}
+        </div>
+
+        <div class="tt-args-head">
+          <span class="tt-label">入参（JSON 对象）</span>
+          <a-button type="link" size="small" @click="fillArgsTemplate">
+            填入示例参数
+          </a-button>
+        </div>
+        <a-textarea
+          v-model:value="toolTest.argsText"
+          class="tt-editor"
+          :rows="8"
+          spellcheck="false"
+          placeholder='{"city": "北京"}'
+        />
+        <div v-if="toolTest.argsError" class="tt-args-error">
+          {{ toolTest.argsError }}
+        </div>
+
+        <div v-if="toolTest.result" class="tt-result">
+          <div class="tt-result-head">
+            <span class="tt-label">返回结果</span>
+            <a-tag v-if="toolTest.result.success && !toolTest.result.is_error" color="green">
+              成功
+            </a-tag>
+            <a-tag v-else-if="toolTest.result.is_error" color="orange">工具报错</a-tag>
+            <a-tag v-else color="red">调用失败</a-tag>
+          </div>
+
+          <a-alert
+            v-if="!toolTest.result.success"
+            type="error"
+            show-icon
+            :message="toolTest.result.message || '调用失败'"
+            class="tt-alert"
+          />
+
+          <template v-else>
+            <a-alert
+              v-if="toolTest.result.is_error"
+              type="warning"
+              show-icon
+              message="工具执行返回 isError=true，内容见下方结果块"
+              class="tt-alert"
+            />
+
+            <a-empty
+              v-if="!toolTest.result.content.length && !toolTest.result.structured_content"
+              description="工具返回了空内容"
+              :image="simpleEmptyImage"
+            />
+
+            <div
+              v-for="(block, index) in toolTest.result.content"
+              :key="index"
+              class="tt-block"
+            >
+              <pre v-if="block.type === 'text'" class="tt-pre">{{ prettyBlockText(block.text) }}</pre>
+              <img
+                v-else-if="block.type === 'image'"
+                class="tt-img"
+                :src="toDataUrl(block.mimeType, block.data)"
+                alt="工具返回图片"
+              />
+              <audio
+                v-else-if="block.type === 'audio'"
+                class="tt-audio"
+                controls
+                :src="toDataUrl(block.mimeType, block.data)"
+              />
+              <div v-else-if="block.type === 'resource_link'" class="tt-resource-link">
+                <LinkOutlined />
+                <span class="tt-resource-name">{{ block.name || block.uri }}</span>
+                <span class="tt-resource-uri">{{ block.uri }}</span>
+              </div>
+              <pre v-else class="tt-pre">{{ formatJson(block) }}</pre>
+            </div>
+
+            <div v-if="toolTest.result.structured_content" class="tt-structured">
+              <div class="tt-label">结构化输出（structuredContent）</div>
+              <pre class="tt-pre">{{ formatJson(toolTest.result.structured_content) }}</pre>
+            </div>
+
+            <a-collapse ghost class="tt-raw">
+              <a-collapse-panel key="raw" header="原始返回 JSON">
+                <pre class="tt-pre">{{ formatJson(toolTest.result) }}</pre>
+              </a-collapse-panel>
+            </a-collapse>
+          </template>
+        </div>
+      </template>
+    </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { Modal, message } from 'ant-design-vue'
+import { Empty, Modal, message } from 'ant-design-vue'
 import {
   AppstoreOutlined,
   DownloadOutlined,
+  LinkOutlined,
   PlusOutlined,
+  ThunderboltOutlined,
   UploadOutlined,
 } from '@ant-design/icons-vue'
 import dayjs from 'dayjs'
@@ -304,6 +420,7 @@ import {
   type McpConflictStrategy,
   type McpImportReport,
   type McpServer,
+  type McpToolCallResult,
   type McpToolSnapshot,
   type McpTransport,
 } from '@/api'
@@ -522,6 +639,144 @@ function toolParams(tool: McpToolSnapshot): ToolParamView[] {
   })
 }
 
+// ---- 方法测试弹窗（参数与结果只活在页面上，不落库）----------------------------
+
+const simpleEmptyImage = Empty.PRESENTED_IMAGE_SIMPLE
+
+const toolTest = reactive({
+  open: false,
+  loading: false,
+  serverId: 0,
+  tool: null as McpToolSnapshot | null,
+  argsText: '{}',
+  argsError: '',
+  result: null as McpToolCallResult | null,
+})
+
+/** 按 JSON Schema 造一个占位值：default > enum 首项 > 类型空壳。 */
+function sampleValue(def: unknown): unknown {
+  if (def && typeof def === 'object') {
+    const schema = def as Record<string, unknown>
+    if ('default' in schema && schema.default !== undefined) return schema.default
+    if (Array.isArray(schema.enum) && schema.enum.length) return schema.enum[0]
+    const rawType = schema.type
+    const type = Array.isArray(rawType) ? rawType[0] : rawType
+    switch (type) {
+      case 'string':
+        return ''
+      case 'integer':
+      case 'number':
+        return 0
+      case 'boolean':
+        return false
+      case 'array':
+        return []
+      case 'object': {
+        const obj: Record<string, unknown> = {}
+        const properties =
+          (schema.properties as Record<string, unknown> | undefined) ?? {}
+        for (const [key, propDef] of Object.entries(properties)) {
+          obj[key] = sampleValue(propDef)
+        }
+        return obj
+      }
+      default:
+        return null
+    }
+  }
+  return null
+}
+
+/** 依据入参 schema 生成模板：必填参数排前面，无参数给 {}。 */
+function buildArgsTemplate(tool: McpToolSnapshot): string {
+  const schema = (tool.input_schema ?? {}) as Record<string, unknown>
+  const properties =
+    (schema.properties as Record<string, unknown> | undefined) ?? {}
+  const required = new Set(
+    Array.isArray(schema.required) ? (schema.required as unknown[]) : [],
+  )
+  const names = Object.keys(properties)
+  names.sort((a, b) => Number(required.has(b)) - Number(required.has(a)))
+  const args: Record<string, unknown> = {}
+  for (const name of names) args[name] = sampleValue(properties[name])
+  return JSON.stringify(args, null, 2)
+}
+
+function openToolTest(serverId: number, tool: McpToolSnapshot) {
+  toolTest.serverId = serverId
+  toolTest.tool = tool
+  toolTest.argsText = buildArgsTemplate(tool)
+  toolTest.argsError = ''
+  toolTest.result = null
+  toolTest.loading = false
+  toolTest.open = true
+}
+
+function fillArgsTemplate() {
+  if (!toolTest.tool) return
+  toolTest.argsText = buildArgsTemplate(toolTest.tool)
+  toolTest.argsError = ''
+}
+
+async function runToolTest() {
+  if (!toolTest.tool) return
+  toolTest.argsError = ''
+
+  let args: Record<string, unknown> = {}
+  const text = toolTest.argsText.trim()
+  if (text) {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(text)
+    } catch (err) {
+      toolTest.argsError = `入参 JSON 解析失败：${(err as Error).message}`
+      return
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      toolTest.argsError = '入参必须是 JSON 对象，例如 {"city": "北京"}'
+      return
+    }
+    args = parsed as Record<string, unknown>
+  }
+
+  toolTest.loading = true
+  try {
+    toolTest.result = await mcpApi.callTool(
+      toolTest.serverId,
+      toolTest.tool.name,
+      args,
+    )
+  } finally {
+    toolTest.loading = false
+  }
+}
+
+/** text 块内容是 JSON 时美化展示，否则按原文。 */
+function prettyBlockText(text: unknown): string {
+  if (typeof text !== 'string') return String(text ?? '')
+  const trimmed = text.trim()
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      return JSON.stringify(JSON.parse(trimmed), null, 2)
+    } catch {
+      // 不是合法 JSON，下面按原文返回。
+    }
+  }
+  return text
+}
+
+function formatJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
+function toDataUrl(mimeType: unknown, data: unknown): string {
+  return `data:${typeof mimeType === 'string' ? mimeType : 'application/octet-stream'};base64,${data ?? ''}`
+}
+
 async function onDelete(id: number) {
   try {
     await mcpApi.remove(id)
@@ -700,6 +955,12 @@ onMounted(load)
   align-items: center;
   gap: 6px;
 }
+.tool-test-btn {
+  margin-left: auto;
+  padding: 0 4px;
+  height: auto;
+  font-size: var(--fs-sm);
+}
 .tool-icon {
   color: var(--text-3);
 }
@@ -771,5 +1032,100 @@ onMounted(load)
 }
 .report-line.error {
   color: #cf1322;
+}
+/* 方法测试弹窗 */
+.tt-desc {
+  margin-bottom: 12px;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.tt-args-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.tt-label {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-1);
+}
+.tt-editor :deep(textarea) {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--fs-sm);
+}
+.tt-args-error {
+  margin-top: 6px;
+  color: #cf1322;
+  font-size: var(--fs-sm);
+}
+.tt-result {
+  margin-top: 16px;
+}
+.tt-result-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.tt-alert {
+  margin-bottom: 8px;
+}
+.tt-block {
+  margin-bottom: 8px;
+}
+.tt-pre {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--fill-quaternary, #fafafa);
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+}
+.tt-img {
+  max-width: 100%;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+}
+.tt-audio {
+  width: 100%;
+}
+.tt-resource-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  font-size: var(--fs-sm);
+}
+.tt-resource-name {
+  font-weight: 600;
+}
+.tt-resource-uri {
+  color: var(--text-3);
+  font-family: var(--font-mono, monospace);
+  word-break: break-all;
+}
+.tt-structured {
+  margin-top: 12px;
+}
+.tt-structured .tt-label {
+  margin-bottom: 6px;
+}
+.tt-raw {
+  margin-top: 4px;
+}
+.tt-raw :deep(.ant-collapse-header) {
+  font-size: var(--fs-sm);
+  color: var(--text-3) !important;
 }
 </style>

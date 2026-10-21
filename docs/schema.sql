@@ -294,6 +294,16 @@ CREATE TABLE IF NOT EXISTS ops_sql_favorite (
   KEY idx_owner (owner_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='SQL 收藏';
 
+CREATE TABLE IF NOT EXISTS resume_doc (
+  id         BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id   BIGINT       NOT NULL,
+  title      VARCHAR(128) NOT NULL,
+  doc        JSON         NOT NULL COMMENT '在线简历结构：{template, module_order, profile, companies[], projects[], educations[], skills_html}，模块顺序与条目顺序都在里面',
+  created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='智能应用 · 在线编辑的简历（与上传式 resume 表并存，富文本为白名单消毒后的 HTML 片段）';
+
 CREATE TABLE IF NOT EXISTS interview_record (
   id             BIGINT PRIMARY KEY AUTO_INCREMENT,
   owner_id       BIGINT       NOT NULL,

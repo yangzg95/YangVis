@@ -23,7 +23,9 @@ from app.services.mcp import (
 )
 from app.services.mcp.tools import (
     describe_connection_error,
+    describe_tool_call_error,
     plan_step_tools,
+    project_tool_result,
     resolve_servers,
     server_prefix,
     snapshot_server_tools,
@@ -398,6 +400,69 @@ def test_snapshot_server_tools_keeps_name_description_and_input_schema():
     assert properties["query"]["type"] == "string"
     assert properties["limit"]["type"] == "integer"
     assert snapshot["input_schema"]["required"] == ["query"]
+
+
+# ---- 方法测试：tools/call 结果投影与错误描述 ----------------------------------
+
+
+def test_project_tool_result_success_and_is_error():
+    """成功调用投影出 text 内容块；工具自己抛错时 isError=True 仍是协议成功。"""
+    import json
+
+    from mcp.server.fastmcp import FastMCP
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    mcp = FastMCP("calc")
+
+    @mcp.tool()
+    async def add(a: int, b: int) -> int:
+        """两数相加。"""
+        return a + b
+
+    @mcp.tool()
+    async def boom(query: str) -> str:
+        """一定会炸的工具。"""
+        raise ValueError("炸了")
+
+    async def drive():
+        async with create_connected_server_and_client_session(mcp) as session:
+            ok_result = await session.call_tool("add", {"a": 2, "b": 3})
+            err_result = await session.call_tool("boom", {"query": "x"})
+            return ok_result, err_result
+
+    ok_raw, err_raw = asyncio.run(drive())
+
+    ok = project_tool_result(ok_raw)
+    assert ok["is_error"] is False
+    text_block = ok["content"][0]
+    assert text_block["type"] == "text"
+    assert json.loads(text_block["text"]) == 5
+
+    # 工具异常被 FastMCP 兜成 isError 文本块，不是连接/协议失败。
+    err = project_tool_result(err_raw)
+    assert err["is_error"] is True
+    assert err["content"]
+    assert "炸了" in str(err["content"])
+
+
+def test_describe_tool_call_error_formats_mcp_error():
+    """JSON-RPC 错误转成带 code 的原因；被 TaskGroup 包着也能在叶子里找到。"""
+    from mcp.shared.exceptions import McpError
+    from mcp.types import ErrorData
+
+    exc = McpError(
+        ErrorData(code=-32602, message="Unknown tool: ghost", data={"reason": "x"})
+    )
+
+    message = describe_tool_call_error(exc)
+    assert "code -32602" in message
+    assert "ghost" in message
+
+    wrapped = ExceptionGroup("unhandled errors in a TaskGroup", [exc])
+    assert "ghost" in describe_tool_call_error(wrapped)
+
+    # 非协议错误回退连接错误口径，不吞信息。
+    assert describe_tool_call_error(RuntimeError("连接被拒绝")) == "连接被拒绝"
 
 
 # ---- run_agent 有界工具循环 --------------------------------------------------

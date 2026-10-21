@@ -42,6 +42,7 @@ from app.routers import (
     ops,
     ops_files,
     resume,
+    resume_builder,
     settings as settings_router,
     slides,
     tools,
@@ -124,6 +125,7 @@ app.include_router(memory.router, prefix=API_PREFIX)
 app.include_router(ops.router, prefix=API_PREFIX)
 app.include_router(ops_files.router, prefix=API_PREFIX)
 app.include_router(resume.router, prefix=API_PREFIX)
+app.include_router(resume_builder.router, prefix=API_PREFIX)
 app.include_router(interview.router, prefix=API_PREFIX)
 app.include_router(slides.router, prefix=API_PREFIX)
 app.include_router(netdisk.router, prefix=API_PREFIX)

@@ -875,6 +875,37 @@ class ResumeToolkitTask(Base):
         return f"<ResumeToolkitTask id={self.id} owner={self.owner_id} kind={self.kind!r}>"
 
 
+class ResumeDoc(Base):
+    """一份在线编辑的简历（简历工作台）。
+
+    与 :class:`Resume`（上传 PDF/Word 做 AI 分析的那条线）是两个域：这条线
+    的简历由用户在页面上逐模块搭建，整份结构以一个 JSON 文档存着——模块
+    （个人信息 / 工作 / 项目 / 教育 / 技能）的顺序也在文档里。条目量级是几条
+    到十几条、没有跨文档检索条目的需求，拆子表只会带来 join 与级联，同
+    :class:`InterviewRecord` 的 questions 一个取舍。
+
+    富文本字段存的是经过白名单消毒的 HTML 片段（消毒在 service 层做）。
+    """
+
+    __tablename__ = "resume_doc"
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    title: Mapped[str] = mapped_column(String(128), nullable=False)
+    doc: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<ResumeDoc id={self.id} owner={self.owner_id} title={self.title!r}>"
+
+
 class InterviewRecord(Base):
     """一场面试的记录及其问题清单。
 
