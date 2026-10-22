@@ -118,6 +118,14 @@
                 :style="frameStyle"
                 @load="onPreviewLoad"
               />
+              <div
+                v-for="guide in pageGuides"
+                :key="guide.page"
+                class="preview-page-break"
+                :style="{ top: `${guide.top * previewScale}px` }"
+              >
+                <span class="preview-page-tag">第 {{ guide.page }} 页从此处开始</span>
+              </div>
             </div>
           </div>
         </aside>
@@ -160,7 +168,7 @@ import {
   type ResumeDocData,
   type ResumeModuleKey,
 } from '@/utils/resumeDoc'
-import { renderDoc } from '@/utils/resumeTemplate'
+import { pageBreakTops, renderDoc } from '@/utils/resumeTemplate'
 
 const route = useRoute()
 const router = useRouter()
@@ -206,6 +214,9 @@ const previewPaneEl = ref<HTMLElement | null>(null)
 const previewScale = ref(0.6)
 // 简历超过一页时 iframe 要按实际内容撑高，否则预览只看得到第一页。
 const previewContentHeight = ref(A4_HEIGHT)
+// 分页线按版式几何算（屏显顶部留白 + 每页实际装得下的流内容高度），不是整页高的倍数；
+// 再吸附到条目起点，只在 iframe 载入时量一次。
+const pageGuides = ref<{ top: number; page: number }[]>([])
 
 const scaleStyle = computed(() => ({
   width: `${A4_WIDTH * previewScale.value}px`,
@@ -217,15 +228,22 @@ const frameStyle = computed(() => ({
   transform: `scale(${previewScale.value})`,
 }))
 
+/** 条目内部允许跨页（只有抬头/部门不许被切），所以分页线就是内容流上的那条线，
+ *  不再往条目起点吸附——以前整条 avoid 时线要跟着被推走的条目挪，现在不用了。 */
 function onPreviewLoad(event: Event) {
   const iframe = event.target as HTMLIFrameElement
   try {
     const inner = iframe.contentDocument
     if (!inner) return
     // 空文档加载瞬间可能量到 0，用一页 A4 兜底。
-    previewContentHeight.value = Math.max(A4_HEIGHT, inner.documentElement.scrollHeight)
+    const height = Math.max(A4_HEIGHT, inner.documentElement.scrollHeight)
+    previewContentHeight.value = height
+    pageGuides.value = pageBreakTops(doc.template, height).map((top, index) => ({
+      top,
+      page: index + 2,
+    }))
   } catch {
-    // srcdoc 同源，理论上不会跨域；读不到就沿用上一次的高度。
+    // srcdoc 同源，理论上不会跨域；读不到就沿用上一次的量测。
   }
 }
 
@@ -324,6 +342,11 @@ function addEntry(kind: EntryModuleKey) {
 }
 
 function exportPdf() {
+  // 双栏是 flex 撑出来的，跨页后左栏底色不延续；分页线是预览量出来的，
+  // 没量过（一直藏着预览）就不提示，不为了提示去同步量一次高度而丢掉开窗手势。
+  if (doc.template === 'sidebar' && pageGuides.value.length) {
+    message.warning('双栏名片已超过一页，翻页后左侧色栏不会延续，建议换经典或简约版式')
+  }
   // 允许导出未保存的当前内容（打印走的是本地文档快照）。
   if (!printSlideDeck(renderDoc(doc))) {
     message.warning('浏览器拦住了新标签页，放行弹窗后再导出')
@@ -498,7 +521,29 @@ onUnmounted(() => {
   justify-content: center;
 }
 .preview-scale {
+  position: relative;
   transform-origin: top center;
+}
+/* 分页线只画在预览上，不进打印文档；pointer-events 关掉，别挡着 iframe 里滚动。 */
+.preview-page-break {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  border-top: 1px dashed #f5a3a3;
+  pointer-events: none;
+}
+.preview-page-tag {
+  position: absolute;
+  top: 3px;
+  right: 0;
+  padding: 0 7px;
+  font-size: 11px;
+  line-height: 17px;
+  color: #b4534f;
+  background: rgba(255, 243, 241, 0.94);
+  border: 1px solid #ffd9d6;
+  border-radius: 9px;
 }
 .preview-frame {
   width: 794px;

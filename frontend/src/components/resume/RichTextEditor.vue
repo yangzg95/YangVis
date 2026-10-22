@@ -355,18 +355,38 @@ defineExpose({ insertHtml, getSelectionText, focusEditor, placeCaretAtEnd })
   outline: none;
   word-break: break-word;
 }
+/* 帮写回来的内容已过消毒器、对齐变成 class 与一层 blockquote，
+   编辑器里要和导出看到同一个效果，否则「居中」在编辑时不生效。 */
+.rte-content :deep(.rb-ta-center) {
+  text-align: center;
+}
+.rte-content :deep(.rb-ta-right) {
+  text-align: right;
+}
+.rte-content :deep(.rb-ta-justify) {
+  text-align: justify;
+}
+/* 块间距与打印版面同一档（见 resumeTemplate 的 BASE_CSS），编辑时看到的分隔就是导出后的
+   分隔；字号这里比打印大 1px 是为了好读，只有间距需要对齐。 */
+.rte-content :deep(blockquote) {
+  margin: 6px 0 7px;
+  padding-left: 20px;
+}
 .rte-content:empty::before {
   content: attr(data-placeholder);
   color: #bfbfbf;
   pointer-events: none;
 }
 .rte-content p {
-  margin: 0 0 4px;
+  margin: 0 0 7px;
 }
 .rte-content ul,
 .rte-content ol {
-  margin: 2px 0 4px;
+  margin: 6px 0 7px;
   padding-left: 22px;
+}
+.rte-content li {
+  margin-bottom: 4px;
 }
 .rte-content a {
   color: #0a7e86;

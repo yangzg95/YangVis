@@ -325,6 +325,29 @@ def test_sanitize_drops_style_class_attributes():
     assert sanitize_html('<p style="position:fixed" class="x">a</p>') == "<p>a</p>"
 
 
+def test_sanitize_maps_text_align_to_controlled_class():
+    assert sanitize_html('<p style="text-align:center">a</p>') == '<p class="rb-ta-center">a</p>'
+    assert sanitize_html("<div style='TEXT-ALIGN: right'>a</div>") == '<div class="rb-ta-right">a</div>'
+    assert sanitize_html('<li align="justify">a</li>') == '<li class="rb-ta-justify">a</li>'
+    # left 是默认值不出 class；行内标签不吃对齐；用户自己的 class 依旧不透传。
+    assert sanitize_html('<p style="text-align:left">a</p>') == "<p>a</p>"
+    assert sanitize_html('<span style="text-align:center">a</span>') == "<span>a</span>"
+    assert sanitize_html('<p style="text-align:center" class="evil">a</p>') == '<p class="rb-ta-center">a</p>'
+    assert sanitize_html('<p style="text-align:expression(alert(1))">a</p>') == "<p>a</p>"
+
+
+def test_sanitize_keeps_one_indent_level_only():
+    assert sanitize_html("<blockquote>a</blockquote>") == "<blockquote>a</blockquote>"
+    assert (
+        sanitize_html("<blockquote><blockquote>a</blockquote></blockquote>")
+        == "<blockquote>a</blockquote>"
+    )
+    assert (
+        sanitize_html("<blockquote style='text-align:center'>a</blockquote>")
+        == '<blockquote class="rb-ta-center">a</blockquote>'
+    )
+
+
 # ---- 四、AI prompt 拼装 -------------------------------------------------------
 
 

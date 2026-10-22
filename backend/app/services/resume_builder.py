@@ -77,12 +77,27 @@ AGENT_BY_ACTION = {
 # ---- 富文本消毒 -------------------------------------------------------------
 
 # 白名单只放开排版所需的最小标签集合：段落/换行/容器、粗斜下划线、两种列表、
-# 链接、无语义 span。style/class 一律不保留——打印版面由我们自己的 CSS 决定，
-# 模型或粘贴内容带进来的样式既不可控也可能藏点击劫持。
-_ALLOWED_TAGS = {"p", "br", "div", "span", "strong", "b", "em", "i", "u", "ul", "ol", "li", "a"}
+# 链接、无语义 span、一层 blockquote 缩进。style/class 一律不透传——打印版面由我们
+# 自己的 CSS 决定，模型或粘贴内容带进来的样式既不可控也可能藏点击劫持。
+# 唯一的例外：块级标签上的 text-align 会被提取成受控 class（见 _align_class）。
+# 前端 utils/resumeTemplate.ts 的 sanitizeRichHtml 是同一套规则，改这里要同步改。
+_ALLOWED_TAGS = {"p", "br", "div", "span", "strong", "b", "em", "i", "u", "ul", "ol", "li", "a", "blockquote"}
 _VOID_TAGS = {"br"}
 _RAW_TEXT_TAGS = {"script", "style", "iframe", "object", "embed"}
 _SAFE_HREF = re.compile(r"^\s*(?:https?|mailto|tel):", re.IGNORECASE)
+_ALIGN_TAGS = {"p", "div", "ul", "ol", "li", "blockquote"}
+_ALIGN_CLASSES = {"center": "rb-ta-center", "right": "rb-ta-right", "justify": "rb-ta-justify"}
+_TEXT_ALIGN_RE = re.compile(r"text-align\s*:\s*([a-z-]+)", re.IGNORECASE)
+
+
+def _align_class(tag: str, attrs) -> str:
+    """块级标签的对齐归一成 class 名；left/未识别返回空串（默认值不出 class）。"""
+    if tag not in _ALIGN_TAGS:
+        return ""
+    attr_map = dict(attrs)
+    matched = _TEXT_ALIGN_RE.search(attr_map.get("style") or "")
+    raw = matched.group(1) if matched else (attr_map.get("align") or "")
+    return _ALIGN_CLASSES.get(raw.strip().lower(), "")
 
 
 class _HtmlSanitizer(HTMLParser):
@@ -117,7 +132,11 @@ class _HtmlSanitizer(HTMLParser):
                 return
             self._parts.append(f'<a href="{html_lib.escape(href, quote=True)}">')
         else:
-            self._parts.append(f"<{tag}>")
+            # 缩进只保留一层：连续按增加缩进会套娃 blockquote，版面就失控了。
+            if tag == "blockquote" and "blockquote" in self._stack:
+                return
+            cls = _align_class(tag, attrs)
+            self._parts.append(f'<{tag} class="{cls}">' if cls else f"<{tag}>")
         self._stack.append(tag)
 
     def handle_startendtag(self, tag: str, attrs) -> None:  # type: ignore[override]

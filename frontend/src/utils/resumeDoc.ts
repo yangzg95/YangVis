@@ -102,7 +102,8 @@ export const STUDY_MODE_OPTIONS = ['全日制', '非全日制']
 
 export const TEMPLATE_OPTIONS: { value: string; label: string; hint: string }[] = [
   { value: 'classic', label: '经典', hint: '通栏抬头 · 单栏排布' },
-  { value: 'sidebar', label: '双栏名片', hint: '左侧名片栏 · 右侧经历' },
+  // 双栏靠 flex 撑，跨页时左栏底色与色条不会延续到第二页，所以文案先把预期钉住。
+  { value: 'sidebar', label: '双栏名片', hint: '左侧名片栏 · 建议控制在一页' },
   { value: 'minimal', label: '简约', hint: '克制用色 · 线条分区' },
 ]
 

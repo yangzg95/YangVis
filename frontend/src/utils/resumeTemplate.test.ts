@@ -3,6 +3,7 @@ import {
   entryIsEmpty,
   isModuleEmpty,
   monthRangeLabel,
+  pageBreakTops,
   plainTextOfHtml,
   renderClassic,
   renderDoc,
@@ -43,6 +44,28 @@ describe('sanitizeRichHtml', () => {
     expect(sanitizeRichHtml('<p>a & b > c</p>')).toBe('<p>a &amp; b &gt; c</p>')
   })
 
+  it('对齐归一成受控 class，与后端 _HtmlSanitizer 同规则', () => {
+    expect(sanitizeRichHtml('<p style="text-align:center">a</p>')).toBe('<p class="rb-ta-center">a</p>')
+    expect(sanitizeRichHtml("<div style='TEXT-ALIGN: right'>a</div>")).toBe('<div class="rb-ta-right">a</div>')
+    expect(sanitizeRichHtml('<li align="justify">a</li>')).toBe('<li class="rb-ta-justify">a</li>')
+    // left 是默认值不出 class；行内标签不吃对齐；用户自己的 class 依旧不透传。
+    expect(sanitizeRichHtml('<p style="text-align:left">a</p>')).toBe('<p>a</p>')
+    expect(sanitizeRichHtml('<span style="text-align:center">a</span>')).toBe('<span>a</span>')
+    expect(sanitizeRichHtml('<p style="text-align:center" class="evil">a</p>')).toBe('<p class="rb-ta-center">a</p>')
+    expect(sanitizeRichHtml('<p style="text-align:expression(alert(1))">a</p>')).toBe('<p>a</p>')
+    expect(sanitizeRichHtml('<p data-align="right">a</p>')).toBe('<p>a</p>')
+  })
+
+  it('缩进只保留一层 blockquote', () => {
+    expect(sanitizeRichHtml('<blockquote>a</blockquote>')).toBe('<blockquote>a</blockquote>')
+    expect(sanitizeRichHtml('<blockquote><blockquote>a</blockquote></blockquote>')).toBe(
+      '<blockquote>a</blockquote>',
+    )
+    expect(sanitizeRichHtml("<blockquote style='text-align:center'>a</blockquote>")).toBe(
+      '<blockquote class="rb-ta-center">a</blockquote>',
+    )
+  })
+
   it('不保留 style/class，非字符串给空串', () => {
     expect(sanitizeRichHtml('<p style="x" class="y">a</p>')).toBe('<p>a</p>')
     expect(sanitizeRichHtml(undefined)).toBe('')
@@ -61,8 +84,13 @@ describe('monthRangeLabel', () => {
   })
   it('普通区间与缺省', () => {
     expect(monthRangeLabel('2019-03', '2021-01', false)).toBe('2019-03 - 2021-01')
-    expect(monthRangeLabel('', '2021-01', false)).toBe('? - 2021-01')
+    expect(monthRangeLabel('2019-03', '', false)).toBe('2019-03')
+    expect(monthRangeLabel('', '2021-01', false)).toBe('2021-01')
     expect(monthRangeLabel('', '', false)).toBe('')
+  })
+  it('缺开始时间时只丢那一端，不打问号占位', () => {
+    expect(monthRangeLabel('', '', true)).toBe('至今')
+    expect(monthRangeLabel('  ', '  ', true)).toBe('至今')
   })
 })
 
@@ -119,7 +147,7 @@ describe('renderClassic', () => {
     expect(html).toContain('13800000000')
   })
 
-  it('基本信息与联系方式分两行、都带标签，裸值不再混排', () => {
+  it('联系方式带「电话/邮箱」字样并排在上面，基本信息继续裸值', () => {
     const doc = createEmptyDoc()
     doc.profile.name = '张三'
     doc.profile.phone = '13800000000'
@@ -128,23 +156,36 @@ describe('renderClassic', () => {
     doc.profile.birthday = '1995-06'
     doc.profile.city = '上海'
     const html = renderClassic(doc)
-    expect(html).toContain('rb-info')
-    expect(html).toContain('rb-contacts')
-    for (const label of ['电话', '邮箱', '性别', '出生年月', '城市']) {
-      expect(html).toContain(label)
+    const contacts = html.match(/<div class="rb-contacts">[\s\S]*?<\/div>/)?.[0] ?? ''
+    const info = html.match(/<div class="rb-info">[\s\S]*?<\/div>/)?.[0] ?? ''
+    // 13800000000 裸放着没人知道是电话，这一行必须有 label。
+    expect(contacts).toContain('13800000000')
+    expect(contacts).toContain('a@b.com')
+    expect(contacts).toContain('<i class="rb-c-label">电话</i>')
+    expect(contacts).toContain('<i class="rb-c-label">邮箱</i>')
+    // 基本信息靠形态就能认出来，加 label 只会把右列撑宽、姓名压窄。
+    expect(info).toContain('男</span>')
+    expect(info).toContain('1995-06</span>')
+    for (const label of ['性别', '出生年月', '城市']) {
+      expect(info).not.toContain(label)
     }
-    expect(html).toContain('13800000000')
-    expect(html).toContain('a@b.com')
+    // 两行都用「·」断项，否则「男1995-06上海」连成一坨。
+    expect(info).toContain('class="rb-sep"')
+    expect(contacts).toContain('class="rb-sep"')
+    // 联系方式是招聘方要抄走的那行，排在基本信息上面。
+    expect(html.indexOf('<div class="rb-contacts">')).toBeLessThan(html.indexOf('<div class="rb-info">'))
   })
 
-  it('个人介绍渲染在抬头；个人网站补协议成链接且挡掉属性注入', () => {
+  it('个人介绍独占一行压在两列抬头下面；个人网站补协议成链接且挡掉属性注入', () => {
     const doc = createEmptyDoc()
     doc.profile.name = '张三'
     doc.profile.intro = '8 年 Java 后端'
     doc.profile.website = 'me.dev'
     let html = renderClassic(doc)
     expect(html).toContain('class="rb-intro">8 年 Java 后端</div>')
-    expect(html).toContain('个人网站')
+    // 姓名/意向在左列，联系信息在右列，简介在 .rb-header-top 之外。
+    expect(html).toMatch(/<div class="rb-header-id"><div class="rb-name">张三<\/div>.*?<\/div><div class="rb-header-meta">/)
+    expect(html).toMatch(/<\/div><div class="rb-intro">/)
     expect(html).toContain('href="https://me.dev"')
 
     // 引号逃逸在属性里被转义。
@@ -213,6 +254,46 @@ describe('renderClassic', () => {
       description_html: '',
     })
     expect(renderClassic(doc)).not.toContain('教育经历')
+  })
+
+  it('教育副行带出学院与就读形式', () => {
+    const doc = createEmptyDoc()
+    doc.educations.push({
+      eid: 'e1',
+      school: '辽宁科技学院',
+      major: '软件工程',
+      college: '信息学院',
+      degree: '本科',
+      study_mode: '全日制',
+      start: '2014-09',
+      end: '2018-06',
+      current: false,
+      description_html: '',
+    })
+    const html = renderClassic(doc)
+    expect(html).toContain('信息学院 · 全日制')
+
+    const noCollege = { ...doc.educations[0], college: '' }
+    doc.educations.splice(0, 1, noCollege)
+    expect(renderClassic(doc)).toContain('全日制')
+  })
+
+  it('缺开始时间的至今条目不打问号', () => {
+    const doc = createEmptyDoc()
+    doc.companies.push({
+      cid: 'c1',
+      company: 'A 公司',
+      position: '工程师',
+      department: '',
+      start: '',
+      end: '',
+      current: true,
+      description_html: '',
+    })
+    const html = renderClassic(doc)
+    expect(html).toContain('至今')
+    expect(html).not.toContain('? 至今')
+    expect(html).not.toContain('? -')
   })
 })
 
@@ -344,6 +425,126 @@ describe('renderDoc 版式分派与配色注入', () => {
     expect(html).toContain('rb-name-bar')
     expect(html).toContain('--accent:#9b3a4b')
     expect(renderClassic(createEmptyDoc())).not.toContain('rb-name-bar')
+  })
+})
+
+describe('打印样式契约', () => {
+  const css = renderClassic(createEmptyDoc())
+
+  it('强制打印背景色，否则双栏名片侧栏变白底白字', () => {
+    expect(css).toContain('print-color-adjust: exact')
+    expect(css).toContain('-webkit-print-color-adjust: exact')
+  })
+
+  it('断页单位是抬头不是整条，否则长条目跳页留半页空白', () => {
+    expect(css).toContain('.rb-entry-head,.rb-dept {')
+    expect(css).toContain('break-after: avoid')
+    expect(css).not.toContain('.rb-entry { break-inside: avoid')
+    expect(css).not.toContain('.rb-section, .rb-entry')
+    expect(css).toContain('.rb-section h2 { break-after: avoid')
+  })
+
+  it('长英文串有溢出策略，标题列可压缩', () => {
+    expect(css).toContain('.rb-info,.rb-contacts { overflow-wrap: anywhere')
+    expect(css).toContain('.rb-entry-title { font-size: 13.5px; font-weight: 600; min-width: 0')
+    expect(css).toContain('orphans: 2; widows: 2')
+  })
+
+  it('消毒器放行的对齐 class 与缩进在版面里有对应样式', () => {
+    expect(css).toContain('.rb-ta-center { text-align: center; }')
+    expect(css).toContain('.rb-ta-right { text-align: right; }')
+    expect(css).toContain('.rb-ta-justify { text-align: justify; }')
+    expect(css).toContain('.rb-desc blockquote { margin: 6px 0 7px; padding-left: 20px; }')
+  })
+
+  it('竖向间距是台阶式的：段 < 条目 < 节，差不到 1mm 就等于没间距', () => {
+    // 行框 12.5px * 1.7 = 21.25px，段间距只有比它多一档才看得出换段。
+    expect(css).toContain('.rb-desc { margin-top: 7px; font-size: 12.5px; line-height: 1.7')
+    expect(css).toContain('.rb-desc p { margin: 0 0 7px; }')
+    expect(css).toContain('.rb-desc li { margin-bottom: 4px; }')
+    expect(css).toContain('.rb-entry { margin-bottom: 14px; }')
+    expect(css).toContain('.rb-section { margin-top: 24px; }')
+    const side = renderDoc({ ...createEmptyDoc(), template: 'sidebar' })
+    expect(side).toContain('.rb-main .rb-section { margin-top: 22px; }')
+    expect(side).toContain('.rb-entry { margin-bottom: 14px; }')
+    const minimal = renderDoc({ ...createEmptyDoc(), template: 'minimal' })
+    expect(minimal).toContain('.rb-section { margin-top: 26px; }')
+    expect(minimal).toContain('.rb-entry { margin-bottom: 15px; }')
+  })
+
+  it('头部两列不换行：意向再长也只压列宽，联系信息不许掉到姓名下面独占一行', () => {
+    expect(css).toContain('.rb-header-top { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px 24px; }')
+    expect(css).toContain('.rb-header-id,.rb-header-meta { min-width: 0; }')
+    expect(css).not.toContain('.rb-header-top { display: flex; flex-wrap: wrap')
+    // 头部 label 是行内小灰字，不是斜体、也不是小标题。
+    expect(css).toContain('.rb-header-meta .rb-c-label { margin-right: 4px; font-style: normal; color: #8a8f99; }')
+    // 姓名要比正文大一档才压得住抬头，之前 28px 被两行带标签的小灰字淹掉。
+    expect(css).toContain('.rb-name { font-size: 34px')
+    const minimal = renderDoc({ ...createEmptyDoc(), template: 'minimal' })
+    expect(minimal).toContain('.rb-name { font-size: 32px')
+  })
+
+  it('屏显 padding 与 @page 边距同数，预览分页才不漂', () => {
+    expect(css).toContain('@page { size: A4; margin: 15mm 14mm; }')
+    expect(css).toContain('.sheet { padding: 15mm 14mm; }')
+    const minimal = renderDoc({ ...createEmptyDoc(), template: 'minimal' })
+    expect(minimal).toContain('.sheet { padding: 18mm 16mm; }')
+    expect(minimal).toContain('@page { size: A4; margin: 18mm 16mm; }')
+  })
+
+  it('节标题用上 --accent-soft，配色注入不再是死变量', () => {
+    expect(css).toContain('background: var(--accent-soft)')
+    expect(css).toContain('border-left: 3px solid var(--accent)')
+    const side = renderDoc({ ...createEmptyDoc(), template: 'sidebar' })
+    expect(side).toContain('.rb-main .rb-section h2 { margin: 0 0 10px; padding: 3px 8px; background: var(--accent-soft)')
+  })
+})
+
+// 每页能装的流内容高度是 Edge 打印引擎逐毫米实测出来的（267/261/297mm 恰好还是一页，
+// 再多 1mm 就翻页），不是页高 297mm；顶部还要加屏显 .sheet 的留白。
+describe('pageBreakTops 分页线几何', () => {
+  const MM = 96 / 25.4
+
+  it('一页放得下时一条线都不画', () => {
+    expect(pageBreakTops('classic', 1123)).toEqual([])
+    expect(pageBreakTops('minimal', 1123)).toEqual([])
+    expect(pageBreakTops('sidebar', 1123)).toEqual([])
+  })
+
+  it('刚溢出 1mm 就画线，位置是顶部留白 + 一页内容高', () => {
+    const tops = pageBreakTops('classic', 298 * MM)
+    expect(tops).toHaveLength(1)
+    expect(tops[0]).toBeCloseTo(282 * MM, 1)
+    // 老写法按整页高 1122.5px 画，会低 56px（正好差一个上边距）。
+    expect(Math.abs(tops[0] - 297 * MM)).toBeGreaterThan(40)
+  })
+
+  it('各版式按自己的边距推页：线间距等于每页内容高', () => {
+    const classic = pageBreakTops('classic', 820 * MM)
+    expect(classic).toHaveLength(2)
+    expect(classic[0]).toBeCloseTo(282 * MM, 1)
+    expect(classic[1] - classic[0]).toBeCloseTo(267 * MM, 1)
+    const minimal = pageBreakTops('minimal', 820 * MM)
+    expect(minimal).toHaveLength(3)
+    expect(minimal[0]).toBeCloseTo(279 * MM, 1)
+    expect(minimal[1] - minimal[0]).toBeCloseTo(261 * MM, 1)
+    const side = pageBreakTops('sidebar', 820 * MM)
+    expect(side[0]).toBeCloseTo(315 * MM, 1)
+    expect(side[1] - side[0]).toBeCloseTo(297 * MM, 1)
+  })
+
+  it('几何表与 CSS 边距同源，改了 padding 必须同步 stride', () => {
+    expect(renderClassic(createEmptyDoc())).toContain('@page { size: A4; margin: 15mm 14mm; }')
+    expect(renderDoc({ ...createEmptyDoc(), template: 'minimal' })).toContain(
+      '@page { size: A4; margin: 18mm 16mm; }',
+    )
+    const side = renderDoc({ ...createEmptyDoc(), template: 'sidebar' })
+    expect(side).toContain('@page { size: A4; margin: 0; }')
+    expect(side).toContain('.rb-main { flex: 1; padding: 18mm 11mm 14mm 10mm; }')
+  })
+
+  it('未知版式回退经典', () => {
+    expect(pageBreakTops('weird', 820)).toEqual(pageBreakTops('classic', 820))
   })
 })
 
