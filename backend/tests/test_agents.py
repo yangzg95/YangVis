@@ -145,6 +145,9 @@ def test_builtin_slugs_are_the_ones_the_module_documents():
         "portfolio-planner",
         "salary-negotiator",
         "interview-answerer",
+        "resume-writer",
+        "resume-polisher",
+        "resume-checker",
         "slide-architect",
     }
 
@@ -164,6 +167,9 @@ def test_feature_owned_personas_stay_out_of_the_picker():
         "portfolio-planner",
         "salary-negotiator",
         "interview-answerer",
+        "resume-writer",
+        "resume-polisher",
+        "resume-checker",
         "slide-architect",
     }
     # 运维工具面的开关只有对话里那个运维助手需要：server-ops / db-ops 是功能人设，

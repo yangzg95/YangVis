@@ -615,7 +615,7 @@ BUILTIN_AGENTS: tuple[BuiltinAgent, ...] = (
         use_ops=False,
         chat_visible=False,
         temperature=30,
-        sort_order=170,
+        sort_order=200,
     ),
 )
 
