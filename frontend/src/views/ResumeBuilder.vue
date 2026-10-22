@@ -32,6 +32,9 @@
         />
       </span>
       <span class="head-spacer" />
+      <a-button size="small" :disabled="!chatReady" @click="openChat">
+        <MessageOutlined /> AI 对话
+      </a-button>
       <a-button size="small" @click="showPreview = !showPreview">
         <EyeOutlined /> {{ showPreview ? '隐藏预览' : '预览' }}
       </a-button>
@@ -148,6 +151,7 @@ import {
   ArrowLeftOutlined,
   EyeOutlined,
   FilePdfOutlined,
+  MessageOutlined,
   SaveOutlined,
 } from '@ant-design/icons-vue'
 import ModuleNav from '@/components/resume/ModuleNav.vue'
@@ -312,8 +316,9 @@ watch(showPreview, (visible) => {
   }
 })
 
-async function onSave() {
-  if (saving.value) return
+// 返回是否保存成功：AI 对话入口要在有未存改动时先落库再打开。
+async function onSave(): Promise<boolean> {
+  if (saving.value) return false
   saving.value = true
   try {
     const detail = await resumeBuilderApi.update(docId, {
@@ -327,8 +332,10 @@ async function onSave() {
     await nextTick()
     suppressDirty = false
     message.success('已保存')
+    return true
   } catch {
     message.error('保存失败，请重试')
+    return false
   } finally {
     saving.value = false
   }
@@ -351,6 +358,18 @@ function exportPdf() {
   if (!printSlideDeck(renderDoc(doc))) {
     message.warning('浏览器拦住了新标签页，放行弹窗后再导出')
   }
+}
+
+async function openChat() {
+  if (!chatReady.value) return
+  // 对话页读的是服务端已保存版本：有未落库改动先保存，失败就不跳转，
+  // 免得模型分析的是旧简历。
+  if (dirty.value) {
+    const ok = await onSave()
+    if (!ok) return
+  }
+  const href = router.resolve({ name: 'Chat', query: { 'resume-doc': docId } }).href
+  window.open(href, '_blank', 'noopener')
 }
 
 async function goBack() {

@@ -44,6 +44,14 @@
             <template v-else-if="column.key === 'actions'">
               <a-space :size="4" wrap>
                 <a-button size="small" type="primary" @click="openDoc(record)">编辑</a-button>
+                <a-button
+                  size="small"
+                  type="link"
+                  :disabled="!chatReady"
+                  @click="openDocChat(record)"
+                >
+                  AI 对话
+                </a-button>
                 <a-button size="small" type="link" @click="openRenameDoc(record)">重命名</a-button>
                 <a-popconfirm
                   title="确认删除这份在线简历？删除后不可恢复。"
@@ -719,7 +727,7 @@ const docRename = reactive({ open: false, loading: false, id: 0, title: '' })
 const docColumns = [
   { key: 'title', title: '简历', dataIndex: 'title', ellipsis: true },
   { key: 'updated_at', title: '更新时间', dataIndex: 'updated_at', width: 220 },
-  { key: 'actions', title: '操作', width: 220 },
+  { key: 'actions', title: '操作', width: 300 },
 ]
 
 async function loadDocs(force = false) {
@@ -752,6 +760,14 @@ async function createDoc() {
 function openDoc(record: ResumeDocItem) {
   // 工作台 bare 整页，新开标签页避开 keep-alive 多实例（同幻灯片工作台）。
   const href = router.resolve({ name: 'ResumeBuilder', params: { id: record.id } }).href
+  window.open(href, '_blank', 'noopener')
+}
+
+function openDocChat(record: ResumeDocItem) {
+  if (!chatReady.value) return
+  // 对话页读 query 里的引用自行拉取简历全文；同样新开标签页（整页路由 +
+  // keep-alive 多实例考量，与编辑工作台一致）。
+  const href = router.resolve({ name: 'Chat', query: { 'resume-doc': record.id } }).href
   window.open(href, '_blank', 'noopener')
 }
 

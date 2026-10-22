@@ -490,6 +490,7 @@ import {
   chatApi,
   knowledgeApi,
   mcpApi,
+  resumeBuilderApi,
   settingsApi,
   toolsApi,
   type Agent,
@@ -505,6 +506,7 @@ import {
   type StreamHandlers,
   type TimelineEntry,
 } from '@/api'
+import { resumeDocHasContent, resumeDocToMarkdown } from '@/utils/resumeDocMarkdown'
 
 const router = useRouter()
 const route = useRoute()
@@ -1320,63 +1322,52 @@ async function removeConversation(id: number) {
   await loadConversations()
 }
 
-// ---- 基于报告发起对话 ---------------------------------------------------------
-// 报告页（ReportView）「发起对话」新开标签页进 /chat?report=<kind>/<id>。
-// query 只传引用不传全文：报告全文由这里重新拉取（noopener 下拿不到 opener 的
-// sessionStorage，URL 也塞不下几千字），数据以后端为准。
+// ---- 带上下文发起对话（报告讨论 / 在线简历咨询）-------------------------------
+// 报告页「发起对话」进 /chat?report=<kind>/<id>，在线简历列表「AI 对话」进
+// /chat?resume-doc=<id>，都是新开标签页。query 只传引用不传全文：全文由这里
+// 重新拉取（noopener 下拿不到 opener 的 sessionStorage，URL 也塞不下几千字），
+// 数据以后端为准。
 
 const REPORT_QUERY_RE = /^(resume|comparison|toolkit)\/(\d+)$/
+const RESUME_DOC_QUERY_RE = /^\d+$/
 /** 首条消息上限与后端 CompletionRequest.message 的 20000 对齐。 */
-const REPORT_MESSAGE_LIMIT = 20000
-/** 报告讨论的默认智能体（内置，backend/services/agents.py 里 seed）。
+const CONTEXT_MESSAGE_LIMIT = 20000
+/** 上下文讨论的默认智能体（内置「求职顾问」，backend/services/agents.py 里 seed）。
  *  找不到（后端没重启 seed、或被用户停用）就退回当前选中的智能体。 */
-const REPORT_DISCUSS_AGENT_SLUG = 'career-advisor'
+const CONTEXT_DEFAULT_AGENT_SLUG = 'career-advisor'
 
-async function handleReportDiscuss() {
-  const raw = route.query.report
-  const match = REPORT_QUERY_RE.exec(typeof raw === 'string' ? raw : '')
-  // 垃圾参数静默忽略——与路由 \d+ 约束「不进页面」同一哲学。
-  if (!match) return
+/**
+ * 上下文会话的「种子消息」登记簿，按会话 id 记。
+ * 在这类会话里中途换智能体时前端会另开一条新会话——换人不能丢上下文（否则新
+ * 智能体拿到的是空对话），所以重开时拿同一份种子消息再播一遍种。只活在当前
+ * 页内：以后从侧栏重新打开老会话，就是普通会话的语义。
+ */
+const contextSeeds = new Map<number, { firstMessage: string; convTitle: string }>()
 
-  // 先清 query 再干活：即使后面任何一步失败，刷新这个标签页都不会重发一遍。
-  void router.replace({ query: {} })
+function truncateContextMessage(message: string): string {
+  // 防御后端哪天再收紧上限：宁可截断并明说，也不让 AI 悄悄基于残缺内容作答。
+  return message.length > CONTEXT_MESSAGE_LIMIT
+    ? `${message.slice(0, CONTEXT_MESSAGE_LIMIT)}\n\n（上下文内容过长，已按长度上限截断）`
+    : message
+}
 
-  let title: string
-  let markdown: string
-  try {
-    ;({ title, markdown } = await loadReportForChat(match[1], Number(match[2])))
-  } catch {
-    // 拦截器已经弹过错误提示；query 已清，页面停在普通空白会话态即可。
-    return
-  }
-
-  let firstMessage = `以下是报告《${title}》的完整内容，请先阅读，稍后我会基于它向你提问。\n\n---\n\n${markdown}`
-  if (firstMessage.length > REPORT_MESSAGE_LIMIT) {
-    // 防御后端哪天再收紧上限：宁可截断并明说，也不让 AI 悄悄基于残缺报告作答。
-    firstMessage = `${firstMessage.slice(0, REPORT_MESSAGE_LIMIT)}\n\n（报告内容过长，已按长度上限截断）`
-  }
-
-  // 报告讨论默认用「求职顾问」：要在 canSend 判断之前切换，gate 检查
-  // （比如知识库项目）针对的才是这场对话真正要用的智能体。这里是程序改写
-  // 选择器，不走下拉框的 change，onAgentChange 的 startNew 保护不会误触发。
-  const advisor = agents.value.find(
-    (a) => a.slug === REPORT_DISCUSS_AGENT_SLUG && a.chat_visible,
-  )
-  if (advisor) activeAgentId.value = advisor.id
+/**
+ * 用当前选中的智能体/模型建一条带种子消息的会话并立即发送。深链首答与
+ * 「换智能体重新分析」两条路共用：后者直接按新选择再播一次种。
+ * gate 未过或建会话失败时不建孤儿会话，内容放进输入框不丢。
+ */
+async function seedContextConversation(firstMessageIn: string, convTitle: string) {
+  const firstMessage = truncateContextMessage(firstMessageIn)
 
   if (!canSend.value) {
     // 没配模型这类 gate 场景：不建孤儿空会话，内容放输入框，用户按 gate 提示
     // 配好后点发送即可，内容不丢。
     draft.value = firstMessage
-    toast.warning('报告内容已放入输入框，按上方提示完成配置后即可发送')
+    toast.warning('内容已放入输入框，按上方提示完成配置后即可发送')
     return
   }
 
   startNew()
-  // 显式建会话而不是让首条消息触发自动建：自动建的标题是从首问截 40 字
-  // （derive_title），首问是报告全文时标题会是一截报告正文。
-  const rawTitle = `报告讨论 · ${title}`
-  const convTitle = rawTitle.length <= 50 ? rawTitle : `${rawTitle.slice(0, 50)}…`
   let conv
   try {
     conv = await chatApi.createConversation({
@@ -1402,8 +1393,81 @@ async function handleReportDiscuss() {
   // 重置 agent/模型选择——而我们正是按当前选择建的会话，重置是绕回原点的空转。
   conversations.value.unshift(conv)
   activeId.value = conv.id
+  contextSeeds.set(conv.id, { firstMessage, convTitle })
   draft.value = firstMessage
   send()
+}
+
+/** 深链入口：默认选「求职顾问」、起会话标题，再交给共用的播种流程。 */
+async function launchContextConversation(options: {
+  title: string
+  firstMessage: string
+  convTitlePrefix: string
+}) {
+  // 默认切到「求职顾问」：要在 canSend 判断之前切换，gate 检查（比如知识库
+  // 项目）针对的才是这场对话真正要用的智能体。这里是程序改写选择器，不走
+  // 下拉框的 change，onAgentChange 的重开保护不会被它误触发。
+  const advisor = agents.value.find(
+    (a) => a.slug === CONTEXT_DEFAULT_AGENT_SLUG && a.chat_visible,
+  )
+  if (advisor) activeAgentId.value = advisor.id
+
+  // 显式建会话而不是让首条消息触发自动建：自动建的标题是从首问截 40 字
+  // （derive_title），首问是长文时标题会是一截正文。
+  const rawTitle = `${options.convTitlePrefix} · ${options.title}`
+  const convTitle = rawTitle.length <= 50 ? rawTitle : `${rawTitle.slice(0, 50)}…`
+  await seedContextConversation(options.firstMessage, convTitle)
+}
+
+async function handleReportDiscuss() {
+  const raw = route.query.report
+  const match = REPORT_QUERY_RE.exec(typeof raw === 'string' ? raw : '')
+  // 垃圾参数静默忽略——与路由 \d+ 约束「不进页面」同一哲学。
+  if (!match) return
+
+  // 先清 query 再干活：即使后面任何一步失败，刷新这个标签页都不会重发一遍。
+  void router.replace({ query: {} })
+
+  let title: string
+  let markdown: string
+  try {
+    ;({ title, markdown } = await loadReportForChat(match[1], Number(match[2])))
+  } catch {
+    // 拦截器已经弹过错误提示；query 已清，页面停在普通空白会话态即可。
+    return
+  }
+
+  await launchContextConversation({
+    title,
+    convTitlePrefix: '报告讨论',
+    firstMessage: `以下是报告《${title}》的完整内容，请先阅读，稍后我会基于它向你提问。\n\n---\n\n${markdown}`,
+  })
+}
+
+async function handleResumeDocChat() {
+  const raw = route.query['resume-doc']
+  if (typeof raw !== 'string' || !RESUME_DOC_QUERY_RE.test(raw)) return
+  void router.replace({ query: {} })
+
+  let detail
+  try {
+    detail = await resumeBuilderApi.detail(Number(raw))
+  } catch {
+    // 简历不存在/无权访问时拦截器已弹错；页面停在普通空白会话态。
+    return
+  }
+
+  if (!resumeDocHasContent(detail.doc)) {
+    toast.warning('这份在线简历还是空的，先在简历工作台填写一些内容再发起对话')
+    return
+  }
+
+  const markdown = resumeDocToMarkdown(detail.doc)
+  await launchContextConversation({
+    title: detail.title,
+    convTitlePrefix: '简历咨询',
+    firstMessage: `以下是我的在线简历《${detail.title}》的完整内容，请先通读，稍后我会围绕它向你咨询，或请你分析并给出建议。\n\n---\n\n${markdown}`,
+  })
 }
 
 // ---- 深链打开指定会话 -------------------------------------------------------
@@ -1677,12 +1741,23 @@ async function saveDiagram(msg: Bubble, segIndex: number, newSource: string) {
   toast.success('已保存，后续对话将基于你修改后的图')
 }
 
-// 聊到一半换智能体，会让两个人设的发言混在同一段历史里，所以开一条新会话。
-// 挂在下拉框的 change 上而不是 watch(activeAgentId)：selectConversation 恢复
-// 会话自带的智能体时也写这个 ref，watch 会把那次写入当成用户换人设，
-// 刚拉到的消息立刻被清空——表现为「要点两次才显示」。
+// 聊到一半换智能体要开一条新会话（上下文会话则带种子重开，见函数体），不能让
+// 两个人设的发言混在同一段历史里。挂在下拉框的 change 上而不是
+// watch(activeAgentId)：selectConversation 恢复会话自带的智能体时也写这个 ref，
+// watch 会把那次写入当成用户换人设，刚拉到的消息立刻被清空——「要点两次才显示」。
 function onAgentChange() {
-  if (!streaming.value && messages.value.length) startNew()
+  if (streaming.value || !messages.value.length) return
+  // 上下文会话（简历咨询/报告讨论）换智能体 = 让新人设基于同一份简历/报告
+  // 重新分析：另开一条、把种子消息再播一遍，而不是开出没有上下文的空会话。
+  // 标题追加智能体名，侧栏里同一简历的多条会话才分得清。普通会话照旧开空白
+  // 新会话——两个人设的发言不该混在同一段历史里。
+  const seed = activeId.value != null ? contextSeeds.get(activeId.value) : undefined
+  if (seed) {
+    const suffix = activeAgent.value ? `（${activeAgent.value.name}）` : ''
+    void seedContextConversation(seed.firstMessage, `${seed.convTitle}${suffix}`)
+  } else {
+    startNew()
+  }
 }
 
 onMounted(async () => {
@@ -1698,9 +1773,11 @@ onMounted(async () => {
   } finally {
     booting.value = false
   }
-  // 报告页「发起对话」带着 ?report=kind/id 进这里：能不能直接发送取决于
-  // 模型/智能体/项目是否就绪，所以要等上面全部加载完再处理。
+  // 报告页「发起对话」带着 ?report=kind/id、在线简历列表「AI 对话」带着
+  // ?resume-doc=<id> 进这里：能不能直接发送取决于模型/智能体/项目是否就绪，
+  // 所以要等上面全部加载完再处理。
   await handleReportDiscuss()
+  await handleResumeDocChat()
   await handleConversationDeepLink()
 })
 
