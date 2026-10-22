@@ -149,9 +149,41 @@ def test_extract_usage_and_fallback_sum():
     apply_usage(record, extract_usage({"usage": {"prompt_tokens": 3, "completion_tokens": 4}}))
     # 部分厂商只给分项不给总数，这里必须自己加上。
     assert (record.prompt_tokens, record.completion_tokens, record.total_tokens) == (3, 4, 7)
+    # 上游没报缓存：留 None，不能落成 0（0 的含义是「支持缓存但这次没命中」）。
+    assert record.cached_tokens is None
 
     apply_usage(record, None)
     assert record.total_tokens == 7
+
+
+def test_extract_usage_reads_cached_tokens():
+    # OpenAI / 通义的写法：嵌在 prompt_tokens_details 里。
+    usage = extract_usage(
+        {
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 20,
+                "total_tokens": 1020,
+                "prompt_tokens_details": {"cached_tokens": 800},
+            }
+        }
+    )
+    record = CallRecord(request_id="r1", endpoint="chat/completions", key=None)
+    apply_usage(record, usage)
+    assert record.cached_tokens == 800
+
+    # DeepSeek 的写法：顶层 prompt_cache_hit_tokens。
+    record = CallRecord(request_id="r1", endpoint="chat/completions", key=None)
+    apply_usage(
+        record,
+        extract_usage({"usage": {"prompt_tokens": 100, "prompt_cache_hit_tokens": 64}}),
+    )
+    assert record.cached_tokens == 64
+
+    # 给了非数字（字符串）按没报处理，否则会拿脏值算出命中率。
+    assert extract_usage({"usage": {"prompt_tokens_details": {"cached_tokens": "800"}}})[
+        "cached_tokens"
+    ] is None
 
 
 def test_failover_status_excludes_client_errors():
@@ -171,14 +203,20 @@ def test_stream_accumulator_handles_split_chunks():
         b'data: {"choices":[{"delta":{"con',
         b'tent":"\xe4\xbd\xa0"}}]}\n\ndata: {"choices":[{"delta":{"content":"\xe5\xa5\xbd"}}',
         b']}\n',
-        b'data: {"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n',
+        b'data: {"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7,'
+        b'"prompt_tokens_details":{"cached_tokens":3}}}\n\n',
         b"data: [DONE]\n\n",
     ]
     for chunk in chunks:
         accumulator.feed(chunk)
 
     assert accumulator.text == "你好"
-    assert accumulator.usage == {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+    assert accumulator.usage == {
+        "prompt_tokens": 5,
+        "completion_tokens": 2,
+        "total_tokens": 7,
+        "cached_tokens": 3,
+    }
 
 
 def test_stream_accumulator_ignores_noise():
@@ -343,8 +381,8 @@ def test_logs_filters_stats_and_purge(db):
         return row
 
     log(request_id="a", model="gpt-4o", channel_id=1, channel_name="primary", success=True,
-        status_code=200, prompt_tokens=10, completion_tokens=5, total_tokens=15, latency_ms=800,
-        request_body=json.dumps({"model": "gpt-4o"}), response_body="回答")
+        status_code=200, prompt_tokens=10, completion_tokens=5, total_tokens=15, cached_tokens=4,
+        latency_ms=800, request_body=json.dumps({"model": "gpt-4o"}), response_body="回答")
     log(request_id="b", model="gpt-4o", channel_id=2, channel_name="backup", success=False,
         status_code=502, latency_ms=120, error="上游不可达")
     log(request_id="c", model="deepseek-chat", channel_id=1, channel_name="primary", success=True,
@@ -355,6 +393,8 @@ def test_logs_filters_stats_and_purge(db):
     # 列表按 id 倒序，最新的一条在最前面；大字段不在列表里。
     assert [item.request_id for item in items] == ["c", "b", "a"]
     assert not hasattr(items[0], "request_body")
+    # 缓存命中数要出现在列表接口的每一行里，前端据此算命中率；上游没报的是 null 而不是 0。
+    assert [item.cached_tokens for item in items] == [None, None, 4]
 
     _, total = service.list_logs(success=False)
     assert total == 1

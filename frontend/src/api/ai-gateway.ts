@@ -118,6 +118,8 @@ export interface AiCallLogItem {
   prompt_tokens: number
   completion_tokens: number
   total_tokens: number
+  /** 命中缓存的 prompt token；null 表示上游没报缓存。 */
+  cached_tokens: number | null
   latency_ms: number
   first_token_ms: number | null
   client_ip: string | null

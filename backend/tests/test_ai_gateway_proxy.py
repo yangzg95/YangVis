@@ -104,7 +104,12 @@ def _ok_json(model: str, content: str = "上游回答") -> httpx.Response:
                     "finish_reason": "stop",
                 }
             ],
-            "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 18,
+                "prompt_tokens_details": {"cached_tokens": 4},
+            },
         },
     )
 
@@ -137,6 +142,8 @@ def test_chat_completion_is_forwarded_and_logged(env):
         assert log.status_code == 200
         assert log.channel_name == "primary"
         assert (log.prompt_tokens, log.completion_tokens, log.total_tokens) == (11, 7, 18)
+        # 上游 usage.prompt_tokens_details.cached_tokens 要落到日志里，前端据此算命中率。
+        assert log.cached_tokens == 4
         assert log.request_body and "你好" in log.request_body
         assert log.response_body == "上游回答"
         assert log.stream is False
@@ -224,7 +231,12 @@ def test_streaming_is_relayed_and_audited(env):
                 json.dumps(
                     {
                         "choices": [],
-                        "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+                        "usage": {
+                            "prompt_tokens": 5,
+                            "completion_tokens": 2,
+                            "total_tokens": 7,
+                            "prompt_tokens_details": {"cached_tokens": 5},
+                        },
                     }
                 ),
             ),
@@ -251,6 +263,7 @@ def test_streaming_is_relayed_and_audited(env):
         assert log.success is True
         assert log.response_body == "流式回答"
         assert log.total_tokens == 7
+        assert log.cached_tokens == 5
         assert log.first_token_ms is not None
 
 

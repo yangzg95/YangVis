@@ -108,6 +108,8 @@ class CallRecord:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    # 上游报的命中缓存的 prompt token 数；None 表示上游根本没报。
+    cached_tokens: Optional[int] = None
     latency_ms: int = 0
     first_token_ms: Optional[int] = None
     request_body: Optional[str] = None
@@ -149,6 +151,7 @@ class CallRecord:
             prompt_tokens=self.prompt_tokens,
             completion_tokens=self.completion_tokens,
             total_tokens=self.total_tokens,
+            cached_tokens=self.cached_tokens,
             latency_ms=self.latency_ms,
             first_token_ms=self.first_token_ms,
             client_ip=self.client_ip,
@@ -223,8 +226,30 @@ def extract_chat_content(payload: Any) -> str:
     return ""
 
 
-def extract_usage(payload: Any) -> Optional[Dict[str, int]]:
-    """取出 usage 三元组；上游没给就返回 None。"""
+# 各家 OpenAI 兼容上游报缓存命中的字段名不统一：OpenAI / 通义放在
+# prompt_tokens_details.cached_tokens，DeepSeek 直接给顶层 prompt_cache_hit_tokens。
+# 按写法依次找，找到第一个数字就用。
+_CACHED_TOKEN_PATHS = (
+    ("prompt_tokens_details", "cached_tokens"),
+    ("cached_tokens",),
+    ("prompt_cache_hit_tokens",),
+)
+
+
+def _cached_prompt_tokens(usage: Dict[str, Any]) -> Optional[int]:
+    for path in _CACHED_TOKEN_PATHS:
+        node: Any = usage
+        for key in path:
+            node = node.get(key) if isinstance(node, dict) else None
+            if node is None:
+                break
+        if isinstance(node, int) and not isinstance(node, bool):
+            return node
+    return None
+
+
+def extract_usage(payload: Any) -> Optional[Dict[str, Any]]:
+    """取出 usage 的 token 明细（含缓存命中数）；上游没给 usage 就返回 None。"""
     if not isinstance(payload, dict):
         return None
     usage = payload.get("usage")
@@ -234,10 +259,12 @@ def extract_usage(payload: Any) -> Optional[Dict[str, int]]:
         "prompt_tokens": int(usage.get("prompt_tokens") or 0),
         "completion_tokens": int(usage.get("completion_tokens") or 0),
         "total_tokens": int(usage.get("total_tokens") or 0),
+        # 没报就是 None，落库为 NULL，和「报了 0 命中」区分开。
+        "cached_tokens": _cached_prompt_tokens(usage),
     }
 
 
-def apply_usage(record: CallRecord, usage: Optional[Dict[str, int]]) -> None:
+def apply_usage(record: CallRecord, usage: Optional[Dict[str, Any]]) -> None:
     if not usage:
         return
     record.prompt_tokens = usage["prompt_tokens"]
@@ -246,6 +273,7 @@ def apply_usage(record: CallRecord, usage: Optional[Dict[str, int]]) -> None:
     record.total_tokens = usage["total_tokens"] or (
         usage["prompt_tokens"] + usage["completion_tokens"]
     )
+    record.cached_tokens = usage.get("cached_tokens")
 
 
 class StreamAccumulator:
@@ -258,7 +286,7 @@ class StreamAccumulator:
     def __init__(self) -> None:
         self._buffer = ""
         self.parts: List[str] = []
-        self.usage: Optional[Dict[str, int]] = None
+        self.usage: Optional[Dict[str, Any]] = None
 
     def feed(self, chunk: bytes) -> None:
         try:

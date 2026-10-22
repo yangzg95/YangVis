@@ -357,6 +357,15 @@
               {{ record.total_tokens.toLocaleString() }}
               <span class="muted">（{{ record.prompt_tokens }}+{{ record.completion_tokens }}）</span>
             </template>
+            <template v-else-if="column.key === 'cache_hit'">
+              <a-tooltip
+                v-if="record.cached_tokens !== null"
+                :title="`命中 ${record.cached_tokens} / 共 ${record.prompt_tokens} prompt token`"
+              >
+                <span>{{ cacheHitRate(record) }}</span>
+              </a-tooltip>
+              <span v-else class="muted">—</span>
+            </template>
             <template v-else-if="column.key === 'latency'">
               {{ record.latency_ms }} ms
               <span v-if="record.first_token_ms !== null" class="muted">
@@ -565,6 +574,15 @@
             <a-descriptions-item label="Token">
               {{ logDrawer.detail.prompt_tokens }} 入 / {{ logDrawer.detail.completion_tokens }} 出
               （合计 {{ logDrawer.detail.total_tokens }}）
+            </a-descriptions-item>
+            <a-descriptions-item label="缓存命中">
+              <template v-if="logDrawer.detail.cached_tokens !== null">
+                {{ cacheHitRate(logDrawer.detail) }}
+                <span class="muted">
+                  （命中 {{ logDrawer.detail.cached_tokens }} / 共 {{ logDrawer.detail.prompt_tokens }}）
+                </span>
+              </template>
+              <span v-else class="hint">上游未上报</span>
             </a-descriptions-item>
             <a-descriptions-item label="耗时">
               {{ logDrawer.detail.latency_ms }} ms
@@ -1118,6 +1136,7 @@ const logColumns = [
   { title: '通道', dataIndex: 'channel_name', width: 140, ellipsis: true },
   { title: '结果', key: 'success', width: 110 },
   { title: 'Token', key: 'tokens', width: 160 },
+  { title: '缓存命中率', key: 'cache_hit', width: 110 },
   { title: '耗时', key: 'latency', width: 170 },
   { title: '来源', dataIndex: 'client_ip', width: 130 },
 ]
@@ -1128,6 +1147,12 @@ const attemptColumns = [
   { title: '耗时(ms)', dataIndex: 'latency_ms', width: 100 },
   { title: '错误', dataIndex: 'error', ellipsis: true },
 ]
+
+/** 命中率 = 命中缓存的 prompt token ÷ prompt 总数；上游没报缓存就留空。 */
+function cacheHitRate(log: AiCallLogItem): string {
+  if (log.cached_tokens === null || !log.prompt_tokens) return '—'
+  return `${((log.cached_tokens / log.prompt_tokens) * 100).toFixed(1)}%`
+}
 
 async function loadLogs() {
   logLoading.value = true

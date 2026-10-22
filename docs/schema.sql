@@ -406,6 +406,7 @@ CREATE TABLE IF NOT EXISTS ai_call_log (
   prompt_tokens     INT          NOT NULL DEFAULT 0,
   completion_tokens INT          NOT NULL DEFAULT 0,
   total_tokens      INT          NOT NULL DEFAULT 0,
+  cached_tokens     INT          NULL COMMENT '命中缓存的 prompt token；NULL=上游没报，0=报了但没命中',
   latency_ms        INT          NOT NULL DEFAULT 0,
   first_token_ms    INT          NULL COMMENT '流式首字延迟；非流式为 NULL',
   client_ip         VARCHAR(64)  NULL,

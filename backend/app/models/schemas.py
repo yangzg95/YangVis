@@ -2289,6 +2289,8 @@ class AiCallLogItem(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    # 命中缓存的 prompt token；None = 上游没报缓存（区别于报了 0）。命中率由前端算。
+    cached_tokens: Optional[int] = None
     latency_ms: int = 0
     first_token_ms: Optional[int] = None
     client_ip: Optional[str] = None

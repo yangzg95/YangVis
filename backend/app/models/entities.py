@@ -1206,6 +1206,9 @@ class AiCallLog(Base):
     prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 上游报的命中缓存的 prompt token 数，命中率是它 ÷ prompt_tokens。上游没报缓存
+    # 时为 null——和「报了 0 命中」是两回事，前者不支持缓存，后者是支持但没命中。
+    cached_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # 流式首字延迟；非流式为 null。

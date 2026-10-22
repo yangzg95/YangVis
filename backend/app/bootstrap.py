@@ -310,10 +310,16 @@ def migrate_schema() -> None:
             logger.info("added ai_model_route.%s", column)
 
     call_log_columns = _column_names("ai_call_log")
-    if call_log_columns and "auto_route" not in call_log_columns:
-        with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE ai_call_log ADD COLUMN auto_route JSON NULL"))
-        logger.info("added ai_call_log.auto_route")
+    if call_log_columns:
+        for column, ddl in (
+            ("auto_route", "ADD COLUMN auto_route JSON NULL"),
+            ("cached_tokens", "ADD COLUMN cached_tokens INT NULL"),
+        ):
+            if column in call_log_columns:
+                continue
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE ai_call_log {ddl}"))
+            logger.info("added ai_call_log.%s", column)
 
     for table, retired in RETIRED_STATUS_COLUMNS.items():
         existing = _column_names(table)
