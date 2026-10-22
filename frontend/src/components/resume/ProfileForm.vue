@@ -9,6 +9,7 @@
         <label class="field-label">性别</label>
         <a-select
           :value="profile.gender || undefined"
+          class="field-control"
           placeholder="选择性别"
           allow-clear
           :options="genderOptions"
@@ -155,6 +156,10 @@ function onApplied(html: string, mode: 'replace' | 'append' | 'insert') {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+/* 同 EducationForm：a-select 不给宽度就按内容塌窄，等宽的下拉面板跟着竖排。 */
+.field-control {
+  width: 100%;
 }
 .field-label {
   display: block;

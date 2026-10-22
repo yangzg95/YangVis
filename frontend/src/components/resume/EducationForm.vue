@@ -30,6 +30,7 @@
           <label class="field-label"><span class="required">*</span>学历</label>
           <a-select
             v-model:value="entry.degree"
+            class="field-control"
             placeholder="选择学历"
             allow-clear
             :options="degreeOptions"
@@ -40,6 +41,7 @@
           <label class="field-label">就读形式</label>
           <a-select
             v-model:value="entry.study_mode"
+            class="field-control"
             placeholder="全日制 / 非全日制"
             allow-clear
             :options="studyModeOptions"
@@ -183,6 +185,11 @@ function onApplied(html: string, mode: 'replace' | 'append' | 'insert') {
 </script>
 
 <style scoped>
+/* a-select 根节点是 inline-block 且不带宽度，不给 100% 就按内容塌窄；
+   下拉面板默认与选择框等宽，塌到几十字宽时选项会一字一行竖排。 */
+.field-control {
+  width: 100%;
+}
 .field-label {
   display: block;
   margin: 10px 0 6px;
