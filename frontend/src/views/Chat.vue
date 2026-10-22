@@ -362,6 +362,29 @@
         </div>
 
         <div class="composer">
+          <!-- 深链带入的简历上下文：先挂起不自动发，用户在上方选好智能体/模型/工具、
+               写好第一个问题再发送；发送时才回源拉最新版并建会话。 -->
+          <div v-if="pendingContext" class="context-bar">
+            <FileTextOutlined class="context-icon" />
+            <div class="context-meta">
+              <span class="context-title">
+                已附带在线简历《{{ pendingContext.title }}》（约 {{ pendingContext.charCount }} 字）
+              </span>
+              <span class="context-sub">
+                将随第一条消息发送；发送前可在上方选择智能体、模型与工具，直接发送则默认让
+                AI 通读分析
+              </span>
+            </div>
+            <button
+              type="button"
+              class="context-remove"
+              title="移除简历上下文"
+              :disabled="contextLaunching"
+              @click="pendingContext = null"
+            >
+              <CloseOutlined />
+            </button>
+          </div>
           <!-- 上传区：回形针常驻，待发附件以缩略图/文件名条展示在上方。
                图片能否发给当前模型由 attachmentGate 在前端先拦一道。 -->
           <div class="attach-bar">
@@ -441,8 +464,13 @@
             <a-button v-if="streaming" danger @click="stop">停止</a-button>
             <a-button
               type="primary"
-              :disabled="!canSend || attachmentsBusy || (!draft.trim() && !readyAttachments.length)"
-              :loading="streaming"
+              :disabled="
+                !canSend ||
+                attachmentsBusy ||
+                contextLaunching ||
+                (!draft.trim() && !readyAttachments.length && !pendingContext)
+              "
+              :loading="streaming || contextLaunching"
               @click="send"
             >
               发送
@@ -463,6 +491,7 @@ import {
   DeleteOutlined,
   EditOutlined,
   FileOutlined,
+  FileTextOutlined,
   PaperClipOutlined,
   PlusOutlined,
   RobotOutlined,
@@ -1130,6 +1159,7 @@ const composerPlaceholder = computed(() => {
   if (!chatReady.value) return '请先配置对话模型'
   if (needsKnowledge.value && !embeddingReady.value) return '请先配置向量模型'
   if (needsKnowledge.value && !activeProjectId.value) return '请先选择项目'
+  if (pendingContext.value) return '留空直接发送则让 AI 通读简历并分析，或输入你的第一个问题…'
   return '输入你的问题…'
 })
 
@@ -1243,6 +1273,8 @@ async function selectConversation(id: number) {
   activeId.value = id
   // 草稿与待发附件都不跨会话带过去：那是写给上一个人的话。
   draft.value = ''
+  // 深链带入但还没发送的简历上下文也不跨会话：它只属于这次发起。
+  pendingContext.value = null
   clearPending({ remote: true })
   clearRenderCaches()
   let data
@@ -1304,6 +1336,8 @@ function startNew() {
   // 让还在路上的 selectConversation 响应失效，别把旧会话的消息灌进新会话。
   convLoadSeq++
   activeId.value = null
+  // 新建会话等于放弃这次深链带入的挂起上下文。
+  pendingContext.value = null
   messages.value = []
   actions.value = []
   draft.value = ''
@@ -1344,6 +1378,22 @@ const CONTEXT_DEFAULT_AGENT_SLUG = 'career-advisor'
  */
 const contextSeeds = new Map<number, { firstMessage: string; convTitle: string }>()
 
+/** 简历深链带入、但还没发送的上下文：发送前用户可在工具栏自由换智能体/模型/工具、
+ *  输入第一个问题；点发送时才回源拉最新内容并建会话。 */
+interface PendingResumeContext {
+  docId: number
+  title: string
+  charCount: number
+}
+const pendingContext = ref<PendingResumeContext | null>(null)
+// 挂起上下文的首条消息正在回源拉取/建会话：期间禁用发送，防连点建出两条会话。
+const contextLaunching = ref(false)
+/** 挂起卡片直接点发送（没写首问）时用的默认开场。 */
+const DEFAULT_RESUME_QUESTION = '请通读这份简历，给出整体分析与改进建议'
+/** 简历咨询会话默认勾选的「读取在线简历」本地工具（backend builtins/resume_tools.py），
+ *  模型之后每轮都能回源读最新版；目录里没有（后端未更新）就跳过。 */
+const RESUME_DOC_TOOL_KEY = 'get_resume_doc'
+
 function truncateContextMessage(message: string): string {
   // 防御后端哪天再收紧上限：宁可截断并明说，也不让 AI 悄悄基于残缺内容作答。
   return message.length > CONTEXT_MESSAGE_LIMIT
@@ -1368,6 +1418,21 @@ async function seedContextConversation(firstMessageIn: string, convTitle: string
   }
 
   startNew()
+  const conv = await createSeededConversation(convTitle, firstMessage)
+  if (!conv) {
+    // 拦截器已弹错；内容放输入框，用户可手动重试。
+    draft.value = firstMessage
+    return
+  }
+  draft.value = firstMessage
+  send()
+}
+
+/**
+ * 按工具栏当前选择（智能体/模型/知识库范围/工具）显式建会话并登记种子消息。
+ * 调用方负责先 startNew()。失败返回 null（拦截器已弹错），不建孤儿会话。
+ */
+async function createSeededConversation(convTitle: string, firstMessage: string) {
   let conv
   try {
     conv = await chatApi.createConversation({
@@ -1385,17 +1450,76 @@ async function seedContextConversation(firstMessageIn: string, convTitle: string
       mcp_server_ids: selectedMcpServerIds.value,
     })
   } catch {
-    // 拦截器已弹错；内容放输入框，用户可手动重试。
-    draft.value = firstMessage
-    return
+    return null
   }
   // 不走 selectConversation：新会话的消息/actions 必然为空（白拉两次），它还会
   // 重置 agent/模型选择——而我们正是按当前选择建的会话，重置是绕回原点的空转。
   conversations.value.unshift(conv)
   activeId.value = conv.id
   contextSeeds.set(conv.id, { firstMessage, convTitle })
-  draft.value = firstMessage
-  send()
+  return conv
+}
+
+/**
+ * 发送挂起的简历上下文：回源拉最新已保存版本（用户可能在工作台改完又存了一次），
+ * 把简历全文与用户首问拼成首条消息，显式建会话后走普通发送；已上传的附件留在
+ * 待发区，send() 会一并带上。
+ */
+async function launchPendingResume(question: string) {
+  const pending = pendingContext.value
+  if (!pending || contextLaunching.value || !canSend.value) return
+  contextLaunching.value = true
+  try {
+    let detail
+    try {
+      detail = await resumeBuilderApi.detail(pending.docId)
+    } catch {
+      // 拦截器已弹错；卡片与首问原样保留，用户重试即可。
+      return
+    }
+    if (!resumeDocHasContent(detail.doc)) {
+      toast.warning('这份在线简历现在是空的，先在简历工作台填写内容后再发送')
+      return
+    }
+
+    const ask = question.trim() || DEFAULT_RESUME_QUESTION
+    const markdown = resumeDocToMarkdown(detail.doc)
+    const intro = `以下是我的在线简历《${detail.title}》（文档 id：${detail.id}）的完整内容，请先通读，稍后我会围绕它向你咨询，或请你分析并给出建议。`
+    // 工具在勾选时才提示模型去调；被用户手动摘掉就别提一个调不了的工具。
+    const toolLine = toolSelection.value.includes(`local:${RESUME_DOC_TOOL_KEY}`)
+      ? `如需读取服务端最新版本（简历可能被修改过），调用 get_resume_doc 工具，doc_id=${detail.id}。`
+      : ''
+    const firstMessage = truncateContextMessage(
+      [intro, toolLine, `---\n\n${markdown}`, `---\n\n${ask}`].filter(Boolean).join('\n\n'),
+    )
+    const rawTitle = `简历咨询 · ${detail.title}`
+    const convTitle = rawTitle.length <= 50 ? rawTitle : `${rawTitle.slice(0, 50)}…`
+
+    // 拉取通过才做内存复位。刻意不调 startNew()：它会 clearPending({remote:true})
+    // 把已上传附件从服务端删掉，而附件要随这条首条消息一起走。
+    convLoadSeq++
+    activeId.value = null
+    messages.value = []
+    actions.value = []
+    draft.value = ''
+    clearRenderCaches()
+    // 摘卡片：建会话失败时要把卡片挂回来。附件始终留在待发区，不动它。
+    pendingContext.value = null
+    const conv = await createSeededConversation(convTitle, firstMessage)
+    if (!conv) {
+      pendingContext.value = {
+        docId: detail.id,
+        title: detail.title,
+        charCount: markdown.length,
+      }
+      draft.value = question
+      return
+    }
+    draft.value = firstMessage
+    send()
+  } finally {
+    contextLaunching.value = false
+  }
 }
 
 /** 深链入口：默认选「求职顾问」、起会话标题，再交给共用的播种流程。 */
@@ -1462,12 +1586,29 @@ async function handleResumeDocChat() {
     return
   }
 
-  const markdown = resumeDocToMarkdown(detail.doc)
-  await launchContextConversation({
+  // 不自动发送：默认选好求职顾问，把简历挂成「待发送上下文」卡片。用户先在工具栏
+  // 选智能体/模型/工具、写好第一个问题，点发送时才回源拉最新内容建会话（见
+  // launchPendingResume）。这里是程序改值，不触发 onAgentChange 的重开保护。
+  const advisor = agents.value.find(
+    (a) => a.slug === CONTEXT_DEFAULT_AGENT_SLUG && a.chat_visible,
+  )
+  if (advisor) activeAgentId.value = advisor.id
+
+  pendingContext.value = {
+    docId: detail.id,
     title: detail.title,
-    convTitlePrefix: '简历咨询',
-    firstMessage: `以下是我的在线简历《${detail.title}》的完整内容，请先通读，稍后我会围绕它向你咨询，或请你分析并给出建议。\n\n---\n\n${markdown}`,
-  })
+    charCount: resumeDocToMarkdown(detail.doc).length,
+  }
+
+  // 默认勾上「读取在线简历」：用户在对话中途回工作台保存了修改，模型可随时回源
+  // 读到最新版，不用用户复述。只在工具目录里有这个 key 时勾选（后端版本兜底）。
+  const toolValue = `local:${RESUME_DOC_TOOL_KEY}`
+  if (
+    localTools.value.some((tool) => tool.key === RESUME_DOC_TOOL_KEY) &&
+    !toolSelection.value.includes(toolValue)
+  ) {
+    toolSelection.value = [...toolSelection.value, toolValue]
+  }
 }
 
 // ---- 深链打开指定会话 -------------------------------------------------------
@@ -1553,13 +1694,26 @@ function send() {
   composerRef.value?.blur()
   const question = draft.value.trim()
   const attachments = readyAttachments.value
-  if ((!question && !attachments.length) || !canSend.value) return
+  // 挂着简历上下文时允许空首问（走默认分析开场），其余情况空内容照旧不发。
+  if (
+    (!question && !attachments.length && !pendingContext.value) ||
+    !canSend.value ||
+    contextLaunching.value
+  )
+    return
   if (attachmentsBusy.value) {
     toast.warning('附件还在上传，请稍候')
     return
   }
   if (imageVisionBlocked.value) {
     toast.warning('当前模型未开启图片理解，请换用支持图片的模型或移除图片')
+    return
+  }
+
+  // 挂起的简历上下文走异步首条流程（回源拉最新 → 建会话 → 带首问发送），
+  // 不走下面的常规建连。
+  if (pendingContext.value) {
+    void launchPendingResume(question)
     return
   }
 
@@ -2077,6 +2231,55 @@ onUnmounted(() => abort?.())
   position: relative;
   border-top: 1px solid #f0f0f0;
   padding-top: 12px;
+}
+/* 挂起的简历上下文：输入框上方的一条提示卡，提醒先选智能体/工具再发送。 */
+.context-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  background: #f3f9fa;
+  border: 1px solid #d4e7ea;
+  border-radius: var(--tool-radius);
+}
+.context-icon {
+  margin-top: 2px;
+  color: #0a7e86;
+  font-size: 15px;
+}
+.context-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.context-title {
+  color: #1f2329;
+  font-weight: 600;
+}
+.context-sub {
+  color: #6b7280;
+}
+.context-remove {
+  flex: none;
+  border: 0;
+  padding: 2px 4px;
+  background: transparent;
+  color: #8a8f99;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.context-remove:hover:not(:disabled) {
+  color: #b4534f;
+  background: #fdf0ef;
+}
+.context-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 /* 上传入口：常驻在输入框上方一行。就一个回形针，不抢视觉重量。 */
 .attach-bar {
