@@ -477,11 +477,54 @@ describe('打印样式契约', () => {
     expect(css).toContain('.rb-header-id,.rb-header-meta { min-width: 0; }')
     expect(css).not.toContain('.rb-header-top { display: flex; flex-wrap: wrap')
     // 头部 label 是行内小灰字，不是斜体、也不是小标题。
-    expect(css).toContain('.rb-header-meta .rb-c-label { margin-right: 4px; font-style: normal; color: #8a8f99; }')
+    expect(css).toContain('.rb-header-meta .rb-c-label { margin-right: 4px; font-style: normal; color: #6b7280; }')
+    // 简介与正文同档：招牌段落曾经用 #6b7280，比下面的列表还浅两档，看着像脚注。
+    expect(css).toContain('.rb-target,.rb-header-meta { color: #374151; }')
+    expect(css).toContain('.rb-intro { color: #1f2329; }')
+    const minimal = renderDoc({ ...createEmptyDoc(), template: 'minimal' })
+    expect(minimal).not.toMatch(/\.rb-intro \{[^}]*color: #6b7280/)
+    expect(minimal).not.toMatch(/\.rb-header-meta \{[^}]*color: #4b5563/)
     // 姓名要比正文大一档才压得住抬头，之前 28px 被两行带标签的小灰字淹掉。
     expect(css).toContain('.rb-name { font-size: 34px')
-    const minimal = renderDoc({ ...createEmptyDoc(), template: 'minimal' })
     expect(minimal).toContain('.rb-name { font-size: 32px')
+  })
+
+  it('文字灰阶只有三档，注释不许再开第 4/5 档灰', () => {
+    // 三档：正文黑 / 信息灰 / 注释灰；再加两个分隔符浅灰（标点是装饰，不算文字档）。
+    const allowed = new Set(['#1f2329', '#374151', '#6b7280', '#c3c8d0', '#c9ced6'])
+    const docs = ['classic', 'minimal', 'sidebar'].map((template) =>
+      renderDoc({ ...createEmptyDoc(), template }),
+    )
+    for (const html of docs) {
+      for (const m of html.matchAll(/[^-\w]color: (#[0-9a-fA-F]{6})/g)) {
+        expect(allowed.has(m[1].toLowerCase()), `${m[1]} 不在三档灰阶里`).toBe(true)
+      }
+    }
+    // 收档之后 #4b5563 / #8a8f99 这两档不该再出现在任何版式里。
+    for (const html of docs) {
+      expect(html).not.toMatch(/[^-\w]color: #4b5563/)
+      expect(html).not.toMatch(/[^-\w]color: #8a8f99/)
+    }
+    // 最浅档只准出现在 label 上：部门曾经是第二处，12px 小字再叠最浅灰，读着像脚注。
+    for (const html of docs) {
+      for (const line of html.split('\n')) {
+        if (/[^-\w]color: #6b7280/.test(line)) {
+          expect(line, `最浅灰漏到了 label 之外：${line.trim()}`).toContain('.rb-c-label')
+        }
+      }
+    }
+    expect(css).toContain('.rb-dept { margin-top: 3px; font-size: 12px; color: #374151; }')
+  })
+
+  it('抬头与正文的分界只靠 padding：margin-bottom 会被节间距合并掉，等于没写', () => {
+    // 相邻兄弟的竖向 margin 取大者，.rb-header 的 margin-bottom(18/22) 一直小于
+    // .rb-section 的 margin-top(24/26)，白占了一层声明。
+    expect(css).toContain('.rb-header { padding-bottom: 8px; border-bottom: 2px solid var(--accent); }')
+    const minimal = renderDoc({ ...createEmptyDoc(), template: 'minimal' })
+    expect(minimal).toContain('.rb-header { padding-bottom: 6px; }')
+    for (const html of [css, minimal]) {
+      expect(html).not.toMatch(/\.rb-header \{[^}]*margin-bottom/)
+    }
   })
 
   it('屏显 padding 与 @page 边距同数，预览分页才不漂', () => {
@@ -497,6 +540,9 @@ describe('打印样式契约', () => {
     expect(css).toContain('border-left: 3px solid var(--accent)')
     const side = renderDoc({ ...createEmptyDoc(), template: 'sidebar' })
     expect(side).toContain('.rb-main .rb-section h2 { margin: 0 0 10px; padding: 3px 8px; background: var(--accent-soft)')
+    // 简约版式没有色块底，标题字色必须走主色：之前写死 #374151，切到简约整页褪色成纯灰阶。
+    const minimal = renderDoc({ ...createEmptyDoc(), template: 'minimal' })
+    expect(minimal).toMatch(/\.rb-section h2 \{[^}]*color: var\(--accent\)/)
   })
 })
 

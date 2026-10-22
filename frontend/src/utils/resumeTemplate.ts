@@ -256,9 +256,9 @@ body { margin: 0; background: #eef0f3; font-family: "Microsoft YaHei","PingFang 
 .rb-entry-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 /* min-width:0 让标题这一列可以被压，长英文公司名才不至于把右侧日期挤出页边。 */
 .rb-entry-title { font-size: 13.5px; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
-.rb-entry-title .rb-sub { margin-left: 8px; font-weight: 400; color: #4b5563; }
-.rb-period { font-size: 12px; color: #6b7280; white-space: nowrap; }
-.rb-dept { margin-top: 3px; font-size: 12px; color: #8a8f99; }
+.rb-entry-title .rb-sub { margin-left: 8px; font-weight: 400; color: #374151; }
+.rb-period { font-size: 12px; color: #374151; white-space: nowrap; }
+.rb-dept { margin-top: 3px; font-size: 12px; color: #374151; }
 /* 竖向台阶：行框 21.25px(5.6mm)，所以段间距给到 7px、列表项 4px，换段才明显比换行
    松一档；条目/节间距由各自版式再往上加一档（16px / 24px 量级）。之前段间距只有
    4px、列表项 2px，和行距差不到 1mm，整块描述在 A4 上会糊成一团。 */
@@ -281,7 +281,16 @@ body { margin: 0; background: #eef0f3; font-family: "Microsoft YaHei","PingFang 
 .rb-header-id,.rb-header-meta { min-width: 0; }
 /* 联系方式的 label 是行内小灰字（<i> 默认斜体要抹掉）：值本身字号一样，只靠颜色退后，
    这样「电话 13882100882」仍然是一眼能读的一项，不会变成另一层标题。 */
-.rb-header-meta .rb-c-label { margin-right: 4px; font-style: normal; color: #8a8f99; }
+.rb-header-meta .rb-c-label { margin-right: 4px; font-style: normal; color: #6b7280; }
+/* 全页文字只留三档灰：#1f2329(15.78) 正文/姓名/简介，#374151(10.31) 信息层（意向、联系
+   方式、日期、职位副标题、部门），#6b7280(4.83) 只给联系方式的 label 用。原来还有
+   #4b5563(7.56) 与 #8a8f99(3.25) 两档：相邻档 L 差只有 3~7，屏幕上算层次、打印出来糊成一片
+   脏灰，而 3.25 已经低于小字可读线，日期和部门正是会被印糊的那两处。层次交给字号与字重。
+   部门曾经也在最浅档：它是 12px 小字，再叠最浅灰等于字号和颜色双重降级，读着像脚注，
+   可它是内容不是注释。最浅档的规矩是「旁边就有一个深色值替它承重」，label 才满足。
+   分隔符的 #c3c8d0/#c9ced6 不算文字档，它是标点。 */
+.rb-target,.rb-header-meta { color: #374151; }
+.rb-intro { color: #1f2329; }
 /* 断页单位只到「抬头 + 部门」这一小段。整条 entry 上 avoid 看着贴心，实际是坑：
    带背景/技术线/负责内容的条目有 40~60mm 高，装不下就整块跳到下一页，上一页留下
    半页空白（实测页尾洞占掉 55% 页高）。条目内部按段流动，再用 orphans/widows 和
@@ -305,14 +314,16 @@ body { margin: 0; background: #eef0f3; font-family: "Microsoft YaHei","PingFang 
 const CLASSIC_CSS = `
 /* 与 BASE_CSS 的 @page margin 同数（见那里的注释）。 */
 .sheet { padding: 15mm 14mm; }
-.rb-header { margin-bottom: 18px; padding-bottom: 14px; border-bottom: 2px solid var(--accent); }
-/* 头部两列的骨架在 BASE_CSS；这里只给配色与字号。原来五块内容全部左堆等距，
+/* margin-bottom 会被下面 .rb-section 的 margin-top 合并掉（相邻兄弟取大者），写在这里
+   等于没写；抬头与正文的分界只靠这条线本身 + padding-bottom 撑。 */
+.rb-header { padding-bottom: 8px; border-bottom: 2px solid var(--accent); }
+/* 头部两列的骨架与共用灰阶在 BASE_CSS；这里只给字号与配色差异。原来五块内容全部左堆等距，
    姓名 28px 被两行小灰字淹掉，右侧空掉 2/3，所以姓名放大到 34px。 */
 .rb-name { font-size: 34px; font-weight: 700; line-height: 1.15; letter-spacing: 3px; color: var(--accent); }
-.rb-target { margin-top: 8px; font-size: 13.5px; color: #4b5563; }
-.rb-header-meta { font-size: 12.5px; line-height: 1.9; color: #374151; text-align: right; }
+.rb-target { margin-top: 8px; font-size: 13.5px; }
+.rb-header-meta { font-size: 12.5px; line-height: 1.9; text-align: right; }
 .rb-header-meta .rb-sep { margin: 0 7px; color: #c3c8d0; }
-.rb-intro { margin-top: 12px; font-size: 12.5px; line-height: 1.75; color: #4b5563; }
+.rb-intro { margin-top: 12px; font-size: 12.5px; line-height: 1.75; }
 .rb-contacts a { color: var(--accent); text-decoration: none; }
 .rb-section { margin-top: 24px; }
 /* 节标题用浅色底 + 主色左竖条：--accent-soft 之前注入了却没人用，配色选择器等于
@@ -328,16 +339,17 @@ const CLASSIC_CSS = `
 const MINIMAL_CSS = `
 /* 留白比经典更松；屏显 padding 与本模板 @page 里的 margin 同数。 */
 .sheet { padding: 18mm 16mm; }
-.rb-header { margin-bottom: 22px; padding-bottom: 16px; }
+/* 同经典：margin-bottom 会被 .rb-section 的 margin-top 吃掉，只留 padding 那一段。 */
+.rb-header { padding-bottom: 6px; }
 .rb-name { font-size: 32px; font-weight: 700; line-height: 1.15; color: #1f2329; letter-spacing: 3px; }
 .rb-name-bar { width: 38px; height: 3px; margin-top: 12px; background: var(--accent); }
-.rb-target { margin-top: 10px; font-size: 13.5px; color: #374151; }
-.rb-header-meta { font-size: 12.5px; line-height: 1.9; color: #4b5563; text-align: right; }
+.rb-target { margin-top: 10px; font-size: 13.5px; }
+.rb-header-meta { font-size: 12.5px; line-height: 1.9; text-align: right; }
 .rb-header-meta .rb-sep { margin: 0 7px; color: #c9ced6; }
-.rb-intro { margin-top: 12px; font-size: 12.5px; line-height: 1.75; color: #6b7280; }
+.rb-intro { margin-top: 12px; font-size: 12.5px; line-height: 1.75; }
 .rb-contacts a { color: var(--accent); text-decoration: none; }
 .rb-section { margin-top: 26px; }
-.rb-section h2 { margin: 0 0 12px; padding-left: 9px; border-left: 3px solid var(--accent); border-bottom: 1px solid #ececec; padding-bottom: 5px; font-size: 13.5px; font-weight: 600; color: #374151; letter-spacing: 2px; }
+.rb-section h2 { margin: 0 0 12px; padding-left: 9px; border-left: 3px solid var(--accent); border-bottom: 1px solid #ececec; padding-bottom: 5px; font-size: 13.5px; font-weight: 600; color: var(--accent); letter-spacing: 2px; }
 .rb-entry { margin-bottom: 15px; }
 .rb-entry-title { color: #1f2329; }
 .rb-desc a { color: var(--accent); text-decoration: none; }
