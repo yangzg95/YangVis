@@ -213,8 +213,10 @@ def default_doc() -> dict:
             "job_target": "",
             "phone": "",
             "email": "",
+            "website": "",
             "city": "",
             "birthday": "",
+            "intro": "",
             "summary_html": "",
         },
         "companies": [],
@@ -232,8 +234,10 @@ def _normalize_profile(raw: object) -> dict:
         "job_target": _text(data.get("job_target")),
         "phone": _text(data.get("phone"), 32),
         "email": _text(data.get("email")),
+        "website": _text(data.get("website"), 200),
         "city": _text(data.get("city"), 64),
         "birthday": _text(data.get("birthday"), 32),
+        "intro": _text(data.get("intro"), 300),
         "summary_html": _html(data.get("summary_html")),
     }
 
@@ -382,9 +386,17 @@ def _full_resume_text(doc: dict) -> str:
     )
     if head:
         lines.append(f"个人信息：{head}")
-    for key in ("phone", "email", "gender", "birthday"):
+    for key, label in (
+        ("phone", "电话"),
+        ("email", "邮箱"),
+        ("website", "个人网站"),
+        ("gender", "性别"),
+        ("birthday", "出生年月"),
+    ):
         if profile.get(key):
-            lines.append(f"- {key}：{profile[key]}")
+            lines.append(f"- {label}：{profile[key]}")
+    if profile.get("intro"):
+        lines.append(f"个人介绍：{profile['intro']}")
     if profile.get("summary_html"):
         lines.append(f"个人优势：{html_to_text(profile['summary_html'])}")
 

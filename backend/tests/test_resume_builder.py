@@ -191,6 +191,22 @@ def test_normalize_theme_is_whitelisted():
     assert normalize_doc({"theme": 7})["theme"] == "teal"
 
 
+def test_normalize_profile_keeps_website_and_intro():
+    doc = normalize_doc(
+        {"profile": {"website": "https://me.dev", "intro": "8 年 Java 后端", "name": 123}}
+    )
+    profile = doc["profile"]
+    assert profile["website"] == "https://me.dev"
+    assert profile["intro"] == "8 年 Java 后端"
+    # 旧文档缺键会补齐。
+    assert normalize_doc({})["profile"]["website"] == ""
+    assert normalize_doc({})["profile"]["intro"] == ""
+    # 非字符串丢弃；介绍长度收口到 300。
+    bad = normalize_doc({"profile": {"website": 9, "intro": "x" * 500}})["profile"]
+    assert bad["website"] == ""
+    assert len(bad["intro"]) == 300
+
+
 def test_normalize_entries_validates_fields():
     raw = {
         "module_order": list(DEFAULT_MODULE_ORDER),

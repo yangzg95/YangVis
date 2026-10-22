@@ -46,9 +46,13 @@ export interface ResumeProfile {
   job_target: string
   phone: string
   email: string
+  /** 个人网站（可不带协议，预览时补 https:// 渲染成链接） */
+  website: string
   city: string
   birthday: string
-  /** 个人优势（富文本） */
+  /** 个人介绍：抬头下的一句话招牌，纯文本 */
+  intro: string
+  /** 个人优势（富文本，详细卖点） */
   summary_html: string
 }
 
@@ -156,11 +160,13 @@ export function createEmptyProfile(): ResumeProfile {
   return {
     name: '',
     gender: '',
+    website: '',
     job_target: '',
     phone: '',
     email: '',
     city: '',
     birthday: '',
+    intro: '',
     summary_html: '',
   }
 }

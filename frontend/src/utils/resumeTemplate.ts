@@ -248,8 +248,11 @@ const CLASSIC_CSS = `
 .rb-header { margin-bottom: 14px; padding-bottom: 12px; border-bottom: 2.5px solid var(--accent); }
 .rb-name { font-size: 28px; font-weight: 700; line-height: 1.2; color: var(--accent); }
 .rb-target { margin-top: 6px; font-size: 14px; color: #4b5563; }
-.rb-contacts { margin-top: 8px; font-size: 12px; color: #6b7280; }
-.rb-contacts span { margin-right: 14px; }
+.rb-intro { margin-top: 8px; font-size: 12.5px; line-height: 1.65; color: #6b7280; }
+.rb-info { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12px; color: #374151; }
+.rb-contacts { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12px; color: #374151; }
+.rb-info .rb-c-label, .rb-contacts .rb-c-label { font-style: normal; margin-right: 5px; color: #9ca3af; }
+.rb-contacts a { color: var(--accent); text-decoration: none; }
 .rb-section { margin-top: 16px; }
 .rb-section h2 { margin: 0 0 8px; padding-bottom: 4px; border-bottom: 1px solid #d9d9d9; font-size: 15px; color: var(--accent); letter-spacing: 1px; }
 .rb-entry { margin-bottom: 12px; }
@@ -265,8 +268,11 @@ const MINIMAL_CSS = `
 .rb-name { font-size: 30px; font-weight: 700; line-height: 1.2; color: #1f2329; letter-spacing: 2px; }
 .rb-name-bar { width: 38px; height: 3px; margin-top: 10px; background: var(--accent); }
 .rb-target { margin-top: 10px; font-size: 13.5px; color: #374151; }
-.rb-contacts { margin-top: 8px; font-size: 12px; color: #8a8f99; }
-.rb-contacts span { margin-right: 14px; }
+.rb-intro { margin-top: 8px; font-size: 12.5px; line-height: 1.65; color: #6b7280; }
+.rb-info { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12px; color: #4b5563; }
+.rb-contacts { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12px; color: #4b5563; }
+.rb-info .rb-c-label, .rb-contacts .rb-c-label { font-style: normal; margin-right: 5px; color: #aab0b8; }
+.rb-contacts a { color: var(--accent); text-decoration: none; }
 .rb-section { margin-top: 18px; }
 .rb-section h2 { margin: 0 0 10px; padding-left: 9px; border-left: 3px solid var(--accent); border-bottom: 1px solid #ececec; padding-bottom: 5px; font-size: 13.5px; font-weight: 600; color: #374151; letter-spacing: 2px; }
 .rb-entry { margin-bottom: 13px; }
@@ -283,9 +289,13 @@ const SIDEBAR_CSS = `
 .rb-main { flex: 1; padding: 18mm 11mm 14mm 10mm; }
 .rb-aside-name { font-size: 24px; font-weight: 700; line-height: 1.25; }
 .rb-aside-target { margin-top: 6px; font-size: 13px; color: rgba(255,255,255,.82); }
+.rb-aside-intro { margin-top: 10px; font-size: 12px; line-height: 1.7; color: rgba(255,255,255,.78); }
 .rb-aside-block { margin-top: 18px; }
+.rb-contact .rb-c-value a { color: #fff; text-decoration: none; }
 .rb-aside-label { margin: 0 0 8px; padding-bottom: 5px; border-bottom: 1px solid rgba(255,255,255,.28); font-size: 12px; letter-spacing: 2px; color: rgba(255,255,255,.78); }
-.rb-contact { margin-bottom: 6px; font-size: 12px; line-height: 1.5; color: rgba(255,255,255,.92); word-break: break-all; }
+.rb-contact { display: flex; gap: 8px; margin-bottom: 7px; font-size: 12px; line-height: 1.5; }
+.rb-contact .rb-c-label { flex: 0 0 48px; color: rgba(255,255,255,.6); }
+.rb-contact .rb-c-value { min-width: 0; color: rgba(255,255,255,.94); word-break: break-all; }
 .rb-aside .rb-desc, .rb-aside .rb-desc li { color: rgba(255,255,255,.9); }
 .rb-aside .rb-desc a { color: #fff; }
 .rb-main .rb-section { margin-top: 15px; }
@@ -300,28 +310,71 @@ const SIDEBAR_CSS = `
 }
 `
 
-function contactValues(doc: ResumeDocData): string[] {
+interface ContactItem {
+  label: string
+  value: string
+  /** 联系方式项渲染成可点链接（个人网站）。 */
+  href?: string
+}
+
+function escapeHref(raw: string): string {
+  return escapeAttr(raw).replace(/"/g, '&quot;')
+}
+
+/** 用户可能只填 me.dev，预览时补成 https://me.dev。 */
+function websiteHref(raw: string): string {
+  const value = raw.trim()
+  return /^https?:\/\//i.test(value) ? value : `https://${value}`
+}
+
+/** 抬头第一行：性别 / 出生年月 / 城市（基本信息）。 */
+function basicItems(doc: ResumeDocData): ContactItem[] {
   const p = doc.profile
-  return [p.phone, p.email, p.city, p.gender, p.birthday].filter(Boolean)
+  const items: ContactItem[] = []
+  if (p.gender) items.push({ label: '性别', value: p.gender })
+  if (p.birthday) items.push({ label: '出生年月', value: p.birthday })
+  if (p.city) items.push({ label: '城市', value: p.city })
+  return items
+}
+
+/** 抬头第二行：电话 / 邮箱 / 个人网站（联系方式）。 */
+function contactItems(doc: ResumeDocData): ContactItem[] {
+  const p = doc.profile
+  const items: ContactItem[] = []
+  if (p.phone) items.push({ label: '电话', value: p.phone })
+  if (p.email) items.push({ label: '邮箱', value: p.email })
+  if (p.website) {
+    items.push({ label: '个人网站', value: p.website, href: websiteHref(p.website) })
+  }
+  return items
+}
+
+function inlineItemHtml(it: ContactItem): string {
+  const value = it.href
+    ? `<a href="${escapeHref(it.href)}" target="_blank" rel="noopener">${escapeAttr(it.value)}</a>`
+    : escapeAttr(it.value)
+  return `<span><i class="rb-c-label">${escapeAttr(it.label)}</i>${value}</span>`
+}
+
+function infoLineHtml(className: string, items: ContactItem[]): string {
+  if (!items.length) return ''
+  return `<div class="${className}">${items.map(inlineItemHtml).join('')}</div>`
 }
 
 function headerHtml(doc: ResumeDocData): string {
   const p = doc.profile
-  const contacts = contactValues(doc)
-  if (!p.name && !p.job_target && contacts.length === 0) return ''
+  const basic = basicItems(doc)
+  const contacts = contactItems(doc)
+  if (!p.name && !p.job_target && !p.intro && basic.length === 0 && contacts.length === 0) return ''
   const parts = ['<header class="rb-header">']
   if (p.name) {
     parts.push(`<div class="rb-name">${escapeAttr(p.name)}</div>`)
     parts.push('<div class="rb-name-bar"></div>') // 仅简约模板给尺寸；经典下无样式
   }
   if (p.job_target) parts.push(`<div class="rb-target">求职意向：${escapeAttr(p.job_target)}</div>`)
-  if (contacts.length) {
-    parts.push(
-      '<div class="rb-contacts">' +
-        contacts.map((v) => `<span>${escapeAttr(v)}</span>`).join('') +
-        '</div>',
-    )
-  }
+  if (p.intro) parts.push(`<div class="rb-intro">${escapeAttr(p.intro)}</div>`)
+  parts.push(infoLineHtml('rb-info', basic))
+  parts.push(infoLineHtml('rb-contacts', contacts))
   parts.push('</header>')
   return parts.join('')
 }
@@ -440,7 +493,7 @@ ${orderedSections(doc, ['profile', 'companies', 'projects', 'educations', 'skill
 function renderSidebar(doc: ResumeDocData): string {
   const theme = resolveTheme(doc.theme)
   const p = doc.profile
-  const contacts = contactValues(doc)
+  const contacts = contactItems(doc)
   const skills = sanitizeRichHtml(doc.skills_html)
 
   const asideParts = ['<aside class="rb-aside">']
@@ -448,10 +501,35 @@ function renderSidebar(doc: ResumeDocData): string {
   if (p.job_target) {
     asideParts.push(`<div class="rb-aside-target">求职意向：${escapeAttr(p.job_target)}</div>`)
   }
+  if (p.intro) asideParts.push(`<div class="rb-aside-intro">${escapeAttr(p.intro)}</div>`)
+  const basic = basicItems(doc)
+  if (basic.length) {
+    asideParts.push(
+      '<div class="rb-aside-block"><div class="rb-aside-label">基本信息</div>' +
+        basic
+          .map(
+            (it) =>
+              `<div class="rb-contact"><span class="rb-c-label">${escapeAttr(it.label)}</span>` +
+              `<span class="rb-c-value">${escapeAttr(it.value)}</span></div>`,
+          )
+          .join('') +
+        '</div>',
+    )
+  }
   if (contacts.length) {
     asideParts.push(
       '<div class="rb-aside-block"><div class="rb-aside-label">联系方式</div>' +
-        contacts.map((v) => `<div class="rb-contact">${escapeAttr(v)}</div>`).join('') +
+        contacts
+          .map((it) => {
+            const value = it.href
+              ? `<a href="${escapeHref(it.href)}" target="_blank" rel="noopener">${escapeAttr(it.value)}</a>`
+              : escapeAttr(it.value)
+            return (
+              `<div class="rb-contact"><span class="rb-c-label">${escapeAttr(it.label)}</span>` +
+              `<span class="rb-c-value">${value}</span></div>`
+            )
+          })
+          .join('') +
         '</div>',
     )
   }

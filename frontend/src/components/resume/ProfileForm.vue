@@ -7,11 +7,29 @@
       </a-col>
       <a-col :span="12">
         <label class="field-label">性别</label>
-        <a-input v-model:value="profile.gender" :maxlength="32" placeholder="如 男 / 女" @change="emitChange" />
+        <a-select
+          :value="profile.gender || undefined"
+          placeholder="选择性别"
+          allow-clear
+          :options="genderOptions"
+          @update:value="onGenderChange"
+        />
       </a-col>
       <a-col :span="12">
-        <label class="field-label">求职意向</label>
-        <a-input v-model:value="profile.job_target" :maxlength="128" placeholder="如 后端工程师" @change="emitChange" />
+        <label class="field-label">出生年月</label>
+        <a-date-picker
+          :value="profile.birthday || undefined"
+          picker="month"
+          format="YYYY-MM"
+          valueFormat="YYYY-MM"
+          placeholder="如 1995-06"
+          style="width: 100%"
+          @update:value="onBirthdayChange"
+        />
+      </a-col>
+      <a-col :span="12">
+        <label class="field-label">所在城市</label>
+        <a-input v-model:value="profile.city" :maxlength="64" placeholder="如 上海" @change="emitChange" />
       </a-col>
       <a-col :span="12">
         <label class="field-label">手机号码</label>
@@ -22,14 +40,32 @@
         <a-input v-model:value="profile.email" :maxlength="128" placeholder="邮箱" @change="emitChange" />
       </a-col>
       <a-col :span="12">
-        <label class="field-label">所在城市</label>
-        <a-input v-model:value="profile.city" :maxlength="64" placeholder="如 上海" @change="emitChange" />
+        <label class="field-label">个人网站</label>
+        <a-input
+          v-model:value="profile.website"
+          :maxlength="200"
+          placeholder="如 me.dev 或 https://me.dev"
+          @change="emitChange"
+        />
       </a-col>
-      <a-col :span="12">
-        <label class="field-label">出生年月</label>
-        <a-input v-model:value="profile.birthday" :maxlength="32" placeholder="如 1995-06" @change="emitChange" />
+      <a-col :span="24">
+        <label class="field-label">求职意向</label>
+        <a-input v-model:value="profile.job_target" :maxlength="128" placeholder="如 后端工程师" @change="emitChange" />
       </a-col>
     </a-row>
+
+    <label class="field-label field-label--block">
+      个人介绍
+      <span class="field-hint">一句话招牌，展示在简历抬头；详细卖点写下方个人优势</span>
+    </label>
+    <a-textarea
+      v-model:value="profile.intro"
+      :rows="2"
+      :maxlength="300"
+      show-count
+      placeholder="如：8 年 Java 后端，主导过日均亿级订单系统，专注高并发与分布式架构"
+      @change="emitChange"
+    />
 
     <label class="field-label field-label--block">个人优势</label>
     <RichTextEditor
@@ -80,8 +116,23 @@ const assist = reactive<{ open: boolean; action: ResumeAiAction; selection: stri
   selection: '',
 })
 
+const genderOptions = [
+  { value: '男', label: '男' },
+  { value: '女', label: '女' },
+]
+
 function emitChange() {
   emit('change')
+}
+
+function onGenderChange(value: string | undefined) {
+  props.profile.gender = value ?? ''
+  emitChange()
+}
+
+function onBirthdayChange(value: string | null) {
+  props.profile.birthday = value ?? ''
+  emitChange()
 }
 
 function openWrite() {
@@ -117,5 +168,11 @@ function onApplied(html: string, mode: 'replace' | 'append' | 'insert') {
 .required {
   color: #ff4d4f;
   margin-right: 2px;
+}
+.field-hint {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 400;
+  color: #9ca3af;
 }
 </style>

@@ -119,6 +119,47 @@ describe('renderClassic', () => {
     expect(html).toContain('13800000000')
   })
 
+  it('基本信息与联系方式分两行、都带标签，裸值不再混排', () => {
+    const doc = createEmptyDoc()
+    doc.profile.name = '张三'
+    doc.profile.phone = '13800000000'
+    doc.profile.email = 'a@b.com'
+    doc.profile.gender = '男'
+    doc.profile.birthday = '1995-06'
+    doc.profile.city = '上海'
+    const html = renderClassic(doc)
+    expect(html).toContain('rb-info')
+    expect(html).toContain('rb-contacts')
+    for (const label of ['电话', '邮箱', '性别', '出生年月', '城市']) {
+      expect(html).toContain(label)
+    }
+    expect(html).toContain('13800000000')
+    expect(html).toContain('a@b.com')
+  })
+
+  it('个人介绍渲染在抬头；个人网站补协议成链接且挡掉属性注入', () => {
+    const doc = createEmptyDoc()
+    doc.profile.name = '张三'
+    doc.profile.intro = '8 年 Java 后端'
+    doc.profile.website = 'me.dev'
+    let html = renderClassic(doc)
+    expect(html).toContain('class="rb-intro">8 年 Java 后端</div>')
+    expect(html).toContain('个人网站')
+    expect(html).toContain('href="https://me.dev"')
+
+    // 引号逃逸在属性里被转义。
+    const evil = createEmptyDoc()
+    evil.profile.website = 'x" onmouseover="alert(1)'
+    html = renderClassic(evil)
+    // 引号被转义，注入内容只能老实地待在 href 属性值里。
+    expect(html).toContain('href="https://x&quot; onmouseover=&quot;alert(1)"')
+
+    // 已带协议的不重复补。
+    const https = createEmptyDoc()
+    https.profile.website = 'https://me.dev/resume'
+    expect(renderClassic(https)).toContain('href="https://me.dev/resume"')
+  })
+
   it('富文本里的脚本不会进入打印文档', () => {
     const doc = createEmptyDoc()
     doc.profile.name = '李四'
@@ -196,6 +237,13 @@ describe('renderDoc 版式分派与配色注入', () => {
     return doc
   }
 
+  function htmlAside(html: string): string {
+    return html.slice(
+      html.indexOf('<aside class="rb-aside">'),
+      html.indexOf('<main class="rb-main">'),
+    )
+  }
+
   it('未知 template/theme 分别回退 classic / teal', () => {
     const doc = populatedDoc()
     doc.template = 'future-tpl'
@@ -236,6 +284,30 @@ describe('renderDoc 版式分派与配色注入', () => {
     expect(asideAt).toBeGreaterThan(-1)
     expect(mainAt).toBeGreaterThan(asideAt)
     expect(html.slice(asideAt, mainAt)).toContain('Vue')
+  })
+
+  it('sidebar：个人介绍、基本信息块与网站链接都在名片栏', () => {
+    const doc = populatedDoc()
+    doc.template = 'sidebar'
+    doc.profile.intro = '一句话介绍'
+    doc.profile.website = 'me.dev'
+    doc.profile.gender = '男'
+    doc.profile.city = '上海'
+    const aside = htmlAside(renderDoc(doc))
+    expect(aside).toContain('rb-aside-intro')
+    expect(aside).toContain('一句话介绍')
+    expect(aside).toContain('基本信息')
+    expect(aside).toContain('href="https://me.dev"')
+  })
+
+  it('sidebar：联系方式按标签/值两列排列', () => {
+    const doc = populatedDoc()
+    doc.template = 'sidebar'
+    const aside = htmlAside(renderDoc(doc))
+    expect(aside).toContain('rb-c-label')
+    expect(aside).toContain('电话')
+    expect(aside).toContain('rb-c-value')
+    expect(aside).toContain('13900000000')
   })
 
   it('sidebar：主栏保留除技能外模块并按 module_order 输出', () => {

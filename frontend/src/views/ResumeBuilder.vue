@@ -115,7 +115,8 @@
                 title="简历预览"
                 class="preview-frame"
                 :srcdoc="previewFrameHtml"
-                :style="{ transform: `scale(${previewScale})` }"
+                :style="frameStyle"
+                @load="onPreviewLoad"
               />
             </div>
           </div>
@@ -203,11 +204,30 @@ const A4_WIDTH = 794
 const A4_HEIGHT = 1123
 const previewPaneEl = ref<HTMLElement | null>(null)
 const previewScale = ref(0.6)
+// 简历超过一页时 iframe 要按实际内容撑高，否则预览只看得到第一页。
+const previewContentHeight = ref(A4_HEIGHT)
 
 const scaleStyle = computed(() => ({
   width: `${A4_WIDTH * previewScale.value}px`,
-  height: `${A4_HEIGHT * previewScale.value}px`,
+  height: `${previewContentHeight.value * previewScale.value}px`,
 }))
+
+const frameStyle = computed(() => ({
+  height: `${previewContentHeight.value}px`,
+  transform: `scale(${previewScale.value})`,
+}))
+
+function onPreviewLoad(event: Event) {
+  const iframe = event.target as HTMLIFrameElement
+  try {
+    const inner = iframe.contentDocument
+    if (!inner) return
+    // 空文档加载瞬间可能量到 0，用一页 A4 兜底。
+    previewContentHeight.value = Math.max(A4_HEIGHT, inner.documentElement.scrollHeight)
+  } catch {
+    // srcdoc 同源，理论上不会跨域；读不到就沿用上一次的高度。
+  }
+}
 
 function measurePreview() {
   const width = previewPaneEl.value?.clientWidth
@@ -425,6 +445,14 @@ onUnmounted(() => {
   overflow: hidden;
   display: flex;
 }
+/* 高度链补全：a-spin 在 wrapper 和内容之间还夹了一层 ant-spin-container，
+   不给它定高则 rb-body 的 flex:1 失效、表单随内容膨胀，
+   overflow-y:auto 永不触发，超一屏的条目被 rb-spin 的 overflow:hidden 裁掉。 */
+.rb-spin :deep(.ant-spin-container) {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
 .rb-body {
   flex: 1;
   display: flex;
@@ -474,7 +502,7 @@ onUnmounted(() => {
 }
 .preview-frame {
   width: 794px;
-  height: 1123px;
+  /* 高度由内容量测后内联给出（多页简历完整可见），不再写死一页 A4。 */
   border: none;
   transform-origin: top left;
 }
