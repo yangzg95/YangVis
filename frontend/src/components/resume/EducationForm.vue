@@ -19,7 +19,7 @@
           <a-input v-model:value="entry.school" :maxlength="128" placeholder="学校名称" @change="emitChange" />
         </a-col>
         <a-col :xs="24" :sm="12">
-          <label class="field-label"><span class="required">*</span>专业</label>
+          <label class="field-label">专业</label>
           <a-input v-model:value="entry.major" :maxlength="128" placeholder="专业" @change="emitChange" />
         </a-col>
         <a-col :xs="24" :sm="12">
