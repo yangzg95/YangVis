@@ -167,6 +167,19 @@ class Settings(BaseSettings):
     # oob = 用户在授权页手动复制授权码回来粘贴，不需要公网回调地址。
     BAIDU_NETDISK_REDIRECT_URI: str = "oob"
 
+    # 联网搜索：博查 Bocha（https://open.bochaai.com），供对话的 web_search
+    # 本地工具使用。留空 = 该工具返回「未启用」提示而不是报错（与网盘工具同口径）。
+    BOCHA_API_KEY: str = ""
+    BOCHA_SEARCH_URL: str = "https://api.bochaai.com/v1/web-search"
+    BOCHA_TIMEOUT: float = 20.0
+    # 每次返回的结果条数。它同时是模型上下文预算的闸门，摘要会整段进 prompt。
+    BOCHA_RESULT_COUNT: int = 8
+
+    # 网页读取（fetch_webpage 本地工具）：服务端代抓公网网页/PDF。超时给得比
+    # 博查略宽，慢站点也能读；字节上限守内存，超出直接拒而不是悄悄截断正文。
+    WEB_FETCH_TIMEOUT: float = 25.0
+    WEB_FETCH_MAX_BYTES: int = 5 * 1024 * 1024
+
     # 智能办公 · 幻灯片
     # 用户上传媒体的本地磁盘目录，留空则用 <backend>/uploads。Docker 部署必须
     # 把它挂成卷——镜像里的 /app 是构建产物，重建即丢。

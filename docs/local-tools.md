@@ -25,7 +25,15 @@
 | `frontend/src/views/LocalTools.vue` | 只读目录页 |
 
 内置三个零依赖工具：`current_datetime`（查询当前时间，北京时间）、
-`generate_uuid`（生成 UUID）、`random_integer`（随机整数）。
+`generate_uuid`（生成 UUID）、`random_integer`（随机整数）。另有四个：
+
+- `get_resume_doc`：读取本人在线简历（需要用户上下文）。
+- `save_text_to_netdisk`：把文本存进本人绑定的百度网盘 `chat/` 子目录，
+  未配置/未绑定时返回提示而不是报错。
+- `web_search`：博查联网搜索（需要在 `.env` 配 `BOCHA_API_KEY`，未配置时
+  返回提示），支持 `freshness` 时间范围过滤。
+- `fetch_webpage`：服务端代抓公网网页/PDF 正文。只允许公网 http/https，
+  私网/环回/链路本地地址（含重定向跳转）一律拒绝，5MB 下载上限。
 
 ## 新增一个本地工具（4 步）
 
