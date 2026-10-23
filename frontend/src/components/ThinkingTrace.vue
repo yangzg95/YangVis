@@ -107,10 +107,10 @@ watch(
   },
 )
 
-// timeline 里的 text 条目就是正文本身（已在气泡正文区渲染），时间线只呈现
-// 思考与工具调用，跳过它们。
+// timeline 里的 text 条目就是正文本身（已在气泡正文区渲染），confirm 条目是
+// 写命令确认提议（由它自己的确认卡片呈现），这两类都不属于「思考过程」。
 const visible = computed(() =>
-  props.entries.filter((entry) => entry.type !== 'text'),
+  props.entries.filter((entry) => entry.type !== 'text' && entry.type !== 'confirm'),
 )
 const steps = computed(() =>
   visible.value.filter((entry): entry is TimelineEntry => entry.type === 'step'),

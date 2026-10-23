@@ -585,10 +585,21 @@ const streamBubbleShown = computed(
 const actions = ref<OpsAction[]>([])
 const { isActing, approve, reject } = useOpsConfirm()
 
+// 最后一条助手气泡：无主待确认项的兜底挂载点。
+const tailAssistantKey = computed(() => {
+  for (let i = messages.value.length - 1; i >= 0; i -= 1) {
+    if (messages.value[i].role === 'assistant') return messages.value[i].key
+  }
+  return null
+})
+
 function actionsOf(msg: Bubble): OpsAction[] {
-  return actions.value.filter((a) =>
-    a.message_id != null ? a.message_id === msg.id : msg.key === streamingBubbleKey.value,
-  )
+  return actions.value.filter((a) => {
+    if (a.message_id != null) return a.message_id === msg.id
+    // message_id 没回填（整轮回答没落库就断了：停止/刷新/断线）：宁可挂到最后
+    // 一条助手气泡，也不能让它谁都不匹配——这条命令在界面上根本不存在。
+    return msg.key === streamingBubbleKey.value || msg.key === tailAssistantKey.value
+  })
 }
 
 // 消息 → 分段的缓存：与 renderCached 同理，内容没变就不重新切分，避免每个

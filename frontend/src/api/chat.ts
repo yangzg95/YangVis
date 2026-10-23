@@ -61,9 +61,11 @@ export interface ChatAttachment {
  *   时间线渲染时跳过它，只用 reason / step 重建「思考 + 调工具」的过程。
  * - reason：推理模型的思维链增量，同样按连续片段合并。
  * - step：一次工具调用，input 是完整入参，展示时按工具名挑关键字段。
+ * - confirm：一次写命令确认提议，只有 action_id；运维问答面板按它对位渲染确认
+ *   卡片，对话页的「思考过程」不展示它。
  */
 export interface TimelineEntry {
-  type: 'text' | 'step' | 'reason'
+  type: 'text' | 'step' | 'reason' | 'confirm'
   detail?: string
   tool?: string
   query?: string
@@ -76,6 +78,8 @@ export interface TimelineEntry {
   is_error?: boolean
   /** 仅流式期间使用：该工具是否还在执行。历史消息无此字段，按已完成渲染。 */
   running?: boolean
+  /** confirm 条目指向的待确认项 id。 */
+  action_id?: number
 }
 
 export interface ChatMessage {

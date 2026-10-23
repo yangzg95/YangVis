@@ -47,6 +47,18 @@
       </a-tooltip>
     </div>
 
+    <!-- 待确认提示条：钉在滚动区之外，滚到哪儿都在。写命令只有 180s 窗口，
+         卡片埋在长回答中间没人点，超时后只能让 AI 重新提议一遍。 -->
+    <button
+      v-if="pendingActions.length"
+      type="button"
+      :class="['pending-bar', { dark }]"
+      @click="jumpToPending"
+    >
+      <WarningOutlined />
+      {{ pendingActions.length }} 条写命令等你确认 · 点击跳过去
+    </button>
+
     <div ref="scrollEl" class="chat-body" @click="onBodyClick" @scroll="onBodyScroll">
       <div v-if="!targetId" class="chat-empty">
         {{ emptyHint }}
@@ -92,7 +104,11 @@
                     </template>
                   </span>
                 </button>
-                <div v-else-if="chunk.type === 'step'" class="step-line">
+                <div
+                  v-else-if="chunk.type === 'step'"
+                  class="step-line"
+                  :title="chunk.full"
+                >
                   <span class="step-icon">⚙</span>
                   <span class="step-text">{{ chunk.detail }}</span>
                 </div>
@@ -106,6 +122,18 @@
                   class="content markdown"
                   v-html="renderCached(`${item.key}-${chunk.index}`, chunk.detail)"
                 />
+                <!-- 写命令确认卡片：按提议发生的时刻插在正文中间，而不是
+                     沉在气泡底部被后续内容顶上去。 -->
+                <ConfirmCard
+                  v-else-if="chunk.type === 'confirm' && chunk.action"
+                  :action="chunk.action"
+                  :acting="isActing(chunk.action)"
+                  :dark="dark"
+                  :can-approve="auth.canOpsWrite"
+                  @approve="approveAction"
+                  @reject="rejectAction"
+                  @expired="settleExpired"
+                />
               </template>
             </div>
             <!-- 兜底：如果 chunks 还没数据但 text 有内容（历史回放），整段渲染。 -->
@@ -116,7 +144,7 @@
             />
           </template>
           <div v-else class="content" v-text="item.text" />
-          <!-- 写命令确认卡片：挂在触发提议的那条助手气泡下面。 -->
+          <!-- 兜底：没有时间线条目的待确认项（老消息）仍按 message_id 挂气泡末尾。 -->
           <ConfirmCard
             v-for="act in actionsOf(item)"
             :key="act.id"
@@ -126,6 +154,7 @@
             :can-approve="auth.canOpsWrite"
             @approve="approveAction"
             @reject="rejectAction"
+            @expired="settleExpired"
           />
           <!-- 复制原始 markdown 文本，贴到别处还能用。流式途中不渲染：那会儿
                正文还在长，孤零零一个按钮挂在气泡底下像个空框。 -->
@@ -226,10 +255,12 @@ import {
   HistoryOutlined,
   PlusOutlined,
   VerticalAlignBottomOutlined,
+  WarningOutlined,
 } from '@ant-design/icons-vue'
 import ConfirmCard from '@/components/ConfirmCard.vue'
 import { useAuthStore } from '@/stores/auth'
 import { createMarkdown } from '@/utils/markdown'
+import { toolLabel } from '@/utils/chatTools'
 import { useOpsConfirm, actionFromConfirm } from '@/utils/useOpsConfirm'
 import { useStreamRender } from '@/utils/streamRender'
 import { copyText } from '@/utils/clipboard'
@@ -314,11 +345,15 @@ const { schedule, beginStream, endStream, renderCached, clearCache } = useStream
   md.render(text || ''),
 )
 
-/** 一条助手回复由若干 chunk 按到达顺序拼接：步骤、文字、思考交替。 */
+/** 一条助手回复由若干 chunk 按到达顺序拼接：步骤、文字、思考、确认卡片交替。 */
 interface TalkChunk {
-  type: 'step' | 'text' | 'reason'
-  /** step 时是命令摘要，text 时是这段文字，reason 时是这段推理。 */
+  type: 'step' | 'text' | 'reason' | 'confirm'
+  /** step 时是命令摘要，text 时是这段文字，reason 时是这段推理，confirm 时留空。 */
   detail: string
+  /** confirm 时指向 actions 里的那条待确认项。 */
+  actionId?: number
+  /** step 时的完整命令：detail 已被 toolLabel 截断，悬停看全文。 */
+  full?: string
 }
 
 interface TalkItem {
@@ -356,6 +391,8 @@ interface RenderChunk extends TalkChunk {
   /** 本组折叠状态的键：一条回答里多组命令各自独立展开/收起。 */
   runKey: string
   expanded: boolean
+  /** confirm 条目对位的待确认项（已按 id 查好，查不到就不渲染）。 */
+  action?: OpsAction
 }
 
 function displayChunks(item: TalkItem): RenderChunk[] {
@@ -365,14 +402,23 @@ function displayChunks(item: TalkItem): RenderChunk[] {
   let runIndex = 0
   while (i < chunks.length) {
     const chunk = chunks[i]
-    if (chunk.type === 'text') {
-      out.push({ ...chunk, index: i, summary: false, runCount: 0, runKey: '', expanded: false })
+    if (chunk.type === 'text' || chunk.type === 'confirm') {
+      // 正文与确认卡片都不参与折叠，各自把相邻的步骤/思考组隔开。
+      out.push({
+        ...chunk,
+        index: i,
+        summary: false,
+        runCount: 0,
+        runKey: '',
+        expanded: false,
+        action: chunk.type === 'confirm' ? actionById.value.get(chunk.actionId ?? -1) : undefined,
+      })
       i += 1
       continue
     }
-    // 收一段「同类型的连续 chunk」为一组：一组命令，或一段思考。文字块把组隔开，
-    // 所以每组对应模型的一轮动作，后面紧跟的解说文字留在原位——折叠必须按组就地
-    // 收，若把整条回答的步骤全堆到顶部，各组命令就和它们各自的解说被拆散了。
+    // 收一段「同类型的连续 chunk」为一组：一组命令，或一段思考。正文和确认卡片
+    // 把组隔开，所以每组对应模型的一轮动作，后面紧跟的解说文字留在原位——折叠必须
+    // 按组就地收，若把整条回答的步骤全堆到顶部，各组命令就和它们各自的解说被拆散了。
     const runType = chunk.type // 'step' | 'reason'
     let j = i
     while (j < chunks.length && chunks[j].type === runType) j += 1
@@ -413,14 +459,63 @@ const convAgentId = ref<number | null>(null)
 const actions = ref<OpsAction[]>([])
 const { isActing, approve, reject } = useOpsConfirm()
 
-// 正在流式的那条助手气泡：confirm 事件到达时 message_id 还没回填，这一段
-// 时间卡片挂到它下面（与主对话 actionsOf 同一约定）。
+const actionById = computed(() => new Map(actions.value.map((a) => [a.id, a])))
+
+// 正在流式的那条助手气泡：老消息没有时间线时，卡片只能按它挂到气泡尾部。
 const streamingAnswerKey = ref<string | null>(null)
 
+/** 最后一条助手气泡：无主待确认项的兜底挂载点。 */
+const tailAssistantKey = computed(() => {
+  for (let i = items.value.length - 1; i >= 0; i -= 1) {
+    if (items.value[i].kind === 'assistant') return items.value[i].key
+  }
+  return null
+})
+
+/**
+ * 挂在气泡尾部的待确认项兜底：时间线里有 confirm 条目的按位置就地渲染（见
+ * displayChunks），这里只收那些没有位置信息的——老消息、以及本轮模型一个
+ * 字都没吐就直接提议命令的极端情况。
+ */
 function actionsOf(item: TalkItem): OpsAction[] {
-  return actions.value.filter((a) =>
-    a.message_id != null ? a.message_id === item.id : item.key === streamingAnswerKey.value,
+  const inline = new Set(
+    item.chunks.filter((c) => c.type === 'confirm').map((c) => c.actionId),
   )
+  return actions.value.filter((a) => {
+    if (inline.has(a.id)) return false
+    if (a.message_id != null) return a.message_id === item.id
+    // message_id 没回填（整轮回答没落库就断了：停止/刷新/断线）：宁可挂到最后
+    // 一条助手气泡，也不能让它谁都不匹配——那样这条命令在界面上根本不存在，
+    // 用户只看到 AI 说「已提交，请点确认」而没有任何可点的东西，180s 后超时。
+    return item.key === streamingAnswerKey.value || item.key === tailAssistantKey.value
+  })
+}
+
+/** 还没了结的写命令：卡片可能埋在长回答中间，也可能整张在视口外。 */
+const pendingActions = computed(() => actions.value.filter((a) => a.status === 'pending'))
+
+/**
+ * 本地倒计时归零。服务端对超时的 pending 本来就是报 expired（见 OpsAction 的
+ * status 注释），这里只是让流式中创建的那一条在界面上早点自洽：卡片切文案、
+ * 顶部提示条收起来，不用等下一次拉列表。
+ */
+function settleExpired(action: OpsAction) {
+  if (action.status === 'pending') action.status = 'expired'
+}
+
+/** 跳到第一条待确认的卡片：卡片可能离当前视口很远，滚过去比让用户自己找快。 */
+function jumpToPending() {
+  const target = pendingActions.value[0]
+  if (!target) return
+  nextTick(() => {
+    const cards = scrollEl.value?.querySelectorAll('.confirm-card') ?? []
+    for (const card of cards) {
+      if ((card as HTMLElement).dataset.actionId === String(target.id)) {
+        card.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        return
+      }
+    }
+  })
 }
 
 /** 这条气泡是不是正在流的那条（决定气泡操作行要不要出现）。 */
@@ -436,7 +531,9 @@ const inputEl = ref<{ focus: () => void } | null>(null)
 
 /** 持久状态指示文案：区分 AI 在思考、执行命令、还是空闲。 */
 const aiStatusText = computed(() => {
-  if (currentStepDetail.value) return `正在执行：${currentStepDetail.value}`
+  // 步骤文案走 toolLabel，动词自带（「执行只读命令：…」），再套一层
+  // 「正在执行：」就重复了；进行中由那三个跳动的点表示。
+  if (currentStepDetail.value) return currentStepDetail.value
   if (streamingText.value) return '正在生成回答…'
   return '正在思考…'
 })
@@ -520,14 +617,6 @@ function useSample(text: string) {
 let seq = 0
 const nextKey = () => `i${++seq}`
 
-function currentAnswer(): TalkItem {
-  const last = items.value[items.value.length - 1]
-  if (last && last.kind === 'assistant') return last
-  const created: TalkItem = { key: nextKey(), kind: 'assistant', text: '', chunks: [] }
-  items.value.push(created)
-  return created
-}
-
 // ---- 会话与历史 ---------------------------------------------------------------
 // 面板每次打开（或点「新会话」）都是全新窗口：会话懒创建，第一条提问发出去
 // 时才落库，免得历史列表堆满一句话都没说的空会话。旧排查从历史下拉翻回去，
@@ -606,13 +695,22 @@ async function openConversation(id: number) {
       id: m.id,
       kind: m.role,
       text: m.content,
-      // 后端按到达顺序存了整条回答流（含命令与思考），据此重建交错渲染；
-      // 老消息没有 timeline，退回空 chunks → 模板用 content 兜底整段渲染。
-      chunks: (m.timeline ?? []).map((e) =>
-        e.type === 'step'
-          ? { type: 'step', detail: describeStep({ tool: e.tool ?? '', query: e.query, input: e.input }) }
-          : { type: e.type, detail: e.detail ?? '' },
-      ),
+      // 后端按到达顺序存了整条回答流（含命令、思考与确认提议），据此重建交错
+      // 渲染；老消息没有 timeline，退回空 chunks → 模板用 content 兜底整段渲染。
+      chunks: (m.timeline ?? []).map((e): TalkChunk => {
+        if (e.type === 'step') {
+          const { text, full } = describeStep({
+            tool: e.tool ?? '',
+            query: e.query,
+            input: e.input,
+          })
+          return { type: 'step', detail: text, full }
+        }
+        if (e.type === 'confirm') {
+          return { type: 'confirm', detail: '', actionId: e.action_id }
+        }
+        return { type: e.type, detail: e.detail ?? '' }
+      }),
     }))
     actions.value = acts.items
     pinToBottom()
@@ -724,11 +822,18 @@ function formatTime(value: string): string {
 // completions 与 confirm 两条流共用同一组回调：step/token/confirm/done/error
 // 语义一致；exec 只有 confirm 流会发。
 function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
-  // 取当前回答气泡（没有就建），并记住它是本轮流式的挂载点。
+  // 一轮流式 = 一条助手气泡。确认流的续答绝不能并进提问流那条气泡：卡片是
+  // 按时间线插在气泡里的，两轮流式混在一条气泡里就会让先到的卡片被后到的
+  // 步骤与正文压在中间。后端本来也是每轮流式各落一条消息，这样两边对得上。
+  let bubble: TalkItem | null = null
   const answer = () => {
-    const item = currentAnswer()
-    streamingAnswerKey.value = item.key
-    return item
+    if (!bubble) {
+      const created: TalkItem = { key: nextKey(), kind: 'assistant', text: '', chunks: [] }
+      items.value.push(created)
+      bubble = created
+    }
+    streamingAnswerKey.value = bubble.key
+    return bubble
   }
   // 当前文字 / 思考 chunk 的引用：同类增量追加到它，异类或步骤到来时关闭它。
   let textChunk: TalkChunk | null = null
@@ -757,9 +862,9 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
     onStep: (data) => {
       const item = answer()
       closeTextChunk()
-      const detail = describeStep(data)
-      currentStepDetail.value = detail
-      item.chunks.push({ type: 'step', detail })
+      const { text, full } = describeStep(data)
+      currentStepDetail.value = text
+      item.chunks.push({ type: 'step', detail: text, full })
       scrollToBottom()
     },
     onReason: (token) => {
@@ -789,10 +894,14 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
     onConfirm: (data) => {
       // 模型提议后可能直接结束本轮、一个 token 都不吐：先保证气泡存在，
       // 确认卡片才有地方挂。
-      answer()
+      const item = answer()
       const action = actionFromConfirm(data, conversationId.value)
       actions.value.push(action)
       streamActions.push(action)
+      // 卡片就地插在提议发生的这个位置（与后端 timeline 的 confirm 条目同一
+      // 时刻），后面的正文从新的一块 chunk 开始。
+      closeTextChunk()
+      item.chunks.push({ type: 'confirm', detail: '', actionId: action.id })
       scrollToBottom()
     },
     onExec: (ev) => {
@@ -801,9 +910,11 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
       if (ev.action_id != null) {
         const item = answer()
         closeTextChunk()
+        // 命令全文在上面那张确认卡片里，这里只报结果，不再摊一遍命令。
         item.chunks.push({
           type: 'step',
-          detail: `已执行：${ev.command}（exit ${ev.exit_status ?? '—'}）`,
+          detail: `已执行写命令（exit ${ev.exit_status ?? '—'}）`,
+          full: ev.command,
         })
       }
       // 两种 exec 都通知父组件——服务器问答时父组件把命令和输出打到终端窗口。
@@ -815,9 +926,9 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
       scrollToBottom()
     },
     onDone: ({ message_id }) => {
-      // 记下落库 id 并回填本轮提议的 message_id：卡片从「流式气泡」改挂到
-      // 落库消息上，与历史回放的定位方式一致。
-      const item = items.value[items.value.length - 1]
+      // 记下落库 id 并回填本轮提议的 message_id：卡片已按时间线就地渲染，
+      // 这个 id 只服务「老消息没有时间线」那条兜底路径。
+      const item = bubble ?? items.value[items.value.length - 1]
       if (item && item.kind === 'assistant') item.id = message_id
       for (const a of streamActions) a.message_id = message_id
       finishStream()
@@ -845,14 +956,23 @@ async function copyItem(item: TalkItem) {
   else toast.error('复制失败，浏览器拒绝了剪贴板访问')
 }
 
+/**
+ * 步骤行的文案：走主对话同一份 toolLabel（中文标题 + 80 字截断），全文另存在
+ * full 里给悬停 title。写命令提议是个例外——它的正文就是紧随其后的那张确认
+ * 卡片，步骤行再摊一遍命令，一条气泡里同一串 kubectl 会出现三遍。
+ */
 function describeStep(payload: {
   tool: string
   query?: string
   input?: Record<string, unknown>
-}): string {
-  const input = payload.input ?? {}
-  const detail = input.command || input.statement || input.table || payload.query || ''
-  return detail ? `${payload.tool}: ${detail}` : payload.tool
+}): { text: string; full: string } {
+  const input = payload.input ?? (payload.query ? { query: payload.query } : {})
+  const raw = input.command ?? input.statement ?? input.query ?? ''
+  const full = typeof raw === 'string' && raw ? raw : ''
+  if (payload.tool === 'propose_command') {
+    return { text: '已提议一条写命令，见下方确认卡片', full }
+  }
+  return { text: toolLabel(payload.tool, input), full }
 }
 
 function onComposerEnter(e: KeyboardEvent) {
@@ -990,6 +1110,39 @@ defineExpose({
 .tool-btn:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+/* 待确认提示条：压在滚动区上方，不随消息滚走。整条就是按钮，点一下滚到
+   卡片那儿去——确认窗口只有 180s，看不见就等于拒绝。 */
+.pending-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 5px 8px;
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-sm);
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-size: var(--fs-xs);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.pending-bar:hover {
+  background: rgba(212, 136, 6, 0.16);
+}
+
+.ops-chat.dark .pending-bar {
+  color: var(--warning-bright);
+  border-color: rgba(250, 173, 20, 0.45);
+  background: rgba(250, 173, 20, 0.1);
+}
+
+.ops-chat.dark .pending-bar:hover {
+  background: rgba(250, 173, 20, 0.18);
 }
 
 .chat-body {
@@ -1192,8 +1345,8 @@ defineExpose({
   opacity: 0.5;
 }
 
-/* 命令按内容换行整段摊开：一行裁掉的 ellipsis 让长命令（jq 表达式、带管道的
-   systemctl）在点开后又变成看不到全文的死信息。 */
+/* toolLabel 把命令截到 80 字，这里只负责让截断后的部分换行不溢出。全文没丢：
+   整行有悬停 title，写命令的全文在确认卡片里，只读命令在终端窗口有回显。 */
 .step-text {
   flex: 1;
   min-width: 0;

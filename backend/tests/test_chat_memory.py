@@ -281,6 +281,34 @@ def test_render_labels_user_rows_and_treats_everything_else_as_assistant(db):
     assert mem.MemoryService._render(rows) == "用户：提问\n\n助手：回答\n\n助手：别的角色"
 
 
+def test_split_replay_window_never_separates_a_question_from_its_answer():
+    """续答只落助手消息会打乱 user/assistant 奇偶：切点外若是用户提问，
+    整对问答划回回放段——摘要段不能把一个回答在窗口里的问题写成假待办。"""
+    def rows(spec):
+        roles = {"u": "user", "a": "assistant"}
+        return [SimpleNamespace(role=roles[ch]) for ch in spec]
+
+    # 正常成对序列：切点不动
+    overflow, replay = mem.split_replay_window(rows("uauaua"), 2)
+    assert [r.role for r in overflow] == ["user", "assistant", "user", "assistant"]
+    assert [r.role for r in replay] == ["user", "assistant"]
+
+    # 事故形态（13 条/窗口 12 的缩影：5 条/窗口 4）：溢出段只剩一条提问
+    overflow, replay = mem.split_replay_window(rows("uaaua"), 4)
+    assert overflow == []
+    assert [r.role for r in replay] == ["user", "assistant", "assistant", "user", "assistant"]
+
+    # 两次续答翻转后切点落在中段提问前：提问连同回答一起划回回放段
+    overflow, replay = mem.split_replay_window(rows("uaauaaua"), 4)
+    assert [r.role for r in overflow] == ["user", "assistant", "assistant"]
+    assert [r.role for r in replay] == ["user", "assistant", "assistant", "user", "assistant"]
+
+    # 历史短于窗口：全部归回放段
+    overflow, replay = mem.split_replay_window(rows("ua"), 4)
+    assert overflow == []
+    assert [r.role for r in replay] == ["user", "assistant"]
+
+
 def test_refresh_within_window_drops_summary_without_calling_the_model(db, model):
     """历史还在回放窗口内就没有摘要可言——旧摘要要删掉，而且不值得花一次模型调用。"""
     conv = make_conversation(db)
@@ -384,6 +412,62 @@ def test_refresh_ignores_other_owner_messages_in_the_same_conversation(db, model
     # 本 owner 6 条，窗口占掉末尾 2 条，溢出只剩 4 条；owner 条件一漏就变 10 条
     assert human.count("第 0 轮") == 2 and human.count("第 1 轮") == 2
     assert "第 2 轮" not in human
+
+
+def test_refresh_does_not_summarize_a_question_whose_answer_is_in_the_window(db, model):
+    """事故回放：续答多落一条助手消息（5 条/窗口 4），按条数切出的溢出段
+    只剩第一条用户提问，而它的回答正在窗口开头。此切法不产生摘要，提问
+    完整留给回放窗口，旧摘要一并清掉。"""
+    conv = make_conversation(db)
+    add_messages(db, conv.id, 2)  # u/a/u/a
+    db.add(
+        ChatMessage(
+            owner_id=OWNER,
+            conversation_id=conv.id,
+            role="assistant",
+            content="续答分析",
+        )
+    )
+    db.add(ChatSummary(conversation_id=conv.id, owner_id=OWNER, summary="旧摘要"))
+    db.commit()
+
+    wait(svc(db).refresh_summary(conv, chat_config(db), history_turns=2))
+
+    assert model["calls"] == []
+    assert svc(db).summary_for(conv.id) == ""
+
+
+def test_refresh_peels_dangling_question_but_keeps_complete_pairs(db, model):
+    """切点落在中段提问与其回答之间时：提问不进摘要输入，此前已完整的
+    问答（含续答）照常参与摘要。"""
+    conv = make_conversation(db)
+    for role, content in [
+        ("user", "最早的提问"),
+        ("assistant", "最早的回答"),
+        ("assistant", "续答一"),
+        ("user", "被切点劈中的提问"),
+        ("assistant", "它在窗口里的回答"),
+        ("assistant", "续答二"),
+        ("user", "窗口提问二"),
+        ("assistant", "窗口回答二"),
+    ]:
+        db.add(
+            ChatMessage(
+                owner_id=OWNER,
+                conversation_id=conv.id,
+                role=role,
+                content=content,
+            )
+        )
+    db.commit()
+    model["reply"] = "新摘要"
+
+    wait(svc(db).refresh_summary(conv, chat_config(db), history_turns=2))
+
+    human = model["calls"][0][1].content
+    assert "最早的提问" in human and "最早的回答" in human and "续答一" in human
+    assert "被切点劈中的提问" not in human
+    assert "它在窗口里的回答" not in human
 
 
 # ---- 四、记忆提取：门槛、去重、上限与容错 --------------------------------------

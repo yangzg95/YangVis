@@ -926,6 +926,27 @@ def test_history_keeps_the_newest_window_oldest_first(db):
     assert history[-1].role == ROLE_ASSISTANT
 
 
+def test_history_keeps_question_together_with_the_answer_at_window_start(db):
+    """续答只落助手消息会让回放窗口以回答开头：窗外紧邻的那条提问必须一并
+    带回，与 memory.split_replay_window 是同一条边界，否则提问两段都落空。"""
+    conv = make_conversation(db)
+    window = chat_module.HISTORY_TURNS * 2
+    # index 2 是续答多落的助手消息；之后从 user 重新交替，末尾落在 assistant
+    roles = ["user", "assistant", "assistant"] + [
+        ROLE_USER if index % 2 == 0 else ROLE_ASSISTANT
+        for index in range(window - 2)
+    ]
+    for index, role in enumerate(roles):
+        make_message(db, conv.id, role, f"第 {index} 条")
+
+    history = svc(db)._history(conv.id)
+
+    assert len(history) == window + 1
+    assert history[0].role == ROLE_USER and history[0].content == "第 0 条"
+    assert history[1].content == "第 1 条"
+    assert history[-1].content == f"第 {window} 条"
+
+
 def test_history_is_scoped_to_the_owner(db):
     conv = make_conversation(db)
     fill_history(db, conv, 2)

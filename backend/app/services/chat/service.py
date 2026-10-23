@@ -61,6 +61,7 @@ from app.services.chat.attachments import (
 from app.services.chat.memory import (
     MEMORY_RULES,
     MemoryService,
+    split_replay_window,
 )
 from app.services.ops import database as db_ops
 from app.services.ops import server as server_ops
@@ -991,15 +992,21 @@ class ChatService:
 
     def _history(self, conversation_id: int) -> List[ChatMessage]:
         """最近的若干轮对话，按从旧到新排列。"""
+        window = HISTORY_TURNS * 2
         rows = list(
             self._db.scalars(
                 self._scope(select(ChatMessage), ChatMessage.owner_id)
                 .where(ChatMessage.conversation_id == conversation_id)
                 .order_by(ChatMessage.id.desc())
-                .limit(HISTORY_TURNS * 2)
+                # 多取一条：窗口外紧邻的若是用户提问，split_replay_window
+                # 会把整对问答划进回放段（它的回答正是窗口第一条）——与
+                # 摘要重算共用同一条边界，提问不会被切成「摘要里挂待办、
+                # 窗口里只剩回答」。正常问答序列最多只需这一条。
+                .limit(window + 1)
             ).all()
         )
-        return list(reversed(rows))
+        rows.reverse()
+        return split_replay_window(rows, window)[1]
 
     # -- 智能体选择 ---------------------------------------------------------
 
@@ -1358,9 +1365,9 @@ class ChatService:
         executor = create_agent(client, tools, system_prompt=system)
 
         parts: List[str] = []
-        # 按到达顺序记录整条回答流：文字、执行命令、思考过程。历史回放用它重建
-        # 交错的步骤与解说。只有当它含非纯文字条目（step/reason）时才落库，纯问答
-        # 不重复存 content。
+        # 按到达顺序记录整条回答流：文字、执行命令、思考过程、写命令确认提议。
+        # 历史回放用它重建交错的步骤与解说。只有当它含非纯文字条目（step/reason/
+        # confirm）时才落库，纯问答不重复存 content。
         timeline: List[dict] = []
 
         def _merge_text(kind: str, detail: str) -> None:
@@ -1450,6 +1457,9 @@ class ChatService:
                     # 要跟本轮回答一起出现，而不是等 done。
                     if toolbox is not None and len(toolbox.pending_proposals) > sent_proposals:
                         for action in toolbox.pending_proposals[sent_proposals:]:
+                            # 位置也要落库：确认卡片按 action_id 就地插回这条
+                            # 时间线，历史回放才能和流式时看到同一个顺序。
+                            timeline.append({"type": "confirm", "action_id": action.id})
                             yield "confirm", {
                                 "action_id": action.id,
                                 "command": action.command,

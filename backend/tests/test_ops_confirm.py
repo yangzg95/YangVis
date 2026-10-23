@@ -986,6 +986,19 @@ def test_ops_answer_emits_step_then_exec_then_confirm_then_done(db, agent_env):
     assert action.message_id == done["message_id"], "回填的正是那条 assistant 消息"
     assert agent_env.instances[0].closed is True, "回答结束要把这次开的连接收掉"
 
+    # 确认提议发生的时刻也要落进时间线：前端按它对位插卡片，历史回放才不会
+    # 让卡片沉在气泡底部、被后面的正文顶上去。
+    saved = db.scalars(
+        select(ChatMessage)
+        .where(ChatMessage.conversation_id == conv.id, ChatMessage.role == ROLE_ASSISTANT)
+        .order_by(ChatMessage.id.desc())
+    ).first()
+    types = [entry["type"] for entry in saved.timeline or []]
+    # 位置落库的验收点：confirm 条目排在它发生的那一刻（这里落在正文之前），
+    # 而不是等整条回答收尾再追加——否则回放时卡片会沉在气泡底部顶不上来。
+    assert types.index("confirm") < types.index("text")
+    assert (saved.timeline or [])[types.index("confirm")]["action_id"] == action.id
+
 
 def test_confirm_frames_are_emitted_once_per_proposal(db, agent_env):
     """两条提议各发一帧，不重复：sent_proposals 的游标漏了就会弹两张一样的卡。"""

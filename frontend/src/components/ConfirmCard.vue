@@ -1,5 +1,5 @@
 <template>
-  <div :class="['confirm-card', { dark }]">
+  <div :class="['confirm-card', { dark }]" :data-action-id="action.id">
     <div class="confirm-title">
       <WarningOutlined />
       AI 请求执行一条写操作命令
@@ -32,8 +32,20 @@
 
     <template v-else>
       <div :class="['confirm-state', `is-${displayStatus}`]">{{ stateText }}</div>
-      <!-- 执行完/失败的输出块：续答模型看的是同一份，用户也能直接核对。 -->
-      <pre v-if="showResult" class="confirm-result">{{ action.result }}</pre>
+      <!-- 执行完/失败的输出块：续答模型看的是同一份，用户也能直接核对。
+           默认只留三行——运维终端右侧那条面板本就窄，一整块输出摊开会把
+           气泡里的正文和「AI 还在干活」那行一起挤出视口。 -->
+      <template v-if="showResult">
+        <pre :class="['confirm-result', { 'is-collapsed': !resultOpen }]">{{ action.result }}</pre>
+        <button
+          v-if="resultTruncatable"
+          type="button"
+          class="result-toggle"
+          @click="resultOpen = !resultOpen"
+        >
+          {{ resultOpen ? '收起输出' : '展开完整输出' }}
+        </button>
+      </template>
     </template>
   </div>
 </template>
@@ -59,6 +71,8 @@ const props = withDefaults(
 const emit = defineEmits<{
   (e: 'approve', action: OpsAction): void
   (e: 'reject', action: OpsAction): void
+  /** 本地倒计时归零：卡片自己切到超时展示，同时通知调用方把它记成已了结。 */
+  (e: 'expired', action: OpsAction): void
 }>()
 
 // 本地倒计时：created_at + timeout_seconds 算截止时间。后端写的是本地
@@ -117,14 +131,28 @@ const showResult = computed(
     !!props.action.result,
 )
 
+// 展开状态默认收起。要不要给这个控件走「肯定装不下」的判断：行数或字符数超过
+// 三行的量级才露出来，短输出不凭空多一行按钮。
+const resultOpen = ref(false)
+const resultTruncatable = computed(() => {
+  const text = props.action.result ?? ''
+  return text.split('\n').length > 3 || text.length > 160
+})
+
 onMounted(() => {
   if (props.action.status === 'pending') {
+    // 挂载时就已经过期（本地 created_at + 窗口 < now）：不装表，直接切超时。
+    if (remainingSeconds.value <= 0) {
+      emit('expired', props.action)
+      return
+    }
     timer = setInterval(() => {
       now.value = Date.now()
       // 归零后停表：displayStatus 已经切到 expired，不用再 tick。
       if (remainingSeconds.value <= 0 && timer) {
         clearInterval(timer)
         timer = undefined
+        emit('expired', props.action)
       }
     }, 1000)
   }
@@ -170,8 +198,13 @@ onBeforeUnmount(() => {
   background: var(--ink);
   color: #d4d4d4;
   font-size: var(--fs-xs);
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
+  /* 一条带六个 -H 的 curl 折行能到十行，限高让它内部滚，整张卡才不至于
+     把正文挤出视口。 */
+  max-height: 9em;
+  overflow-y: auto;
 }
 
 /* 理由通常是模型写的一整段「影响范围」，它是说明不是告警：用正文色，
@@ -214,14 +247,35 @@ onBeforeUnmount(() => {
 .confirm-result {
   margin: 6px 0 0;
   padding: 6px 8px;
-  max-height: 200px;
+  max-height: 240px;
   overflow-y: auto;
   border-radius: var(--radius-sm);
   background: var(--ink);
   color: #d4d4d4;
   font-size: var(--fs-xs);
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* 收起态：行高 1.5，三行就是 4.5em，剩下的等点开。 */
+.confirm-result.is-collapsed {
+  max-height: 4.5em;
+  overflow: hidden;
+}
+
+.result-toggle {
+  margin-top: 4px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.result-toggle:hover {
+  color: var(--signal-text);
 }
 
 /* ---- 深色变体（全屏终端页右侧的 AI 面板，与终端 #11181f 同一族） ------ */
@@ -268,5 +322,13 @@ onBeforeUnmount(() => {
 .confirm-card.dark .confirm-result {
   background: #0d141b;
   color: var(--text-dark);
+}
+
+.confirm-card.dark .result-toggle {
+  color: var(--text-dark-2);
+}
+
+.confirm-card.dark .result-toggle:hover {
+  color: var(--signal-bright);
 }
 </style>

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from sqlalchemy import Select, delete, select
 from sqlalchemy.orm import Session
@@ -132,6 +132,29 @@ async def _ask_text(config: ModelConfig, system: str, user: str, *, temperature:
     return _message_text(getattr(result, "content", result))
 
 
+def split_replay_window(
+    rows: List[ChatMessage], window: int
+) -> Tuple[List[ChatMessage], List[ChatMessage]]:
+    """把整段消息按回放窗口切成（摘要段, 回放段），切点不拆开一对问答。
+
+    消息序列不一定严格成对：运维确认命令后的续答只落助手消息（见
+    chat.service 的 ``question_persisted=False``），按条数硬切会让切点
+    落在一条用户提问和它的回答之间——提问进了摘要段、回答留在回放段，
+    摘要模型看不到回答，便把一个其实已经回答的问题写成「尚未回答」的
+    假待办。切点外紧邻用户消息时把切点左移，整对问答留在回放段，等
+    下一轮重算再成对进摘要。
+
+    ``ChatService._history`` 用「多取一条」实现同一条边界，两处必须
+    保持一致。
+    """
+    cut = len(rows) - window
+    if cut < 0:
+        cut = 0
+    while cut > 0 and rows[cut - 1].role == "user":
+        cut -= 1
+    return rows[:cut], rows[cut:]
+
+
 class MemoryService:
     """单个用户的长期记忆与会话摘要。"""
 
@@ -242,7 +265,9 @@ class MemoryService:
         """把回放窗口之外的历史（重新）压缩成摘要。
 
         全量重算：窗口之前的消息全部参与，不依赖上次算到哪。只有当这段历史
-        长到喂不下时才退化为「旧摘要 + 尾部一段」的合并模式。
+        长到喂不下时才退化为「旧摘要 + 尾部一段」的合并模式。摘要段只含
+        完整问答：切点外若是一条用户提问，整对留给回放窗口（见
+        ``split_replay_window``），不会把已回答的问题摘成假待办。
         """
         rows = list(
             self._db.scalars(
@@ -254,8 +279,7 @@ class MemoryService:
                 .order_by(ChatMessage.id)
             ).all()
         )
-        window = history_turns * 2
-        overflow = rows[:-window] if len(rows) > window else []
+        overflow, _ = split_replay_window(rows, history_turns * 2)
 
         if not overflow:
             # 历史还在窗口内，摘要没有存在的必要（比如曾经长过、后来被删短了）。
