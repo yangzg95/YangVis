@@ -252,6 +252,13 @@ def migrate_schema() -> None:
                 conn.execute(text(f"ALTER TABLE resume {ddl}"))
             logger.info("added resume.%s", column)
 
+    # 在线简历「保存到简历」：记录同步到 resume 表的那一行。
+    resume_doc_columns = _column_names("resume_doc")
+    if resume_doc_columns and "resume_id" not in resume_doc_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE resume_doc ADD COLUMN resume_id BIGINT NULL"))
+        logger.info("added resume_doc.resume_id")
+
     # 运行认领业务对象：状态从 workflow_run 翻译出来。
     run_columns = _column_names("workflow_run")
     if run_columns:

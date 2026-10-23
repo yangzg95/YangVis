@@ -17,17 +17,20 @@ import logging
 import re
 import secrets
 from html.parser import HTMLParser
-from typing import AsyncIterator, Callable, List, Optional
+from typing import TYPE_CHECKING, AsyncIterator, Callable, List, Optional
 
 from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
 from app.errors import BusinessError
-from app.models.entities import ResumeDoc
+from app.models.entities import Resume, ResumeDoc
 from app.models.schemas import ResumeDocAiRequest
 from app.services.agent_run import MODEL_TASK_TIMEOUT, require_chat_model
 from app.services.agents import AgentService
 from app.services.providers import build_chat_model, resolve_temperature
+
+if TYPE_CHECKING:
+    from app.services.resume import ResumeService
 
 logger = logging.getLogger("yangvis.resume_builder")
 
@@ -450,6 +453,156 @@ def _truncate(text: str, limit: int = CONTEXT_LIMIT) -> str:
     return text if len(text) <= limit else text[:limit] + "\n……（内容过长，已截断）"
 
 
+# ---- 导出到简历库（纯文本存档） -----------------------------------------------
+
+
+class _LineCollector(HTMLParser):
+    """把消毒过的富文本拍成行：块级标签结算一行，``<li>`` 行首补圆点。
+
+    与 :func:`html_to_text`（喂模型的一整段）不同，这里要保留列表边界——
+    存进简历库的全文会直接给简历分析模型读，所有 bullet 糊成一段就丢掉了
+    「这是第几条成就」的结构。
+    """
+
+    _BLOCK_TAGS = {"p", "div", "li", "blockquote"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._lines: List[str] = []
+        self._parts: List[str] = []
+        self._bullet = False
+
+    def _flush(self) -> None:
+        line = _WS_RE.sub(" ", "".join(self._parts)).strip()
+        if line:
+            self._lines.append(f"· {line}" if self._bullet else line)
+        self._parts = []
+        self._bullet = False
+
+    def handle_starttag(self, tag, attrs) -> None:  # type: ignore[override]
+        if tag == "li":
+            self._flush()
+            self._bullet = True
+        elif tag == "br":
+            self._flush()
+
+    def handle_startendtag(self, tag, attrs) -> None:  # type: ignore[override]
+        if tag == "br":
+            self._flush()
+
+    def handle_endtag(self, tag) -> None:  # type: ignore[override]
+        if tag in self._BLOCK_TAGS:
+            self._flush()
+
+    def handle_data(self, data) -> None:  # type: ignore[override]
+        self._parts.append(data)
+
+    def result(self) -> List[str]:
+        self._flush()
+        return self._lines
+
+
+def html_to_lines(fragment: str) -> List[str]:
+    """白名单 HTML 片段 → 去掉空行的纯文本行列表。"""
+    parser = _LineCollector()
+    try:
+        parser.feed(fragment or "")
+        parser.close()
+    except Exception:  # noqa: BLE001 - 畸形输入不该让同步失败
+        logger.debug("html_to_lines hit malformed input", exc_info=True)
+    return parser.result()
+
+
+def _entry_export_heading(module: str, entry: dict) -> str:
+    """一条经历的抬头：主字段在前，其余身份字段按固定顺序补上。"""
+    if module == "companies":
+        fields = ("company", "position", "department")
+    elif module == "projects":
+        fields = ("name", "role", "department")
+    else:
+        fields = ("school", "degree", "major", "study_mode", "college")
+    return " | ".join(entry.get(field) for field in fields if entry.get(field))
+
+
+# title 落进 filename 时剥掉文件系统不接受的字符；filename 只用于展示与将来
+# 的原件下载，简历库这行本身没有原件。
+_FILE_NAME_BAD_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def _safe_filename(title: str) -> str:
+    name = _FILE_NAME_BAD_RE.sub("_", title).strip().strip(".") or "在线简历"
+    return name[:120]
+
+
+def export_resume_text(doc: dict) -> str:
+    """把在线简历排成存档用的纯文本（简历库 ``Resume.content``）。
+
+    身份抬头固定开头（简历惯例，与打印模板一致）；其余模块按 ``module_order``
+    排布，用户怎么排，文本就怎么排。富文本按块/列表逐行展开。
+    """
+    sections: List[List[str]] = []
+    profile = doc.get("profile", {})
+
+    head: List[str] = []
+    if profile.get("name"):
+        head.append(profile["name"])
+    if profile.get("job_target"):
+        head.append(f"求职意向：{profile['job_target']}")
+    contact = "　".join(
+        f"{label}：{profile[key]}"
+        for key, label in (
+            ("phone", "电话"),
+            ("email", "邮箱"),
+            ("website", "个人网站"),
+        )
+        if profile.get(key)
+    )
+    basics = "　".join(
+        f"{label}：{profile[key]}"
+        for key, label in (
+            ("gender", "性别"),
+            ("birthday", "出生年月"),
+            ("city", "城市"),
+        )
+        if profile.get(key)
+    )
+    meta_line = "　　".join(part for part in (contact, basics) if part)
+    if meta_line:
+        head.append(meta_line)
+    if profile.get("intro"):
+        head.append(profile["intro"])
+    if head:
+        sections.append(head)
+
+    for module in doc.get("module_order", DEFAULT_MODULE_ORDER):
+        if module == "profile":
+            lines = html_to_lines(profile.get("summary_html", ""))
+            if lines:
+                sections.append(["个人优势", *lines])
+        elif module == "skills":
+            lines = html_to_lines(doc.get("skills_html", ""))
+            if lines:
+                sections.append([MODULE_LABELS["skills"], *lines])
+        elif module in _ENTRY_SPECS:
+            blocks: List[str] = []
+            for entry in doc.get(module, []):
+                period = _month_range(
+                    entry.get("start", ""), entry.get("end", ""), entry.get("current", False)
+                )
+                title_line = "　　".join(
+                    part
+                    for part in (_entry_export_heading(module, entry), period)
+                    if part
+                )
+                if title_line:
+                    blocks.append(title_line)
+                blocks.extend(html_to_lines(entry.get("description_html", "")))
+            if blocks:
+                sections.append([MODULE_LABELS[module], *blocks])
+
+    return "\n\n".join("\n".join(rows) for rows in sections).strip()
+
+
 _HTML_FORMAT_RULE = (
     "只输出一段 HTML 片段：允许的标签只有 <p>、<ul>、<li>、<strong>；"
     "不要输出 <html>/<body>、不要 markdown 代码栅栏、不要标题寒暄或任何解释。"
@@ -605,6 +758,73 @@ class ResumeBuilderService:
         self._db.delete(row)
         self._db.commit()
 
+    # -- 同步到简历库 --------------------------------------------------------
+
+    def sync_to_resume(
+        self, doc_id: int, *, resume_service: Optional[ResumeService] = None
+    ) -> tuple[Resume, bool]:
+        """把在线简历落成简历库中的一行（``Resume.content`` 纯文本）。
+
+        首次同步新建并把 id 回填到 ``resume_id``；之后再同步更新同一行。
+        两边是弱关联（无外键）：简历库那行被用户删掉时，这里按缺失重新建一行。
+        再次同步若正文有变化，基于旧正文的分析报告随之失效，一并清空。
+        返回 ``(resume, created)``。
+        """
+        # 局部导入：resume 那条线体量重（工作流/agent 都在它的依赖闭包里），
+        # 只在真正同步时付这个导入成本，也避开两个 service 模块的顶层耦合。
+        from app.services.resume import ResumeService
+
+        row = self.get_doc(doc_id)
+        text = export_resume_text(normalize_doc(row.doc))
+        if not text:
+            raise ValueError("简历还是空的，先填写一些内容再同步")
+
+        service = resume_service or ResumeService(self._db, self._owner_id)
+
+        resume = None
+        if row.resume_id:
+            resume = self._db.scalar(
+                select(Resume).where(
+                    Resume.id == row.resume_id,
+                    Resume.owner_id == self._owner_id,
+                )
+            )
+
+        filename = f"{_safe_filename(row.title)}.txt"
+        if resume is None:
+            resume = service.create_resume(
+                title=row.title,
+                description=None,
+                filename=filename,
+                mime="text/plain",
+                size=len(text.encode("utf-8")),
+                content=text,
+            )
+            row.resume_id = resume.id
+            self._db.commit()
+            logger.info("resume doc %s synced: created resume %s", row.id, resume.id)
+            return resume, True
+
+        resume.title = row.title
+        resume.filename = filename
+        content_changed = resume.content != text
+        if content_changed:
+            resume.content = text
+            resume.size = len(text.encode("utf-8"))
+            # 报告与改进意见是针对旧正文产出的，留着会和新原文打架。
+            resume.report = None
+            resume.suggestions = None
+            resume.analyzed_at = None
+        self._db.commit()
+        self._db.refresh(resume)
+        logger.info(
+            "resume doc %s synced: updated resume %s (content_changed=%s)",
+            row.id,
+            resume.id,
+            content_changed,
+        )
+        return resume, False
+
     # -- 序列化 -------------------------------------------------------------
 
     @staticmethod
@@ -612,6 +832,7 @@ class ResumeBuilderService:
         return {
             "id": row.id,
             "title": row.title,
+            "resume_id": row.resume_id,
             "updated_at": row.updated_at,
             "created_at": row.created_at,
         }

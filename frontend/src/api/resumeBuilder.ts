@@ -7,11 +7,14 @@
  */
 import { request } from './http'
 import { streamSse, type StreamHandlers } from './sse'
+import type { ResumeItem } from './resume'
 import type { ResumeDocData, ResumeModuleKey } from '@/utils/resumeDoc'
 
 export interface ResumeDocItem {
   id: number
   title: string
+  /** 已「保存到简历」时，简历库中对应那一行；null 表示还没同步过。 */
+  resume_id: number | null
   updated_at: string
   created_at: string
 }
@@ -44,6 +47,10 @@ export const resumeBuilderApi = {
     request<ResumeDocDetail>({ url: `/office/resume-docs/${id}`, method: 'PUT', data: payload }),
   remove: (id: number) =>
     request<null>({ url: `/office/resume-docs/${id}`, method: 'DELETE' }),
+
+  /** 内部同步到简历库：首次新建、之后更新同一行，绕开「导出 PDF 再上传」丢文本层的链路。 */
+  saveToResume: (id: number) =>
+    request<ResumeItem>({ url: `/office/resume-docs/${id}/save-to-resume`, method: 'POST' }),
 
   /** 流式 AI 帮写/润色/体检；返回的函数用于「停止」。 */
   aiAssist: (payload: ResumeAiPayload, handlers: ResumeAiHandlers): (() => void) =>

@@ -25,8 +25,10 @@ from app.models.schemas import (
     ResumeDocDetail,
     ResumeDocItem,
     ResumeDocUpdate,
+    ResumeItem,
 )
 from app.services.agent_run import model_error_text
+from app.services.resume import ResumeService
 from app.services.resume_builder import ResumeBuilderService
 from app.sse import SSE_HEADERS, sse_event, with_heartbeat
 
@@ -40,6 +42,14 @@ def get_service(
     db: Session = Depends(get_db),
 ) -> ResumeBuilderService:
     return ResumeBuilderService(db, user.user_id)
+
+
+def get_resume_service(
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> ResumeService:
+    # get_db 在一次请求内被 FastAPI 缓存，与上面拿到的是同一个 session。
+    return ResumeService(db, user.user_id)
 
 
 # ---- 文档 CRUD ---------------------------------------------------------------
@@ -97,6 +107,26 @@ def delete_doc(
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return APIResponse(data=None, message="deleted")
+
+
+@router.post("/{doc_id}/save-to-resume", response_model=APIResponse[ResumeItem])
+def save_to_resume(
+    doc_id: int,
+    service: ResumeBuilderService = Depends(get_service),
+    resume_service: ResumeService = Depends(get_resume_service),
+) -> APIResponse[ResumeItem]:
+    """把在线编辑的简历内部同步到简历库，绕开「导出 PDF 再上传」——
+    浏览器打印出的 PDF（如 Microsoft Print to PDF）常常没有文本层。"""
+    try:
+        resume, created = service.sync_to_resume(doc_id, resume_service=resume_service)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    return APIResponse(
+        data=resume_service.to_item(resume),
+        message="已同步到简历库" if created else "简历库中的内容已更新",
+    )
 
 
 # ---- AI 帮写（SSE）------------------------------------------------------------

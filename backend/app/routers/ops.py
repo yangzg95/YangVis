@@ -13,10 +13,8 @@
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import re
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import quote
 
@@ -97,7 +95,7 @@ from app.services.ops import db_exec as db_exec
 from app.services.ops import db_redis as db_redis
 from app.services.ops import db_schema as db_schema
 from app.services.ops import server as server_ops
-from app.services.chat_ops import Auditor
+from app.services.ops import terminal as term_ops
 
 logger = logging.getLogger("yangvis.ops")
 
@@ -1313,100 +1311,10 @@ async def _authorize(websocket: WebSocket, ticket: Optional[str]) -> Optional[Cu
     return user
 
 
-# 终端输出里出现这类提示，说明下一行键盘输入是密码而不是命令——不记。
-# 真实提示形态不一（"[sudo] password for ops: "、"Enter passphrase for key ...: "、
-# "Password: "），关键词不一定贴着结尾，所以允许关键词后隔一段再以冒号收尾。
-_PASSWORD_PROMPT = re.compile(
-    r"(password|passphrase|密码|口令)[^\n\r]{0,40}[:：]\s*$", re.IGNORECASE
-)
-
-
-class _CommandLineTracker:
-    """从 PTY 输入流里尽力重建用户提交的命令行。
-
-    真 PTY 不做命令过滤（那是用户自己的手），但「他敲过什么」要留痕。难处在
-    PTY 是原始字节流，带着行编辑的全部复杂性：退格、Ctrl+U、转义序列、上下
-    翻历史。完美重建需要一台完整的终端模拟器，那是堡垒机级别的活；这里走
-    务实路线——可打印字符入缓冲，常见编辑键尽力处理，回车提交。翻历史翻出
-    来的命令会重建不全，接受这个偏差：审计要的是「看得到大概干过什么」。
-
-    一条硬规则：输出侧刚问过密码（sudo、mysql -p 之类），下一行输入不记——
-    把密码写进审计库比漏记一条命令糟得多。
-    """
-
-    def __init__(self) -> None:
-        self._buf: List[str] = []
-        self._escape = False  # 正在吞一个 ANSI 转义序列
-        self._output_tail = ""  # 终端输出的滚动尾部，用来认密码提示
-        self._muted = False  # 下一行是密码输入，跳过
-
-    def feed_output(self, chunk: str) -> None:
-        """SSH → 浏览器方向的输出，只留一小段尾巴认提示符。"""
-        self._output_tail = (self._output_tail + chunk)[-200:]
-        if _PASSWORD_PROMPT.search(self._output_tail):
-            self._muted = True
-
-    def feed(self, text: str) -> List[str]:
-        """喂入一段键盘输入，返回本次提交的命令行（粘贴多行时可能多条）。"""
-        submitted: List[str] = []
-        for ch in text:
-            if self._escape:
-                # CSI/SS3 序列以字母或 ~ 收尾，整个吞掉不进缓冲。
-                if ch.isalpha() or ch == "~":
-                    self._escape = False
-                continue
-            if ch == "\x1b":
-                self._escape = True
-            elif ch in ("\r", "\n"):
-                line = "".join(self._buf).strip()
-                self._buf.clear()
-                if self._muted:
-                    # 密码行：跳过并恢复记录。
-                    self._muted = False
-                elif line:
-                    submitted.append(line)
-            elif ch in ("\x7f", "\x08"):  # 退格
-                if self._buf:
-                    self._buf.pop()
-            elif ch == "\x15":  # Ctrl+U 清行
-                self._buf.clear()
-            elif ch == "\x17":  # Ctrl+W 删一个词
-                while self._buf and self._buf[-1] == " ":
-                    self._buf.pop()
-                while self._buf and self._buf[-1] != " ":
-                    self._buf.pop()
-            elif ch == "\x03":  # Ctrl+C：当前行作废
-                self._buf.clear()
-            elif ch >= " ":  # 可打印字符（含中文等多字节字符）
-                self._buf.append(ch)
-            # \t（补全请求，不产生字符）与其余控制字符忽略。
-        return submitted
-
-
-def _is_cwd_probe(command: str) -> bool:
-    """前端右键「在文件浏览器打开」的 cwd 探测命令。
-
-    那条 printf 在终端屏幕上会自我擦除，审计里也不该留痕——否则每右键一次
-    就刷一条无意义的 printf。标记串（OSC 697 格式 + $PWD）足够独特。
-    """
-    return "697;%s" in command and "$PWD" in command
-
-
-async def _record_manual_command(user_id: int, server_id: int, server_name: str, command: str) -> None:
-    """把终端里手敲的一行命令写进审计表。
-
-    审计自己开短会话并放到工作线程跑（长连接不该占连接池，也不该卡 WS 事件
-    循环）。verdict 记 ``manual``：人工输入没有「白名单判定」这回事，success
-    也只是「已送达」，退出码在这条通道上拿不到。
-    """
-    await Auditor(user_id, "server").record(
-        target_id=server_id,
-        target_name=server_name,
-        command=command,
-        verdict="manual",
-        success=True,
-        actor="user",
-    )
+# 会话本身（SSH 连接 + PTY + 回放缓冲）活在 services.ops.terminal 的内存表里，
+# 生命周期独立于 WebSocket：浏览器断线只摘掉一块「屏幕」，会话保留
+# OPS_TERMINAL_TTL 秒，重连续接并回放。本端点只负责鉴权、建新会话的工厂，
+# 以及浏览器 → PTY 的读循环；反方向的泵比这条连接命长，归会话自己管。
 
 
 @router.websocket("/terminal")
@@ -1417,10 +1325,11 @@ async def terminal(
     cols: int = Query(default=80, ge=20, le=500),
     rows: int = Query(default=24, ge=5, le=200),
 ) -> None:
-    """一条 xterm.js ↔ SSH PTY 的双向字节通道。
+    """xterm.js ↔ 持久 PTY 会话的双向字节通道。
 
     客户端发文本帧：普通字符串就是键盘输入，``{"type":"resize",...}`` 是窗口
-    变化。服务端只回纯文本，也就是终端输出本身。
+    变化。服务端回纯文本（终端输出本身）或以 0x1e 打头的控制帧
+    （hello/live/ended/takenover）。
     """
     user = await _authorize(websocket, ticket)
     if user is None:
@@ -1432,58 +1341,60 @@ async def terminal(
         await websocket.close(code=WS_UNAUTHORIZED, reason="没有运维写权限，无法打开终端")
         return
 
-    db = SessionLocal()
-    try:
-        service = server_ops.OpsServerService(db, user.user_id)
+    async def create_session():
+        """新会话工厂：只在没有可续接会话时、于 per-key 锁内执行。
+
+        续接路径完全不走这里，所以重连不查库、不重连 SSH，也不刷新台账的
+        最近检查时间。
+        """
+        db = SessionLocal()
         try:
-            server = service.get(server_id)
-        except LookupError:
-            await websocket.close(code=WS_UNAUTHORIZED, reason="服务器不存在")
-            return
-
-        try:
-            conn = await server_ops.connect(server, service)
-        except server_ops.OpsConnectError as exc:
-            logger.warning(
-                "terminal handshake failed: user %s, server %s: %s",
-                user.user_id,
-                server_id,
-                exc,
-            )
-            service.record_check(server, ok=False, message=str(exc))
-            await websocket.send_text(f"\r\n\x1b[31m{exc}\x1b[0m\r\n")
-            await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="连接失败")
-            return
-
-        service.record_check(server, ok=True)
-        # 会话关在后面对象就过期了，先把审计要用的标量取出来。
-        audit_target = (server.id, server.name or server.host)
-    finally:
-        # PTY 会话可能挂上几个小时，不该一直占着连接池里的一个连接。
-        db.close()
+            service = server_ops.OpsServerService(db, user.user_id)
+            server = service.get(server_id)  # 查无此机抛 LookupError
+            try:
+                conn = await server_ops.connect(server, service)
+            except server_ops.OpsConnectError as exc:
+                service.record_check(server, ok=False, message=str(exc))
+                raise
+            try:
+                process = await conn.create_process(
+                    term_type="xterm-256color", term_size=(cols, rows)
+                )
+            except Exception as exc:  # pragma: no cover - 依赖真实 SSH 服务端
+                conn.close()
+                raise server_ops.OpsConnectError(f"无法打开终端：{exc}") from exc
+            service.record_check(server, ok=True)
+            # 会话关在后面对象就过期了，先把审计要用的标量取出来。
+            return conn, process, (server.id, server.name or server.host)
+        finally:
+            # PTY 会话可能挂上几个小时，不该一直占着连接池里的一个连接。
+            db.close()
 
     try:
-        process = await conn.create_process(term_type="xterm-256color", term_size=(cols, rows))
-    except Exception as exc:  # pragma: no cover - 依赖真实 SSH 服务端
-        logger.warning("failed to open a pty on server %s: %s", server_id, exc)
-        await websocket.send_text(f"\r\n\x1b[31m无法打开终端：{exc}\x1b[0m\r\n")
-        await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
-        conn.close()
+        session, resumed = await term_ops.terminal_sessions.attach_or_create(
+            user_id=user.user_id,
+            server_id=server_id,
+            websocket=websocket,
+            cols=cols,
+            rows=rows,
+            create=create_session,
+        )
+    except LookupError:
+        await websocket.close(code=WS_UNAUTHORIZED, reason="服务器不存在")
+        return
+    except server_ops.OpsConnectError as exc:
+        logger.warning(
+            "terminal handshake failed: user %s, server %s: %s",
+            user.user_id,
+            server_id,
+            exc,
+        )
+        await websocket.send_text(f"\r\n\x1b[31m{exc}\x1b[0m\r\n")
+        await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="连接失败")
         return
 
-    tracker = _CommandLineTracker()
-
-    async def pump_out() -> None:
-        """SSH → 浏览器。"""
-        while True:
-            chunk = await process.stdout.read(4096)
-            if not chunk:
-                break
-            tracker.feed_output(chunk)
-            await websocket.send_text(chunk)
-
-    async def pump_in() -> None:
-        """浏览器 → SSH。"""
+    # 浏览器 → PTY。反方向（SSH → 浏览器）是会话自己的泵和写者，不在这里。
+    try:
         while True:
             message = await websocket.receive_text()
             if message.startswith("{"):
@@ -1492,47 +1403,33 @@ async def terminal(
                 except json.JSONDecodeError:
                     payload = None
                 if isinstance(payload, dict) and payload.get("type") == "resize":
-                    process.change_terminal_size(
+                    await session.resize(
                         int(payload.get("cols", cols)), int(payload.get("rows", rows))
                     )
                     continue
-            for command in tracker.feed(message):
-                if not _is_cwd_probe(command):
-                    await _record_manual_command(user.user_id, audit_target[0], audit_target[1], command)
-            process.stdin.write(message)
-
-    logger.info("terminal tunnel opened: user %s, server %s", user.user_id, server_id)
-    tasks = [asyncio.create_task(pump_out()), asyncio.create_task(pump_in())]
-    try:
-        # 任意一边断掉，整条隧道就结束——另一半单独留着没有意义。
-        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            await session.handle_input(message)
     except WebSocketDisconnect:
-        logger.debug("terminal websocket disconnected: user %s, server %s", user.user_id, server_id)
+        logger.debug(
+            "terminal websocket disconnected: user %s, server %s", user.user_id, server_id
+        )
+    except Exception as exc:
+        # 往已死会话的 PTY 写输入会炸在这里：控制帧已经通知过浏览器，
+        # 正常收尾即可，别刷一墙异常。
+        if not session.closed:
+            logger.warning(
+                "terminal receive loop died: user %s, server %s: %s",
+                user.user_id,
+                server_id,
+                exc,
+            )
     finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        for task in tasks:
-            if task.cancelled():
-                continue
-            exc = task.exception()
-            if exc is None:
-                continue
-            if isinstance(exc, WebSocketDisconnect):
-                logger.debug(
-                    "terminal websocket disconnected: user %s, server %s",
-                    user.user_id,
-                    server_id,
-                )
-            else:
-                logger.warning(
-                    "terminal pump task died: user %s, server %s: %s",
-                    user.user_id,
-                    server_id,
-                    exc,
-                )
-        conn.close()
-        logger.info("terminal tunnel closed: user %s, server %s", user.user_id, server_id)
+        # 只是摘掉屏幕：会话留给后来的连接，TTL 到了才真的关 SSH。
+        session.detach(websocket)
+        logger.info(
+            "terminal screen detached: user %s, server %s (session kept)",
+            user.user_id,
+            server_id,
+        )
         try:
             await websocket.close()
         except RuntimeError:

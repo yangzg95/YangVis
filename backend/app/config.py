@@ -131,6 +131,12 @@ class Settings(BaseSettings):
     OPS_BACKUP_MAX_BYTES: int = 64 * 1024 * 1024
     # WebSocket 入场票的有效期。它只需要活到握手完成，给 60 秒已经很宽裕。
     OPS_WS_TICKET_TTL: int = 60
+    # 浏览器断开后，终端会话在服务端继续存活的秒数。超时内重连（刷新页面、
+    # 网络抖动、空闲掉线）能接回原来的 shell 并回放画面；0 表示断线即销毁。
+    OPS_TERMINAL_TTL: int = 1800
+    # SSH keepalive 间隔（秒）。空闲长连接会被 NAT/防火墙或 sshd 的
+    # ClientAlive 策略掐断（表现为 WinError 10054），定期发心跳保活；0 关闭。
+    OPS_SSH_KEEPALIVE: int = 25
     # AI 提议写操作后等待用户点确认的时间。超时按「未批准」处理。180 秒太紧：
     # 卡片上那段「影响范围」常常要读要想要，还要去确认目标对不对，读着读着就
     # 超时了，只能让 AI 重新提议一遍。放宽到 15 分钟。

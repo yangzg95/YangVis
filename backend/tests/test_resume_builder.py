@@ -17,9 +17,10 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.errors import CODE_CHAT_NOT_READY, BusinessError
-from app.models.entities import ModelConfig, ResumeDoc
+from app.models.entities import ModelConfig, Resume, ResumeDoc
 from app.models.schemas import ResumeDocAiRequest
 from app.services.agents import seed_builtin_agents
+from app.services.resume import ResumeService
 from app.services.resume_builder import (
     DEFAULT_MODULE_ORDER,
     MODULES,
@@ -27,6 +28,8 @@ from app.services.resume_builder import (
     build_assist_prompt,
     build_check_prompt,
     default_doc,
+    export_resume_text,
+    html_to_lines,
     html_to_text,
     normalize_doc,
     sanitize_html,
@@ -426,7 +429,146 @@ def test_html_to_text_flattens_fragment():
     assert html_to_text("<p> a\n\n b </p>") == "a b"
 
 
-# ---- 五、流式 AI：门槛、搬运与断连 ---------------------------------------------
+# ---- 五、导出纯文本与同步到简历库 ----------------------------------------------
+
+
+def _saved_doc(session, title: str = "李四的简历", doc: dict | None = None) -> ResumeDoc:
+    builder = service(session)
+    row = builder.create_doc(title)
+    builder.update_doc(row.id, title=None, doc=doc or _full_doc())
+    return builder.get_doc(row.id)
+
+
+def test_html_to_lines_keeps_list_and_block_boundaries():
+    assert html_to_lines("<ul><li>第一条</li><li>第二条</li></ul><p>段落<br>续行</p>") == [
+        "· 第一条",
+        "· 第二条",
+        "段落",
+        "续行",
+    ]
+    assert html_to_lines("<p>  </p><div></div>") == []
+
+
+def test_export_resume_text_follows_the_printed_layout():
+    text = export_resume_text(_full_doc())
+    assert text.startswith("李四\n求职意向：产品经理")
+    assert "城市：上海" in text
+    # 经历抬头：主字段 + 职位 + 在职时间；描述保留 bullet 行。
+    assert "星河科技 | 高级产品运营　　2019-03 至今" in text
+    assert "负责增长" in text
+    assert "增长平台 | 负责人　　2020-01 - 2021-06" in text
+    assert "某某大学 | 本科 | 市场营销" in text
+    assert "专业技能\n· 数据分析" in text
+
+
+def test_export_resume_text_is_empty_for_blank_doc():
+    assert export_resume_text(default_doc()) == ""
+
+
+def test_sync_empty_doc_is_rejected(db):
+    row = service(db).create_doc("空简历")
+    with pytest.raises(ValueError, match="先填写"):
+        service(db).sync_to_resume(row.id)
+    # 被拒绝时不往简历库落任何行。
+    assert db.query(Resume).count() == 0
+
+
+def test_sync_creates_resume_and_backfills_the_link(db):
+    builder = service(db)
+    row = _saved_doc(db)
+    resume, created = builder.sync_to_resume(row.id)
+
+    assert created is True
+    assert isinstance(resume, Resume)
+    assert resume.owner_id == OWNER
+    assert resume.title == "李四的简历"
+    assert resume.filename == "李四的简历.txt"
+    assert resume.mime == "text/plain"
+    assert resume.size == len(resume.content.encode("utf-8"))
+    assert resume.content.startswith("李四")
+    assert resume.netdisk_fs_id is None  # 内部同步没有原件，不走网盘
+    # 弱关联回填到在线文档。
+    assert builder.get_doc(row.id).resume_id == resume.id
+    assert builder.to_item(builder.get_doc(row.id))["resume_id"] == resume.id
+
+
+def test_sync_second_time_updates_the_same_row(db):
+    builder = service(db)
+    row = _saved_doc(db)
+    first, created1 = builder.sync_to_resume(row.id)
+    assert created1 is True
+
+    # 模拟基于旧原文产出过报告。
+    first.report = "旧报告"
+    first.suggestions = ["旧建议"]
+    db.commit()
+
+    changed = _full_doc()
+    changed["profile"]["name"] = "李四丰"
+    builder.update_doc(row.id, title="新标题", doc=changed)
+    same, created2 = builder.sync_to_resume(row.id)
+
+    assert created2 is False
+    assert same.id == first.id
+    assert same.title == "新标题"
+    assert same.filename == "新标题.txt"
+    assert "李四丰" in same.content
+    # 正文变了，针对旧正文的产物必须失效。
+    assert same.report is None
+    assert same.suggestions is None
+    assert same.analyzed_at is None
+
+
+def test_sync_keeps_report_when_only_title_changes(db):
+    builder = service(db)
+    row = _saved_doc(db)
+    first, _ = builder.sync_to_resume(row.id)
+    first.report = "旧报告"
+    db.commit()
+
+    builder.update_doc(row.id, title="只改标题", doc=_full_doc())
+    same, created = builder.sync_to_resume(row.id)
+    assert created is False
+    assert same.report == "旧报告"
+    assert same.title == "只改标题"
+
+
+def test_sync_rebuilds_after_resume_deleted(db):
+    builder = service(db)
+    row = _saved_doc(db)
+    first, _ = builder.sync_to_resume(row.id)
+    db.delete(first)
+    db.commit()
+
+    again, created = builder.sync_to_resume(row.id)
+    assert created is True
+    # 旧行已删，库里只剩重新建出的这一行（SQLite 可能复用 rowid，不比 id）。
+    assert db.query(Resume).count() == 1
+    assert builder.get_doc(row.id).resume_id == again.id
+
+
+def test_sync_ignores_resume_id_owned_by_someone_else(db):
+    # resume_id 弱关联只认本人的简历；指向别人的行等同于缺失，重新建一行。
+    foreign = ResumeService(db, OTHER).create_resume(
+        title="别人的简历",
+        description=None,
+        filename="x.txt",
+        mime="text/plain",
+        size=3,
+        content="abc",
+    )
+    builder = service(db)
+    row = _saved_doc(db)
+    row.resume_id = foreign.id
+    db.commit()
+
+    resume, created = builder.sync_to_resume(row.id)
+    assert created is True
+    assert resume.id != foreign.id
+    assert builder.get_doc(row.id).resume_id == resume.id
+
+
+# ---- 六、流式 AI：门槛、搬运与断连 ---------------------------------------------
 
 
 def _assist_request(**over) -> ResumeDocAiRequest:

@@ -895,6 +895,10 @@ class ResumeDoc(Base):
     title: Mapped[str] = mapped_column(String(128), nullable=False)
     doc: Mapped[dict] = mapped_column(JSON, nullable=False)
 
+    # 「保存到简历」同步过去的 resume 行 id（弱关联，不加外键：简历库那侧
+    # 被删后这里自然失效，下次同步按缺失重新建一行）。NULL=还没同步过。
+    resume_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )

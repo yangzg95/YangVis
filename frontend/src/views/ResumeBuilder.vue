@@ -41,6 +41,9 @@
       <a-button size="small" @click="exportPdf">
         <FilePdfOutlined /> 导出 PDF
       </a-button>
+      <a-button size="small" :loading="syncing" @click="onSaveToResume">
+        <CloudUploadOutlined /> {{ resumeId ? '更新到简历库' : '保存到简历' }}
+      </a-button>
       <a-button size="small" type="primary" :loading="saving" @click="onSave">
         <SaveOutlined /> 保存
       </a-button>
@@ -149,6 +152,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import {
   ArrowLeftOutlined,
+  CloudUploadOutlined,
   EyeOutlined,
   FilePdfOutlined,
   MessageOutlined,
@@ -181,6 +185,9 @@ const docId = Number(route.params.id)
 const loading = ref(true)
 const loaded = ref(false)
 const saving = ref(false)
+const syncing = ref(false)
+// 是否已同步到简历库及对应行 id：决定按钮文案，空值=还没同步过。
+const resumeId = ref<number | null>(null)
 const dirty = ref(false)
 const title = ref('')
 const chatReady = ref(true)
@@ -258,8 +265,9 @@ function measurePreview() {
 
 // ---- 载入 / 保存 ---------------------------------------------------------------
 
-function applyDetail(detail: { title: string; doc: ResumeDocData }) {
+function applyDetail(detail: { title: string; doc: ResumeDocData; resume_id?: number | null }) {
   title.value = detail.title
+  resumeId.value = detail.resume_id ?? null
   doc.template = detail.doc.template
   doc.theme = detail.doc.theme
   doc.module_order = [...detail.doc.module_order]
@@ -338,6 +346,31 @@ async function onSave(): Promise<boolean> {
     return false
   } finally {
     saving.value = false
+  }
+}
+
+// 同步的是服务端已保存版本：有未落库改动先保存（与 AI 对话入口同一约定），
+// 失败就不发起同步，免得简历库收到旧内容。
+async function onSaveToResume() {
+  if (syncing.value) return
+  if (dirty.value) {
+    const ok = await onSave()
+    if (!ok) return
+  }
+  const wasLinked = resumeId.value !== null
+  syncing.value = true
+  try {
+    const item = await resumeBuilderApi.saveToResume(docId)
+    resumeId.value = item.id
+    message.success(
+      wasLinked
+        ? '简历库中的内容已更新；正文有变化时，之前的分析报告会被清空'
+        : '已保存到简历库，可在「简历」页发起 AI 分析',
+    )
+  } catch {
+    // 拦截器已统一弹错（含「简历还是空的」这类业务拒绝）。
+  } finally {
+    syncing.value = false
   }
 }
 

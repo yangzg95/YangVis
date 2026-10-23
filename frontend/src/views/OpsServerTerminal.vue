@@ -111,7 +111,6 @@
         <ServerTerminal
           v-else-if="server"
           ref="terminalRef"
-          :key="reconnectSeq"
           :server-id="serverId"
           @status="onTerminalStatus"
           @browse-files="onBrowseFiles"
@@ -226,8 +225,6 @@ const showAi = ref(true)
 const showFiles = ref(false)
 const leftTab = ref<'files' | 'transfer'>('files')
 const transfers = useTransfersStore()
-// 重连 = 换掉 key 重挂载 ServerTerminal，比给它加重连方法简单，状态也干净。
-const reconnectSeq = ref(0)
 const terminalRef = ref<InstanceType<typeof ServerTerminal> | null>(null)
 const filePanelRef = ref<InstanceType<typeof ServerFilePanel> | null>(null)
 // 终端主题：从 ServerTerminal 组件读取，用于顶栏图标切换。
@@ -258,7 +255,8 @@ function reconnect() {
   // 手动重连：停掉自动重连的倒计时并清零次数（用户已经等不及了）。
   autoReconnectAttempt.value = 0
   cancelAutoReconnect()
-  reconnectSeq.value += 1
+  // 同实例内重连：xterm 与滚动缓冲保留，由服务端 hello 帧决定清屏+回放还是清屏开新会话。
+  terminalRef.value?.reconnect()
 }
 
 function toggleAi() {
@@ -327,8 +325,9 @@ async function onBrowseFiles(path: string) {
 }
 
 // ---- 断线自动重连 ------------------------------------------------------------
-// 网络层断开（区别于 1008 这类服务端主动拒绝——鉴权失败、查无此机，重连也
-// 是白费）自动重连：指数退避 1s→2s→4s…封顶 10s，最多 5 次，连上即清零。
+// 网络层断开自动重连：指数退避 1s→2s→4s…封顶 10s，最多 5 次，连上即清零。
+// 重连同实例进行、不清屏，服务端会话未过期就能接回原 shell（见 services/ops/terminal.py）。
+// 1008 鉴权拒绝、4000 本端主动断开、4001 被顶号、4002 会话终结都不自动重试；
 // 放弃之后顶栏的手动重连按钮依然可用。
 const AUTO_RECONNECT_MAX = 5
 let autoReconnectTimer: number | undefined
@@ -356,17 +355,21 @@ function scheduleAutoReconnect() {
   const delay = Math.min(1000 * 2 ** (autoReconnectAttempt.value - 1), 10000)
   autoReconnectTimer = window.setTimeout(() => {
     autoReconnectTimer = undefined
-    // 重连 = 重挂载 ServerTerminal（与手动 reconnect 同一条路）。
-    reconnectSeq.value += 1
+    // 同实例重连（与手动 reconnect 同一条路），终端内容不丢。
+    terminalRef.value?.reconnect()
   }, delay)
 }
+
+// 这些关闭码重连没有意义：鉴权拒绝 / 本端主动断开 / 被其他页面顶掉 / 会话已终结。
+// 4002 之后手动点「重连」仍可——旧会话已摘除，那是一条全新会话。
+const NO_AUTO_RECONNECT_CODES = new Set([1008, 4000, 4001, 4002])
 
 function onTerminalStatus(value: 'connecting' | 'connected' | 'closed', code?: number) {
   terminalStatus.value = value
   if (value === 'connected') {
     autoReconnectAttempt.value = 0
     cancelAutoReconnect()
-  } else if (value === 'closed' && code !== 1008) {
+  } else if (value === 'closed' && (code === undefined || !NO_AUTO_RECONNECT_CODES.has(code))) {
     scheduleAutoReconnect()
   }
   if (value === 'connected' && pendingInput) {

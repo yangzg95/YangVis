@@ -285,6 +285,11 @@ async def connect(
         "known_hosts": None,  # 校验交给 _PinnedHostKeyClient，不是不校验
         "connect_timeout": settings.OPS_SSH_TIMEOUT,
     }
+    # 空闲心跳：终端会话脱离浏览器后仍挂在 SSH 上，不能让中间设备因空闲掐线。
+    # 连续 3 次无响应才判死，抖动网络下也不会误杀。
+    if settings.OPS_SSH_KEEPALIVE > 0:
+        options["keepalive_interval"] = settings.OPS_SSH_KEEPALIVE
+        options["keepalive_count_max"] = 3
 
     try:
         if auth_type is ServerAuthType.PASSWORD:

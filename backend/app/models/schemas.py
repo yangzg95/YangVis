@@ -1798,6 +1798,8 @@ class ResumeDocItem(BaseModel):
 
     id: int
     title: str
+    # 「保存到简历」同步到简历库的那一行；NULL=还没同步过。
+    resume_id: Optional[int] = None
     updated_at: datetime
     created_at: datetime
 

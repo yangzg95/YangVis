@@ -69,6 +69,12 @@ const emit = defineEmits<{
 
 const hostEl = ref<HTMLElement | null>(null)
 
+// 服务端控制帧前缀，与 backend/app/services/ops/terminal.py 的 CONTROL_MARK 对应。
+// 0x1e 在真实终端输出里几乎不会出现，专门用来和裸 PTY 输出消歧。
+const CONTROL_MARK = '\x1e'
+// 本端主动断开（切走服务器/卸载），告诉父页面不要自动重连。
+const WS_INTENTIONAL = 4000
+
 let term: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let searchAddon: SearchAddon | null = null
@@ -78,6 +84,8 @@ let observer: ResizeObserver | null = null
 let generation = 0
 // 用户已键入但还没回车的内容。AI 补提示符时要避开它，免得把半条命令提交上去。
 let pendingLine = ''
+// 控制帧提前告知的关闭原因（会话结束 / 被新页面顶掉），onclose 时展示。
+let closeNote: string | null = null
 
 // ---- 终端主题切换 -----------------------------------------------------------
 // 深色/浅色两套配色，存 localStorage 持久化。
@@ -151,8 +159,9 @@ function closeSocket() {
 async function connect(serverId: number) {
   const mine = ++generation
   closeSocket()
-  term?.reset()
-  pendingLine = ''
+  // 不在连接前清屏：重连失败时旧画面必须留在屏幕上（那是用户的现场）。
+  // 等服务端 hello 帧确认新会话/续接成功，再 reset + 回放。
+  closeNote = null
   emit('status', 'connecting')
   write(`\x1b[90m正在连接 #${serverId} …\x1b[0m\r\n`)
 
@@ -183,13 +192,14 @@ async function connect(serverId: number) {
     syncSize()
   }
   ws.onmessage = (event) => {
-    if (typeof event.data === 'string') write(event.data)
+    if (mine !== generation || typeof event.data !== 'string') return
+    handleFrame(event.data)
   }
   ws.onclose = (event) => {
     if (mine !== generation) return
     socket = null
-    // 1008 是鉴权/查不到机器，服务端会把原因塞在 reason 里。
-    const reason = event.reason ? `：${event.reason}` : ''
+    // 4001/4002 的具体原因由控制帧先行告知；1008 是鉴权/查不到机器。
+    const reason = closeNote || (event.reason ? `：${event.reason}` : '')
     write(`\r\n\x1b[90m连接已断开${reason}\x1b[0m\r\n`)
     emit('status', 'closed', event.code)
   }
@@ -198,10 +208,42 @@ async function connect(serverId: number) {
   }
 }
 
+/** 处理一帧服务端消息：0x1e 打头是控制帧，其余原样写进终端。 */
+function handleFrame(data: string) {
+  if (!data.startsWith(CONTROL_MARK)) {
+    write(data)
+    return
+  }
+  let payload: { type?: string; reason?: string; resume?: boolean }
+  try {
+    payload = JSON.parse(data.slice(1))
+  } catch {
+    write(data)
+    return
+  }
+  if (payload.type === 'hello') {
+    // 新会话：干净屏幕；续接：reset 后由后续回放帧重建断线前的画面。
+    term?.reset()
+    pendingLine = ''
+    closeNote = null
+  } else if (payload.type === 'live') {
+    // 回放结束、进入实时——状态由顶栏表达，这里不插提示行（会破坏光标位置）。
+  } else if (payload.type === 'ended') {
+    closeNote = `：${payload.reason || '远端会话已结束'}`
+  } else if (payload.type === 'takenover') {
+    closeNote = '：终端已在另一个页面打开'
+  }
+}
+
+/** 不断开、不清屏地重连一次（由父页面的自动重连/手动重连调用）。 */
+function reconnect() {
+  if (props.serverId !== null) void connect(props.serverId)
+}
+
 function disconnect() {
   generation += 1
   closeSocket()
-  emit('status', 'closed')
+  emit('status', 'closed', WS_INTENTIONAL)
 }
 
 /** 把 AI 执行的命令和结果打进终端，青色 [AI] 前缀跟用户自己的输入区分开。 */
@@ -473,6 +515,7 @@ watch(
 defineExpose({
   focus: () => term?.focus(),
   fit: syncSize,
+  reconnect,
   writeAiExec,
   sendInput,
   terminalTheme,
