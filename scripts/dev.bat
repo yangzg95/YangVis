@@ -1,15 +1,18 @@
 @echo off
 REM ---------------------------------------------------------------
 REM  Dev start script for yangvis (Windows)
-REM    dev.bat          start backend + frontend
-REM    dev.bat backend  start backend only
-REM    dev.bat frontend start frontend only
+REM    scripts\dev.bat          start backend + frontend
+REM    scripts\dev.bat backend  start backend only
+REM    scripts\dev.bat frontend start frontend only
 REM  Backend : http://localhost:18099  (docs: /api/docs)
 REM  Frontend: http://localhost:5173   (/api proxied to backend)
 REM ---------------------------------------------------------------
 setlocal
 
-set ROOT=%~dp0
+REM 脚本位于 scripts\，项目根是其上一级（保留尾部反斜杠供 %ROOT%backend 拼接）
+pushd "%~dp0.."
+set ROOT=%CD%\
+popd
 set TARGET=%1
 if "%TARGET%"=="" set TARGET=all
 

@@ -147,7 +147,7 @@ pending ──claim_for_confirm()──► approved ──执行成功──► 
 ## 本地验证
 
 ```bash
-./dev.sh              # 后端 18099（uvicorn --reload，单进程），前端 5173 代理 /api
+./scripts/dev.sh      # 后端 18099（uvicorn --reload，单进程），前端 5173 代理 /api
 ```
 
 **触发一条待确认命令**：运维终端页右侧 AI 面板问「帮我把 xxx 服务重启一下」，或主对话选「运维助手」智能体。

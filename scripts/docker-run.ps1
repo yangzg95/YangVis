@@ -4,23 +4,23 @@
 
 .EXAMPLE
     # 默认：使用 backend\.env，镜像 luke.yang/docker/yangvis:latest，容器名 yangvis
-    .\docker-run.ps1
+    .\scripts\docker-run.ps1
 
 .EXAMPLE
     # 指定其他 env 文件和端口
-    .\docker-run.ps1 -EnvFile .env.prod -Port 8080
+    .\scripts\docker-run.ps1 -EnvFile .env.prod -Port 8080
 
 .EXAMPLE
     # 跳过构建，只用已有镜像重启容器
-    .\docker-run.ps1 -SkipBuild
+    .\scripts\docker-run.ps1 -SkipBuild
 
 .EXAMPLE
     # 只构建镜像，不启动容器
-    .\docker-run.ps1 -BuildOnly
+    .\scripts\docker-run.ps1 -BuildOnly
 
 .EXAMPLE
     # 构建并推送到镜像仓库（需先 docker login）
-    .\docker-run.ps1 -BuildOnly -Push
+    .\scripts\docker-run.ps1 -BuildOnly -Push
 #>
 param(
     [string]$EnvFile = "backend\.env",
@@ -40,8 +40,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# 切到脚本所在目录（项目根）
-Set-Location $PSScriptRoot
+# 切到项目根（脚本位于 scripts\ 下）
+Set-Location (Resolve-Path (Join-Path $PSScriptRoot '..'))
 
 # 1. 构建镜像（BuildOnly 模式下不检查 env 文件——构建不需要它）
 if (-not $SkipBuild) {

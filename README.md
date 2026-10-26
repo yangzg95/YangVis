@@ -138,9 +138,9 @@ noetix-tool/
 │       ├── components/        # 终端、SFTP 面板、确认卡片、Mermaid 卡片…
 │       ├── api/ router/ stores/
 ├── docs/                      # features/ 功能实现文档、schema.sql（DDL 对照稿）、设计复盘
+├── scripts/                   # dev.sh/.bat 本地起两端；build.sh/.bat 构建镜像；docker-run.ps1 裸机构建部署
 ├── Dockerfile                 # 前后端一体镜像
-├── docker-compose.yml         # app + MySQL + Qdrant
-└── build.sh / build.bat / dev.sh / dev.bat
+└── docker-compose.yml         # app + MySQL + Qdrant
 ```
 
 ## 快速开始（Docker）
@@ -196,7 +196,7 @@ npm install
 npm run dev                   # http://localhost:5173，/api 与网关的 /v1 已代理到 18099
 ```
 
-也可以使用根目录的 `dev.sh / dev.bat` 同时拉起两端。MySQL 与 Qdrant 可用 `docker-compose up -d mysql qdrant` 单独启动。
+也可以使用 `scripts/` 下的 `dev.sh / dev.bat` 同时拉起两端。MySQL 与 Qdrant 可用 `docker-compose up -d mysql qdrant` 单独启动。
 
 ## 配置项
 

@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------
 #  Dev start script for yangvis
-#    ./dev.sh            start backend + frontend
-#    ./dev.sh backend    start backend only
-#    ./dev.sh frontend   start frontend only
+#    ./scripts/dev.sh            start backend + frontend
+#    ./scripts/dev.sh backend    start backend only
+#    ./scripts/dev.sh frontend   start frontend only
 #  Backend : http://localhost:18099  (docs: /api/docs)
 #  Frontend: http://localhost:5173   (/api proxied to backend)
 # ---------------------------------------------------------------
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 脚本位于 scripts/，项目根是其上一级
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
 
 TARGET="${1:-all}"
@@ -47,7 +48,7 @@ case "${TARGET}" in
     start_frontend
     ;;
   *)
-    echo "Usage: ./dev.sh [all|backend|frontend]"
+    echo "Usage: ./scripts/dev.sh [all|backend|frontend]"
     exit 1
     ;;
 esac
