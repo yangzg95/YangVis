@@ -16,6 +16,9 @@ from app.models.entities import ChatConversation
 from app.models.schemas import (
     APIResponse,
     ChatAttachmentItem,
+    CompactionApplyRequest,
+    CompactionPreviewRequest,
+    CompactionStateItem,
     CompletionRequest,
     ConversationCreate,
     ConversationItem,
@@ -161,6 +164,104 @@ def list_actions(
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return APIResponse(data=ListResponse(items=items, total=len(items)))
+
+
+# ---- 手动对话压缩 -------------------------------------------------------------
+
+
+@router.get(
+    "/conversations/{conversation_id}/compaction",
+    response_model=APIResponse[CompactionStateItem],
+)
+def get_compaction(
+    conversation_id: int,
+    service: ChatService = Depends(get_service),
+) -> APIResponse[CompactionStateItem]:
+    """会话当前的摘要/压缩状态；连自动摘要都还没有时 data 为 null。"""
+    try:
+        item = service.compaction_state(conversation_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return APIResponse(data=item)
+
+
+@router.post("/conversations/{conversation_id}/compaction/preview")
+async def compaction_preview(
+    conversation_id: int,
+    payload: CompactionPreviewRequest,
+    request: Request,
+    service: ChatService = Depends(get_service),
+) -> StreamingResponse:
+    """生成压缩预览（SSE）：compact_meta → token* → compact_done，全程不写库。
+
+    与 ``/completions`` 同一约定：响应恒 200，错误落成 ``error`` 事件帧。
+    """
+
+    async def stream() -> AsyncIterator[str]:
+        try:
+            async for event, data in service.compaction_preview(
+                conversation_id=conversation_id,
+                keep_turns=payload.keep_turns,
+                instruction=payload.instruction,
+                is_disconnected=request.is_disconnected,
+            ):
+                yield sse_event(event, data)
+        except BusinessError as exc:
+            yield sse_event("error", {"code": exc.code, "message": exc.msg})
+        except LookupError as exc:
+            yield sse_event("error", {"code": 404, "message": str(exc)})
+        except ValueError as exc:
+            yield sse_event("error", {"code": -1, "message": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - the stream must not just stop
+            logger.exception("compaction preview failed for conversation %s", conversation_id)
+            yield sse_event("error", {"code": -1, "message": f"压缩预览失败：{exc}"})
+
+    return StreamingResponse(
+        with_heartbeat(stream()),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+        status_code=status.HTTP_200_OK,
+    )
+
+
+@router.post(
+    "/conversations/{conversation_id}/compaction/apply",
+    response_model=APIResponse[CompactionStateItem],
+)
+def apply_compaction(
+    conversation_id: int,
+    payload: CompactionApplyRequest,
+    service: ChatService = Depends(get_service),
+) -> APIResponse[CompactionStateItem]:
+    """把预览过的摘要与切点正式应用：锚点之前的消息从此不再回放。"""
+    try:
+        item = service.apply_compaction(
+            conversation_id,
+            payload.cut_message_id,
+            payload.summary,
+            payload.instruction,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (BusinessError, ValueError) as exc:
+        return APIResponse(code=-1, message=str(exc))
+    return APIResponse(data=item, message="applied")
+
+
+@router.delete(
+    "/conversations/{conversation_id}/compaction",
+    response_model=APIResponse[None],
+)
+def clear_compaction(
+    conversation_id: int,
+    service: ChatService = Depends(get_service),
+) -> APIResponse[None]:
+    """取消压缩：摘要行删除，回放恢复自动窗口口径；消息原文一条不删。"""
+    try:
+        service.clear_compaction(conversation_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return APIResponse(data=None, message="cleared")
 
 
 # ---- 运维问答会话与写命令确认 -------------------------------------------------

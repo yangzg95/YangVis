@@ -310,6 +310,40 @@ class MessageUpdate(BaseModel):
     content: str = Field(..., min_length=1, max_length=20000)
 
 
+# 手动压缩时允许保留的最近轮数区间。至少留一轮原文在摘要之外，否则模型
+# 下一句话就失去了对话的现场感；上限只是防止 UI 提交无意义的大值。
+COMPACT_KEEP_TURNS_MIN = 1
+COMPACT_KEEP_TURNS_MAX = 20
+COMPACT_INSTRUCTION_MAX = 500
+
+
+class CompactionPreviewRequest(BaseModel):
+    """生成压缩预览：不落库任何东西，应用是另一次请求。"""
+
+    keep_turns: int = Field(default=6, ge=1, le=COMPACT_KEEP_TURNS_MAX)
+    instruction: Optional[str] = Field(default=None, max_length=COMPACT_INSTRUCTION_MAX)
+
+
+class CompactionApplyRequest(BaseModel):
+    """应用一份已预览的压缩：摘要文本 + 切点 + 本次使用的压缩要求。"""
+
+    cut_message_id: int
+    summary: str = Field(..., min_length=1, max_length=2000)
+    instruction: Optional[str] = Field(default=None, max_length=COMPACT_INSTRUCTION_MAX)
+
+
+class CompactionStateItem(BaseModel):
+    """会话当前的摘要/压缩状态，供对话页顶部那条分界卡使用。"""
+
+    summary: str
+    # 有锚点表示用户手动压缩过：该 id 及之前的消息不再回放。
+    cut_message_id: Optional[int] = None
+    instruction: Optional[str] = None
+    # 实际不进回放窗口的消息条数（手动压缩=锚点之前全部；自动摘要=窗口外溢出）。
+    covered_count: int = 0
+    updated_at: datetime
+
+
 class CompletionRequest(BaseModel):
     """提问请求。回答通过 SSE 流式返回，而不是走这个响应外壳。"""
 

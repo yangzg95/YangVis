@@ -6,7 +6,7 @@
  * 依赖 chat.ts 与 workflows.ts 的载荷类型——类型位在编译后擦除，不构成运行时环。
  */
 import { getAccessToken } from '@/utils/auth'
-import type { Citation, ConfirmEvent, ExecEvent } from './chat'
+import type { Citation, CompactMeta, ConfirmEvent, ExecEvent } from './chat'
 import { handleUnauthorized } from './http'
 import type { RunStatus, RunStepStatus } from './workflows'
 
@@ -37,6 +37,9 @@ export interface StreamHandlers {
   onConfirm?: (data: ConfirmEvent) => void
   onExec?: (data: ExecEvent) => void
   onDone?: (data: { message_id: number; conversation_id: number }) => void
+  // ---- 手动压缩预览流（compact_meta → token* → compact_done）----
+  onCompactMeta?: (data: CompactMeta) => void
+  onCompactDone?: (data: { cut_message_id: number }) => void
   onError?: (data: { code: number; message: string }) => void
   // ---- 工作流运行的进度事件（对话用不到这几项）----
 
@@ -158,7 +161,12 @@ export function streamSse(
         for (const block of blocks) {
           const event = parseSseBlock(block)
           if (event) {
-            if (event.event === 'done' || event.event === 'run_end' || event.event === 'error') {
+            if (
+              event.event === 'done' ||
+              event.event === 'compact_done' ||
+              event.event === 'run_end' ||
+              event.event === 'error'
+            ) {
               receivedTerminal = true
             }
             dispatchSse(event, handlers)
@@ -233,6 +241,12 @@ function dispatchSse(
       break
     case 'done':
       handlers.onDone?.(data)
+      break
+    case 'compact_meta':
+      handlers.onCompactMeta?.(data)
+      break
+    case 'compact_done':
+      handlers.onCompactDone?.(data)
       break
     // 工作流的进度事件：事件名与对话的互不重叠，共用一套解析与中断逻辑。
     case 'run_start':

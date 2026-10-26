@@ -143,6 +143,27 @@ export interface ExecEvent {
   success: boolean
 }
 
+// ---- 手动对话压缩 ----------------------------------------------------------
+
+/** 会话当前的摘要/压缩状态；连自动滚动摘要都还没有时接口返回 null。 */
+export interface CompactionState {
+  summary: string
+  /** 手动压缩锚点：该 id 及之前的消息不再进入模型上下文；null 表示这行是自动摘要。 */
+  cut_message_id: number | null
+  /** 用户发起压缩时给的额外要求，自动重算时沿用；null 表示没有。 */
+  instruction: string | null
+  /** 被摘要/锚点覆盖的消息条数，按当前消息实况动态计算。 */
+  covered_count: number
+  updated_at: string
+}
+
+/** 压缩预览流的第一帧：切点与两侧计数，比正文先到，用于展示「将压掉 N 条」。 */
+export interface CompactMeta {
+  cut_message_id: number
+  covered_count: number
+  kept_count: number
+}
+
 export const chatApi = {
   listConversations: () =>
     request<{ items: Conversation[]; total: number }>({ url: '/chat/conversations' }),
@@ -272,4 +293,41 @@ export const chatApi = {
   },
   rejectAction: (actionId: number) =>
     request<OpsAction>({ url: `/chat/actions/${actionId}/reject`, method: 'POST' }),
+
+  // ---- 手动对话压缩 ----------------------------------------------------------
+
+  /** 会话当前的压缩状态；data 为 null 表示连自动摘要都还没有。 */
+  getCompaction: (conversationId: number) =>
+    request<CompactionState | null>({
+      url: `/chat/conversations/${conversationId}/compaction`,
+    }),
+  /**
+   * 流式生成压缩预览（compact_meta → token* → compact_done），全程不写库；
+   * 应用是另一次 applyCompaction 请求。返回中断函数。
+   */
+  previewCompaction(
+    conversationId: number,
+    payload: { keep_turns: number; instruction?: string },
+    handlers: StreamHandlers,
+  ): () => void {
+    return streamSse(
+      `/api/chat/conversations/${conversationId}/compaction/preview`,
+      payload,
+      handlers,
+    )
+  },
+  applyCompaction: (
+    conversationId: number,
+    payload: { cut_message_id: number; summary: string; instruction?: string | null },
+  ) =>
+    request<CompactionState>({
+      url: `/chat/conversations/${conversationId}/compaction/apply`,
+      method: 'POST',
+      data: payload,
+    }),
+  clearCompaction: (conversationId: number) =>
+    request<null>({
+      url: `/chat/conversations/${conversationId}/compaction`,
+      method: 'DELETE',
+    }),
 }

@@ -196,9 +196,11 @@ CREATE TABLE IF NOT EXISTS chat_summary (
   conversation_id BIGINT PRIMARY KEY COMMENT 'chat_conversation.id，一个会话至多一行',
   owner_id        BIGINT       NOT NULL,
   summary         TEXT         NOT NULL COMMENT '回放窗口之外历史的滚动摘要（全量重算）',
+  cut_message_id  BIGINT       NULL COMMENT '手动压缩锚点：该 id 及之前的消息不再回放；NULL 表示纯自动摘要',
+  instruction     VARCHAR(500) NULL COMMENT '用户手动压缩时给的额外摘要要求，自动重算沿用',
   updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_owner (owner_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话摘要';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话摘要与手动压缩锚点';
 
 CREATE TABLE IF NOT EXISTS user_memory (
   id                     BIGINT PRIMARY KEY AUTO_INCREMENT,

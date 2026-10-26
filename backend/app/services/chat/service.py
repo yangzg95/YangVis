@@ -35,6 +35,7 @@ from app.models.entities import (
 from app.models.schemas import (
     ChatAttachmentItem,
     Citation,
+    CompactionStateItem,
     ConversationItem,
     MessageItem,
     ModelPurpose,
@@ -991,8 +992,14 @@ class ChatService:
             yield event, data
 
     def _history(self, conversation_id: int) -> List[ChatMessage]:
-        """最近的若干轮对话，按从旧到新排列。"""
+        """最近的若干轮对话，按从旧到新排列。
+
+        有手动压缩锚点时，锚点及之前的消息永不回放：取回来后先按锚点截断，
+        再走自动窗口与「不拆问答对」的切点保护。锚点之后的消息可能不足一窗
+        （刚压缩完、保留轮数小于 HISTORY_TURNS），全部回放即可。
+        """
         window = HISTORY_TURNS * 2
+        anchor = self._memory.anchor_id(conversation_id)
         rows = list(
             self._db.scalars(
                 self._scope(select(ChatMessage), ChatMessage.owner_id)
@@ -1006,7 +1013,88 @@ class ChatService:
             ).all()
         )
         rows.reverse()
+        if anchor is not None:
+            rows = [row for row in rows if row.id > anchor]
         return split_replay_window(rows, window)[1]
+
+    # -- 手动压缩 -------------------------------------------------------------
+
+    def _compaction_item(self, row) -> CompactionStateItem:
+        """把摘要行换算成给前端的状态：covered_count 按当前消息实况算。"""
+        rows = self._memory.list_all_messages(row.conversation_id)
+        if row.cut_message_id is not None:
+            covered = sum(1 for message in rows if message.id <= row.cut_message_id)
+        else:
+            overflow, _ = split_replay_window(rows, HISTORY_TURNS * 2)
+            covered = len(overflow)
+        return CompactionStateItem(
+            summary=row.summary,
+            cut_message_id=row.cut_message_id,
+            instruction=row.instruction,
+            covered_count=covered,
+            updated_at=row.updated_at,
+        )
+
+    def compaction_state(self, conversation_id: int) -> Optional[CompactionStateItem]:
+        """会话当前的摘要/压缩状态；连自动摘要都没有时返回 None。"""
+        self.get_conversation(conversation_id)
+        row = self._memory.summary_row(conversation_id)
+        return self._compaction_item(row) if row is not None else None
+
+    async def compaction_preview(
+        self,
+        *,
+        conversation_id: int,
+        keep_turns: int,
+        instruction: Optional[str] = None,
+        is_disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
+    ) -> AsyncIterator[Tuple[str, object]]:
+        """压缩预览流：``compact_meta`` 先给切点与计数，随后 ``token*``，最后
+        ``compact_done``。全程不写库；应用是另一次请求。"""
+        conversation = self.get_conversation(conversation_id)
+        config = self.require_chat_config(conversation.model_config_id)
+        cut_message_id, overflow, replay = self._memory.plan_compaction(
+            conversation_id, keep_turns
+        )
+        yield "compact_meta", {
+            "cut_message_id": cut_message_id,
+            "covered_count": len(overflow),
+            "kept_count": len(replay),
+        }
+        produced = False
+        async for piece in self._memory.stream_compaction(
+            config,
+            conversation_id,
+            overflow,
+            instruction,
+            is_disconnected=is_disconnected,
+        ):
+            if piece:
+                produced = True
+                yield "token", piece
+        if not produced:
+            raise BusinessError(400, "摘要模型没有返回内容，请重新生成。")
+        yield "compact_done", {"cut_message_id": cut_message_id}
+
+    def apply_compaction(
+        self,
+        conversation_id: int,
+        cut_message_id: int,
+        summary: str,
+        instruction: Optional[str],
+    ) -> CompactionStateItem:
+        """应用预览过的压缩，返回最新状态。切点合法性由 memory 层兜底校验。"""
+        self.get_conversation(conversation_id)
+        row = self._memory.apply_compaction(
+            conversation_id, cut_message_id, summary, instruction
+        )
+        return self._compaction_item(row)
+
+    def clear_compaction(self, conversation_id: int) -> None:
+        """取消压缩：删掉摘要行，回放恢复成自动窗口口径（下一轮问答会重建
+        自动摘要）。消息原文一条不删。"""
+        self.get_conversation(conversation_id)
+        self._memory.delete_summary(conversation_id)
 
     # -- 智能体选择 ---------------------------------------------------------
 

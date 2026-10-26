@@ -166,6 +166,19 @@ def migrate_schema() -> None:
             conn.execute(text("ALTER TABLE chat_message ADD COLUMN timeline JSON NULL"))
         logger.info("added chat_message.timeline")
 
+    # 手动对话压缩：锚点消息 id 与用户给的压缩要求；chat_summary 表由 create_all 建。
+    summary_columns = _column_names("chat_summary")
+    if summary_columns:
+        for column, ddl in (
+            ("cut_message_id", "ADD COLUMN cut_message_id BIGINT NULL"),
+            ("instruction", "ADD COLUMN instruction VARCHAR(500) NULL"),
+        ):
+            if column in summary_columns:
+                continue
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE chat_summary {ddl}"))
+            logger.info("added chat_summary.%s", column)
+
     model_config_columns = _column_names("model_config")
     if model_config_columns:
         for column, ddl in (

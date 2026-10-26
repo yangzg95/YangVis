@@ -480,12 +480,16 @@ class ChatAttachment(Base):
 
 
 class ChatSummary(Base):
-    """一个会话「最近几轮之前」那部分历史的滚动摘要。
+    """一个会话「最近几轮之前」那部分历史的滚动摘要，兼作手动压缩的落点。
 
     回放窗口（services/chat/service.py 的 HISTORY_TURNS）之外的消息对模型不可见，
-    摘要就是它们留在上下文里的唯一形式。摘要是*全量重算*出来的——不存
-    「摘要到第几条消息」的 checkpoint，这样历史消息被手动改写后，下一次
-    重算自然吸收，任何 worker 也都能随时重算，无需跨进程状态。
+    摘要就是它们留在上下文里的唯一形式。摘要是*全量重算*出来的——默认不存
+    「摘要到第几条消息」的 checkpoint，历史消息被手动改写后下一次重算自然吸收，
+    任何 worker 也都能随时重算。
+
+    例外是用户手动压缩：``cut_message_id`` 记录锚点（该 id 及之前的消息永不
+    回放，回放窗口从它之后起算），锚点只前移不后退。``instruction`` 存用户
+    压缩时给的额外要求（如「保留具体路径与未决错误」），自动重算沿用它。
     """
 
     __tablename__ = "chat_summary"
@@ -494,6 +498,12 @@ class ChatSummary(Base):
     conversation_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # 手动压缩锚点：NULL 表示这行是自动滚动摘要，回放边界按 HISTORY_TURNS 现算；
+    # 非 NULL 时该 id 及之前的消息只以摘要形式存在于上下文。
+    cut_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # 用户发起压缩时给的额外摘要要求；NULL/空表示没有。长度对齐前端文本框。
+    instruction: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now(), onupdate=func.now()

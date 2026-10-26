@@ -1,27 +1,32 @@
-"""长期记忆与会话摘要。
+"""长期记忆、会话摘要与手动压缩。
 
-两块功能共用这个模块，因为它们的触发时机相同（一轮问答落库之后）、调用
-形态相同（后台任务里的一次性非流式模型调用）：
+三块功能共用这个模块：
 
 - 会话摘要：回放窗口（chat.HISTORY_TURNS）之外的历史对模型不可见，摘要
-  是它们留在上下文里的唯一形式。摘要*全量重算*而不做增量合并：不存
+  是它们留在上下文里的唯一形式。摘要*全量重算*而不做增量合并：默认不存
   「摘要到第几条」的 checkpoint，历史被手动改写后下一次重算自然吸收，
   任何 worker 也都能随时重算（见 ChatSummary 的注释）。
+- 手动压缩（compaction）：用户主动把回放窗口前移，预览后应用。摘要行上
+  的 ``cut_message_id`` 是唯一的 checkpoint——锚点及之前的消息永不回放，
+  锚点只前移不后退；再次压缩时锚点前的历史与新老化出窗口的部分一起参与
+  重算，超长则退化为「旧摘要 + 尾部一段」的合并模式。
 - 长期记忆：从最近一轮问答里提取关于用户的持久事实，存入 user_memory，
   回答时注入到开了 ``use_memory`` 的智能体的 system prompt 里。
 
-两者都刻意失败静默：它们是对话的增强而不是主链路，模型调用失败只记
-日志，绝不影响下一次回答。
+三者都刻意失败静默（预览流除外——它本身就是用户正在等待的主操作）：
+摘要与记忆是对话的增强而不是主链路，模型调用失败只记日志，绝不影响
+下一次回答。
 """
 from __future__ import annotations
 
 import json
 import logging
-from typing import List, Optional, Tuple
+from typing import AsyncIterator, List, Optional, Tuple
 
 from sqlalchemy import Select, delete, select
 from sqlalchemy.orm import Session
 
+from app.errors import BusinessError
 from app.models.entities import (
     Agent,
     ChatConversation,
@@ -132,6 +137,37 @@ async def _ask_text(config: ModelConfig, system: str, user: str, *, temperature:
     return _message_text(getattr(result, "content", result))
 
 
+async def _ask_text_stream(
+    config: ModelConfig,
+    system: str,
+    user: str,
+    *,
+    temperature: float,
+    is_disconnected=None,
+) -> AsyncIterator[str]:
+    """流式模型调用，逐块吐出纯文本。压缩预览用：用户要看着摘要长出来。
+
+    客户端断开时把底层流也关掉，不让那条 HTTP 请求在后台一路跑完。
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    model = build_chat_model(
+        config, temperature=temperature, streaming=True, timeout=MEMORY_TASK_TIMEOUT
+    )
+    stream = model.astream([SystemMessage(content=system), HumanMessage(content=user)])
+    try:
+        async for chunk in stream:
+            if is_disconnected is not None and await is_disconnected():
+                break
+            yield _message_text(getattr(chunk, "content", chunk))
+    finally:
+        # 正常耗尽后再 aclose 也是安全的；break（用户关弹窗/断线）时这一句
+        # 负责把底层 HTTP 请求释放掉。
+        aclose = getattr(stream, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+
 def split_replay_window(
     rows: List[ChatMessage], window: int
 ) -> Tuple[List[ChatMessage], List[ChatMessage]]:
@@ -153,6 +189,25 @@ def split_replay_window(
     while cut > 0 and rows[cut - 1].role == "user":
         cut -= 1
     return rows[:cut], rows[cut:]
+
+
+def split_with_anchor(
+    rows: List[ChatMessage], window: int, cut_message_id: Optional[int]
+) -> Tuple[List[ChatMessage], List[ChatMessage]]:
+    """在自动回放窗口之外叠加手动压缩锚点，切出（摘要段, 回放段）。
+
+    锚点（``cut_message_id``）之前的消息永不回放，回放窗口从锚点之后起算；
+    锚点之后溢出自动窗口的消息同样进摘要段。没有锚点时退化为
+    :func:`split_replay_window`。锚点本身在应用时就落在完整问答边界上，
+    尾部再套一次同口径的切点保护，续答序列也不会被劈成两半。
+    """
+    if cut_message_id is None:
+        return split_replay_window(rows, window)
+    head = 0
+    while head < len(rows) and rows[head].id <= cut_message_id:
+        head += 1
+    tail_overflow, replay = split_replay_window(rows[head:], window)
+    return rows[:head] + tail_overflow, replay
 
 
 class MemoryService:
@@ -231,14 +286,23 @@ class MemoryService:
             return ""
         return "\n".join(f"- {row.content}" for row in rows)
 
-    def summary_for(self, conversation_id: int) -> str:
-        """一个会话当前的摘要；没有时返回空串。"""
-        row = self._db.scalar(
+    def summary_row(self, conversation_id: int) -> Optional[ChatSummary]:
+        """摘要行本身（含锚点与压缩要求）；没有时返回 None。读操作按 owner 限定。"""
+        return self._db.scalar(
             self._scope(select(ChatSummary), ChatSummary.owner_id).where(
                 ChatSummary.conversation_id == conversation_id
             )
         )
+
+    def summary_for(self, conversation_id: int) -> str:
+        """一个会话当前的摘要；没有时返回空串。"""
+        row = self.summary_row(conversation_id)
         return row.summary if row is not None else ""
+
+    def anchor_id(self, conversation_id: int) -> Optional[int]:
+        """手动压缩锚点；没有摘要行或纯自动摘要时为 None。"""
+        row = self.summary_row(conversation_id)
+        return row.cut_message_id if row is not None else None
 
     def delete_summary(self, conversation_id: int) -> None:
         self._db.execute(
@@ -248,6 +312,18 @@ class MemoryService:
             )
         )
         self._db.commit()
+
+    def list_all_messages(self, conversation_id: int) -> List[ChatMessage]:
+        return list(
+            self._db.scalars(
+                select(ChatMessage)
+                .where(
+                    ChatMessage.owner_id == self._owner_id,
+                    ChatMessage.conversation_id == conversation_id,
+                )
+                .order_by(ChatMessage.id)
+            ).all()
+        )
 
     # -- 摘要重算 -----------------------------------------------------------------
 
@@ -259,44 +335,56 @@ class MemoryService:
             lines.append(f"{speaker}：{row.content}")
         return "\n\n".join(lines)
 
-    async def refresh_summary(
-        self, conversation: ChatConversation, config: ModelConfig, *, history_turns: int
-    ) -> None:
-        """把回放窗口之外的历史（重新）压缩成摘要。
+    def _summary_prompt(
+        self,
+        conversation_id: int,
+        overflow: List[ChatMessage],
+        instruction: Optional[str],
+    ) -> Tuple[str, str]:
+        """根据摘要段长度选全量/合并提示词，尾部附上用户的压缩要求（若有）。
 
-        全量重算：窗口之前的消息全部参与，不依赖上次算到哪。只有当这段历史
-        长到喂不下时才退化为「旧摘要 + 尾部一段」的合并模式。摘要段只含
-        完整问答：切点外若是一条用户提问，整对留给回放窗口（见
-        ``split_replay_window``），不会把已回答的问题摘成假待办。
+        自动重算与手动预览共用这一处：两种触发只有「指令从哪来」的差别
+        （自动重算沿用行上存的 instruction，预览用本次请求带的）。
         """
-        rows = list(
-            self._db.scalars(
-                select(ChatMessage)
-                .where(
-                    ChatMessage.owner_id == self._owner_id,
-                    ChatMessage.conversation_id == conversation.id,
-                )
-                .order_by(ChatMessage.id)
-            ).all()
-        )
-        overflow, _ = split_replay_window(rows, history_turns * 2)
-
-        if not overflow:
-            # 历史还在窗口内，摘要没有存在的必要（比如曾经长过、后来被删短了）。
-            self.delete_summary(conversation.id)
-            return
-
         rendered = self._render(overflow)
         if len(rendered) <= SUMMARY_INPUT_LIMIT:
             system = _SUMMARY_SYSTEM_FULL
             user_prompt = f"请总结以下对话：\n\n{rendered}"
         else:
-            prior = self.summary_for(conversation.id)
+            prior = self.summary_for(conversation_id)
             system = _SUMMARY_SYSTEM_MERGE
             user_prompt = (
                 f"已有摘要：\n{prior or '（无）'}\n\n"
                 f"对话的更新部分：\n\n{rendered[-SUMMARY_INPUT_LIMIT:]}"
             )
+        instruction = (instruction or "").strip()
+        if instruction:
+            user_prompt += f"\n\n额外的压缩要求（请在摘要中遵守）：\n{instruction}"
+        return system, user_prompt
+
+    async def refresh_summary(
+        self, conversation: ChatConversation, config: ModelConfig, *, history_turns: int
+    ) -> None:
+        """把回放窗口之外的历史（重新）压缩成摘要。
+
+        全量重算：摘要段消息全部参与，不依赖上次算到哪。存在手动压缩锚点时，
+        锚点之前的历史永远属于摘要段，回放窗口从锚点之后起算。只有当摘要段
+        长到喂不下时才退化为「旧摘要 + 尾部一段」的合并模式。切点不拆问答对
+        （见 ``split_replay_window``），不会把已回答的问题摘成假待办。
+        """
+        rows = self.list_all_messages(conversation.id)
+        existing = self.summary_row(conversation.id)
+        anchor = existing.cut_message_id if existing is not None else None
+        overflow, _ = split_with_anchor(rows, history_turns * 2, anchor)
+
+        if not overflow:
+            # 历史还在窗口内，摘要没有存在的必要（比如曾经长过、后来被删短了）。
+            # 有锚点时 head 恒非空，走不到这里。
+            self.delete_summary(conversation.id)
+            return
+
+        instruction = existing.instruction if existing is not None else None
+        system, user_prompt = self._summary_prompt(conversation.id, overflow, instruction)
 
         text = (await _ask_text(config, system, user_prompt, temperature=0.2)).strip()
         if not text:
@@ -304,13 +392,13 @@ class MemoryService:
             return
         text = text[:SUMMARY_MAX_CHARS]
 
-        row = self._db.get(ChatSummary, conversation.id)
-        if row is None:
+        if existing is None:
             row = ChatSummary(
                 conversation_id=conversation.id, owner_id=self._owner_id, summary=text
             )
             self._db.add(row)
         else:
+            row = existing
             row.summary = text
         self._db.commit()
         logger.info(
@@ -319,6 +407,108 @@ class MemoryService:
             len(overflow),
             len(text),
         )
+
+    # -- 手动压缩 -----------------------------------------------------------------
+
+    def plan_compaction(
+        self, conversation_id: int, keep_turns: int
+    ) -> Tuple[int, List[ChatMessage], List[ChatMessage]]:
+        """算出本次压缩的切点，返回 ``(cut_message_id, 摘要段, 回放段)``。
+
+        切点沿用自动摘要的同一条边界（不拆问答对）。已有锚点时新切点必须
+        比旧锚点更靠后——压缩只能前移，不能把已经压掉的历史放回来。
+        """
+        rows = self.list_all_messages(conversation_id)
+        overflow, replay = split_replay_window(rows, keep_turns * 2)
+        if not overflow:
+            raise BusinessError(400, "更早的对话都还在回放窗口内，没有需要压缩的内容。")
+        if not replay:
+            # split 的左移保护理论上会至少留一对；这一条是防数据形态异常的兜底。
+            raise BusinessError(400, "至少保留一轮完整对话不被压缩，请调大保留轮数。")
+        cut_message_id = overflow[-1].id
+        existing = self.summary_row(conversation_id)
+        if (
+            existing is not None
+            and existing.cut_message_id is not None
+            and cut_message_id <= existing.cut_message_id
+        ):
+            raise BusinessError(400, "保留轮数过多：压缩点没有比现在更靠前，调小一些再试。")
+        return cut_message_id, overflow, replay
+
+    async def stream_compaction(
+        self,
+        config: ModelConfig,
+        conversation_id: int,
+        overflow: List[ChatMessage],
+        instruction: Optional[str],
+        *,
+        is_disconnected=None,
+    ) -> AsyncIterator[str]:
+        """压缩预览：按摘要段流式吐出草稿文本，不写任何库。"""
+        system, user_prompt = self._summary_prompt(conversation_id, overflow, instruction)
+        async for piece in _ask_text_stream(
+            config,
+            system,
+            user_prompt,
+            temperature=0.2,
+            is_disconnected=is_disconnected,
+        ):
+            yield piece
+
+    def apply_compaction(
+        self,
+        conversation_id: int,
+        cut_message_id: int,
+        summary: str,
+        instruction: Optional[str],
+    ) -> ChatSummary:
+        """应用一份预览过的压缩：摘要 + 锚点 + 压缩要求一起落在摘要行上。
+
+        切点要确实属于本会话、且后面还留有消息；防止前端拿着旧切点（比如
+        另一个窗口已经压过一次）把空回放段写进去。
+        """
+        text = (summary or "").strip()
+        if not text:
+            raise ValueError("摘要为空，无法应用压缩。")
+        rows = self.list_all_messages(conversation_id)
+        ids = [row.id for row in rows]
+        if cut_message_id not in ids:
+            raise LookupError("压缩切点对应的消息不存在")
+        if cut_message_id >= ids[-1]:
+            raise BusinessError(400, "切点之后至少要保留一轮对话，请重新生成预览。")
+        existing = self.summary_row(conversation_id)
+        if (
+            existing is not None
+            and existing.cut_message_id is not None
+            and cut_message_id <= existing.cut_message_id
+        ):
+            raise BusinessError(400, "压缩点没有比现在更靠前，请调小保留轮数后重新生成。")
+
+        clean_instruction = (instruction or "").strip() or None
+        if clean_instruction is not None:
+            clean_instruction = clean_instruction[:500]
+        if existing is None:
+            row = ChatSummary(
+                conversation_id=conversation_id,
+                owner_id=self._owner_id,
+                summary=text[:SUMMARY_MAX_CHARS],
+                cut_message_id=cut_message_id,
+                instruction=clean_instruction,
+            )
+            self._db.add(row)
+        else:
+            row = existing
+            row.summary = text[:SUMMARY_MAX_CHARS]
+            row.cut_message_id = cut_message_id
+            row.instruction = clean_instruction
+        self._db.commit()
+        self._db.refresh(row)
+        logger.info(
+            "compaction applied to conversation %s (anchor message %s)",
+            conversation_id,
+            cut_message_id,
+        )
+        return row
 
     # -- 记忆提取 -----------------------------------------------------------------
 

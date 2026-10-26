@@ -233,6 +233,16 @@
                 </a-select-option>
               </a-select-opt-group>
             </a-select>
+            <!-- 手动压缩对话：更早的消息压成摘要、不再进入模型上下文。
+                 不足两对消息时压缩无意义，后端也会拒，直接在入口禁用。 -->
+            <a-button
+              size="small"
+              :disabled="streaming || messages.length < 4"
+              @click="openCompaction"
+            >
+              <template #icon><CompressOutlined /></template>
+              压缩对话
+            </a-button>
           </a-space>
         </div>
 
@@ -242,7 +252,46 @@
             <div>{{ activeAgent?.description || '开始一个新的对话吧' }}</div>
           </div>
 
-          <div v-for="msg in messages" :key="msg.key" :class="['msg', msg.role]">
+          <!-- 压缩分界卡：手动压缩后锚点前的消息在本视图隐藏，用这张卡交代
+               去向并可展开摘要原文；自动滚动摘要也在此露出一条。 -->
+          <div v-if="compaction" class="compaction-bar">
+            <button
+              type="button"
+              class="compaction-head"
+              @click="summaryExpanded = !summaryExpanded"
+            >
+              <CompressOutlined class="compaction-icon" />
+              <span class="compaction-title">
+                <template v-if="compaction.cut_message_id != null">
+                  已压缩 {{ compaction.covered_count }} 条更早对话（不再进入上下文，原文保留）
+                </template>
+                <template v-else>
+                  更早对话的滚动摘要（覆盖 {{ compaction.covered_count }} 条）
+                </template>
+              </span>
+              <span class="compaction-toggle">{{ summaryExpanded ? '收起' : '查看摘要' }}</span>
+            </button>
+            <div v-if="summaryExpanded" class="compaction-detail">
+              <div
+                class="compaction-summary markdown"
+                v-html="renderCached(`compaction:${activeId}`, compaction.summary)"
+              />
+              <div v-if="compaction.instruction" class="compaction-instruction">
+                压缩要求：{{ compaction.instruction }}
+              </div>
+              <a-popconfirm
+                v-if="compaction.cut_message_id != null"
+                title="取消压缩后，更早的消息将重新进入回放窗口，确认？"
+                ok-text="取消压缩"
+                cancel-text="再想想"
+                @confirm="clearCompaction"
+              >
+                <a-button size="small" type="link" danger>取消压缩</a-button>
+              </a-popconfirm>
+            </div>
+          </div>
+
+          <div v-for="msg in visibleMessages" :key="msg.key" :class="['msg', msg.role]">
             <div class="bubble">
               <!-- 思考与工具调用过程：流式中实时展示，落定后折叠，历史消息
                    从 timeline 重建。纯问答消息时间线为空，不占位置。 -->
@@ -478,6 +527,71 @@
           </div>
         </div>
       </a-card>
+
+      <!-- 手动压缩向导：选保留轮数与压缩要求 → 流式预览摘要 → 确认后应用。
+           预览全程不写库，应用是独立请求；关掉弹窗即放弃预览并掐断流。 -->
+      <a-modal
+        v-model:open="compactModalOpen"
+        title="压缩对话"
+        :width="620"
+        :mask-closable="false"
+        ok-text="应用压缩"
+        cancel-text="取消"
+        :confirm-loading="compactApplying"
+        :ok-button-props="{ disabled: compactBusy || !compactPreview.trim() }"
+        @ok="applyCompactionFromModal"
+        @cancel="closeCompaction"
+      >
+        <div class="compact-form">
+          <div class="compact-row">
+            <span>保留最近</span>
+            <a-input-number
+              v-model:value="compactKeepTurns"
+              :min="COMPACT_KEEP_TURNS_MIN"
+              :max="COMPACT_KEEP_TURNS_MAX"
+              :disabled="compactBusy"
+            />
+            <span>轮对话，更早的内容压成摘要</span>
+          </div>
+          <a-textarea
+            v-model:value="compactInstruction"
+            :rows="2"
+            :maxlength="COMPACT_INSTRUCTION_MAX"
+            show-count
+            :disabled="compactBusy"
+            placeholder="压缩要求（可选），如：保留未决错误、文件路径与结论"
+          />
+          <div class="compact-preview-head">
+            <a-button
+              size="small"
+              :loading="compactBusy"
+              :disabled="streaming"
+              @click="runCompactPreview"
+            >
+              {{ compactPreview ? '重新生成' : '生成预览' }}
+            </a-button>
+            <a-button v-if="compactBusy" size="small" @click="stopCompactPreview">
+              停止
+            </a-button>
+            <span v-if="compactMeta" class="compact-meta">
+              将压缩 {{ compactMeta.covered_count }} 条，保留 {{ compactMeta.kept_count }} 条
+            </span>
+          </div>
+          <div v-if="compactBusy || compactPreview" class="compact-preview-wrap">
+            <div
+              class="compact-preview markdown"
+              v-html="renderCached('compact-preview', compactPreview)"
+            />
+            <span v-if="compactBusy" class="compact-caret" />
+          </div>
+          <a-alert
+            v-else
+            type="info"
+            show-icon
+            message="摘要生成后可在此预览，确认应用才会生效；更早的消息原文不会删除。"
+          />
+        </div>
+      </a-modal>
     </div>
   </div>
 </template>
@@ -487,6 +601,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { message as toast, Empty } from 'ant-design-vue'
 import {
   CloseOutlined,
+  CompressOutlined,
   CopyOutlined,
   DeleteOutlined,
   EditOutlined,
@@ -525,6 +640,8 @@ import {
   type Agent,
   type ChatAttachment,
   type Citation,
+  type CompactMeta,
+  type CompactionState,
   type Conversation,
   type KbProject,
   type KnowledgeType,
@@ -1274,6 +1391,128 @@ async function loadToolCatalogs() {
   }
 }
 
+// ---- 手动对话压缩 -----------------------------------------------------------
+// 服务端用 cut_message_id 锚点分界：该 id 及之前的消息不再进入模型上下文，但
+// 原文一条不删。前端口径与之一致——锚点前的消息只是在本会话视图里藏起来，
+// 分界卡可展开看摘要，取消压缩或重新进入会话即恢复服务端口径。
+const compaction = ref<CompactionState | null>(null)
+const summaryExpanded = ref(false)
+const compactModalOpen = ref(false)
+const compactKeepTurns = ref(6)
+const compactInstruction = ref('')
+const compactPreview = ref('')
+const compactMeta = ref<CompactMeta | null>(null)
+const compactBusy = ref(false)
+const compactApplying = ref(false)
+/** 边界与后端 COMPACT_* 常量对齐。 */
+const COMPACT_KEEP_TURNS_MIN = 1
+const COMPACT_KEEP_TURNS_MAX = 20
+const COMPACT_INSTRUCTION_MAX = 500
+let stopCompactStream: (() => void) | null = null
+
+// 锚点之前的消息在当前视图隐藏；无锚点（自动滚动摘要）时一条都不藏。
+// 没有 id 的是流式中的临时气泡，永远可见。
+const visibleMessages = computed(() => {
+  const cut = compaction.value?.cut_message_id
+  if (cut == null) return messages.value
+  return messages.value.filter((m) => m.id == null || m.id > cut)
+})
+
+function openCompaction() {
+  if (streaming.value || !activeId.value) return
+  compactKeepTurns.value = 6
+  // 再次压缩默认带上次的要求：渐进式压缩沿用同一条摘要偏好。
+  compactInstruction.value = compaction.value?.instruction ?? ''
+  compactPreview.value = ''
+  compactMeta.value = null
+  compactBusy.value = false
+  compactModalOpen.value = true
+  // 打开即流式生成预览，用户调参后再手动「重新生成」。
+  runCompactPreview()
+}
+
+function runCompactPreview() {
+  if (!activeId.value) return
+  stopCompactStream?.()
+  compactPreview.value = ''
+  compactMeta.value = null
+  compactBusy.value = true
+  beginStream('compact-preview')
+  stopCompactStream = chatApi.previewCompaction(
+    activeId.value,
+    {
+      keep_turns: compactKeepTurns.value ?? 6,
+      instruction: compactInstruction.value.trim() || undefined,
+    },
+    {
+      onCompactMeta: (data) => {
+        compactMeta.value = data
+      },
+      onToken: (token) => {
+        compactPreview.value += token
+        schedule()
+      },
+      onCompactDone: () => finishCompactPreview(),
+      onError: (data) => {
+        finishCompactPreview()
+        toast.error(data.message)
+      },
+    },
+  )
+}
+
+function finishCompactPreview() {
+  compactBusy.value = false
+  stopCompactStream = null
+  endStream()
+}
+
+/** 用户点「停止」：中断请求，已收到的半截预览保留在框里供阅读。 */
+function stopCompactPreview() {
+  stopCompactStream?.()
+  stopCompactStream = null
+  finishCompactPreview()
+}
+
+function closeCompaction() {
+  // 关弹窗即放弃这次预览：挂着的流必须收掉，否则它会在后台继续烧 token。
+  if (compactBusy.value) stopCompactPreview()
+  compactModalOpen.value = false
+}
+
+async function applyCompactionFromModal() {
+  if (!activeId.value || !compactMeta.value || compactBusy.value) return
+  const summary = compactPreview.value.trim()
+  if (!summary) return
+  compactApplying.value = true
+  try {
+    const state = await chatApi.applyCompaction(activeId.value, {
+      cut_message_id: compactMeta.value.cut_message_id,
+      summary,
+      instruction: compactInstruction.value.trim() || null,
+    })
+    compaction.value = state
+    compactModalOpen.value = false
+    toast.success('已压缩，更早的对话不再进入上下文')
+  } catch {
+    // 拦截器已弹 toast（常见：切点过期，重新生成即可）。
+  } finally {
+    compactApplying.value = false
+  }
+}
+
+async function clearCompaction() {
+  if (!activeId.value) return
+  try {
+    await chatApi.clearCompaction(activeId.value)
+    compaction.value = null
+    summaryExpanded.value = false
+    toast.success('已取消压缩，更早的消息恢复进入回放窗口')
+  } catch {
+    // 拦截器已弹 toast。
+  }
+}
+
 // 切换会话的竞态守卫：快速连点时慢响应不得覆盖新选择。
 // 序号管「后发起的覆盖先发起的」，id 比对管「等响应期间又切走了」。
 let convLoadSeq = 0
@@ -1290,9 +1529,15 @@ async function selectConversation(id: number) {
   clearRenderCaches()
   let data
   let acts
+  let compact
   try {
-    // 确认卡片与消息一起回放：普通会话的 actions 恒为空列表，不多一次请求。
-    ;[data, acts] = await Promise.all([chatApi.listMessages(id), chatApi.listActions(id)])
+    // 确认卡片、压缩状态与消息一起回放：普通会话的 actions 恒为空、compaction
+    // 恒为 null，多两个轻请求换一次渲染齐套，不额外转圈。
+    ;[data, acts, compact] = await Promise.all([
+      chatApi.listMessages(id),
+      chatApi.listActions(id),
+      chatApi.getCompaction(id),
+    ])
   } catch {
     // 拦截器已经提示过了；这里只要不把过期/失败的结果应用上去。
     return
@@ -1309,6 +1554,8 @@ async function selectConversation(id: number) {
     attachments: m.attachments ?? [],
   }))
   actions.value = acts.items
+  compaction.value = compact
+  summaryExpanded.value = false
   const conv = conversations.value.find((c) => c.id === id)
   if (conv?.agent_id) activeAgentId.value = conv.agent_id
   // 重新打开会话时要恢复它当初依据的检索范围，而不是沿用最后一次选的那个 ——
@@ -1351,6 +1598,8 @@ function startNew() {
   pendingContext.value = null
   messages.value = []
   actions.value = []
+  compaction.value = null
+  summaryExpanded.value = false
   draft.value = ''
   clearPending({ remote: true })
   clearRenderCaches()
@@ -2076,6 +2325,108 @@ onUnmounted(() => abort?.())
   flex: 1;
   overflow-y: auto;
   padding: 4px 4px 12px;
+}
+
+/* 压缩分界卡：交代被压掉消息的去向，整行可点展开摘要原文。 */
+.compaction-bar {
+  margin: 4px 8px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.compaction-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  text-align: left;
+  cursor: pointer;
+}
+.compaction-head:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+.compaction-icon {
+  flex: none;
+  color: var(--signal-text);
+}
+.compaction-title {
+  flex: 1;
+}
+.compaction-toggle {
+  flex: none;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+.compaction-detail {
+  padding: 0 12px 8px 32px;
+}
+.compaction-summary {
+  max-height: 240px;
+  overflow-y: auto;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.compaction-instruction {
+  margin-top: 6px;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+/* 压缩向导弹窗 */
+.compact-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.compact-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.compact-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.compact-meta {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+.compact-preview-wrap {
+  position: relative;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.compact-preview {
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+/* 流式追加中的闪烁光标：挂在预览框末尾而不是塞进 markdown HTML 里。 */
+.compact-caret {
+  display: inline-block;
+  width: 7px;
+  height: 15px;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--signal-text);
+  animation: compact-blink 1s steps(2, start) infinite;
+}
+@keyframes compact-blink {
+  to {
+    visibility: hidden;
+  }
 }
 
 /* 回到底部：sticky 钉在消息区右下角，发丝线 + 浮层阴影与全站口径一致。 */
