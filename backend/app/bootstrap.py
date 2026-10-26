@@ -289,6 +289,19 @@ def migrate_schema() -> None:
             conn.execute(text("ALTER TABLE workflow ADD COLUMN mcp_server_ids JSON NULL"))
         logger.info("added workflow.mcp_server_ids")
 
+    # 步骤行绑定开跑时的人设版本（agent_version 新表由 create_all 建立）。
+    run_step_columns = _column_names("workflow_run_step")
+    if run_step_columns:
+        for column, ddl in (
+            ("agent_id", "ADD COLUMN agent_id BIGINT NULL"),
+            ("agent_version", "ADD COLUMN agent_version INT NULL"),
+        ):
+            if column in run_step_columns:
+                continue
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE workflow_run_step {ddl}"))
+            logger.info("added workflow_run_step.%s", column)
+
     # 节点级 MCP 挂载：仅对所属步骤生效，与 workflow.mcp_server_ids 取并集。
     step_columns = _column_names("workflow_step")
     if step_columns and "mcp_server_ids" not in step_columns:
@@ -395,6 +408,15 @@ def seed_agents() -> None:
     """安装内置智能体（幂等）。"""
     with SessionLocal() as db:
         seed_builtin_agents(db)
+        # 版本功能上线前就存在的用户智能体没有任何快照：按当前值补 v1，
+        # 让之后的运行总有版本可绑。内置的已在 seed 里对账过，这里再扫是幂等空转。
+        from app.models.entities import Agent
+        from app.services.agent_versions import ensure_versions
+
+        agents = list(db.scalars(select(Agent)).all())
+        added = ensure_versions(db, agents)
+        if added:
+            logger.info("backfilled v1 snapshot for %d legacy agent(s)", added)
 
 
 def seed_workflows() -> None:

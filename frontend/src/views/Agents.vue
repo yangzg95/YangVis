@@ -24,6 +24,7 @@
           :key="agent.id"
           :agent="agent"
           @view="openView"
+          @history="openHistory"
           @duplicate="onDuplicate"
           @edit="openEdit"
           @delete="(a) => onDelete(a.id)"
@@ -46,6 +47,7 @@
             :key="agent.id"
             :agent="agent"
             @view="openView"
+            @history="openHistory"
             @duplicate="onDuplicate"
             @edit="openEdit"
             @delete="(a) => onDelete(a.id)"
@@ -149,6 +151,47 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <!-- 版本史：人设字段每次保存追加一个不可变版本，工作流运行按版本号绑定现场。 -->
+    <a-modal
+      v-model:open="versions.open"
+      :title="`版本史 · ${versions.agentName}`"
+      width="780px"
+      :footer="null"
+    >
+      <div class="version-wrap">
+        <div class="version-list">
+          <a-spin size="small" :spinning="versions.loading">
+            <div
+              v-for="item in versions.items"
+              :key="item.version"
+              class="version-row"
+              :class="{ active: versions.selected === item.version }"
+              @click="pickVersion(item.version)"
+            >
+              <div><b>v{{ item.version }}</b> <span class="muted">{{ item.name }}</span></div>
+              <div class="muted version-time">{{ new Date(item.created_at).toLocaleString() }}</div>
+            </div>
+            <a-empty v-if="!versions.loading && !versions.items.length" description="还没有版本" />
+          </a-spin>
+        </div>
+        <div class="version-detail">
+          <a-spin size="small" :spinning="versions.detailLoading">
+            <template v-if="versions.detail">
+              <div class="version-tags">
+                <a-tag>温度 {{ versions.detail.snapshot.temperature ?? '跟随模型' }}</a-tag>
+                <a-tag :color="versions.detail.snapshot.use_knowledge ? 'blue' : 'default'">
+                  {{ versions.detail.snapshot.use_knowledge ? '检索知识库' : '不检索' }}
+                </a-tag>
+                <a-tag v-if="versions.detail.snapshot.use_ops" color="cyan">运维只读</a-tag>
+                <a-tag v-if="versions.detail.snapshot.use_memory">长期记忆</a-tag>
+              </div>
+              <pre class="version-prompt">{{ versions.detail.snapshot.system_prompt }}</pre>
+            </template>
+          </a-spin>
+        </div>
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -156,7 +199,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { DownOutlined, PlusOutlined } from '@ant-design/icons-vue'
-import { agentsApi, type Agent } from '@/api'
+import { agentsApi, type Agent, type AgentVersionDetail, type AgentVersionItem } from '@/api'
 import AgentCard from '@/components/AgentCard.vue'
 
 const agents = ref<Agent[]>([])
@@ -314,6 +357,60 @@ async function onDelete(id: number) {
   await load()
 }
 
+// ---- 版本史 -----------------------------------------------------------------
+
+const versions = reactive<{
+  open: boolean
+  agentId: number | null
+  agentName: string
+  loading: boolean
+  detailLoading: boolean
+  items: AgentVersionItem[]
+  selected: number
+  detail: AgentVersionDetail | null
+}>({
+  open: false,
+  agentId: null,
+  agentName: '',
+  loading: false,
+  detailLoading: false,
+  items: [],
+  selected: 0,
+  detail: null,
+})
+
+async function openHistory(agent: Agent) {
+  versions.open = true
+  versions.agentId = agent.id
+  versions.agentName = agent.name
+  versions.items = []
+  versions.selected = 0
+  versions.detail = null
+  versions.loading = true
+  try {
+    const data = await agentsApi.listVersions(agent.id)
+    versions.items = data.items
+    if (data.items[0]) await pickVersion(data.items[0].version)
+  } catch {
+    // 拦截器已提示。
+  } finally {
+    versions.loading = false
+  }
+}
+
+async function pickVersion(version: number) {
+  if (versions.agentId == null || (versions.selected === version && versions.detail)) return
+  versions.selected = version
+  versions.detailLoading = true
+  try {
+    versions.detail = await agentsApi.versionDetail(versions.agentId, version)
+  } catch {
+    versions.detail = null
+  } finally {
+    versions.detailLoading = false
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -354,5 +451,51 @@ onMounted(load)
 /* 颜色/字号/行高用全局 .hint（style.css），这里只留本页差异。 */
 .hint {
   margin-top: 4px;
+}
+.version-wrap {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 12px;
+  min-height: 320px;
+  max-height: 60vh;
+}
+.version-list {
+  border-right: 1px solid var(--hairline);
+  padding-right: 8px;
+  overflow-y: auto;
+}
+.version-row {
+  padding: 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.version-row:hover {
+  background: var(--hairline);
+}
+.version-row.active {
+  background: rgba(22, 119, 255, 0.1);
+}
+.version-time {
+  font-size: var(--fs-xs);
+  margin-top: 2px;
+}
+.version-detail {
+  overflow-y: auto;
+  padding-right: 8px;
+}
+.version-tags {
+  margin-bottom: 8px;
+}
+.version-prompt {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  padding: 10px;
+  font-size: var(--fs-sm);
+  line-height: 1.6;
 }
 </style>

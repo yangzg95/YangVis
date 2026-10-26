@@ -12,6 +12,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    Float,
     Index,
     Integer,
     JSON,
@@ -173,6 +174,41 @@ class Agent(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<Agent id={self.id} slug={self.slug!r} builtin={self.is_builtin}>"
+
+
+class AgentVersion(Base):
+    """智能体配置的一个不可变版本快照。
+
+    人设每次被保存（或内置智能体随代码升级改变）就**追加**一行，永不改写：
+    工作流每一步开跑时绑定当时的版本号（见 ``workflow_run_step.agent_version``），
+    历史运行永远对得上当时的 ``system_prompt`` 与温度，不被后来的编辑追着改。
+
+    ``snapshot`` 是自足的：智能体被删除后版本行仍然保留（与评测的 Rubric 快照
+    同一取舍），旧运行的现场照样能打开当时的人设。
+    """
+
+    __tablename__ = "agent_version"
+    __table_args__ = (UniqueConstraint("agent_id", "version", name="uk_agent_version_no"),)
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    # 冗余 owner：内置为 0；读取版本列表时按人收敛，不必先 join agent 表。
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    agent_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    # 该智能体名下单调递增的版本号，从 1 开始。
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # {"name","description","system_prompt","temperature","use_knowledge",
+    #  "use_ops","use_memory","chat_visible"}：影响模型输出的人设字段全在这里；
+    # enabled / sort_order 只是展示开关，不入快照、不因此产生新版本。
+    snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<AgentVersion agent={self.agent_id} v{self.version}>"
 
 
 class KbProject(Base):
@@ -1421,6 +1457,12 @@ class WorkflowRunStep(Base):
     # 这次实际用的模型配置，排查「为什么这一步慢/为什么换了模型」的第一手线索。
     model_config_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
+    # 开跑时绑定的人设：agent_id + 版本号。历史运行回看时按它取当时的 system_prompt，
+    # 而不是取智能体的当前值。slug 可能被删后重建复用，所以连 id 一起存。
+    # 功能上线前的老运行两列都是 NULL：那批现场没有版本可对，界面不显示版本标。
+    agent_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    agent_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     elapsed_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -1434,3 +1476,91 @@ class WorkflowRunStep(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<WorkflowRunStep id={self.id} run={self.run_id} key={self.key!r} status={self.status!r}>"
+
+
+class WorkflowEvalRubric(Base):
+    """运行对比用的评分细则：2–6 条有序标准，可在多次对比之间复用。
+
+    评测保存时把标准**冻结成快照**写进 ``workflow_evaluation.rubric_snapshot``：
+    细则以后改名、增减标准甚至被删除，都不改写已经保存的评测——历史分数对着的
+    永远是当时那把尺子。
+    """
+
+    __tablename__ = "workflow_eval_rubric"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "name", name="uk_eval_rubric_owner_name"),
+    )
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # [{"name": "信息完整度", "description": "..."}]，2–6 条，顺序即打分表上的顺序。
+    criteria: Mapped[list] = mapped_column(JSON, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<WorkflowEvalRubric id={self.id} name={self.name!r}>"
+
+
+class WorkflowEvaluation(Base):
+    """一次 A/B 双运行对比评测。
+
+    两次运行必须属于**同一条工作流**，步骤才能按 key 逐条对齐；``run_a`` 是基准
+    （旧版/对照），``run_b`` 是候选，``diff`` 按 ``avg_b - avg_a`` 记，方向由
+    保存时的选择决定——所以 (run_a, run_b) 反着选是另一次评测，不做归并。
+
+    同一对运行、同一把尺子重复提交按**更新**处理：同一份证据改了主意，不该长出
+    两行分数。被评测引用的运行在留存清理里硬豁免（见 ``runs.prune_runs``）——
+    删了证据，留下的分数就没法复核了。
+    """
+
+    __tablename__ = "workflow_evaluation"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_id",
+            "run_a_id",
+            "run_b_id",
+            "rubric_id",
+            name="uk_eval_pair_rubric",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    workflow_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    # 细则可能被删，行照样留着：rubric_name 读侧取不到就给 None，打分对着的
+    # 标准以 rubric_snapshot 为准。与工作流定义/运行现场同一个取舍。
+    rubric_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    rubric_snapshot: Mapped[list] = mapped_column(JSON, nullable=False)
+
+    run_a_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    run_b_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    # [{"index": 0, "score_a": 3, "score_b": 5}]，index 对齐快照下标，分数 1–5。
+    scores: Mapped[list] = mapped_column(JSON, nullable=False)
+
+    # 非加权均分，保存时算好落库，读侧不用各自再算一遍。
+    avg_a: Mapped[float] = mapped_column(Float, nullable=False)
+    avg_b: Mapped[float] = mapped_column(Float, nullable=False)
+
+    # 评测者独立写下的总体结论（哪版好、为什么），不由分数替人决定。
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<WorkflowEvaluation id={self.id} run_a={self.run_a_id} run_b={self.run_b_id}>"

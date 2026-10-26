@@ -12,10 +12,13 @@ from app.models.schemas import (
     AgentCreate,
     AgentItem,
     AgentUpdate,
+    AgentVersionDetail,
+    AgentVersionItem,
     APIResponse,
     CurrentUser,
     ListResponse,
 )
+from app.services import agent_versions
 from app.services.agents import AgentService
 
 logger = logging.getLogger("yangvis.agents")
@@ -92,3 +95,45 @@ def duplicate_agent(
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return APIResponse(data=AgentService.to_item(agent))
+
+
+@router.get("/{agent_id}/versions", response_model=APIResponse[ListResponse[AgentVersionItem]])
+def list_agent_versions(
+    agent_id: int,
+    service: AgentService = Depends(get_service),
+    db: Session = Depends(get_db),
+) -> APIResponse[ListResponse[AgentVersionItem]]:
+    """该智能体的版本史，新的在前；内置智能体人人可查。"""
+    try:
+        service.get(agent_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    rows = agent_versions.list_versions(db, agent_id)
+    items = [
+        AgentVersionItem(version=row.version, name=row.snapshot.get("name", ""), created_at=row.created_at)
+        for row in rows
+    ]
+    return APIResponse(data=ListResponse(items=items, total=len(items)))
+
+
+@router.get(
+    "/{agent_id}/versions/{version}",
+    response_model=APIResponse[AgentVersionDetail],
+)
+def get_agent_version(
+    agent_id: int,
+    version: int,
+    service: AgentService = Depends(get_service),
+    db: Session = Depends(get_db),
+) -> APIResponse[AgentVersionDetail]:
+    """取某个版本的完整人设快照：历史运行步骤上的版本号就对到这里。"""
+    try:
+        service.get(agent_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    row = agent_versions.get_version(db, agent_id, version)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="该版本不存在")
+    return APIResponse(
+        data=AgentVersionDetail(version=row.version, created_at=row.created_at, snapshot=row.snapshot)
+    )

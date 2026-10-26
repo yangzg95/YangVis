@@ -770,6 +770,8 @@ class WorkflowService:
                     key=row.key,
                     group_key=row.group_key,
                     agent_slug=row.agent_slug,
+                    agent_id=row.agent_id,
+                    agent_version=row.agent_version,
                     agent_name=agent_names.get(row.agent_slug),
                     output_kind=definitions[row.key].output_kind if row.key in definitions else None,
                     optional=definitions[row.key].optional if row.key in definitions else False,

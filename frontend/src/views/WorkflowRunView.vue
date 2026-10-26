@@ -17,6 +17,10 @@
       <div class="head-meta">
         <span v-if="detail" class="muted">{{ headMeta }}</span>
         <a-button size="small" :loading="loading" @click="load">刷新</a-button>
+        <a-button
+          size="small"
+          @click="router.push({ name: 'WorkflowRunCompare', params: { a: runId } })"
+        >与其他运行对比</a-button>
         <a-button size="small" @click="router.push({ name: 'Workflows' })">工作流页</a-button>
       </div>
     </header>

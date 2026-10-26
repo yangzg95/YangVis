@@ -19,6 +19,7 @@
 
     <template #actions>
       <span @click="emit('view', agent)">查看</span>
+      <span @click="emit('history', agent)">版本</span>
       <span @click="emit('duplicate', agent)">复制</span>
       <template v-if="!agent.is_builtin">
         <span @click="emit('edit', agent)">编辑</span>
@@ -37,6 +38,7 @@ defineProps<{ agent: Agent }>()
 
 const emit = defineEmits<{
   view: [agent: Agent]
+  history: [agent: Agent]
   duplicate: [agent: Agent]
   edit: [agent: Agent]
   delete: [agent: Agent]

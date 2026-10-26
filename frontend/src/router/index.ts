@@ -57,6 +57,14 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '运行记录'},
     },
     {
+        // 双运行对比 + Rubric 评分：A 必带、B 选填（先进页再挑另一次运行）。
+        // compare 是字面量段，不与上面两条 :id 数字路由抢。
+        path: '/workflows/compare/:a(\\d+)/:b(\\d+)?',
+        name: 'WorkflowRunCompare',
+        component: () => import('@/views/WorkflowRunCompare.vue'),
+        meta: {title: '运行对比'},
+    },
+    {
         path: '/mcp',
         name: 'McpServers',
         component: () => import('@/views/McpServers.vue'),

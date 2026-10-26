@@ -59,4 +59,23 @@ describe('leafForPath', () => {
     expect(leafForPath('/workflows/runs/7', [])?.title).toBe('运行 #7')
     expect(leafForPath('/workflows/7/runs', [])?.title).toBe('运行记录 #7')
   })
+
+  it('双运行对比按两个 id 展开成动态标签', () => {
+    const leaf = leafForPath('/workflows/compare/3/8', staticLeaves)
+    expect(leaf).toEqual({
+      path: '/workflows/compare/3/8',
+      title: '运行对比 #3 / #8',
+      icon: expect.anything(),
+    })
+  })
+
+  it('只带基准运行（B 还没选）也认', () => {
+    expect(leafForPath('/workflows/compare/3', staticLeaves)?.title).toBe('运行对比 #3')
+  })
+
+  it('对比形态的非法段不认，交给路由约束兜底', () => {
+    expect(leafForPath('/workflows/compare/abc', staticLeaves)).toBeUndefined()
+    expect(leafForPath('/workflows/compare/3/8/9', staticLeaves)).toBeUndefined()
+    expect(leafForPath('/workflows/compare/', staticLeaves)).toBeUndefined()
+  })
 })

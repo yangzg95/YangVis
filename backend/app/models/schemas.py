@@ -563,6 +563,24 @@ class AgentItem(BaseModel):
     updated_at: datetime
 
 
+class AgentVersionItem(BaseModel):
+    """版本列表里的一行：不带快照正文，只给辨认用的名字与时间。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    version: int
+    name: str
+    created_at: datetime
+
+
+class AgentVersionDetail(BaseModel):
+    """某个版本的完整快照：历史运行对人设现场时取的就是这份。"""
+
+    version: int
+    created_at: datetime
+    snapshot: Dict[str, Any]
+
+
 # ---- 工作流 ---------------------------------------------------------------
 
 class WorkflowInputField(BaseModel):
@@ -678,6 +696,9 @@ class WorkflowRunStepItem(BaseModel):
     key: str
     group_key: str
     agent_slug: str
+    # 开跑时绑定的人设版本：功能上线前的老运行两列都是 None。
+    agent_id: Optional[int] = None
+    agent_version: Optional[int] = None
     # 这一步挂的是哪个人设、可不可选、要什么格式：来自流程**当前**的定义。定义可能在
     # 这次运行之后被改过（内置流程每次启动就地刷新），所以这几项对得上才带。
     agent_name: Optional[str] = None
@@ -753,6 +774,86 @@ class WorkflowRunPruneRequest(BaseModel):
 class WorkflowRunPruneResult(BaseModel):
     deleted_runs: int
     deleted_steps: int
+
+
+# ---- 运行对比评测 -----------------------------------------------------------
+
+
+class EvalCriterion(BaseModel):
+    """评分细则里的一条标准；2–6 条有序标准组成一把可复用的尺子。"""
+
+    name: str = Field(..., min_length=1, max_length=128)
+    description: Optional[str] = Field(default=None, max_length=512)
+
+
+class RubricUpsert(BaseModel):
+    """创建 / 更新评分细则共用的内容（整份替换，与工作流定义同一口径）。"""
+
+    name: str = Field(..., min_length=1, max_length=128)
+    description: Optional[str] = Field(default=None, max_length=512)
+    criteria: List[EvalCriterion] = Field(..., min_length=2, max_length=6)
+
+
+class RubricItem(BaseModel):
+    id: int
+    name: str
+    description: Optional[str] = None
+    criteria: List[EvalCriterion] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class EvalScore(BaseModel):
+    """一条标准对两次运行的打分；``index`` 对齐保存时冻结的细则快照下标。"""
+
+    index: int = Field(..., ge=0)
+    score_a: int = Field(..., ge=1, le=5)
+    score_b: int = Field(..., ge=1, le=5)
+
+
+class EvaluationCreate(BaseModel):
+    """提交一次 A/B 对比评测。
+
+    两次运行必须属于同一条工作流；同一对运行 + 同一把尺子重复提交按更新处理，
+    不会长出两行。
+    """
+
+    run_a_id: int
+    run_b_id: int
+    rubric_id: int
+    scores: List[EvalScore] = Field(..., min_length=1)
+    note: Optional[str] = Field(default=None, max_length=10000)
+
+
+class EvalRunBrief(BaseModel):
+    """评测行里嵌的运行摘要：列表不用再逐条拉运行详情。"""
+
+    id: int
+    status: str
+    subject_label: Optional[str] = None
+    elapsed_ms: Optional[int] = None
+    created_at: datetime
+
+
+class EvaluationItem(BaseModel):
+    id: int
+    workflow_id: int
+    rubric_id: int
+    # 细则可能已被删除：名字取不到为 None，标准仍以快照为准。
+    rubric_name: Optional[str] = None
+    rubric_snapshot: List[EvalCriterion] = Field(default_factory=list)
+    run_a_id: int
+    run_b_id: int
+    run_a: EvalRunBrief
+    run_b: EvalRunBrief
+    scores: List[EvalScore] = Field(default_factory=list)
+    # 非加权均分与 B−A 差值，后端算好：读侧不各自再算一遍。
+    avg_a: float
+    avg_b: float
+    diff: float
+    note: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
 
 
 # ---- MCP 服务 ---------------------------------------------------------------

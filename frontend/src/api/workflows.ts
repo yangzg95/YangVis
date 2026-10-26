@@ -112,6 +112,9 @@ export interface WorkflowRunStep {
   key: string
   group_key: string
   agent_slug: string
+  /** 开跑时绑定的人设版本：功能上线前的老运行两列都是 null。 */
+  agent_id?: number | null
+  agent_version?: number | null
   status: RunStepStatus
   /** 这一步挂的人设与要什么格式：来自流程当前的定义，定义改过就对不上，为 null。 */
   agent_name?: string | null
@@ -221,4 +224,90 @@ export const workflowsApi = {
       method: 'POST',
       data: { keep_days: keepDays },
     }),
+}
+
+// ---- 运行对比评测 -----------------------------------------------------------
+
+export interface EvalCriterion {
+  name: string
+  description?: string | null
+}
+
+export interface EvalRubric {
+  id: number
+  name: string
+  description?: string | null
+  criteria: EvalCriterion[]
+  created_at: string
+  updated_at: string
+}
+
+export interface EvalRubricPayload {
+  name: string
+  description?: string | null
+  criteria: EvalCriterion[]
+}
+
+export interface EvalScore {
+  /** 对齐评分细则快照的下标。 */
+  index: number
+  score_a: number
+  score_b: number
+}
+
+export interface EvalRunBrief {
+  id: number
+  status: RunStatus | 'unknown'
+  subject_label?: string | null
+  elapsed_ms?: number | null
+  created_at: string
+}
+
+export interface WorkflowEvaluation {
+  id: number
+  workflow_id: number
+  rubric_id: number
+  /** 细则可能已删：null 时标准仍以 rubric_snapshot 为准。 */
+  rubric_name?: string | null
+  rubric_snapshot: EvalCriterion[]
+  run_a_id: number
+  run_b_id: number
+  run_a: EvalRunBrief
+  run_b: EvalRunBrief
+  scores: EvalScore[]
+  avg_a: number
+  avg_b: number
+  /** avg_b - avg_a：正数 B 好，负数 A 好。 */
+  diff: number
+  note?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export const evalApi = {
+  listRubrics: () =>
+    request<{ items: EvalRubric[]; total: number }>({ url: '/workflows/rubrics' }),
+  createRubric: (payload: EvalRubricPayload) =>
+    request<EvalRubric>({ url: '/workflows/rubrics', method: 'POST', data: payload }),
+  updateRubric: (id: number, payload: EvalRubricPayload) =>
+    request<EvalRubric>({ url: `/workflows/rubrics/${id}`, method: 'PUT', data: payload }),
+  removeRubric: (id: number) =>
+    request<null>({ url: `/workflows/rubrics/${id}`, method: 'DELETE' }),
+  /** 某次运行参与过的评测；withRunId 给定时收敛到这一对运行之间。 */
+  listForRun: (runId: number, withRunId?: number) =>
+    request<{ items: WorkflowEvaluation[]; total: number }>({
+      url: '/workflows/evaluations',
+      params: { run_id: runId, with_run_id: withRunId },
+    }),
+  /** 提交评测：同对运行 + 同一把尺子重复提交，后端按更新处理。 */
+  save: (payload: {
+    run_a_id: number
+    run_b_id: number
+    rubric_id: number
+    scores: EvalScore[]
+    note?: string | null
+  }) =>
+    request<WorkflowEvaluation>({ url: '/workflows/evaluations', method: 'POST', data: payload }),
+  remove: (id: number) =>
+    request<null>({ url: `/workflows/evaluations/${id}`, method: 'DELETE' }),
 }

@@ -19,7 +19,11 @@ from app.errors import BusinessError
 from app.models.schemas import (
     APIResponse,
     CurrentUser,
+    EvaluationCreate,
+    EvaluationItem,
     ListResponse,
+    RubricItem,
+    RubricUpsert,
     RunStatus,
     WorkflowCreate,
     WorkflowItem,
@@ -32,6 +36,7 @@ from app.models.schemas import (
     WorkflowUpdate,
 )
 from app.services.workflows.defs import WorkflowService
+from app.services.workflows.evals import EvalService
 from app.services.workflows.rerun import (
     OverrideValidationError,
     prepare_resume,
@@ -177,6 +182,116 @@ def _follow_response(owner_id: int, run_id: int, request: Request) -> StreamingR
         headers=SSE_HEADERS,
         status_code=status.HTTP_200_OK,
     )
+
+
+# ---- 评分细则与对比评测 ------------------------------------------------------
+#
+# 静态路径全部声明在 ``/{workflow_id}`` 之前：不然 ``GET /rubrics`` 会被当成
+# workflow_id="rubrics" 抢去做 int 转换，直接 422（``/runs`` 区块同理）。
+
+
+def get_eval_service(
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> EvalService:
+    return EvalService(db, user.user_id)
+
+
+@router.get("/rubrics", response_model=APIResponse[ListResponse[RubricItem]])
+def list_rubrics(
+    service: EvalService = Depends(get_eval_service),
+) -> APIResponse[ListResponse[RubricItem]]:
+    """调用方保存过的评分细则，新的在前。"""
+    rows = service.list_rubrics()
+    items = [service.to_rubric_item(row) for row in rows]
+    return APIResponse(data=ListResponse(items=items, total=len(items)))
+
+
+@router.post("/rubrics", response_model=APIResponse[RubricItem])
+def create_rubric(
+    payload: RubricUpsert,
+    service: EvalService = Depends(get_eval_service),
+) -> APIResponse[RubricItem]:
+    try:
+        row = service.create_rubric(payload)
+    except ValueError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    return APIResponse(data=service.to_rubric_item(row))
+
+
+@router.put("/rubrics/{rubric_id}", response_model=APIResponse[RubricItem])
+def update_rubric(
+    rubric_id: int,
+    payload: RubricUpsert,
+    service: EvalService = Depends(get_eval_service),
+) -> APIResponse[RubricItem]:
+    """改细则只影响以后的评测：已保存评测拿着冻结快照，不会被改写。"""
+    try:
+        row = service.update_rubric(rubric_id, payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    return APIResponse(data=service.to_rubric_item(row))
+
+
+@router.delete("/rubrics/{rubric_id}", response_model=APIResponse[None])
+def delete_rubric(
+    rubric_id: int,
+    service: EvalService = Depends(get_eval_service),
+) -> APIResponse[None]:
+    """删细则不删评测：评测行的标准快照自足。"""
+    try:
+        service.delete_rubric(rubric_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return APIResponse(data=None, message="deleted")
+
+
+@router.get("/evaluations", response_model=APIResponse[ListResponse[EvaluationItem]])
+def list_evaluations(
+    run_id: int = Query(..., description="涉及的运行 id（当 A 或当 B 都算）"),
+    with_run_id: Optional[int] = Query(default=None, description="再收敛到这一对运行之间"),
+    service: EvalService = Depends(get_eval_service),
+) -> APIResponse[ListResponse[EvaluationItem]]:
+    """某次运行参与过的对比评测，新的在前；对比页用 ``with_run_id`` 取这一对的。"""
+    try:
+        rows = service.list_for_run(run_id, with_run_id=with_run_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    items = [service.to_item(row) for row in rows]
+    return APIResponse(data=ListResponse(items=items, total=len(items)))
+
+
+@router.post("/evaluations", response_model=APIResponse[EvaluationItem])
+def upsert_evaluation(
+    payload: EvaluationCreate,
+    service: EvalService = Depends(get_eval_service),
+) -> APIResponse[EvaluationItem]:
+    """提交一次 A/B 对比评测。
+
+    同对运行 + 同一把尺子重复提交按更新处理。两次运行必须同属一条工作流、
+    归属调用方；标准快照在保存时冻结。
+    """
+    try:
+        row, created = service.upsert_evaluation(payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    return APIResponse(data=service.to_item(row), message="评测已保存" if created else "评测已更新")
+
+
+@router.delete("/evaluations/{evaluation_id}", response_model=APIResponse[None])
+def delete_evaluation(
+    evaluation_id: int,
+    service: EvalService = Depends(get_eval_service),
+) -> APIResponse[None]:
+    try:
+        service.delete_evaluation(evaluation_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return APIResponse(data=None, message="deleted")
 
 
 def _apply_prepare_errors(exc: Exception) -> HTTPException:

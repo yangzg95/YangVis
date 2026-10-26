@@ -46,6 +46,11 @@
           {{ step.group_key }}
         </a-tag>
         <span class="muted">{{ step.agent_name || step.agent_slug }}</span>
+        <span
+          v-if="step.agent_version"
+          class="muted"
+          :title="`这次运行绑的是人设 v${step.agent_version}：之后再改人设，这次现场对的还是当时那一版`"
+        >v{{ step.agent_version }}</span>
         <span v-if="step.optional" class="muted">可选</span>
         <span class="spacer" />
         <span v-if="step.model_name" class="muted">{{ step.model_name }}</span>

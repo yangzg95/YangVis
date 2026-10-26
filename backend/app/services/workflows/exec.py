@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 from app.models.entities import McpServer, Workflow, WorkflowRun, WorkflowRunStep, WorkflowStep
 from app.services.agent_run import model_error_text, parse_output, require_chat_model, run_agent
 from app.services.agents import AgentService
+from app.services.agent_versions import current_version_no
 from app.services.mcp.tools import open_bundle, plan_step_tools, resolve_servers
 from app.services.workflows.template import _group_order, render_prompt
 from app.services.workflows import (
@@ -170,12 +171,20 @@ async def _execute_step(
             config = require_chat_model(db, owner_id, step.model_config_id)
             row.model_config_id = config.id
             model_name = config.model_name
+            # 绑定开跑这一刻的人设版本：以后智能体再怎么改，这次运行对的是当时的
+            # system_prompt。查不到不在这儿报错——交给 run_agent 里的 require_by_slug
+            # 走原有缺失语义（测试把 run_agent 打桩时也不受影响）。
+            agent = AgentService(db, owner_id).get_by_slug(step.agent_slug)
+            if agent is not None:
+                row.agent_id = agent.id
+                row.agent_version = current_version_no(db, agent.id)
             db.commit()
             text = await run_agent(
                 db,
                 owner_id,
                 step.agent_slug,
                 prompt,
+                agent=agent,
                 config_id=config.id,
                 tools=tools,
             )

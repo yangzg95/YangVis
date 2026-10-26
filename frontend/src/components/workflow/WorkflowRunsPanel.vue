@@ -167,6 +167,12 @@
                 class="run-jump"
                 @click.stop.prevent="router.push({ name: 'WorkflowRunView', params: { id: run.id } })"
               >完整现场</a>
+              <!-- 拿这次当 A 基准进对比页，另一次运行（同流程）到页面里再挑。 -->
+              <a
+                href="#"
+                class="run-jump"
+                @click.stop.prevent="router.push({ name: 'WorkflowRunCompare', params: { a: run.id } })"
+              >对比</a>
               <span class="spacer" />
               <span v-if="run.elapsed_ms != null" class="muted">{{ fmtElapsed(run.elapsed_ms) }}</span>
               <span v-if="run.model_names?.length" class="muted run-models">

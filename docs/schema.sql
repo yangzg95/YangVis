@@ -63,6 +63,21 @@ CREATE TABLE IF NOT EXISTS agent (
   KEY idx_owner (owner_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='可选择的智能体';
 
+-- 智能体配置的不可变版本快照：新建即 v1，人设字段每次保存追加新版本，
+-- 内置智能体随代码升级在启动 seed 时对账追加。工作流步骤开跑时绑定当时版本号，
+-- 历史运行永远对得上当时的 system_prompt。智能体删除后版本行保留。
+CREATE TABLE IF NOT EXISTS agent_version (
+  id         BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id   BIGINT NOT NULL DEFAULT 0 COMMENT '冗余 owner：内置为 0',
+  agent_id   BIGINT NOT NULL COMMENT 'agent.id；智能体删除后行保留',
+  version    INT    NOT NULL COMMENT '该智能体名下单调递增，从 1 开始',
+  snapshot   JSON   NOT NULL COMMENT '当时的人设字段：name/description/system_prompt/temperature/use_knowledge/use_ops/use_memory/chat_visible',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_agent_version_no (agent_id, version),
+  KEY idx_agent_version_owner (owner_id),
+  KEY idx_agent_version_agent (agent_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='智能体配置版本快照';
+
 CREATE TABLE IF NOT EXISTS kb_project (
   id            BIGINT PRIMARY KEY AUTO_INCREMENT,
   owner_id      BIGINT       NOT NULL COMMENT 'sys_user.id',
@@ -521,6 +536,8 @@ CREATE TABLE IF NOT EXISTS workflow_run_step (
   parsed          JSON         NULL COMMENT 'json 步骤解析出的对象；markdown 步骤为 NULL',
   error_msg       VARCHAR(512) NULL,
   model_config_id BIGINT       NULL COMMENT '这次实际用的模型配置',
+  agent_id        BIGINT       NULL COMMENT '开跑时绑定的人设 agent.id；上线前老运行为 NULL',
+  agent_version   INT          NULL COMMENT '开跑时人设的版本号，对 agent_version 表取当时快照；老运行为 NULL',
   elapsed_ms      BIGINT       NULL,
   started_at      DATETIME     NULL,
   finished_at     DATETIME     NULL,
@@ -529,6 +546,42 @@ CREATE TABLE IF NOT EXISTS workflow_run_step (
   KEY idx_run_step_owner (owner_id),
   KEY idx_run_step_run (run_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一次运行中单个步骤的现场';
+
+-- 运行对比评测：评分细则是可复用的尺子（2–6 条标准），评测保存时把标准冻结成
+-- 快照；被评测引用的运行在留存清理里硬豁免，分数永远有现场可复核（见
+-- services/workflows/evals.py）。
+CREATE TABLE IF NOT EXISTS workflow_eval_rubric (
+  id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id    BIGINT       NOT NULL COMMENT 'sys_user.id',
+  name        VARCHAR(128) NOT NULL,
+  description VARCHAR(512) NULL,
+  criteria    JSON         NOT NULL COMMENT '[{name, description}]，2–6 条，顺序即打分表顺序',
+  created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_eval_rubric_owner_name (owner_id, name),
+  KEY idx_eval_rubric_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='运行对比评分细则（个人资产）';
+
+CREATE TABLE IF NOT EXISTS workflow_evaluation (
+  id              BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id        BIGINT      NOT NULL COMMENT 'sys_user.id',
+  workflow_id     BIGINT      NOT NULL COMMENT '两次运行必须同属一条工作流',
+  rubric_id       BIGINT      NOT NULL COMMENT 'workflow_eval_rubric.id；细则删除后行仍保留',
+  rubric_snapshot JSON        NOT NULL COMMENT '保存时冻结的标准 [{name, description}]',
+  run_a_id        BIGINT      NOT NULL COMMENT '基准运行 workflow_run.id',
+  run_b_id        BIGINT      NOT NULL COMMENT '候选运行 workflow_run.id；反选是另一次评测',
+  scores          JSON        NOT NULL COMMENT '[{index, score_a, score_b}]，index 对齐快照，分数 1–5',
+  avg_a           FLOAT       NOT NULL COMMENT 'A 的非加权均分',
+  avg_b           FLOAT       NOT NULL COMMENT 'B 的非加权均分',
+  note            TEXT        NULL COMMENT '评测者写的总体结论，不由分数替人决定',
+  created_at      DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at      DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_eval_pair_rubric (owner_id, run_a_id, run_b_id, rubric_id),
+  KEY idx_eval_owner (owner_id),
+  KEY idx_eval_workflow (workflow_id),
+  KEY idx_eval_run_a (run_a_id),
+  KEY idx_eval_run_b (run_b_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一次 A/B 双运行对比评测';
 
 
 -- ---------------------------------------------------------------------------

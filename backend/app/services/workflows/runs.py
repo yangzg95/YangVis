@@ -23,6 +23,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.models.entities import WorkflowRun, WorkflowRunStep
+from app.services.workflows.evals import referenced_run_ids
 from app.services.workflows import (
     RUN_CANCELLED,
     RUN_FAILED,
@@ -107,13 +108,20 @@ def prune_runs(
             .group_by(WorkflowRun.subject_kind, WorkflowRun.subject_ref)
         ).scalars().all()
     )
+    # 评测证据硬豁免：被 A/B 对比评测引用的运行（连同它的步骤现场）不删，
+    # 否则留下的分数没有可复核的依据。引用在评测保存时冻结的是标准，不是现场。
+    protected = referenced_run_ids(db, [run_id for run_id, _s, _k, _r in candidates])
     doomed = [
         run_id
         for run_id, status, _kind, _ref in candidates
-        if status not in (RUN_PENDING, RUN_RUNNING) and run_id not in latest_ids
+        if status not in (RUN_PENDING, RUN_RUNNING)
+        and run_id not in latest_ids
+        and run_id not in protected
     ]
     if not doomed:
         return 0, 0
+    if protected:
+        logger.info("keeping %s run(s) referenced by evaluations", len(protected))
 
     deleted_steps = int(
         db.execute(delete(WorkflowRunStep).where(WorkflowRunStep.run_id.in_(doomed))).rowcount or 0

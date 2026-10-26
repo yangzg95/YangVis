@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.errors import CODE_CHAT_NOT_READY, BusinessError
 from app.models.entities import Agent
 from app.models.schemas import AgentCreate, AgentItem, AgentUpdate
+from app.services import agent_versions
 
 logger = logging.getLogger("yangvis.agents")
 
@@ -673,6 +674,13 @@ def seed_builtin_agents(db: Session) -> None:
     if created:
         logger.info("seeded %s built-in agents", created)
 
+    # 人设快照对账：全新安装补 v1；代码里改过内置 prompt 的升级启动追加新版本，
+    # 历史运行绑定的旧版本不受影响（见 services/agent_versions.py）。
+    rows = list(db.scalars(select(Agent).where(Agent.owner_id == BUILTIN_OWNER_ID)).all())
+    versioned = agent_versions.reconcile_builtins(db, rows)
+    if versioned:
+        logger.info("recorded %s built-in agent version(s)", versioned)
+
 
 class AgentService:
     """一个用户能看到的智能体：共享的内置项，加上他自己的。"""
@@ -747,11 +755,16 @@ class AgentService:
         self._db.add(agent)
         self._db.commit()
         self._db.refresh(agent)
+        # 人设的第一份快照：新建即 v1，以后每次开跑都有版本可绑。
+        agent_versions.append(self._db, agent)
+        self._db.commit()
         logger.info("owner %s created agent %s (%s)", self._owner_id, agent.slug, agent.id)
         return agent
 
     def update(self, agent_id: int, payload: AgentUpdate) -> Agent:
         agent = self._owned(agent_id)
+        # 保存前先留底：只翻 enabled / sort_order 这类开关时，不产生新版本。
+        before = agent_versions.snapshot_of(agent)
         data = payload.model_dump(exclude_unset=True)
         changed = [field for field, value in data.items() if value is not None]
         for field in changed:
@@ -763,11 +776,15 @@ class AgentService:
                 changed.append("temperature")
         self._db.commit()
         self._db.refresh(agent)
+        versioned = agent_versions.append_if_changed(self._db, agent, before)
+        if versioned is not None:
+            self._db.commit()
         logger.info(
-            "owner %s updated agent %s (%s)",
+            "owner %s updated agent %s (%s)%s",
             self._owner_id,
             agent.slug,
             ",".join(changed) or "nothing",
+            f" -> v{versioned.version}" if versioned else "",
         )
         return agent
 
@@ -805,6 +822,9 @@ class AgentService:
         self._db.add(clone)
         self._db.commit()
         self._db.refresh(clone)
+        # 副本是一份独立人设，从 v1 重新开始版本史。
+        agent_versions.append(self._db, clone)
+        self._db.commit()
         logger.info(
             "owner %s duplicated agent %s as %s", self._owner_id, source.slug, clone.slug
         )
