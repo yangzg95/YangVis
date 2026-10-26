@@ -148,6 +148,12 @@ async function copyBlock(nodeKey: string, blockIndex: number, text: string) {
   line-height: 1.5;
   color: var(--text-3);
 }
+.tn-tool {
+  /* 标题行与展开的入参/返回结果是兄弟节点：不改成纵向的话，详情块会当成
+     第二个 flex 项被 100% 宽的标题按钮挤到右侧，还跟着 align-items 垂直居中。 */
+  flex-direction: column;
+  align-items: stretch;
+}
 .tn-tool + .tn-tool {
   margin-top: 0;
 }
