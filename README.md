@@ -5,76 +5,102 @@
 
 ## 功能模块
 
-### 🏠 首页工作台
-- 登录后默认落在首页：问候区 + 功能模块卡片（各模块在用户名下的数量：会话 / 文档 / 简历 / 幻灯片 / 服务器 / 连接 / 智能体）
-- 最近对话列表，点一条直接进对话页并打开该会话（`/chat?conv=<id>` 深链）
-- 对话模型未通过连通性测试时在首页先提示「去配置」，而不是点进各功能再撞 gate
-- 管理员多一张 AI 网关卡片，主数字是今日调用数（今日 tokens 跟在后面），与网关自身概览的累计口径区分开
-- 数量口径统一来自 `GET /api/dashboard/summary`（按 `owner_id` 隔离；会话数与对话页一致，不含运维页内嵌的问答会话）
+### 🏠 首页工作台（[文档](docs/features/home-dashboard.md)）
+- 问候区 + 模块卡片（各模块在本人名下的数量）+ 最近对话列表，点一条带 `/chat?conv=<id>` 深链直进会话
+- 对话模型未测通先提示「去配置」；管理员多一张 AI 网关卡片，主数字是**今日**调用数（与网关概览的累计口径区分）；数量统一来自 `GET /api/dashboard/summary`，按 owner 隔离
 
 ### 💬 智能对话
-- 多智能体体系：内置 + 自定义智能体，各自独立的 system prompt 与模型绑定，可按需对对话页开放/隐藏
-- 智能体**配置版本化**：人设字段（system prompt、温度、知识库/运维/记忆开关）每次保存追加一个不可变版本，改名、隐藏、排序这类不影响输出的操作不产生新版本；内置智能体随代码升级在启动时自动追加版本。智能体卡片「版本」可回看每一版快照；删除智能体不删版本
-- SSE 流式输出、会话重命名/搜索/删除、发送失败重试
-- 手动对话压缩：选择保留最近几轮并可附加压缩要求，先流式预览摘要、确认后才应用；更早的消息不再进入模型上下文但原文保留，分界卡可展开查看摘要/取消压缩，支持在此基础上渐进式再次压缩（详见 `docs/features/chat-compaction.md`）
-- 统一 Trace 时间线：对话「思考过程」与工作流每步现场用同一套节点渲染——每次模型往返与每个工具调用的起止、耗时、入参/返回都对得上；工作流步骤新增「执行过程」分组，跟随运行时实时累积，失败步骤也保留挂点前的轨迹（详见 `docs/features/unified-trace.md`）
-- 绘图助手：Mermaid 图表生成与在线编辑
-- 运维工具挂载：对话中可直接调用只读运维工具（巡检服务器、查数据库），危险写操作走「两阶段确认」卡片，超时自动按未批准处理
+- 多智能体体系：独立人设/温度与知识库、运维、记忆三个能力开关，内置+自建、可对对话页隐藏，聊到一半换人设强制另开会话（[文档](docs/features/agents.md)）
+- 人设**配置版本化**：影响输出的改动追加不可变版本，历史运行与对比页永远对得上当时那版人设（[文档](docs/features/agent-versions.md)）
+- 对话基础能力：SSE 流式、会话重命名/搜索/删除、失败重试、图片/文件附件、Mermaid 绘图与在线编辑（[文档](docs/features/chat-core.md)）
+- 上下文管理：手动压缩（流式预览、锚点分界、可取消、可渐进再压）、窗口外历史自动滚动摘要、跨会话长期记忆（[压缩](docs/features/chat-compaction.md) · [摘要与记忆](docs/features/chat-memory.md)）
+- 统一 Trace 时间线：对话思考过程与工作流每步现场同构渲染，每次模型往返、每个工具调用的起止/耗时/入参返回都对得上，失败步也保留挂点前轨迹（[文档](docs/features/unified-trace.md)）
+- 对话可挂工具：内置**本地工具**（联网搜索、网页抓取、时间/UUID、网盘存文本、读简历，代码注册的只读目录）与外部 **MCP 服务**（stdio / SSE / Streamable HTTP，会话级勾选、每次回答建连即关）（[文档](docs/features/local-tools.md)）
+- 对话里直接用运维只读工具（巡检、查库）；危险写操作走「两阶段确认」卡片，超时按未批准处理（[文档](docs/features/ops-chat-confirm.md)）
 
-### 📚 知识库（RAG）
-- 按用户隔离：文档、分块、向量全部带 `owner_id`，Qdrant 按用户建 collection，互不串数据
-- 文档上传 → 切片 → 向量化 → 检索 → 带引用溯源的回答，全链路自建（LangChain + Qdrant）
-- 对话模型与向量模型独立配置；未配向量模型时 RAG 明确阻断并引导
-- 检索测试、低分结果阈值过滤、批量删除、单篇/全量索引重建
+### 📚 知识库 RAG（[文档](docs/features/knowledge-base.md)）
+- 按用户隔离的全链路自建 RAG：上传 → 切片 → 向量化（Qdrant 每用户一个 `kb_u<owner_id>` collection）→ 带 `[1][2]` 引用溯源的回答
+- 对话模型与向量模型独立配置，未配向量模型整页阻断；支持检索预览、低分阈值过滤、批量删除与单篇/全量索引重建
 
-### 🔁 工作流编排
-- 菜单路径「AI 构建 → 工作流」：一条工作流就是把「一次功能调用」拆成几步写模型的流水线——输入变量、每步的智能体与 Prompt 模板、输出格式都在页面上改，不用发版
-- 步骤在左边的列表里改，右边贴一张只读结构图：**一列就是一个并行组**，列间顺序执行、列内几步同时跑。图上的线不用手连——从每步模板里的 `{{变量}}` 反推出来，只画「前面的组 → 这一步」这种后端认的引用
-- 两边双向跟随：点图上的节点，列表滚到那一步并描一圈光环；在列表里滚动或编辑哪张卡片，图上对应的节点就亮哪一个
-- 并行关系还是在列表里改：「加一步」自动开新组，「加一个并行步骤」并入上一组，上下调序按钮改先后，要把两组并成一个就在「高级」里把分组名改成同名
-- 分组口径全站只有这一条：**相邻且分组名相同**才算一组（后端 `_group_order` 与结构图同一套算法，画出来几列就是跑起来几段）；同名被别的组隔开那种写法保存时就拦下
-- 窄屏（`≤768px`）不画结构图，只留列表——列表永远是全集的兜底，改动的地方也只有一处数据
-- 步骤标识、分组名、产出变量、JSON 契约与「可选」都收在「高级」里；模板里敲 `{{` 弹补全，引用芯片只列这一步真能引用的那些（声明的输入 + 前面并行组的产物，JSON 步骤还能按 `{{产物.字段}}` 取）
-- 内置流程（简历分析那几条）点进去就是只读；新建时可以选一条内置的起步复制，标识得自己起——功能侧是按 `slug` 调用这条流程的
-- 保存是整份替换，且不提交 `sort_order`（后端按数组顺序重新编号），界面顺序与执行顺序不会两张皮；引用了同组或后面步骤的产物会被后端拒绝并把原因弹回来
-- 运行侧：列表卡片带「最近一次运行」，抽屉里查历次运行、逐步看渲染出来的 prompt 与原始输出，跑挂的那步可单步重跑，页面跟 SSE 实时进度
-- 双运行对比（「与其他运行对比」入口，路由 `/workflows/compare/:a/:b?`）：同一条流程的两次运行并排摆放——输入差异、按步骤 key 对齐的输出（缺步的一侧明说）、每步渲染 prompt 与模型名都摊开，parsed/raw 一键切换，URL 即选择，可直接收藏/转发
-- 每个步骤开跑时**绑定当时的人设版本**（agent_version）：后来再改智能体，旧运行现场仍可展开「当时的人设 vN」看当时的 system prompt；对比页同一步两侧版本不同会给「人设版本不同」标记，输出差异能归因到人设有没有改版
-- 对比页带 Rubric 打分：评分细则是 2–6 条有序标准、每条 1–5 星，细则可命名保存、跨多次对比复用；打分后给非加权均分与 B−A 差值（正绿负红），可附文字结论。**保存即冻结标准快照**——细则之后改名、增减甚至删除都不改写历史评测；同对运行 + 同一把尺子重复提交按更新处理，A/B 反选算另一次评测；被评测引用的运行在历史清理（prune）时硬豁免，删掉评测后豁免才解除
+### 🔁 工作流编排（[设计器](docs/features/workflow-designer.md) · [运行与清理](docs/features/workflow-runs.md) · [对比评测](docs/features/workflow-eval.md)）
+- 把「一次功能调用」拆成几步写模型的流水线：输入变量、每步的智能体/Prompt 模板/输出格式（markdown 或 JSON 契约）页面上改，不用发版
+- 向导弹窗式编辑器，**一个并行组一页**（组间串行、组内并发），结构图按模板里的 `{{变量}}` 自动反推、只读预览；分组唯一口径是「相邻且同名」，保存时后端把所有跑起来必失败的写法（同组互引、未声明变量、不可见人设等）一次拦下
+- 10 条内置流程（简历分析、幻灯片生成、面试参考答案等）只读、可复制起步；功能侧按 slug 调内置流程，界面停用不影响功能本身
+- 运行：SSE 实时进度、历次运行逐步看渲染 prompt 与原始输出（parsed/raw 切换）、失败步单步重跑或断点续跑、中途打开可跟随；历史按保留窗口自动清理
+- 双运行对比（URL 即选择，可收藏转发）：输入差异 + 按步骤 key 对齐的输出；每步开跑即绑定当时人设版本，两侧版本不同有标记，输出差异可归因
+- 对比页带 Rubric 打分（2–6 条标准、1–5 星，细则可复用）：保存即冻结标准快照，重复提交按更新、A/B 反选算另一次评测；被评测引用的运行在历史清理时硬豁免
 
 ### 🛠️ 智能运维
-- 服务器台账：SSH 连接管理、连通性测试
-- Web 终端：xterm.js + WebSocket + PTY，断线自动重连、内容搜索、可点链接、深色/浅色主题切换，手敲命令也进审计
-- SFTP 文件面板：目录浏览、拖拽上传、下载、新建/删除
-- 数据库工作台（MySQL）：多页签查询（Navicat 式批量执行、消息/摘要面板）、SQL 收藏、查询历史、结果网格导出（CSV/JSON/Markdown/INSERT；当前页在前端序列化，全量走服务端分批流式并受 `OPS_EXPORT_MAX_ROWS` 约束）、表结构查看（DDL / 索引 / 外键）、设计表（表单编辑 → ALTER 预览确认 → 执行）、ER 图、数据浏览的行内改值与删除记录
-- Redis 控制台：scan 浏览 + key 详情；连接开启写入后可新建 key、改 string 值（保留原 TTL）、五种类型的元素增删（list 按下标删、hash 覆盖 field、stream 删条目）、EXPIRE/PERSIST、key 列表勾选批量 UNLINK
-- AI 运维助手：自然语言 → 命令/SQL；只读直接执行，写操作必须人工确认后才放行（实现说明见 `docs/ops-chat-confirm-flow.md`）；命令步骤与回答文字按真实顺序交错展示、连续两步及以上自动折叠；模型自带思维链时（如硅基流动 Qwen 思考模式）同步展示「思考过程」，默认折成一行、点开才看全文，历史会话按落库的完整时间线回放步骤与思考，普通模型不显示该栏，也可在模型配置上按服务商关掉；界面层级上正文是唯一重心，步骤/思考/进度一律降级为无边底的细字行，只有用户气泡与确认卡带底色；底部一行小字区分「思考中/执行中/生成中」与卡死；SSH 连接中途断开时自动重连并重试一次（只读命令幂等安全）；AI 通道单条命令 300 秒超时、确认等待 15 分钟、单轮回答 900 秒墙钟上限，超时提示用户回复「继续」
-- 权限闸门：`ops_write` 权限位控制一切写操作，台账全员共用、只读用户也能查
-- 全量审计：AI 执行的、终端手敲的、SQL 执行的，统一留痕可翻查
+- 服务器台账（[文档](docs/features/ops-servers.md)）：SSH 连接管理、TOFU 主机指纹、连通性测试、凭据 Fernet 加密；台账全员共用，只读用户也能查
+- Web 终端（[文档](docs/features/ops-terminal.md)）：xterm.js + WebSocket + 真 PTY，断线自动重连、服务端会话保留 30 分钟（断线不丢现场）、内容搜索/可点链接/双主题，手敲命令同样进审计
+- SFTP 文件面板（[文档](docs/features/ops-sftp.md)）：目录浏览、拖拽上传/下载/新建/删除/复制粘贴，500MB 上限边传边计数、无新字节停顿看门狗
+- MySQL 工作台（[文档](docs/features/ops-database.md)）：多页签批量执行（消息/摘要面板）、SQL 收藏/历史、CSV/JSON/Markdown/INSERT 导出（全量走服务端分批流式）、表结构、设计表（ALTER 预览后执行）、ER 图、数据浏览行内改值；每条会话强制 `READ ONLY` 事务，不靠 SQL 解析保证只读
+- Redis 控制台（[文档](docs/features/ops-redis.md)）：SCAN 浏览 + key 详情，五类元素结构化增删、改 string 值保留原 TTL、EXPIRE/PERSIST、批量 UNLINK
+- AI 运维助手（[文档](docs/features/ops-chat-confirm.md)）：自然语言 → 命令/SQL，只读直执、写操作必须人工确认（15 分钟不批自动作废）；命令步骤与正文按真实顺序交错、思考链与进度折成细字行，SSH 断线自动重连重试一次，命令 300s / 单轮 900s 超时
+- 安全底座：`ops_write` 单个权限位闸住一切写操作（前端+后端双重）；AI、终端手敲、SQL、SFTP 统一进 `ops_audit_log`，普通用户看自己、管理员看全部（[文档](docs/features/ops-servers.md)）
 
 ### 📄 智能办公
-- 简历分析：PDF/DOCX 文本抽取 → LLM 评估 → 关键信息提取与多份对比（prompt 走智能体体系，可自行调整）
-- 百度网盘：xpan 开放平台绑定（oob 授权码模式，无需公网回调），简历文件可备份至网盘应用目录
+- 简历分析（[文档](docs/features/resume.md)）：PDF/DOCX 文本抽取 → 内置工作流跑 LLM 评估 → 关键信息提取与 2–10 份多份对比，独立报告整页展示，分析 prompt 走内置工作流+智能体体系，复制出来即可自行调整
+- 在线简历工作台（[文档](docs/features/resume-builder.md)）：整页三栏编辑（模块导航 + 表单 + A4 实时预览），五模块拖拽排序、富文本、3 版式 × 7 主题，AI 帮写/润色/检查走三个专用智能体，浏览器打印导出 PDF
+- 幻灯片（[文档](docs/features/slides.md)）：AI 按结构化 JSON 生成自包含 HTML 幻灯片，工作台支持表单与源码双模式编辑+实时预览，放映页满屏播放/键盘翻页/就地改内容，浏览器打印出 PDF
+- 面试记录（[文档](docs/features/interview.md)）：面试场次与题目手工录入，参考答案走内置工作流异步生成、轮询看进度
+- 百度网盘（[文档](docs/features/netdisk.md)）：xpan 开放平台绑定（oob 授权码模式，无需公网回调），简历/报告/数据库备份可存至网盘应用目录，也可作为对话工具让模型存文本
 
-### 🔌 AI 网关
-- 对外一个统一密钥（`sk-yv-*`），背后可挂多个 OpenAI 兼容的上游厂商通道，平台级共享、仅管理员可管
-- 模型名映射 + 优先级故障转移：同一个对外模型名可绑多条通道，按 `priority` 升序尝试，上游不可达/限流/鉴权失败时自动换下一条（仅在首字节发出前切换）
-- `model: "auto"` 虚拟模型名：调用方不点名，由网关按「这次任务要什么」+「管理员给每条路由的能力定义」自己挑一条路由。硬要求由规则判定（`/v1/embeddings` 要 embedding、请求里带图要 vision、带 `tools` 要 tools），只有任务类型（推理/代码/写作/翻译/普通问答）规则判不了，就挑候选池里优先级最高的那条映射问它一次——这次问答可以整体关掉（`AI_GATEWAY_AUTO_LLM`），超时或答得不像话就退回按 `priority` 选，绝不因此多一个故障点。池子里没有满足硬要求的路由就直接 404 `auto_model_not_found`，不会降级发到不相干的模型上；每次决策（要什么标签、判成什么任务、最后落到哪个上游模型）都存进调用日志的 `auto_route`
-- 两层防自环：通道 `base_url` 保存时校验（本站域名 / localhost / 回环地址一律拒绝），转发出去的请求再盖一个 `X-Yangvis-Gateway` 标记头，入站看到它就回 508 `gateway_loop_detected`——内网别名之类保存时认不出来的情况靠这层兜底，否则请求会在网关里无限递归
-- 端点：`POST /v1/chat/completions`（SSE 流式与非流式）、`POST /v1/embeddings`、`GET /v1/models`，错误体沿用 OpenAI 结构，标准 SDK 改 `base_url` 即可直连
-- 监控与审计：每次调用记录通道、模型、token 数、耗时/首字节耗时、客户端 IP、重试轨迹，正文按 `AI_GATEWAY_LOG_MAX_CHARS` 截断入库（可用 `AI_GATEWAY_LOG_PAYLOAD` 整体关闭）；日志写失败绝不影响调用本身
-- 概览页提供调用量、成功率、token 总量、延迟与按天趋势，以及按通道/模型/密钥的分布
+### 🧰 开发工具
+- YApi 同步（[文档](docs/features/yapi-sync.md)）：菜单「开发工具 → YApi 同步」，选本机目录扫描 Java Controller（Spring/Swagger 注解），一个 Controller 一个分类、按「方法 + 路径」判重新增或更新到 YApi；该功能面向开发者本机使用
 
-### 👥 账号与权限
-- 自建账号体系：`sys_user` 表 + PBKDF2 密码散列 + 本地签发 JWT，不依赖任何外部认证服务
-- 管理员在「账号管理」里建号、禁用、授予运维写权限；首次启动可用环境变量引导初始管理员
+### 🔌 AI 网关（[文档](docs/features/ai-gateway.md)）
+- 对外一个统一密钥（`sk-yv-*`，只存 SHA-256 摘要、明文仅创建时显示），背后挂多个 OpenAI 兼容上游通道，平台级共享、仅管理员可管
+- 模型名映射 + `priority` 优先级故障转移：上游不可达/限流/鉴权失败自动换下一条（仅在首字节发出前切换，默认最多 3 条）
+- `model: "auto"`：调用方不点名，硬要求（embedding/vision/tools）按规则判，任务类型问一次池内最高优先级模型来判（可整体关掉、超时或答得不像话退回规则），没有满足硬要求的路由直接 404 `auto_model_not_found`，每次决策落进日志的 `auto_route`
+- 两层防自环：通道 `base_url` 保存时拒绝本站/localhost/回环地址；转发请求盖 `X-Yangvis-Gateway` 头，入站再见到就回 508 `gateway_loop_detected`（兜内网别名等保存期认不出的情况）
+- OpenAI 兼容三端点挂在站点根 `/v1`：`chat/completions`（SSE/非流式）、`embeddings`、`models`，标准 SDK 改 `base_url` 直连；每次调用记通道/模型/token/首字节耗时/IP/重试轨迹，正文可截断可关，日志失败不影响调用
 
-### ⚙️ 模型设置
-- 菜单路径「系统设置 → 模型与集成 → 模型管理」，按用户保存，对话/向量两种用途各自独立配置
-- 这里配的是**站内自用模型**（控制台的对话、简历、幻灯片、知识库检索都从这里取）；把本站当成 OpenAI 接口给外部系统调用是「AI 网关」的职责，两个页面互相有跳转入口
-- api_key 使用 Fernet 加密落库，任何接口都不返回明文
-- 一键连通性测试，配错（如把部署 ID 填成模型名）当场暴露
-- 对话模型另有「思考过程」三态：自动（服务商返回才显示）/ 开启（额外请求参数原样并入请求体，各家开思考的字段名不同，如 `enable_thinking`、`thinking.type`、`reasoning_effort`，本站不猜厂商，由配置的人按文档填）/ 关闭（思维链在解析层就丢弃，界面与落库都不留）；改动额外请求参数视同换凭据，会让上一次测试结果失效，光挪开关不会
+### 👥 账号与权限（[文档](docs/features/accounts.md)）
+- 自建账号体系：`sys_user` + PBKDF2 散列 + 本地 JWT（无状态但每请求回库查状态，禁用即时生效），登录失败按账号+IP 双维锁定并加验证码，不依赖任何外部认证
+- 管理员在「用户管理」建号、禁用、授予 `ops_write`；首次启动可用环境变量引导初始管理员
+
+### ⚙️ 模型设置（[文档](docs/features/model-settings.md)）
+- 「系统设置 → 模型与集成」按用户保存，对话/向量两种用途独立配置，一键连通性测试（向量还会实测维度）；api_key 用 Fernet 加密落库、接口只回掩码
+- 这里配的是**站内自用模型**；把本站当 OpenAI 接口给外部系统调用是「AI 网关」的职责，两页互相有入口
+- 对话模型「思考过程」三态：自动（服务商返回才显示）/ 开启（额外请求参数原样并入，字段名由配置人按厂商文档填，本站不猜）/ 关闭（解析层丢弃、界面与落库都不留）
+
+---
+
+## 功能实现文档
+
+每个功能点在 `docs/features/` 下有一篇实现文档，统一按「用户可见行为 → 关键取舍 →
+实现结构（真实文件路径）→ 升级行为 → 测试」组织：
+
+| 模块 | 文档 |
+| --- | --- |
+| 首页工作台 | [home-dashboard.md](docs/features/home-dashboard.md) |
+| 智能对话（会话/SSE/重试/附件/绘图） | [chat-core.md](docs/features/chat-core.md) |
+| 多智能体体系 | [agents.md](docs/features/agents.md) |
+| 智能体配置版本化 | [agent-versions.md](docs/features/agent-versions.md) |
+| 滚动摘要与长期记忆 | [chat-memory.md](docs/features/chat-memory.md) |
+| 手动对话压缩 | [chat-compaction.md](docs/features/chat-compaction.md) |
+| 统一 Trace 时间线 | [unified-trace.md](docs/features/unified-trace.md) |
+| 本地工具与 MCP 服务 | [local-tools.md](docs/features/local-tools.md) |
+| 知识库（RAG） | [knowledge-base.md](docs/features/knowledge-base.md) |
+| 工作流设计器（并行组/结构图） | [workflow-designer.md](docs/features/workflow-designer.md) |
+| 工作流运行（SSE/重跑/清理） | [workflow-runs.md](docs/features/workflow-runs.md) |
+| 双运行对比与 Rubric 评测 | [workflow-eval.md](docs/features/workflow-eval.md) |
+| 服务器台账/权限闸门/审计 | [ops-servers.md](docs/features/ops-servers.md) |
+| Web 终端（持久 PTY） | [ops-terminal.md](docs/features/ops-terminal.md) |
+| SFTP 文件面板 | [ops-sftp.md](docs/features/ops-sftp.md) |
+| MySQL 数据库工作台 | [ops-database.md](docs/features/ops-database.md) |
+| Redis 控制台 | [ops-redis.md](docs/features/ops-redis.md) |
+| AI 运维助手与两阶段确认 | [ops-chat-confirm.md](docs/features/ops-chat-confirm.md) |
+| 简历分析与多份对比 | [resume.md](docs/features/resume.md) |
+| 在线简历工作台 | [resume-builder.md](docs/features/resume-builder.md) |
+| 幻灯片 | [slides.md](docs/features/slides.md) |
+| 面试记录 | [interview.md](docs/features/interview.md) |
+| 百度网盘 | [netdisk.md](docs/features/netdisk.md) |
+| YApi 同步 | [yapi-sync.md](docs/features/yapi-sync.md) |
+| AI 网关 | [ai-gateway.md](docs/features/ai-gateway.md) |
+| 账号与权限 | [accounts.md](docs/features/accounts.md) |
+| 模型设置 | [model-settings.md](docs/features/model-settings.md) |
 
 ---
 
@@ -111,7 +137,7 @@ noetix-tool/
 │       │                      # Users / Settings / AiGateway
 │       ├── components/        # 终端、SFTP 面板、确认卡片、Mermaid 卡片…
 │       ├── api/ router/ stores/
-├── docs/                      # 设计方案、schema.sql（DDL 对照稿）
+├── docs/                      # features/ 功能实现文档、schema.sql（DDL 对照稿）、设计复盘
 ├── Dockerfile                 # 前后端一体镜像
 ├── docker-compose.yml         # app + MySQL + Qdrant
 └── build.sh / build.bat / dev.sh / dev.bat
