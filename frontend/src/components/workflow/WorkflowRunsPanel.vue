@@ -81,15 +81,22 @@
         <a-button v-else size="small" @click="clearLive">收起</a-button>
       </div>
       <div v-for="step in live.steps" :key="step.key" class="live-step">
-        <a-tag :color="statusColor(step.status)">{{ statusText(step.status) }}</a-tag>
-        <span class="live-key">{{ step.key }}</span>
-        <span class="muted">{{ step.agent_name || step.agent_slug }}</span>
-        <span v-if="step.optional" class="muted">可选</span>
-        <span class="spacer" />
-        <span v-if="step.model_name" class="muted">{{ step.model_name }}</span>
-        <span v-if="step.output_chars" class="muted">{{ step.output_chars }} 字</span>
-        <span v-if="step.elapsed_ms != null" class="muted">{{ fmtElapsed(step.elapsed_ms) }}</span>
-        <span v-if="step.error" class="danger">{{ step.error }}</span>
+        <div class="live-step-row">
+          <a-tag :color="statusColor(step.status)">{{ statusText(step.status) }}</a-tag>
+          <span class="live-key">{{ step.key }}</span>
+          <span class="muted">{{ step.agent_name || step.agent_slug }}</span>
+          <span v-if="step.optional" class="muted">可选</span>
+          <span class="spacer" />
+          <span v-if="step.model_name" class="muted">{{ step.model_name }}</span>
+          <span v-if="step.output_chars" class="muted">{{ step.output_chars }} 字</span>
+          <span v-if="step.elapsed_ms != null" class="muted">{{ fmtElapsed(step.elapsed_ms) }}</span>
+          <span v-if="step.error" class="danger">{{ step.error }}</span>
+        </div>
+        <!-- 步骤内部的模型往返 / 工具调用：run_agent 黑盒打开后的现场，
+             与对话回答的「思考过程」同一套节点与渲染。 -->
+        <div v-if="liveTraceNodes(step).length" class="live-step-trace">
+          <TraceNodeList :nodes="liveTraceNodes(step)" :streaming="step.status === 'running'" />
+        </div>
       </div>
       <a-alert
         v-if="live.status === 'failed' || live.status === 'cancelled'"
@@ -215,7 +222,9 @@ import { message } from 'ant-design-vue'
 import { DownOutlined, PlayCircleOutlined, RightOutlined } from '@ant-design/icons-vue'
 import RunScene from '@/components/workflow/RunScene.vue'
 import StepOverrideModal from '@/components/workflow/StepOverrideModal.vue'
+import TraceNodeList from '@/components/trace/TraceNodeList.vue'
 import { stepInputFields, type StepField } from '@/components/workflow/runFields'
+import { workflowTraceNodes, type TraceNode } from '@/utils/traceModel'
 import { subjectLink } from '@/components/workflow/runLinks'
 import {
   workflowsApi,
@@ -225,6 +234,7 @@ import {
   type WorkflowRunDetail,
   type WorkflowRunStep,
   type WorkflowRunSubject,
+  type WorkflowTraceEvent,
 } from '@/api'
 // 状态文案与颜色在 utils/format，工作流卡片上那行「最近一次运行」用的是同一份口径。
 import {
@@ -257,6 +267,8 @@ interface LiveStep {
   error?: string | null
   /** 这一步跑完后实际用的模型；还没跑到的步骤是 null。 */
   model_name?: string | null
+  /** 步骤内部 trace 扁平事件（模型往返 / 工具起止），step_trace 实时累积。 */
+  trace?: WorkflowTraceEvent[]
 }
 
 const runs = ref<WorkflowRun[]>([])
@@ -457,6 +469,17 @@ function applyStepEnd(data: {
   step.model_name = data.model_name
 }
 
+/** 步骤内部 trace：扁平事件按 key 累积进对应步骤，配对成统一节点交给 TraceNodeList。 */
+function applyStepTrace(data: { key: string; group_key: string; node: WorkflowTraceEvent }) {
+  const step = live.steps.find((item) => item.key === data.key)
+  if (!step) return
+  ;(step.trace ??= []).push(data.node)
+}
+
+function liveTraceNodes(step: LiveStep): TraceNode[] {
+  return workflowTraceNodes(step.trace)
+}
+
 /** 跑完了：换回列表和那次的现场，并让调用方刷新它自己的业务列表。 */
 async function settleLive(status: string, error: string | null | undefined, runId: number) {
   running.value = false
@@ -511,6 +534,7 @@ function startRun() {
     },
     onStepStart: applyStepStart,
     onStepEnd: applyStepEnd,
+    onStepTrace: applyStepTrace,
     onRunEnd: (data) => void settleLive(data.status, data.error, data.run_id),
     onError: onStreamError,
   })
@@ -543,6 +567,7 @@ function attachFollow(runId: number) {
     },
     onStepStart: applyStepStart,
     onStepEnd: applyStepEnd,
+    onStepTrace: applyStepTrace,
     onRunEnd: (data) => void settleLive(data.status, data.error, data.run_id),
     onError: onStreamError,
   })
@@ -673,11 +698,19 @@ const filledOptionalCount = computed(
   font-size: var(--fs-sm);
 }
 .live-step {
+  padding: 4px 0;
+  font-size: var(--fs-sm);
+}
+.live-step-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 0;
-  font-size: var(--fs-sm);
+}
+.live-step-trace {
+  /* 与步骤标识下方对齐，视觉上从属于这一步。 */
+  margin: 4px 0 2px 20px;
+  padding-left: 12px;
+  border-left: 1px solid var(--hairline);
 }
 .live-key {
   font-family: var(--font-mono);

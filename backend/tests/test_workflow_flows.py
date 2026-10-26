@@ -120,6 +120,7 @@ def model_call(monkeypatch):
             config_id=None,
             timeout=None,
             tools=None,
+            on_event=None,
         ):
             calls.append((agent_slug, user_prompt))
             reply = reply_for() if callable(reply_for) else reply_for

@@ -536,6 +536,7 @@ CREATE TABLE IF NOT EXISTS workflow_run_step (
   prompt          MEDIUMTEXT   NULL COMMENT '渲染后的 prompt——「当时模型到底收到了什么」问得出来',
   output          MEDIUMTEXT   NULL COMMENT '模型的原始输出',
   parsed          JSON         NULL COMMENT 'json 步骤解析出的对象；markdown 步骤为 NULL',
+  trace           JSON         NULL COMMENT '步骤内部统一执行轨迹 [{kind:llm|tool_start|tool_end,...}]；老运行为 NULL',
   error_msg       VARCHAR(512) NULL,
   model_config_id BIGINT       NULL COMMENT '这次实际用的模型配置',
   agent_id        BIGINT       NULL COMMENT '开跑时绑定的人设 agent.id；上线前老运行为 NULL',

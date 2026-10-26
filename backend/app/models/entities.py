@@ -1462,6 +1462,10 @@ class WorkflowRunStep(Base):
     output: Mapped[str | None] = mapped_column(_LONG_TEXT, nullable=True)
     # output_kind=json 时解析出的对象；markdown 步骤为 NULL。
     parsed: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 步骤内部的执行轨迹（与 chat_message.timeline 同构的统一 trace 节点）：
+    # 每次模型往返、每个工具调用的开始/结束与耗时。run_agent 黑盒时代这里是
+    # NULL；功能上线后的步骤按实际发生记录，老行回放时界面不显示执行过程区。
+    trace: Mapped[list | None] = mapped_column(JSON, nullable=True)
     error_msg: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     # 这次实际用的模型配置，排查「为什么这一步慢/为什么换了模型」的第一手线索。

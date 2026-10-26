@@ -107,6 +107,24 @@ export interface WorkflowRun {
   created_at: string
 }
 
+/**
+ * 步骤内部统一执行轨迹的一个扁平事件（run_agent 黑盒打开后的记录）。
+ * - llm：一次模型往返，只带耗时；
+ * - tool_start / tool_end：一个工具调用的起止，前端按 name 配对，
+ *   只收到 start 没收到 end（步骤被中断）时该工具按执行中渲染。
+ */
+export type WorkflowTraceEvent =
+  | { kind: 'llm'; elapsed_ms?: number | null }
+  | { kind: 'tool_start'; name: string; args?: unknown }
+  | {
+      kind: 'tool_end'
+      name: string
+      args?: unknown
+      output?: string
+      is_error?: boolean
+      elapsed_ms?: number | null
+    }
+
 export interface WorkflowRunStep {
   id: number
   key: string
@@ -126,6 +144,8 @@ export interface WorkflowRunStep {
   prompt?: string | null
   output?: string | null
   parsed?: Record<string, unknown> | null
+  /** 步骤内部的执行轨迹（模型往返 / 工具调用）；run_agent 黑盒时代的老运行为 null。 */
+  trace?: WorkflowTraceEvent[] | null
   error_msg?: string | null
   model_config_id?: number | null
   /** 这一步当时用的模型：按步骤覆盖与默认模型可能混在同一条流程里，按步才说得清。 */

@@ -105,6 +105,7 @@ def routed_model(monkeypatch):
         config_id=None,
         timeout=None,
         tools=None,
+        on_event=None,
     ):
         calls.append((agent_slug, user_prompt))
         reply = replies[agent_slug]

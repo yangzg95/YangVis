@@ -74,6 +74,22 @@
       <div v-show="!isStepCollapsed(step)" class="scene-body">
         <div v-if="step.error_msg" class="danger">{{ step.error_msg }}</div>
 
+        <!-- 执行过程：run_agent 黑盒打开后的模型往返与工具调用，与对话回答的
+             「思考过程」同一套节点；老运行没有 trace，整块不出现。失败步默认展开。 -->
+        <div v-if="traceOf(step).length" class="scene-group">
+          <div class="scene-group-head" @click="toggleSection(step, 'trace')">
+            <span class="scene-caret">
+              <RightOutlined v-if="!isSectionOpen(step, 'trace')" />
+              <DownOutlined v-else />
+            </span>
+            <a-tag color="purple" class="scene-group-tag">执行过程</a-tag>
+            <span class="muted">{{ traceSummary(step) }}</span>
+          </div>
+          <div v-show="isSectionOpen(step, 'trace')" class="scene-group-body">
+            <TraceNodeList :nodes="traceOf(step)" :streaming="step.status === 'running'" />
+          </div>
+        </div>
+
         <!-- 输入 / 输出两组，一眼分得清方向；输出默认展开（那才是大家来这一页
              要看的产物），输入组只在失败步默认展开——排查当时的入参才需要它。 -->
         <div v-if="fieldsOf(step).length || step.prompt" class="scene-group">
@@ -181,6 +197,8 @@ import { copyText } from '@/utils/clipboard'
 import type { WorkflowRunDetail, WorkflowRunStep } from '@/api'
 import { fmtElapsed, runStatusColor as statusColor, runStatusText as statusText } from '@/utils/format'
 import { stepInputFields, type StepField } from './runFields'
+import TraceNodeList from '@/components/trace/TraceNodeList.vue'
+import { workflowTraceNodes, type TraceNode } from '@/utils/traceModel'
 
 const props = defineProps<{
   detail: WorkflowRunDetail
@@ -224,22 +242,41 @@ function collapseAll(collapsed: boolean) {
   for (const step of props.detail.steps) stepOverrides[step.id] = collapsed
 }
 
-function sectionKey(step: WorkflowRunStep, section: 'in' | 'out') {
+function sectionKey(step: WorkflowRunStep, section: 'in' | 'out' | 'trace') {
   return `${step.id}:${section}`
 }
 
-function isSectionOpen(step: WorkflowRunStep, section: 'in' | 'out') {
+function isSectionOpen(step: WorkflowRunStep, section: 'in' | 'out' | 'trace') {
   const key = sectionKey(step, section)
   if (key in sectionOverrides) return sectionOverrides[key]
+  // 输出是来这页的主目的，默认展开；执行过程与输入只在失败步默认展开，
+  // 成功步保持收起（模型往返/入参都在，要查时点开即可）。
   return section === 'out' || step.status === 'failed'
 }
 
-function toggleSection(step: WorkflowRunStep, section: 'in' | 'out') {
+function toggleSection(step: WorkflowRunStep, section: 'in' | 'out' | 'trace') {
   sectionOverrides[sectionKey(step, section)] = !isSectionOpen(step, section)
 }
 
 function fieldsOf(step: WorkflowRunStep): StepField[] {
   return stepInputFields(props.detail, step)
+}
+
+/** 步骤落库的扁平 trace 事件 → 统一节点；每次渲染重算，步数与节点数都很小。 */
+function traceOf(step: WorkflowRunStep): TraceNode[] {
+  return workflowTraceNodes(step.trace)
+}
+
+function traceSummary(step: WorkflowRunStep): string {
+  const nodes = traceOf(step)
+  const tools = nodes.filter((node) => node.kind === 'tool').length
+  const llms = nodes.filter((node) => node.kind === 'llm').length
+  const errors = nodes.filter((node) => node.status === 'error').length
+  const parts: string[] = []
+  if (llms) parts.push(`${llms} 次模型往返`)
+  if (tools) parts.push(`${tools} 次工具调用`)
+  if (errors) parts.push(`${errors} 次失败`)
+  return parts.join(' · ')
 }
 
 /** 现场里每一块文本都按原样复制：贴回编辑器或别处都还是落库时的那份内容。 */

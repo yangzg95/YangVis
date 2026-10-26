@@ -13,7 +13,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Optional, Sequence, Tuple
+import time
+from typing import Any, Awaitable, Callable, Optional, Sequence, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -37,6 +38,33 @@ MODEL_TASK_TIMEOUT = 300.0
 MAX_TOOL_ROUNDS = 8
 # 单个工具结果进上下文的字符上限：检索类工具一次吐几万字是常态。
 TOOL_OUTPUT_LIMIT = 8000
+
+# run_agent 向外吐执行轨迹的回调：节点形态与 chat_message.timeline 同构
+# （kind=llm|tool_start|tool_end），工作流步骤靠它把内部过程落进统一 trace。
+TraceEventCallback = Callable[[dict], Awaitable[None]]
+
+
+async def _emit(on_event: Optional[TraceEventCallback], event: dict) -> None:
+    """把一个轨迹节点交给回调；回调本身出错不能炸掉这次模型调用。"""
+    if on_event is None:
+        return
+    try:
+        await on_event(event)
+    except Exception:  # noqa: BLE001 - trace 是观测通道，失败只记日志
+        logger.warning("trace event callback failed for %s", event.get("kind"), exc_info=True)
+
+
+def _json_safe(value: Any) -> Any:
+    """工具入参进 trace 前保证 JSON 可序列化：provider 偶尔塞自定义对象。"""
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _elapsed(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
 
 # 工作流步骤的默认输出形态。
 OUTPUT_MARKDOWN = "markdown"
@@ -119,6 +147,7 @@ async def run_agent(
     timeout: float = MODEL_TASK_TIMEOUT,
     tools: Optional[Sequence] = None,
     max_tool_rounds: int = MAX_TOOL_ROUNDS,
+    on_event: Optional[TraceEventCallback] = None,
 ) -> str:
     """按人设发起一轮非流式调用，返回模型输出的原始文本。
 
@@ -154,14 +183,18 @@ async def run_agent(
     ]
 
     if not tools:
+        started = time.monotonic()
         result = await model.ainvoke(messages)
+        await _emit(on_event, {"kind": "llm", "elapsed_ms": _elapsed(started)})
         return message_text(getattr(result, "content", result))
 
     by_name = {tool.name: tool for tool in tools}
     bound = model.bind_tools(list(tools))
 
     for _round in range(max_tool_rounds):
+        round_started = time.monotonic()
         response = await bound.ainvoke(messages)
+        await _emit(on_event, {"kind": "llm", "elapsed_ms": _elapsed(round_started)})
         tool_calls = getattr(response, "tool_calls", None)
         if not tool_calls:
             return message_text(getattr(response, "content", response))
@@ -171,17 +204,33 @@ async def run_agent(
         messages.append(response)
         for call in tool_calls:
             name = call.get("name", "")
+            args = _json_safe(call.get("args") or {})
+            await _emit(on_event, {"kind": "tool_start", "name": name, "args": args})
+            tool_started = time.monotonic()
             tool = by_name.get(name)
+            is_error = False
             if tool is None:
                 output = f"工具 {name} 不存在，请改用其他可用工具"
             else:
                 try:
                     output = await tool.ainvoke(call.get("args") or {})
                 except Exception as exc:  # noqa: BLE001 - 错误回灌让模型自纠，不炸步骤
+                    is_error = True
                     output = f"工具调用失败：{str(exc)[:300]}"
             output = message_text(output)
             if len(output) > TOOL_OUTPUT_LIMIT:
                 output = output[:TOOL_OUTPUT_LIMIT] + "\n…（工具输出过长，已截断）"
+            await _emit(
+                on_event,
+                {
+                    "kind": "tool_end",
+                    "name": name,
+                    "args": args,
+                    "output": output,
+                    "is_error": is_error,
+                    "elapsed_ms": _elapsed(tool_started),
+                },
+            )
             messages.append(
                 ToolMessage(content=output, tool_call_id=call.get("id", ""))
             )
@@ -193,7 +242,9 @@ async def run_agent(
             "不要再调用任何工具。"
         )
     )
+    final_started = time.monotonic()
     final = await model.ainvoke(messages)
+    await _emit(on_event, {"kind": "llm", "elapsed_ms": _elapsed(final_started)})
     return message_text(getattr(final, "content", final))
 
 

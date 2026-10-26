@@ -1116,6 +1116,7 @@ function appendStep(
   tool: string,
   input?: Record<string, unknown>,
   runId = '',
+  startedAt?: string,
 ) {
   // 新工具开始意味着上一个已经返回：把之前还在转圈的步骤全部收掉，
   // 只保留最新一个处于进行中。
@@ -1129,6 +1130,7 @@ function appendStep(
     query: typeof input?.query === 'string' ? input.query : '',
     input,
     run_id: runId,
+    started_at: startedAt,
     running: true,
   })
 }
@@ -1140,6 +1142,7 @@ function attachStepResult(
   runId: string,
   output: string,
   isError: boolean,
+  elapsedMs?: number,
 ) {
   const timeline = bubble.timeline ?? []
   let target: TimelineEntry | undefined
@@ -1151,6 +1154,14 @@ function attachStepResult(
   target.output = output
   target.is_error = isError
   target.running = false
+  if (elapsedMs != null) target.elapsed_ms = elapsedMs
+}
+
+// 一次模型往返结束（没有工具调用的一轮也会来）：统一 trace 里补一个 llm 节点，
+// 慢回答归因到模型还是工具全靠它和工具耗时对位。
+function appendLlm(bubble: Bubble, elapsedMs: number) {
+  const timeline = (bubble.timeline ??= [])
+  timeline.push({ type: 'llm', elapsed_ms: elapsedMs })
 }
 
 function settleSteps(bubble: Bubble) {
@@ -1179,13 +1190,18 @@ function makeStreamHandlers(
     onCitations: (citations) => {
       bubble.citations = citations
     },
-    onStep: ({ tool, input, run_id }) => {
+    onStep: ({ tool, input, run_id, started_at }) => {
       ensureBubble()
-      appendStep(bubble, tool, input, run_id)
+      appendStep(bubble, tool, input, run_id, started_at)
       scrollToBottom()
     },
-    onStepResult: ({ run_id, output, is_error }) => {
-      attachStepResult(bubble, run_id, output, is_error)
+    onStepResult: ({ run_id, output, is_error, elapsed_ms }) => {
+      attachStepResult(bubble, run_id, output, is_error, elapsed_ms)
+      scrollToBottom()
+    },
+    onLlm: ({ elapsed_ms }) => {
+      ensureBubble()
+      appendLlm(bubble, elapsed_ms)
       scrollToBottom()
     },
     onReason: (delta) => {

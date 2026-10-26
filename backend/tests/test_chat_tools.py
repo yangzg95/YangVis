@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import datetime
 from types import SimpleNamespace
 from typing import List
 
@@ -378,16 +379,28 @@ def test_local_tools_are_mounted_run_for_real_and_recorded(db, runtime):
     assert steps[0]["query"] == "" and steps[0]["input"] == {"count": 2}
     run_id = steps[0]["run_id"]
     assert isinstance(run_id, str) and run_id
-    # 工具返回要逐次推 step_result，run_id 与开始事件对得上。
+    # 工具返回要逐次推 step_result，run_id 与开始事件对得上，并带回耗时。
     results = [payload for event, payload in events if event == "step_result"]
-    assert results == [{"run_id": run_id, "output": "ok", "is_error": False}]
+    assert len(results) == 1
+    assert results[0]["run_id"] == run_id
+    assert results[0]["output"] == "ok"
+    assert results[0]["is_error"] is False
+    assert isinstance(results[0]["elapsed_ms"], int) and results[0]["elapsed_ms"] >= 0
     assert events[-1][0] == "done"
     assert events[-1][1]["conversation_id"] == conv.id
     assert isinstance(events[-1][1]["message_id"], int)
 
     saved = assistant_messages(db, conv.id)
     assert len(saved) == 1
+    saved_steps = [e for e in (saved[0].timeline or []) if e.get("type") == "step"]
+    assert len(saved_steps) == 1
+    # 落库条目带起始时刻与耗时（统一 trace 节点）。
+    datetime.fromisoformat(saved_steps[0]["started_at"])
+    assert isinstance(saved_steps[0]["elapsed_ms"], int)
     assert {
+        k: saved_steps[0][k]
+        for k in ("type", "tool", "query", "input", "run_id", "output", "is_error")
+    } == {
         "type": "step",
         "tool": "generate_uuid",
         "query": "",
@@ -395,7 +408,7 @@ def test_local_tools_are_mounted_run_for_real_and_recorded(db, runtime):
         "run_id": run_id,
         "output": "ok",
         "is_error": False,
-    } in (saved[0].timeline or [])
+    }
     assert runtime["closes"] == ["stream"]
 
 
@@ -463,9 +476,12 @@ def test_mcp_tools_are_mounted_capped_and_bundle_closed(db, runtime, monkeypatch
     assert steps[0]["tool"] == "calc_add"
     assert steps[0]["query"] == "" and steps[0]["input"] == {"a": 2, "b": 3}
     assert isinstance(steps[0]["run_id"], str) and steps[0]["run_id"]
-    assert [p for e, p in events if e == "step_result"] == [
-        {"run_id": steps[0]["run_id"], "output": "ok", "is_error": False}
-    ]
+    results = [p for e, p in events if e == "step_result"]
+    assert len(results) == 1
+    assert results[0]["run_id"] == steps[0]["run_id"]
+    assert results[0]["output"] == "ok"
+    assert results[0]["is_error"] is False
+    assert isinstance(results[0]["elapsed_ms"], int) and results[0]["elapsed_ms"] >= 0
     assert bundle.exits == 1
 
 

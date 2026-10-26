@@ -67,6 +67,7 @@ from app.services.chat.memory import (
 from app.services.ops import database as db_ops
 from app.services.ops import server as server_ops
 from app.services.providers import build_chat_model, resolve_temperature
+from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.chat")
 
@@ -213,12 +214,13 @@ def _tool_result_text(result: object) -> str:
 
 
 def _attach_step_result(
-    timeline: List[dict], event: dict, result: object
+    timeline: List[dict], event: dict, result: object, started_perf: dict
 ) -> Optional[dict]:
     """把一次工具返回挂到对应的 timeline 步骤上，返回要推给前端的事件载荷。
 
     优先按 ``run_id`` 配对（并行工具调用也不会串）；事件里没有 run_id（测试
     打桩、兼容旧行为）时退回「最后一个还没结果的步骤」。找不到归属就不发。
+    ``started_perf`` 按 run_id 记工具开跑时刻，顺带把耗时挂回步骤。
     """
     run_id = event.get("run_id")
     target: Optional[dict] = None
@@ -237,12 +239,17 @@ def _attach_step_result(
     output = _tool_result_text(result)
     # ToolMessage.status：工具抛异常被 LangChain 接住时为 "error"。
     is_error = getattr(result, "status", None) == "error"
+    started_at = started_perf.pop(target.get("run_id"), None)
+    elapsed_ms = int((time.monotonic() - started_at) * 1000) if started_at else None
     target["output"] = output
     target["is_error"] = is_error
+    if elapsed_ms is not None:
+        target["elapsed_ms"] = elapsed_ms
     return {
         "run_id": target.get("run_id") or "",
         "output": output,
         "is_error": is_error,
+        **({"elapsed_ms": elapsed_ms} if elapsed_ms is not None else {}),
     }
 
 
@@ -1465,6 +1472,11 @@ class ChatService:
             else:
                 timeline.append({"type": kind, "detail": detail})
 
+        # 统一 trace 的计时：工具与模型往返各自按 langchain run_id 记开跑时刻，
+        # 结束事件回来时算出耗时，挂回时间线条目。
+        tool_started: dict = {}
+        model_started: dict = {}
+
         aborted = False
         step_limited = False
         time_limited = False
@@ -1509,6 +1521,9 @@ class ChatService:
                 kind = event.get("event")
                 if kind == "on_tool_start":
                     payload = (event.get("data") or {}).get("input") or {}
+                    run_id = event.get("run_id") or ""
+                    if run_id:
+                        tool_started[run_id] = time.monotonic()
                     step_event = {
                         "tool": event.get("name") or "",
                         "query": str(payload.get("query", "")),
@@ -1516,7 +1531,10 @@ class ChatService:
                         # 由前端按工具名挑字段。
                         "input": payload,
                         # 与 on_tool_end 配对的凭据：并行工具调用时靠它认门。
-                        "run_id": event.get("run_id") or "",
+                        "run_id": run_id,
+                        # trace 节点的起始时刻（本地墙上时间，ISO 字符串）；
+                        # 耗时在 on_tool_end 回填。
+                        "started_at": db_now().isoformat(),
                     }
                     timeline.append({"type": "step", **step_event})
                     yield "step", step_event
@@ -1524,7 +1542,9 @@ class ChatService:
                     # 工具结果挂回步骤并立刻推给前端：时间线能逐次展示「调用 →
                     # 返回」，而不是只有一行转圈圈的工具名。
                     result = (event.get("data") or {}).get("output")
-                    result_event = _attach_step_result(timeline, event, result)
+                    result_event = _attach_step_result(
+                        timeline, event, result, tool_started
+                    )
                     if result_event is not None:
                         yield "step_result", result_event
                     yield "citations", [c.model_dump() for c in registry.all()]
@@ -1558,6 +1578,22 @@ class ChatService:
                                 "timeout_seconds": int(settings.OPS_CONFIRM_TIMEOUT),
                             }
                         sent_proposals = len(toolbox.pending_proposals)
+                elif kind == "on_chat_model_start":
+                    # 一次模型往返（工具循环每轮各一次）：记录开跑时刻，
+                    # end 时落成一个 llm trace 节点——慢回答归因到「模型慢」
+                    # 还是「工具慢」全靠它。
+                    model_run_id = event.get("run_id") or ""
+                    if model_run_id:
+                        model_started[model_run_id] = time.monotonic()
+                elif kind == "on_chat_model_end":
+                    model_run_id = event.get("run_id") or ""
+                    started_perf = model_started.pop(model_run_id, None)
+                    if started_perf is not None:
+                        llm_event = {
+                            "elapsed_ms": int((time.monotonic() - started_perf) * 1000)
+                        }
+                        timeline.append({"type": "llm", **llm_event})
+                        yield "llm", llm_event
                 elif kind == "on_chat_model_stream":
                     chunk = (event.get("data") or {}).get("chunk")
                     reasoning = _chunk_reasoning(chunk)

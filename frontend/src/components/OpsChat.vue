@@ -272,6 +272,7 @@ import {
   type ModelConfig,
   type OpsAction,
   type StreamHandlers,
+  type TimelineEntry,
 } from '@/api'
 
 const props = defineProps<{
@@ -697,20 +698,27 @@ async function openConversation(id: number) {
       text: m.content,
       // 后端按到达顺序存了整条回答流（含命令、思考与确认提议），据此重建交错
       // 渲染；老消息没有 timeline，退回空 chunks → 模板用 content 兜底整段渲染。
-      chunks: (m.timeline ?? []).map((e): TalkChunk => {
-        if (e.type === 'step') {
-          const { text, full } = describeStep({
-            tool: e.tool ?? '',
-            query: e.query,
-            input: e.input,
-          })
-          return { type: 'step', detail: text, full }
-        }
-        if (e.type === 'confirm') {
-          return { type: 'confirm', detail: '', actionId: e.action_id }
-        }
-        return { type: e.type, detail: e.detail ?? '' }
-      }),
+      // llm 节点（模型往返耗时）是统一 trace 给对话页的信息，运维面板的命令
+      // 时间线不展示它：过滤掉再映射，避免落进兜底分支造出非法 chunk。
+      chunks: (m.timeline ?? [])
+        .filter(
+          (e): e is TimelineEntry & { type: 'text' | 'reason' | 'step' | 'confirm' } =>
+            e.type !== 'llm',
+        )
+        .map((e): TalkChunk => {
+          if (e.type === 'step') {
+            const { text, full } = describeStep({
+              tool: e.tool ?? '',
+              query: e.query,
+              input: e.input,
+            })
+            return { type: 'step', detail: text, full }
+          }
+          if (e.type === 'confirm') {
+            return { type: 'confirm', detail: '', actionId: e.action_id }
+          }
+          return { type: e.type, detail: e.detail ?? '' }
+        }),
     }))
     actions.value = acts.items
     pinToBottom()

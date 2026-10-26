@@ -511,7 +511,7 @@ def _make_tool(*, name: str = "echo_tool", output: str = "echo:hi", raises: Exce
     )
 
 
-def _run_with_fake_model(db, fake, tools):
+def _run_with_fake_model(db, fake, tools, *, on_event=None):
     def _factory(config, **kwargs):
         return fake
 
@@ -522,7 +522,7 @@ def _run_with_fake_model(db, fake, tools):
         agent_run_module.build_chat_model = _factory
         try:
             return await run_agent(
-                db, OWNER, "writer", "查一下", tools=tools
+                db, OWNER, "writer", "查一下", tools=tools, on_event=on_event
             )
         finally:
             agent_run_module.build_chat_model = original
@@ -640,6 +640,131 @@ def test_run_agent_forces_convergence_after_max_rounds(db):
     assert fake.cursor == 9
     nudge = fake.received[-1][-1]
     assert "工具调用次数已达上限" in nudge.content
+
+
+# ---- run_agent 的统一 trace 回调（on_event）---------------------------------
+
+
+def _collect_events():
+    events: list[dict] = []
+
+    async def on_event(event: dict) -> None:
+        events.append(event)
+
+    return events, on_event
+
+
+def _assert_ms(value) -> None:
+    assert isinstance(value, int)
+    assert value >= 0
+
+
+def test_run_agent_without_tools_emits_a_single_llm_event(db):
+    _agent(db)
+    _chat_model(db)
+    events, on_event = _collect_events()
+    fake = FakeChatModel([FakeAIMessage("直接答", [])])
+
+    assert _run_with_fake_model(db, fake, None, on_event=on_event) == "直接答"
+    assert [e["kind"] for e in events] == ["llm"]
+    _assert_ms(events[0]["elapsed_ms"])
+
+
+def test_run_agent_emits_llm_and_tool_pairs_as_trace(db):
+    _agent(db)
+    _chat_model(db)
+    events, on_event = _collect_events()
+    tool = _make_tool()
+    fake = FakeChatModel(
+        [
+            FakeAIMessage(
+                "我先查",
+                [{"name": "echo_tool", "args": {"text": "hi"}, "id": "c1"}],
+            ),
+            FakeAIMessage("最终答案", []),
+        ]
+    )
+
+    assert _run_with_fake_model(db, fake, [tool], on_event=on_event) == "最终答案"
+
+    # 一轮工具往返：第 1 轮模型 → 工具起止 → 第 2 轮模型（无工具调用即收束）。
+    assert [e["kind"] for e in events] == ["llm", "tool_start", "tool_end", "llm"]
+    _assert_ms(events[0]["elapsed_ms"])
+    assert events[1] == {"kind": "tool_start", "name": "echo_tool", "args": {"text": "hi"}}
+    end = events[2]
+    assert end["kind"] == "tool_end"
+    assert end["name"] == "echo_tool"
+    assert end["args"] == {"text": "hi"}
+    assert end["output"] == "echo:hi"
+    assert end["is_error"] is False
+    _assert_ms(end["elapsed_ms"])
+
+
+def test_run_agent_trace_marks_tool_errors(db):
+    _agent(db)
+    _chat_model(db)
+    events, on_event = _collect_events()
+    tool = _make_tool(raises=RuntimeError("boom"))
+    fake = FakeChatModel(
+        [
+            FakeAIMessage(
+                "试工具",
+                [{"name": "echo_tool", "args": {}, "id": "c3"}],
+            ),
+            FakeAIMessage("知道失败了", []),
+        ]
+    )
+
+    _run_with_fake_model(db, fake, [tool], on_event=on_event)
+
+    end = events[2]
+    assert end["is_error"] is True
+    assert "boom" in end["output"]
+
+
+def test_run_agent_trace_stringifies_unserializable_args(db):
+    _agent(db)
+    _chat_model(db)
+    events, on_event = _collect_events()
+
+    class _IdTool:
+        """最小工具形状：name + 原样回显的 ainvoke（绕开 StructuredTool 的入参校验）。"""
+
+        name = "id_tool"
+
+        async def ainvoke(self, args):
+            return "ok"
+
+    # set 不可 JSON 序列化：进 trace 前要退回字符串，否则落 JSON 列直接炸。
+    fake = FakeChatModel(
+        [
+            FakeAIMessage(
+                "试怪入参",
+                [{"name": "id_tool", "args": {"weird": {"一", "二"}}, "id": "c6"}],
+            ),
+            FakeAIMessage("好了", []),
+        ]
+    )
+
+    _run_with_fake_model(db, fake, [_IdTool()], on_event=on_event)
+
+    start = events[1]
+    assert start["kind"] == "tool_start"
+    assert isinstance(start["args"], str)
+    assert "weird" in start["args"]
+
+
+def test_run_agent_trace_callback_failure_does_not_crash_the_run(db):
+    _agent(db)
+    _chat_model(db)
+
+    async def boom(event: dict) -> None:
+        raise RuntimeError("trace 通道挂了")
+
+    fake = FakeChatModel([FakeAIMessage("直接答", [])])
+
+    # 观测通道异常被吞掉只记日志，主流程照常返回模型输出。
+    assert _run_with_fake_model(db, fake, None, on_event=boom) == "直接答"
 
 
 # ---- plan_step_tools：两级挂载的并集、去重与冲突范围 -------------------------

@@ -308,6 +308,7 @@ def migrate_schema() -> None:
         for column, ddl in (
             ("agent_id", "ADD COLUMN agent_id BIGINT NULL"),
             ("agent_version", "ADD COLUMN agent_version INT NULL"),
+            ("trace", "ADD COLUMN trace JSON NULL"),
         ):
             if column in run_step_columns:
                 continue

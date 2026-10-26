@@ -156,12 +156,24 @@ async def _execute_step(
         row.started_at = db_now()
         db.commit()
 
+        # 步骤内部的执行轨迹（模型往返 / 工具调用），随发生随推 step_trace，
+        # 终态时整体落到行上：换设备看历史详情不依赖当时的 SSE 连接。
+        trace_nodes: List[dict] = []
+
+        async def on_trace(node: dict) -> None:
+            trace_nodes.append(node)
+            await queue.put(
+                ("step_trace", {"key": step.key, "group_key": step.group_key, "node": node})
+            )
+
         try:
             prompt = render_prompt(step.prompt_tpl, context)
             row.prompt = prompt
             db.commit()
         except ValueError as exc:
-            return await _finish_step(db, row, step, queue, str(exc), started)
+            return await _finish_step(
+                db, row, step, queue, str(exc), started, trace=trace_nodes
+            )
 
         model_name: Optional[str] = None
         try:
@@ -187,6 +199,7 @@ async def _execute_step(
                 agent=agent,
                 config_id=config.id,
                 tools=tools,
+                on_event=on_trace,
             )
             plain, parsed = parse_output(text, step.output_kind, step.output_keys)
         except Exception as exc:  # noqa: BLE001 - 步骤的失败就是这一步的状态
@@ -194,12 +207,13 @@ async def _execute_step(
                 "workflow step %s of run %s failed: %s", step.key, run_id, exc, exc_info=True
             )
             return await _finish_step(
-                db, row, step, queue, model_error_text(exc), started, model_name=model_name
+                db, row, step, queue, model_error_text(exc), started,
+                model_name=model_name, trace=trace_nodes,
             )
 
         return await _finish_step(
             db, row, step, queue, None, started,
-            output=plain, parsed=parsed, model_name=model_name,
+            output=plain, parsed=parsed, model_name=model_name, trace=trace_nodes,
         )
 
 
@@ -214,6 +228,7 @@ async def _finish_step(
     output: Optional[str] = None,
     parsed: Optional[dict] = None,
     model_name: Optional[str] = None,
+    trace: Optional[List[dict]] = None,
 ) -> _StepOutcome:
     """写终态并补一条 ``step_end`` 事件。"""
     elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -222,6 +237,8 @@ async def _finish_step(
     row.parsed = parsed
     row.error_msg = error
     row.elapsed_ms = elapsed_ms
+    # 失败的步骤也保留已经发生的轨迹：模型超时/工具报错前的过程正是排查线索。
+    row.trace = trace or None
     row.finished_at = db_now()
     db.commit()
 

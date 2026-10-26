@@ -8,7 +8,7 @@
 import { getAccessToken } from '@/utils/auth'
 import type { Citation, CompactMeta, ConfirmEvent, ExecEvent } from './chat'
 import { handleUnauthorized } from './http'
-import type { RunStatus, RunStepStatus } from './workflows'
+import type { RunStatus, RunStepStatus, WorkflowTraceEvent } from './workflows'
 
 /** 由 SSE 事件流驱动的一组回调。 */
 export interface StreamHandlers {
@@ -28,12 +28,22 @@ export interface StreamHandlers {
     query: string
     input?: Record<string, unknown>
     run_id?: string
+    /** 工具开始执行的时刻（ISO 字符串）；无 run_id 配对的桩调用可能不带。 */
+    started_at?: string
   }) => void
   /** 一次工具调用返回：把结果预览挂回同 run_id 的步骤卡片。 */
-  onStepResult?: (data: { run_id: string; output: string; is_error: boolean }) => void
+  onStepResult?: (data: {
+    run_id: string
+    output: string
+    is_error: boolean
+    /** 本次工具调用耗时毫秒；无 run_id 配对的桩调用可能不带。 */
+    elapsed_ms?: number
+  }) => void
   onToken?: (token: string) => void
   /** 会输出思维链的模型发来的推理/思考增量；普通模型不会有这个事件。 */
   onReason?: (token: string) => void
+  /** 一次模型往返结束（没有工具调用的一轮）：统一 trace 里补一个「模型思考」节点。 */
+  onLlm?: (data: { elapsed_ms: number }) => void
   onConfirm?: (data: ConfirmEvent) => void
   onExec?: (data: ExecEvent) => void
   onDone?: (data: { message_id: number; conversation_id: number }) => void
@@ -62,6 +72,8 @@ export interface StreamHandlers {
     }[]
   }) => void
   onStepStart?: (data: { key: string; group_key: string; status?: string }) => void
+  /** 步骤内部 trace 节点（模型往返/工具调用）：跟随流实时累积进对应步骤。 */
+  onStepTrace?: (data: { key: string; group_key: string; node: WorkflowTraceEvent }) => void
   onStepEnd?: (data: {
     key: string
     status: RunStepStatus
@@ -233,6 +245,9 @@ function dispatchSse(
     case 'reason':
       handlers.onReason?.(String(data ?? ''))
       break
+    case 'llm':
+      handlers.onLlm?.(data ?? { elapsed_ms: 0 })
+      break
     case 'confirm':
       handlers.onConfirm?.(data)
       break
@@ -254,6 +269,9 @@ function dispatchSse(
       break
     case 'step_start':
       handlers.onStepStart?.(data)
+      break
+    case 'step_trace':
+      handlers.onStepTrace?.(data)
       break
     case 'step_end':
       handlers.onStepEnd?.(data)

@@ -79,6 +79,7 @@ def _stub_model(monkeypatch, reply: str):
         config_id=None,
         timeout=None,
         tools=None,
+        on_event=None,
     ):
         return reply
 
@@ -471,6 +472,7 @@ def _recording_model(monkeypatch, reply: str) -> list[str]:
         config_id=None,
         timeout=None,
         tools=None,
+        on_event=None,
     ):
         prompts.append(user_prompt)
         return reply

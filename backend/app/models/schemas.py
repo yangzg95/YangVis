@@ -744,6 +744,8 @@ class WorkflowRunStepItem(BaseModel):
     prompt: Optional[str] = None
     output: Optional[str] = None
     parsed: Optional[Dict[str, Any]] = None
+    # 步骤内部的统一执行轨迹（模型往返/工具调用节点）；老运行为 None。
+    trace: Optional[List[Dict[str, Any]]] = None
     error_msg: Optional[str] = None
     model_config_id: Optional[int] = None
     # 这一步当时用的模型（``model_name``）：按步骤覆盖与默认模型可能混在同一条流程里，

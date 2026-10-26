@@ -117,6 +117,7 @@ def _stub_model(monkeypatch, reply_for):
         config_id=None,
         timeout=None,
         tools=None,
+        on_event=None,
     ):
         calls.append((agent_slug, user_prompt))
         reply = reply_for(agent_slug)
@@ -1152,6 +1153,90 @@ def test_execute_run_streams_and_persists_each_step(db, monkeypatch):
     finished = WorkflowService(db, OWNER).get_run(run.id)
     assert finished.status == RUN_SUCCEEDED and finished.error_msg is None
     assert finished.elapsed_ms is not None
+
+
+def test_step_trace_events_are_streamed_and_persisted(db, monkeypatch):
+    """run_agent 黑盒打开：内部模型往返/工具调用经 on_event 变成 step_trace
+    事件透传给跟随者，同一份节点列表落进 workflow_run_step.trace。"""
+    import app.services.workflows.exec as workflow_exec
+
+    _chat_model(db)
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+
+    scripted: dict[str, list[dict]] = {
+        "writer": [
+            {"kind": "llm", "elapsed_ms": 120},
+            {"kind": "tool_start", "name": "search", "args": {"q": "x"}},
+            {
+                "kind": "tool_end",
+                "name": "search",
+                "args": {"q": "x"},
+                "output": "查到了",
+                "is_error": False,
+                "elapsed_ms": 300,
+            },
+        ],
+        "scorer": [{"kind": "llm", "elapsed_ms": 80}],
+    }
+
+    async def fake_run_agent(db, owner_id, agent_slug, user_prompt, *, on_event=None, **kwargs):
+        for node in scripted[agent_slug]:
+            await on_event(node)
+        return {"writer": "一段初稿", "scorer": "8 分"}[agent_slug]
+
+    monkeypatch.setattr(workflow_exec, "run_agent", fake_run_agent)
+
+    events = _run_all(db, OWNER, run.id)
+
+    # step_trace 夹在所属步骤的 start/end 之间，载荷带上步骤定位字段。
+    traces = [data for name, data in events if name == "step_trace"]
+    assert [data["key"] for data in traces] == ["draft", "draft", "draft", "score"]
+    assert {data["group_key"] for data in traces[:1]} == {"draft"}
+    assert traces[0]["node"] == {"kind": "llm", "elapsed_ms": 120}
+    assert traces[2]["node"]["output"] == "查到了"
+
+    rows = {row.key: row for row in WorkflowService(db, OWNER).run_steps(run.id)}
+    assert rows["draft"].trace == scripted["writer"]
+    assert rows["score"].trace == [{"kind": "llm", "elapsed_ms": 80}]
+
+    # run detail 接口形状里也带 trace（前端 RunScene 据此渲染「执行过程」）。
+    detail = WorkflowService(db, OWNER).to_run_detail(
+        WorkflowService(db, OWNER).get_run(run.id)
+    )
+    by_key = {step.key: step for step in detail.steps}
+    assert by_key["draft"].trace[1]["name"] == "search"
+
+
+def test_failed_step_keeps_the_trace_it_already_emitted(db, monkeypatch):
+    """步骤在工具调用之后才失败：已发出的 trace 不能跟着回滚丢掉，
+    排查时正要看它挂在了哪一步内部动作上。"""
+    import app.services.workflows.exec as workflow_exec
+
+    _chat_model(db)
+    workflow = _two_step_workflow(db)
+    run = WorkflowService(db, OWNER).create_run(workflow.id, {"topic": "编排"})
+
+    async def fake_run_agent(db, owner_id, agent_slug, user_prompt, *, on_event=None, **kwargs):
+        if agent_slug == "writer":
+            await on_event({"kind": "llm", "elapsed_ms": 50})
+            await on_event({"kind": "tool_start", "name": "search", "args": {}})
+            raise RuntimeError("模型在工具之后炸了")
+        return "用不上"
+
+    monkeypatch.setattr(workflow_exec, "run_agent", fake_run_agent)
+
+    events = _run_all(db, OWNER, run.id)
+    assert events[-1][1]["status"] == RUN_FAILED
+
+    rows = {row.key: row for row in WorkflowService(db, OWNER).run_steps(run.id)}
+    assert rows["draft"].status == STEP_FAILED
+    assert rows["draft"].trace == [
+        {"kind": "llm", "elapsed_ms": 50},
+        {"kind": "tool_start", "name": "search", "args": {}},
+    ]
+    # 第二步根本没开跑：没有 trace。
+    assert rows["score"].trace is None
 
 
 def test_run_model_names_reports_the_models_each_step_used(db, monkeypatch):

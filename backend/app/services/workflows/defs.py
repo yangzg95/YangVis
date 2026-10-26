@@ -781,6 +781,7 @@ class WorkflowService:
                     prompt=row.prompt,
                     output=row.output,
                     parsed=row.parsed,
+                    trace=row.trace,
                     error_msg=row.error_msg,
                     model_config_id=row.model_config_id,
                     # 这一步当时用的是哪个模型：现场里每一步各用自己的（按步骤覆盖

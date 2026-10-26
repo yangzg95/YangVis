@@ -1252,13 +1252,13 @@ def test_answer_emits_step_result_citations_then_tokens_then_done(db, agent_env,
         "token",
         "done",
     ]
-    assert events[0][1] == {
-        "tool": "search_knowledge_base",
-        "query": "nginx 502",
-        "input": {"query": "nginx 502"},
-        # 打桩事件不带 run_id：开始事件落空串，结束事件走兜底配对。
-        "run_id": "",
-    }
+    # started_at 是 trace 节点的起始时刻；打桩事件不带 run_id，结束事件走兜底
+    # 配对，因此这条没有 elapsed_ms（run_id 是耗时回填的凭据）。
+    assert events[0][1]["tool"] == "search_knowledge_base"
+    assert events[0][1]["query"] == "nginx 502"
+    assert events[0][1]["input"] == {"query": "nginx 502"}
+    assert events[0][1]["run_id"] == ""
+    datetime.fromisoformat(events[0][1]["started_at"])
     # 没带 run_id 的 on_tool_end 挂到最后一个还没结果的步骤。
     assert events[1][1] == {"run_id": "", "output": "x", "is_error": False}
     # citations 帧是「累积到当前为止的完整列表」，客户端整体替换。
@@ -1272,6 +1272,97 @@ def test_answer_emits_step_result_citations_then_tokens_then_done(db, agent_env,
     }
     assert events[3][1] == "先说一句「我查一下」。"
     assert events[8][1] == {"message_id": messages(db, conv.id)[-1].id, "conversation_id": conv.id}
+
+
+def test_answer_records_llm_rounds_and_tool_timing_in_trace(db, agent_env, kb):
+    """统一 trace：每次模型往返推一帧 llm 并进 timeline，工具步带上起始时刻与耗时；
+    落库的 timeline 与流式过程同构（含 output 回填后的完整 step 条目）。"""
+    conv = make_conversation(db)
+    kb["hits"] = [hit(1, filename="a.md", content="nginx 502 常见于上游超时")]
+    agent = make_agent(db, use_knowledge=True)
+
+    events = run_answer(
+        db,
+        conv,
+        agent,
+        agent_env,
+        [
+            {"event": "on_chat_model_start", "run_id": "m1"},
+            {"event": "on_chat_model_end", "run_id": "m1"},
+            {
+                "event": "on_tool_start",
+                "name": "search_knowledge_base",
+                "run_id": "t1",
+                "data": {"input": {"query": "nginx 502"}},
+            },
+            {
+                "event": "on_tool_end",
+                "name": "search_knowledge_base",
+                "run_id": "t1",
+                "data": {"output": "x"},
+            },
+            {"event": "on_chat_model_start", "run_id": "m2"},
+            token("答案在这"),
+            {"event": "on_chat_model_end", "run_id": "m2"},
+        ],
+        project_id=5,
+    )
+
+    # 第二轮模型的 llm 帧在 end 时才出，晚于这一轮的正文 token——
+    # 开始时刻只记账不发事件。
+    assert [name for name, _ in events] == [
+        "llm",
+        "step",
+        "step_result",
+        "citations",
+        "token",
+        "llm",
+        "done",
+    ]
+    assert isinstance(events[0][1]["elapsed_ms"], int)
+    assert events[0][1]["elapsed_ms"] >= 0
+    assert events[1][1]["run_id"] == "t1"
+    datetime.fromisoformat(events[1][1]["started_at"])
+    result = events[2][1]
+    assert result["run_id"] == "t1"
+    assert result["output"] == "x"
+    assert result["is_error"] is False
+    assert isinstance(result["elapsed_ms"], int)
+    assert isinstance(events[5][1]["elapsed_ms"], int)
+
+    saved = messages(db, conv.id)[-1].timeline
+    assert [entry["type"] for entry in saved] == ["llm", "step", "text", "llm"]
+    assert isinstance(saved[0]["elapsed_ms"], int)
+    step_entry = saved[1]
+    assert step_entry["tool"] == "search_knowledge_base"
+    assert step_entry["run_id"] == "t1"
+    datetime.fromisoformat(step_entry["started_at"])
+    assert isinstance(step_entry["elapsed_ms"], int)
+    assert step_entry["output"] == "x"
+    assert step_entry["is_error"] is False
+
+
+def test_answer_plain_qa_now_saves_the_llm_round_in_trace(db, agent_env):
+    """没有工具的普通问答也落 timeline：llm 节点是「这次模型花了多久」的唯一凭据，
+    纯正文才继续不存。"""
+    conv = make_conversation(db)
+
+    events = run_answer(
+        db,
+        conv,
+        make_agent(db),
+        agent_env,
+        [
+            {"event": "on_chat_model_start", "run_id": "m1"},
+            token("凭常识的回答"),
+            {"event": "on_chat_model_end", "run_id": "m1"},
+        ],
+    )
+    assert [name for name, _ in events] == ["token", "llm", "done"]
+
+    saved = messages(db, conv.id)[-1].timeline
+    assert [entry["type"] for entry in saved] == ["text", "llm"]
+    assert isinstance(saved[1]["elapsed_ms"], int)
 
 
 def test_answer_saves_what_the_user_saw_plus_the_sources(db, agent_env, kb):
