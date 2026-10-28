@@ -32,8 +32,9 @@
             <span class="sidebar-menu-label">{{ node.title }}</span>
           </template>
           <a-menu-item v-for="child in node.children" :key="child.path">
-            <!-- 子项缺图标时回退父级图标，与顶栏标签页的 LEAVES 兜底口径一致。 -->
-            <component :is="child.icon ?? node.icon" />
+            <!-- 必须走 #icon 插槽：裸放图标会和文字挤同一内容流，缩进与选中态全错位。
+                 子项缺图标时回退父级图标，与顶栏标签页的 LEAVES 兜底口径一致。 -->
+            <template #icon><component :is="child.icon ?? node.icon" /></template>
             <span class="sidebar-menu-label">{{ child.title }}</span>
           </a-menu-item>
         </a-sub-menu>
