@@ -1130,6 +1130,10 @@ class AiModelRoute(Base):
     同一个对外模型名可以有多条映射：按 ``priority`` 升序依次尝试，上游连不上或
     明确拒绝时自动转移到下一条，这就是网关的故障转移能力。
 
+    ``expires_at`` / ``token_quota`` 是每条映射各自的有效期与 token 额度（通常对应
+    这个通道账号自己的期限与配额），留空即不限制；到期或超额的映射和停用一样被
+    跳过，同名的其他映射继续接管。
+
     ``auto_eligible`` 为真的映射还额外服务一个保留名 ``auto``：它不进
     ``model_name`` 的精确匹配，而是由 Auto 按 ``auto_tags`` 这份「对模型的定义」
     从候选池里筛出来（见 :mod:`app.services.ai_gateway.auto`）。
@@ -1152,6 +1156,14 @@ class AiModelRoute(Base):
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     remark: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # 有效期截止时刻（本地 naive，与 created_at 同一口径）；NULL 表示长期有效。
+    # 过期的路由和停用一样在候选解析时被跳过，同名还有别的通道时故障转移照常。
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 这条路由的 token 总额度与已用量，按上游回报的 total_tokens 在每次调用后累加。
+    # token_quota 为 NULL 不限制；token_used >= token_quota 后该路由不参与路由。
+    token_quota: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    token_used: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
 
     # 打开后这条映射进入 ``model="auto"`` 的候选池；关着就只有点名它的请求会打到。
     auto_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

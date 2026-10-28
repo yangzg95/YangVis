@@ -64,6 +64,14 @@ export interface AiModelRouteItem {
   priority: number
   enabled: boolean
   remark: string | null
+  /** 有效期截止时刻；null 表示长期有效。 */
+  expires_at: string | null
+  /** token 总额度；null 表示不限制。 */
+  token_quota: number | null
+  /** 已累计消耗的 total_tokens，由网关在每次调用后回填。 */
+  token_used: number
+  /** null=未受限，'expired'=已过期，'quota_exceeded'=额度用尽。 */
+  limit_reason: 'expired' | 'quota_exceeded' | null
   auto_eligible: boolean
   auto_tags: AiAutoTag[] | null
   created_at: string
@@ -77,6 +85,9 @@ export interface AiModelRoutePayload {
   priority?: number
   enabled?: boolean
   remark?: string | null
+  /** 'YYYY-MM-DD HH:mm:ss' 或 null（清除限制）；字段缺席表示不修改。 */
+  expires_at?: string | null
+  token_quota?: number | null
   auto_eligible?: boolean
   auto_tags?: AiAutoTag[] | null
 }

@@ -31,7 +31,9 @@ from app.services.ai_gateway.service import (
     EMBEDDINGS_ENDPOINT,
     RouteCandidate,
     auto_routes,
+    route_limit_reason,
 )
+from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.ai_gateway.auto")
 
@@ -176,22 +178,42 @@ def _task_tags_in_pool(candidates: List[RouteCandidate]) -> bool:
     return any(TASK_TAGS.intersection(_route_tags(item.route)) for item in candidates)
 
 
+def _tag_feasible_rows(db: Session, required: List[str]) -> List[Tuple[Any, Any]]:
+    """候选池里标签满足全部硬性要求的（路由, 通道），含被有效期/额度挡住的。"""
+    wanted = set(required)
+    return [
+        (route, channel)
+        for route, channel in auto_routes(db, include_limited=True)
+        if wanted.issubset(_route_tags(route))
+    ]
+
+
 def _feasible(db: Session, required: List[str]) -> List[RouteCandidate]:
-    """候选池里满足全部硬性要求的那些，已按 priority 升序。
+    """候选池里满足全部硬性要求且当前未受限的那些，已按 priority 升序。
 
     硬性要求一律严格匹配：没有哪条路由可以靠「大概也行」进池子，否则图打给纯文本
     模型这种事会变成偶发的、日志里看不出原因的回答质量问题。
     """
-    wanted = set(required)
+    moment = db_now()
     return [
         RouteCandidate(
             route=route,
             channel=channel,
             upstream_model=(route.upstream_model or route.model_name),
         )
-        for route, channel in auto_routes(db)
-        if wanted.issubset(_route_tags(route))
+        for route, channel in _tag_feasible_rows(db, required)
+        if route_limit_reason(route, moment) is None
     ]
+
+
+def _blocked_feasible(db: Session, required: List[str]) -> int:
+    """标签够格、但被有效期/额度挡掉的条数：候选全灭时给报错留个说法。"""
+    moment = db_now()
+    return sum(
+        1
+        for route, _ in _tag_feasible_rows(db, required)
+        if route_limit_reason(route, moment) is not None
+    )
 
 
 async def resolve_auto(
@@ -208,11 +230,13 @@ async def resolve_auto(
     """
     required = required_tags(endpoint, body)
     candidates = _feasible(db, required)
+    blocked = _blocked_feasible(db, required)
     decision: Dict[str, Any] = {
         "required": required,
         "task": None,
         "source": "priority",
         "matched": len(candidates),
+        "blocked": blocked,
     }
     if not candidates:
         return [], decision

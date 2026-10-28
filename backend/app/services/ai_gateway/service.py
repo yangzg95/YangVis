@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from typing import Any, List, Optional, Tuple
 from urllib.parse import urlsplit
 
-from sqlalchemy import Select, case, delete, func, or_, select
+from sqlalchemy import Select, case, delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -60,6 +60,94 @@ MODELS_ENDPOINT = "models"
 # 放在这里而不是 auto 模块里，是因为「对外有哪些模型名」归本模块管
 # （:func:`list_public_models`），而 auto 模块要读本模块的候选结构。
 AUTO_MODEL_NAME = "auto"
+
+# 路由级限制命中时的原因码；也原样进 AiModelRouteItem.limit_reason 给前端着色。
+LIMIT_EXPIRED = "expired"
+LIMIT_QUOTA = "quota_exceeded"
+
+
+# ---- 路由级限制：有效期与 token 额度 ----------------------------------------
+
+
+def route_limit_reason(route: AiModelRoute, now: Optional[datetime] = None) -> Optional[str]:
+    """这条路由此刻是否被自己的有效期/额度挡住；没配限制返回 None。
+
+    判定口径与停用一致——调用方拿到 None 才可以把它放进候选列表。有效期按本地
+    naive 墙上时间比较（与 ``db_now()`` 同口径）；额度看已累计的 total_tokens，
+    是「开始转发前」的软门槛，并发请求可能轻微超出，不做硬性预扣。
+    """
+    moment = now or db_now()
+    if route.expires_at is not None and moment >= route.expires_at:
+        return LIMIT_EXPIRED
+    if route.token_quota is not None and (route.token_used or 0) >= route.token_quota:
+        return LIMIT_QUOTA
+    return None
+
+
+@dataclass(frozen=True)
+class RoutesUnavailable:
+    """某个对外模型名的启用路由全部被限制挡住时，给调用方的解释。"""
+
+    code: str
+    message: str
+    expired: int
+    quota_exceeded: int
+
+
+def routes_unavailable(
+    db: Session, model_name: str, now: Optional[datetime] = None
+) -> Optional[RoutesUnavailable]:
+    """所有启用候选都撞上限制时返回原因；没配路由或仍有可用候选时返回 None。
+
+    转发侧先用它区分两种「候选为空」：根本没配（404）和配了但全部到期/超额
+    （403/429），否则调用方只会看到一句「模型未配置」，没法意识到该找管理员续期。
+    """
+    rows = db.execute(
+        select(AiModelRoute, AiChannel)
+        .join(AiChannel, AiChannel.id == AiModelRoute.channel_id)
+        .where(
+            AiModelRoute.model_name == model_name,
+            AiModelRoute.enabled.is_(True),
+            AiChannel.enabled.is_(True),
+        )
+        .order_by(AiModelRoute.priority.asc(), AiModelRoute.id.asc())
+    ).all()
+    if not rows:
+        return None
+
+    moment = now or db_now()
+    reasons = [route_limit_reason(route, moment) for route, _ in rows]
+    blocked = [reason for reason in reasons if reason is not None]
+    if len(blocked) != len(rows):
+        return None
+
+    expired = reasons.count(LIMIT_EXPIRED)
+    quota = reasons.count(LIMIT_QUOTA)
+    if expired and not quota:
+        first = rows[0][0]
+        when = first.expires_at.strftime("%Y-%m-%d %H:%M") if first.expires_at else ""
+        message = (
+            f"模型 {model_name} 已过有效期（{when} 到期），请联系网关管理员续期"
+            if len(rows) == 1
+            else f"模型 {model_name} 的 {expired} 条上游均已过有效期，请联系网关管理员续期"
+        )
+        return RoutesUnavailable("model_expired", message, expired, quota)
+    if quota and not expired:
+        first = rows[0][0]
+        if len(rows) == 1:
+            message = (
+                f"模型 {model_name} 的 token 额度已用尽"
+                f"（已用 {first.token_used or 0:,} / 额度 {first.token_quota:,}），请联系网关管理员调整额度"
+            )
+        else:
+            message = f"模型 {model_name} 的 {quota} 条上游 token 额度均已用尽，请联系网关管理员调整额度"
+        return RoutesUnavailable("model_quota_exceeded", message, expired, quota)
+
+    message = (
+        f"模型 {model_name} 暂不可用：{expired} 条上游已过有效期、"
+        f"{quota} 条上游 token 额度已用尽，请联系网关管理员"
+    )
+    return RoutesUnavailable("model_unavailable", message, expired, quota)
 
 
 # ---- 密钥 -------------------------------------------------------------------
@@ -166,79 +254,71 @@ class RouteCandidate:
         return decrypt(self.channel.api_key_enc) or "not-needed"
 
 
+def _active_route_rows(
+    db: Session, *where: Any, include_limited: bool = False
+) -> List[Tuple[AiModelRoute, AiChannel]]:
+    """启用路由 ⋈ 启用通道、按 priority 升序的共用查询。
+
+    ``include_limited`` 为真时保留已过期/超额的行（管理侧统计与「为什么全灭」的
+    解释要用）；默认在 Python 侧顺手按 :func:`route_limit_reason` 过滤——这两个
+    条件走 SQL 要写一串 OR，而路由表本来就小，判定集中在一个函数里也不会分叉。
+    """
+    rows = db.execute(
+        select(AiModelRoute, AiChannel)
+        .join(AiChannel, AiChannel.id == AiModelRoute.channel_id)
+        .where(AiModelRoute.enabled.is_(True), AiChannel.enabled.is_(True), *where)
+        .order_by(AiModelRoute.priority.asc(), AiModelRoute.id.asc())
+    ).all()
+    if include_limited:
+        return list(rows)
+    moment = db_now()
+    return [
+        (route, channel)
+        for route, channel in rows
+        if route_limit_reason(route, moment) is None
+    ]
+
+
+def _to_candidate(route: AiModelRoute, channel: AiChannel) -> RouteCandidate:
+    return RouteCandidate(
+        route=route,
+        channel=channel,
+        upstream_model=(route.upstream_model or route.model_name),
+    )
+
+
 def resolve_candidates(db: Session, model_name: str) -> List[RouteCandidate]:
     """按优先级返回某个对外模型名当前可用的全部上游。
 
-    通道停用、路由停用、通道被删（join 不上）都在这里一次性排除，转发侧拿到的
-    就是「可以直接打」的列表，顺序即故障转移顺序。
+    通道停用、路由停用、通道被删（join 不上）、路由过期、额度用尽都在这里一次性
+    排除，转发侧拿到的就是「可以直接打」的列表，顺序即故障转移顺序。
     """
-    rows = db.execute(
-        select(AiModelRoute, AiChannel)
-        .join(AiChannel, AiChannel.id == AiModelRoute.channel_id)
-        .where(
-            AiModelRoute.model_name == model_name,
-            AiModelRoute.enabled.is_(True),
-            AiChannel.enabled.is_(True),
-        )
-        .order_by(AiModelRoute.priority.asc(), AiModelRoute.id.asc())
-    ).all()
-
-    candidates: List[RouteCandidate] = []
-    for route, channel in rows:
-        candidates.append(
-            RouteCandidate(
-                route=route,
-                channel=channel,
-                upstream_model=(route.upstream_model or route.model_name),
-            )
-        )
-    return candidates
+    rows = _active_route_rows(db, AiModelRoute.model_name == model_name)
+    return [_to_candidate(route, channel) for route, channel in rows]
 
 
-def auto_routes(db: Session) -> List[Tuple[AiModelRoute, AiChannel]]:
+def auto_routes(
+    db: Session, *, include_limited: bool = False
+) -> List[Tuple[AiModelRoute, AiChannel]]:
     """Auto 的候选池：开了 ``auto_eligible``、路由与通道都启用的映射。
 
-    查询口径必须跟 :func:`resolve_candidates` 一致（同样跳过停用路由与停用通道，
-    同样按 priority 升序），否则会出现「点名能打通、Auto 选出来却打不通」。
+    查询口径必须跟 :func:`resolve_candidates` 一致（同样跳过停用/受限路由与停用
+    通道，同样按 priority 升序），否则会出现「点名能打通、Auto 选出来却打不通」。
     """
-    rows = db.execute(
-        select(AiModelRoute, AiChannel)
-        .join(AiChannel, AiChannel.id == AiModelRoute.channel_id)
-        .where(
-            AiModelRoute.auto_eligible.is_(True),
-            AiModelRoute.enabled.is_(True),
-            AiChannel.enabled.is_(True),
-        )
-        .order_by(AiModelRoute.priority.asc(), AiModelRoute.id.asc())
-    ).all()
-    return list(rows)
+    return _active_route_rows(
+        db, AiModelRoute.auto_eligible.is_(True), include_limited=include_limited
+    )
 
 
 def has_auto_routes(db: Session) -> bool:
     """候选池非空 —— 决定 ``GET /v1/models`` 要不要把 auto 列出来。"""
-    row = db.execute(
-        select(AiModelRoute.id)
-        .join(AiChannel, AiChannel.id == AiModelRoute.channel_id)
-        .where(
-            AiModelRoute.auto_eligible.is_(True),
-            AiModelRoute.enabled.is_(True),
-            AiChannel.enabled.is_(True),
-        )
-        .limit(1)
-    ).scalar_one_or_none()
-    return row is not None
+    return bool(auto_routes(db))
 
 
 def list_public_models(db: Session) -> List[str]:
     """当前对外可用的模型名（去重、按名字排序），给 ``GET /v1/models`` 用。"""
-    rows = db.scalars(
-        select(AiModelRoute.model_name)
-        .join(AiChannel, AiChannel.id == AiModelRoute.channel_id)
-        .where(AiModelRoute.enabled.is_(True), AiChannel.enabled.is_(True))
-        .distinct()
-        .order_by(AiModelRoute.model_name.asc())
-    ).all()
-    names = list(rows)
+    rows = _active_route_rows(db)
+    names = sorted({route.model_name for route, _ in rows})
     # 一条候选都没有时不列 auto：列出来只会让调用方选完拿到一个 404。
     if has_auto_routes(db) and AUTO_MODEL_NAME not in names:
         names.append(AUTO_MODEL_NAME)
@@ -382,6 +462,7 @@ class AiGatewayService:
         for route, channel_name in self._db.execute(stmt).all():
             item = AiModelRouteItem.model_validate(route)
             item.channel_name = channel_name
+            item.limit_reason = route_limit_reason(route)
             items.append(item)
         return items
 
@@ -396,6 +477,8 @@ class AiGatewayService:
             priority=payload.priority,
             enabled=payload.enabled,
             remark=payload.remark,
+            expires_at=payload.expires_at,
+            token_quota=payload.token_quota,
             auto_eligible=payload.auto_eligible,
             auto_tags=self._auto_tags(payload.auto_eligible, payload.auto_tags),
         )
@@ -428,6 +511,12 @@ class AiGatewayService:
             route.enabled = data["enabled"]
         if data.get("remark") is not None:
             route.remark = data["remark"]
+        # 这两列的 null 本身就是「不限制」这个有效值，所以按 key 判存在而不是
+        # 判真值：前端显式传 null 回来就是要把限制清掉。
+        if "expires_at" in data:
+            route.expires_at = data["expires_at"]
+        if "token_quota" in data:
+            route.token_quota = data["token_quota"]
 
         # 这两个字段要一起判：只改开关时也得保证「进了候选池就有定义」，否则 Auto
         # 面对一条没有任何标签的路由只能猜。
@@ -482,6 +571,7 @@ class AiGatewayService:
         channel = self._db.get(AiChannel, route.channel_id)
         item = AiModelRouteItem.model_validate(route)
         item.channel_name = channel.name if channel else None
+        item.limit_reason = route_limit_reason(route)
         return item
 
     # -- 密钥 ---------------------------------------------------------------
@@ -681,6 +771,24 @@ class AiGatewayService:
             log_count=count(AiCallLog),
             payload_logging=settings.AI_GATEWAY_LOG_PAYLOAD,
         )
+
+
+def accrue_route_tokens(db: Session, route_id: int, tokens: int) -> None:
+    """把一次调用实际消耗的 total_tokens 原子累加到路由额度上。
+
+    用 ``列 = 列 + n`` 的 SQL 自增而不是读出再加，是为了并发调用下不至于互相
+    覆盖丢量；只提交语句不提交事务，和调用日志在同一个事务里落库、一起回滚。
+    路由已被删除时静默跳过，日志照常写。
+    """
+    if tokens <= 0:
+        return
+    # 路由已删除时 rowcount=0，只是一条空 UPDATE，不 rollback：本事务里还有
+    # 密钥计数与即将写入的调用日志，不能为这个边角情况把它们一起冲掉。
+    db.execute(
+        update(AiModelRoute)
+        .where(AiModelRoute.id == route_id)
+        .values(token_used=AiModelRoute.token_used + tokens)
+    )
 
 
 def write_call_log(db: Session, log: AiCallLog) -> None:

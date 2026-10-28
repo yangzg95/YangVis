@@ -26,6 +26,7 @@ from app.services.ai_gateway.service import (  # noqa: F401
     TRUNCATE_MARK,
     AiGatewayService,
     RouteCandidate,
+    accrue_route_tokens,
     display_prefix,
     extract_bearer_key,
     find_api_key,
@@ -35,6 +36,8 @@ from app.services.ai_gateway.service import (  # noqa: F401
     normalize_base_url,
     public_base_url,
     resolve_candidates,
+    route_limit_reason,
+    routes_unavailable,
     truncate_text,
     write_call_log,
 )

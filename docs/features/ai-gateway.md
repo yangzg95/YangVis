@@ -20,9 +20,11 @@
   不参与转发判定）、启用开关、备注；「测试」按钮真发一条最短 prompt，结果与时间
   留在行上。删除通道会连带删掉指向它的路由（有二次确认）。
 - **模型路由**：对外模型名、通道、上游模型名（留空表示与对外名一致）、优先级
-  （0–9999，小者先试，默认 100）、启用开关；「参与 Auto 路由」开关展开后是
-  **能力**（chat / embedding / vision / tools，至少勾一个）与**擅长的任务**
-  （reasoning / code / writing / translation / general，选填）两组标签。
+  （0–9999，小者先试，默认 100）、启用开关；可选的**有效期至**与 **Token 额度**
+  （留空即不限制，行上实时展示「已用 / 额度」），到期或用尽的路由被自动跳过，
+  同名其他通道继续接管；「参与 Auto 路由」开关展开后是**能力**（chat / embedding /
+  vision / tools，至少勾一个）与**擅长的任务**（reasoning / code / writing /
+  translation / general，选填）两组标签。
 - **统一密钥**：新建即生成 `sk-yv-` + 43 字符随机串，**明文只在创建成功的弹窗里
   出现一次**，列表只有前 12 位 + `****`；行上展示调用次数与最近调用时间，可停用
   （立即生效）/ 删除。忘了明文只能新建一把。
@@ -35,8 +37,9 @@
 - `POST /v1/chat/completions`：`stream:true` 时 SSE 原样透传（`X-Accel-Buffering:
   no`，帧边界插心跳），非流式返回上游原响应；请求/响应都不套本站统一信封。
 - `POST /v1/embeddings`：只支持非流式（客户端传 `stream` 会被剥掉）。
-- `GET /v1/models`：列出当前「启用路由 + 启用通道」上的全部对外模型名（去重排序），
-  只要存在一条启用的「参与 Auto」路由，列表里就有 `auto`；一条候选都没有时不列。
+- `GET /v1/models`：列出当前「启用路由 + 启用通道且未被有效期/额度挡住」上的全部对外
+  模型名（去重排序），只要存在一条启用的「参与 Auto」且当前可用的路由，列表里就有
+  `auto`；一条候选都没有时不列。
 - 鉴权只认 `Authorization: Bearer sk-yv-*`，与控制台 JWT 互不通用。错误体一律
   OpenAI 结构 `{"error": {"message", "type", "param", "code"}}`。凡产生日志行的
   响应都带 `X-Yangvis-Request-Id` 头（值为 `uuid4().hex`），报障凭它定位日志；
@@ -51,7 +54,10 @@
 | 密钥已停用 | 403 | `permission_error` | `key_disabled` |
 | 请求体不是合法 JSON / 不是对象 / 缺 `model` | 400 | `invalid_request_error` | `missing_model`（缺 model 时） |
 | 点名模型没有启用路由 | 404 | `model_not_found` | `model_not_found` |
-| auto 没有满足硬要求的候选 | 404 | `model_not_found` | `auto_model_not_found` |
+| 启用路由全部已过有效期 | 403 | `permission_error` | `model_expired` |
+| 启用路由 token 额度全部用尽 | 429 | `insufficient_quota` | `model_quota_exceeded` |
+| 启用路由分别到期、超额（混合全灭） | 429 | `insufficient_quota` | `model_unavailable` |
+| auto 没有满足硬要求的候选 | 404 | `model_not_found` | `auto_model_not_found`（另有 N 条被限制挡掉时文案带出计数） |
 | 入站带着网关戳（回环） | 508 | `server_error` | `gateway_loop_detected` |
 | 上游全部连不上 | 502 | `upstream_error` | —（网关生成的错误体） |
 | 上游返回 4xx/5xx | 原状态码 | 原样透传上游错误体，不重写 |
@@ -78,6 +84,25 @@ SSE 一旦开始往客户端写，就没法把已经吐出去的半截回答收�
 `{"include_usage": true}` 好从收尾帧里拿 token 数；个别上游不认这个字段回 400/422 且
 错误体提到 `stream_options`，就在**同一条通道**上撤掉该字段重发一次（不算通道故障、
 不进 attempts），而不是误判整条通道不可用。
+
+### 有效期与额度为什么挂在「路由」上，判定又为什么是软的
+
+两个限制都长在 `ai_model_route` 行上，而不是对外模型名上：一条路由是「对外名 →
+某通道（账号）」，同名多通道时各通道往往是不同的上游账号，期限和配额本来就各算各的。
+于是到期/超额的语义与「停用」完全一致——在候选解析阶段被过滤，故障转移对调用方
+透明；只有同名路由**全部**不可用时才由网关拒绝（`routes_unavailable` 区分「没配」
+与「配了但全灭」）：到期 403、超额 429、混合 429，错误文案直接说明原因和已用量，
+调用方该做的是找管理员而不是换个名字重试。auto 候选池同一口径：被挡的路由不进池，
+决策快照多一个 `blocked` 计数，全灭时报错里能说出「另有 N 条被限制挡掉」。
+
+额度是**开始转发前**的软门槛，不做预扣：判定只读 `token_used >= token_quota`，
+实际消耗要等上游响应（或 SSE 收尾）里的 `usage` 回来才知道，并发请求可能轻微超出
+上限。用量按上游回报的 `total_tokens` 在 `persist` 里用 `token_used = token_used + n`
+原子自增（不经过 Python 读改写，避免并发互相覆盖），与调用日志、密钥计数同一个事务
+提交、一起回滚；上游报错（无 usage）不计量，客户端中途断开但已产生 usage 仍计量。
+`token_used` 是累计列，所以清理 `ai_call_log` 不会让额度「复活」。有效期是本地 naive
+墙上时间（与全库 `DATETIME`、`db_now()` 同口径），带时区的入参在 schema 层折成本地
+naive。
 
 ### 为什么分类失败退回规则，而不是新增一个故障点
 
@@ -137,17 +162,20 @@ rollback 后只打 error 日志。流式响应更特殊：落库发生在 `relay
 
 | 位置 | 职责 |
 | --- | --- |
-| `backend/app/services/ai_gateway/service.py` | 「管」：密钥生成/散列/ Bearer 解析、`normalize_base_url` 自环校验、`resolve_candidates` / `auto_routes` / `list_public_models` 候选查询、`AiGatewayService`（通道/路由/密钥 CRUD、日志过滤分页与清理、stats/overview 聚合）、`truncate_text`、`write_call_log`；端点常量、`AUTO_MODEL_NAME` 也定义在此 |
-| `backend/app/services/ai_gateway/proxy.py` | 「通」：`GatewayError`（OpenAI 错误体）、`CallRecord` 记账本、候选挑选与 auto 入口、`forward_json` / `open_stream` / `relay_stream`、故障转移白名单与 hop 头、SSE 旁路解析 `StreamAccumulator`、usage/缓存命中提取、`persist`、通道连通性 `test_channel` |
-| `backend/app/services/ai_gateway/auto.py` | 「选」：请求特征规则（`has_image` / `wants_tools` / `required_tags`）、待分类文本与分类 prompt、回答解析 `parse_task_kind`、`_feasible` 严格筛选、`resolve_auto` 稳定排序与决策快照；本模块不发网络请求，分类器由 proxy 注入 |
+| `backend/app/services/ai_gateway/service.py` | 「管」：密钥生成/散列/ Bearer 解析、`normalize_base_url` 自环校验、`_active_route_rows` / `resolve_candidates` / `auto_routes` / `list_public_models` 候选查询（统一过滤停用与到期/超额）、`route_limit_reason` / `routes_unavailable` 限制判定与「全灭」解释、`accrue_route_tokens` 原子累加用量、`AiGatewayService`（通道/路由/密钥 CRUD、日志过滤分页与清理、stats/overview 聚合）、`truncate_text`、`write_call_log`；端点常量、`AUTO_MODEL_NAME` 也定义在此 |
+| `backend/app/services/ai_gateway/proxy.py` | 「通」：`GatewayError`（OpenAI 错误体）、`CallRecord` 记账本（`route_id`）、候选挑选与 auto 入口（全灭转 403/429）、`forward_json` / `open_stream` / `relay_stream`、故障转移白名单与 hop 头、SSE 旁路解析 `StreamAccumulator`、usage/缓存命中提取、`persist`（顺带回填路由 token_used）、通道连通性 `test_channel` |
+| `backend/app/services/ai_gateway/auto.py` | 「选」：请求特征规则（`has_image` / `wants_tools` / `required_tags`）、待分类文本与分类 prompt、回答解析 `parse_task_kind`、`_feasible` 严格筛选 + `_blocked_feasible` 限制计数、`resolve_auto` 稳定排序与决策快照；本模块不发网络请求，分类器由 proxy 注入 |
 | `backend/app/routers/ai_gateway.py` | 管理端 `/api/ai-gateway/*`：路由级 `Depends(require_admin)`；ValueError→400、LookupError→404；概览地址按 `X-Forwarded-Proto`/Host 推导 |
 | `backend/app/routers/ai_gateway_openai.py` | 对外 `/v1` 三端点：`_reject_loop` / `_authenticate` / `_read_body` 前置；OpenAI 错误结构、`X-Yangvis-Request-Id`；models 与分类请求不落日志 |
-| `backend/app/models/entities.py` | `AiChannel`（api_key_enc Fernet、protocol 预留、测试结论三字段）、`AiModelRoute`（唯一约束 `(model_name, channel_id)`、priority、auto_eligible/auto_tags）、`AiApiKey`（key_hash 唯一、key_prefix、计数）、`AiCallLog`（名称快照、auto_route、attempts、token/缓存/耗时/首字/IP/正文） |
-| `backend/app/models/schemas.py` | `AiModelCapability` / `AiModelTaskKind` 枚举与 `AI_AUTO_TAGS` 词表（拼写错标签直接 422，避免「永远选不上且无方向排查」）、各 Create/Update/Item  schema、`AiCallLogItem`（无正文大字段）/ `AiCallLogDetail`、`AiStats*`、`AiGatewayOverview` |
+| `backend/app/models/entities.py` | `AiChannel`（api_key_enc Fernet、protocol 预留、测试结论三字段）、`AiModelRoute`（唯一约束 `(model_name, channel_id)`、priority、`expires_at` / `token_quota` / `token_used`、auto_eligible/auto_tags）、`AiApiKey`（key_hash 唯一、key_prefix、计数）、`AiCallLog`（名称快照、auto_route、attempts、token/缓存/耗时/首字/IP/正文） |
+| `backend/app/models/schemas.py` | `AiModelCapability` / `AiModelTaskKind` 枚举与 `AI_AUTO_TAGS` 词表（拼写错标签直接 422，避免「永远选不上且无方向排查」）、各 Create/Update/Item schema（有效期折本地 naive、额度 ≥1、Item 带实时 `limit_reason`）、`AiCallLogItem`（无正文大字段）/ `AiCallLogDetail`、`AiStats*`、`AiGatewayOverview` |
+| `backend/app/bootstrap.py` | `migrate_schema` 对已存在的 `ai_model_route` 幂等补 `expires_at DATETIME NULL`、`token_quota BIGINT NULL`、`token_used BIGINT NOT NULL DEFAULT 0`；新库由 `create_all` 直接建成 |
 | `backend/app/config.py` | 9 个 `AI_GATEWAY_*` 设置（见配置节） |
 | `docs/schema.sql` | 四张表的 MySQL DDL（`ai_channel` / `ai_model_route` / `ai_api_key` / `ai_call_log`） |
 | `backend/app/services/dashboard.py` | 首页管理员卡片：通道总数、今日调用数、今日 token（自然日零点起，全局口径，仅管理员） |
-| `frontend/src/views/AiGateway.vue` | 五个页签整页；非管理员显示 403 结果页；能力/任务两个多选底下绑同一个 `auto_tags` 数组；前端先拦一次保留名 `auto`；日志抽屉渲染决策标签与 attempts 表、缓存命中率 |
+| `frontend/src/views/AiGateway.vue` | 五个页签整页；非管理员显示 403 结果页；能力/任务两个多选底下绑同一个 `auto_tags` 数组；前端先拦一次保留名 `auto`；路由表单的有效期（日期时间选择器，留空不限）与额度（留空
+不限，编辑时显示已用）、表格「有效期 / 额度」列按 `limit_reason` 红色标记到期/超额；
+日志抽屉渲染决策标签与 attempts 表、缓存命中率 |
 | `frontend/src/api/ai-gateway.ts` | `aiGatewayApi`：管理端全部接口与 TS 类型（含 `AiAutoTag`） |
 
 ### 一次转发的生命周期（chat/completions）
@@ -157,10 +185,12 @@ rollback 后只打 error 日志。流式响应更特殊：落库发生在 `relay
    OpenAI 错误体，**不建 record、不写日志、不带 request id**。
 2. **建账**：`_prepare` 生成 `request_id`，记 `client_ip`、model、stream，请求体以
    紧凑 JSON（`ensure_ascii=False`）存进 `request_body`。
-3. **选路**：点名模型走 `resolve_candidates`（join 通道，路由与通道都启用，按
-   priority、id 升序），截断到 `MAX_ATTEMPTS`，空则 404 `model_not_found`；
-   `auto` 走下一节的流程，空候选 404 `auto_model_not_found`。网关自身的拒绝也落
-   日志并带 request id。
+3. **选路**：点名模型走 `resolve_candidates`（join 通道，路由与通道都启用、未到期、
+   额度未满，按 priority、id 升序），截断到 `MAX_ATTEMPTS`；候选为空时先问
+   `routes_unavailable`——压根没配是 404 `model_not_found`，配了但全部到期/超额是
+   403 `model_expired` / 429 `model_quota_exceeded` / 429 `model_unavailable`。
+   `auto` 走下一节的流程，空候选 404 `auto_model_not_found`（文案带被限制挡住的条数）。
+   网关自身的拒绝也落日志并带 request id。
 4. **转发**：请求体的 `model` 改写成 `upstream_model`；出站头只有
    `Authorization: Bearer <通道密钥>`、`Content-Type` 和 hop 头，调用方其余头不透传。
    非流式逐个候选尝试；流式先建流再透传（成功响应头阶段仍可换通道）。
@@ -169,7 +199,8 @@ rollback 后只打 error 日志。流式响应更特殊：落库发生在 `relay
    流式由 `StreamAccumulator` 旁路逐行解析 SSE（按 `\n` 分包容忍 TCP 切断与非 JSON
    噪声行），首个 chunk 到达记 `first_token_ms`，透传字节本身不重新序列化。
    embeddings 只存 `{count, dimensions, model}` 摘要，几万维向量不入库。
-6. **落库**：`persist` 用独立 session 回填密钥计数并写 `ai_call_log`；正文按
+6. **落库**：`persist` 用独立 session 回填密钥计数、把本次 `total_tokens` 原子累加进
+   应答路由的 `token_used`（与日志同事务，失败一起回滚），并写 `ai_call_log`；正文按
    `AI_GATEWAY_LOG_MAX_CHARS` 截断并追加 `…[已截断]`，`AI_GATEWAY_LOG_PAYLOAD=false`
    时两个正文字段直接为 NULL。上游错误体（非流式/建流失败）原样回给调用方。
 
@@ -181,13 +212,14 @@ rollback 后只打 error 日志。流式响应更特殊：落库发生在 `relay
    历史里有 `role:"tool"` 或 assistant 的 `tool_calls` 加 `tools`（空 `tools` 数组
    不算，很多客户端无脑带这个键）。畸形 body 不会让规则崩。
 3. **可行候选**：`auto_routes()` 的口径与 `resolve_candidates` 完全一致（同样要求
-   路由+通道双启用、同样 priority/id 排序），再用「auto_tags 包含全部硬要求」筛；
-   缺任一硬要求的路由不许「大概也行」地混进来。
+   路由+通道双启用、未被有效期/额度挡住、同样 priority/id 排序），再用「auto_tags
+   包含全部硬要求」筛；缺任一硬要求的路由不许「大概也行」地混进来。标签够格但被
+   限制挡住的条数由 `_blocked_feasible` 单独计数，进决策快照。
 4. **任务排序（可选一问）**：条件全满足时问优先级第一的候选一个词，回答按词表包含
    匹配（reasoning/code/translation/writing/general 的顺序认）；认出来则用 Python
    稳定排序把「声明了该任务标签」的候选整组提前，组内仍是 priority 说话。
-5. 决策快照 `{required, task, source, matched}` 在判空之前就挂到 record 上——404 的
-   日志也带着「要什么标签、池子里有几条」；真正应答（含故障转移后改道）时补
+5. 决策快照 `{required, task, source, matched, blocked}` 在判空之前就挂到 record 上
+   ——404 的日志也带着「要什么标签、池子里有几条、另有几条被限制挡住」；真正应答（含故障转移后改道）时补
    `resolved_model`，日志记的是「实际打了谁」。随后候选同样受 `MAX_ATTEMPTS` 截断、
    同样在池内故障转移。
 
@@ -240,7 +272,11 @@ rollback 后只打 error 日志。流式响应更特殊：落库发生在 `relay
     结论；自环拒绝时不改写原 base_url；路由必须挂在存在的通道上；候选按 priority
     排序并跳过停用路由/停用通道；upstream_model 映射与上游密钥解密；密钥生命周期；
     删通道级联删路由；日志过滤/关键字/分页倒序/统计四组聚合/清理；`write_call_log`
-    吞掉 commit 异常；overview 计数；`public_base_url` 两种 origin 口径。
+    吞掉 commit 异常；overview 计数；`public_base_url` 两种 origin 口径；
+    有效期/额度：未配限制全放行、到期高优先级路由被跳过但故障转移到有效路由、
+    全部到期→`model_expired` 且退出 `/v1/models`、额度 99 放行/100 挡（边界）、
+    到期+超额混合→`model_unavailable`、显式 null 清除限制、`accrue_route_tokens`
+    原子累加且路由已删时不抛异常。
 - `backend/tests/test_ai_gateway_proxy.py`（httpx.MockTransport 伪上游的端到端）：
   - 转发与留痕：打优先级首条、出站 Authorization 换成通道密钥且不含网关明文、
     hop 头值等于响应 request id、token 与缓存命中落库、密钥计数回填；
@@ -251,6 +287,10 @@ rollback 后只打 error 日志。流式响应更特殊：落库发生在 `relay
   - 404 `model_not_found` 也落日志且响应头能指回该行；缺头/错钥/JWT 三种 401 不写日志
     且不给 request id；停用密钥 403 `key_disabled`；带 hop 头入站回 508
     `gateway_loop_detected`、零出站、零日志；全部通道连接失败回 502 且两条尝试都在；
+  - 有效期/额度：到期的首选通道零命中直接转移到备用；两条全到期回 403
+    `model_expired`（落日志、零出站）；两条额度用尽回 429 `model_quota_exceeded`；
+    成功调用后 `token_used` 累加 18，随后的调用先转移再 429；auto 池全被限制挡住时
+    404 文案带「2 条」且 `auto` 退出 models 列表；
   - auto：带图只打 vision 路由且不发分类请求；先问最便宜路由再打 code 路由且全程只有
     一行日志；无 vision 候选回 404 `auto_model_not_found`（message 含缺失标签、
     matched=0）；池内 502 故障转移后 `resolved_model` 改写为实际应答者；有人勾选后

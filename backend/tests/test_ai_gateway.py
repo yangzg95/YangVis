@@ -5,6 +5,7 @@
 不在这里覆盖。
 """
 import json
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine
@@ -18,6 +19,7 @@ from app.models.schemas import (
     AiChannelCreate,
     AiChannelUpdate,
     AiModelRouteCreate,
+    AiModelRouteUpdate,
 )
 from app.services.ai_gateway import service as gateway
 from app.services.ai_gateway import proxy
@@ -26,6 +28,7 @@ from app.services.ai_gateway import (
     KEY_PREFIX,
     TRUNCATE_MARK,
     AiGatewayService,
+    accrue_route_tokens,
     display_prefix,
     extract_bearer_key,
     find_api_key,
@@ -35,6 +38,8 @@ from app.services.ai_gateway import (
     normalize_base_url,
     public_base_url,
     resolve_candidates,
+    route_limit_reason,
+    routes_unavailable,
     truncate_text,
     write_call_log,
 )
@@ -334,6 +339,149 @@ def test_route_maps_public_name_to_upstream_name(db):
     assert candidate.upstream_model == "doubao-pro-32k"
     # 上游密钥要能取出来（转发时换掉调用方那把网关钥匙），且只从密文解出。
     assert candidate.upstream_key == "upstream-key"
+
+
+# ---- 路由级有效期与 token 额度 ----------------------------------------------
+
+
+def test_route_without_limits_is_unrestricted(db):
+    service = AiGatewayService(db)
+    channel = _channel(db)
+    item = service.create_route(
+        AiModelRouteCreate(model_name="gpt-4o", channel_id=channel.id)
+    )
+    assert item.expires_at is None
+    assert item.token_quota is None
+    assert item.token_used == 0
+    assert item.limit_reason is None
+    assert len(resolve_candidates(db, "gpt-4o")) == 1
+
+
+def test_expired_route_is_skipped_but_fails_over_to_a_valid_one(db):
+    service = AiGatewayService(db)
+    primary = _channel(db, name="primary")
+    backup = _channel(db, name="backup")
+    past = datetime.now() - timedelta(hours=1)
+    future = datetime.now() + timedelta(days=1)
+
+    # 到期的这条优先级反而更高：必须像停用一样被跳过，而不是把请求带去然后失败。
+    service.create_route(
+        AiModelRouteCreate(model_name="gpt-4o", channel_id=primary.id, priority=50, expires_at=past)
+    )
+    service.create_route(
+        AiModelRouteCreate(model_name="gpt-4o", channel_id=backup.id, priority=200, expires_at=future)
+    )
+
+    assert [c.channel.name for c in resolve_candidates(db, "gpt-4o")] == ["backup"]
+    reasons = {item.channel_name: item.limit_reason for item in service.list_routes()}
+    assert reasons == {"primary": "expired", "backup": None}
+
+
+def test_routes_unavailable_distinguishes_not_configured_and_all_expired(db):
+    service = AiGatewayService(db)
+    assert routes_unavailable(db, "gpt-4o") is None
+
+    channel = _channel(db)
+    service.create_route(
+        AiModelRouteCreate(
+            model_name="gpt-4o",
+            channel_id=channel.id,
+            expires_at=datetime.now() - timedelta(minutes=1),
+        )
+    )
+    unavailable = routes_unavailable(db, "gpt-4o")
+    assert unavailable is not None
+    assert unavailable.code == "model_expired"
+    assert unavailable.expired == 1
+    # 全灭的模型名不该出现在对外模型列表里。
+    assert list_public_models(db) == []
+
+
+def test_token_quota_boundary_and_reason(db):
+    service = AiGatewayService(db)
+    channel = _channel(db)
+    item = service.create_route(
+        AiModelRouteCreate(model_name="gpt-4o", channel_id=channel.id, token_quota=100)
+    )
+    route = service.get_route(item.id)
+
+    route.token_used = 99
+    db.commit()
+    assert route_limit_reason(route) is None
+    assert len(resolve_candidates(db, "gpt-4o")) == 1
+
+    route.token_used = 100
+    db.commit()
+    assert route_limit_reason(service.get_route(route.id)) == "quota_exceeded"
+    assert resolve_candidates(db, "gpt-4o") == []
+
+    unavailable = routes_unavailable(db, "gpt-4o")
+    assert unavailable is not None
+    assert unavailable.code == "model_quota_exceeded"
+    assert unavailable.quota_exceeded == 1
+    assert "100" in unavailable.message
+
+
+def test_mixed_expired_and_quota_exhausted_reports_both(db):
+    service = AiGatewayService(db)
+    expired_channel = _channel(db, name="expired-co")
+    quota_channel = _channel(db, name="quota-co")
+    service.create_route(
+        AiModelRouteCreate(
+            model_name="gpt-4o",
+            channel_id=expired_channel.id,
+            expires_at=datetime.now() - timedelta(days=2),
+        )
+    )
+    quota_item = service.create_route(
+        AiModelRouteCreate(model_name="gpt-4o", channel_id=quota_channel.id, token_quota=10)
+    )
+    quota_route = service.get_route(quota_item.id)
+    quota_route.token_used = 10
+    db.commit()
+
+    unavailable = routes_unavailable(db, "gpt-4o")
+    assert unavailable is not None
+    assert unavailable.code == "model_unavailable"
+    assert (unavailable.expired, unavailable.quota_exceeded) == (1, 1)
+
+
+def test_updating_route_clears_limits_with_explicit_null(db):
+    service = AiGatewayService(db)
+    channel = _channel(db)
+    item = service.create_route(
+        AiModelRouteCreate(
+            model_name="gpt-4o",
+            channel_id=channel.id,
+            expires_at=datetime.now() - timedelta(hours=1),
+            token_quota=10,
+        )
+    )
+    assert routes_unavailable(db, "gpt-4o") is not None
+
+    updated = service.update_route(item.id, AiModelRouteUpdate(expires_at=None, token_quota=None))
+    assert updated.expires_at is None
+    assert updated.token_quota is None
+    assert updated.limit_reason is None
+    assert len(resolve_candidates(db, "gpt-4o")) == 1
+
+
+def test_accrue_route_tokens_increments_and_tolerates_missing_route(db):
+    service = AiGatewayService(db)
+    channel = _channel(db)
+    item = service.create_route(
+        AiModelRouteCreate(model_name="gpt-4o", channel_id=channel.id, token_quota=100)
+    )
+
+    accrue_route_tokens(db, item.id, 18)
+    accrue_route_tokens(db, item.id, 0)  # 0 与负数都是空操作
+    db.commit()
+    assert service.get_route(item.id).token_used == 18
+
+    # 路由删掉后再记账不能抛异常，调用日志照常落库。
+    accrue_route_tokens(db, 9999, 18)
+    db.commit()
+    assert service.get_route(item.id).token_used == 18
 
 
 def test_key_lifecycle(db):

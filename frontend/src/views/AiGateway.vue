@@ -201,6 +201,20 @@
             <template v-else-if="column.key === 'upstream_model'">
               <code class="mono">{{ record.upstream_model || record.model_name }}</code>
             </template>
+            <template v-else-if="column.key === 'limit'">
+              <div class="limit-cell">
+                <a-tag v-if="record.expires_at" :color="record.limit_reason === 'expired' ? 'error' : 'default'">
+                  有效期至 {{ formatTime(record.expires_at) }}
+                </a-tag>
+                <a-tag
+                  v-if="record.token_quota != null"
+                  :color="record.limit_reason === 'quota_exceeded' ? 'error' : 'default'"
+                >
+                  额度 {{ formatNumber(record.token_used) }} / {{ formatNumber(record.token_quota) }}
+                </a-tag>
+                <span v-if="!record.expires_at && record.token_quota == null" class="hint">不限</span>
+              </div>
+            </template>
             <template v-else-if="column.key === 'auto'">
               <a-space v-if="record.auto_eligible" :size="4" wrap>
                 <a-tag color="processing">参与 Auto</a-tag>
@@ -460,6 +474,29 @@
           <a-input-number v-model:value="routeModal.form.priority" :min="0" :max="9999" />
           <div class="hint">数字越小越先尝试；同名多通道时构成故障转移顺序。</div>
         </a-form-item>
+        <a-form-item label="有效期至">
+          <a-date-picker
+            v-model:value="routeModal.form.expires_at"
+            show-time
+            value-format="YYYY-MM-DD HH:mm:ss"
+            placeholder="留空表示长期有效"
+            style="width: 100%"
+          />
+          <div class="hint">到期后这条路由不再参与转发；同名还有其他通道时自动转移过去。</div>
+        </a-form-item>
+        <a-form-item label="Token 额度">
+          <a-input-number
+            v-model:value="routeModal.form.token_quota"
+            :min="1"
+            placeholder="留空表示不限制"
+            style="width: 100%"
+          />
+          <div class="hint">
+            该通道累计 total_tokens 上限，按上游回报累加；
+            <template v-if="routeModal.id">已用 {{ formatNumber(routeModal.form.token_used) }}，</template>
+            用尽后跳过这条路由。
+          </div>
+        </a-form-item>
         <a-form-item label="启用">
           <a-switch v-model:checked="routeModal.form.enabled" />
         </a-form-item>
@@ -669,6 +706,23 @@ function formatTime(value: string | null): string {
   return value ? new Date(value).toLocaleString() : '—'
 }
 
+function formatNumber(value: number): string {
+  return value.toLocaleString()
+}
+
+// 后端给的是 ISO 字符串，日期选择器按 valueFormat 要 'YYYY-MM-DD HH:mm:ss'，
+// 统一走本地时间转换（与后端 db_now 的本地 naive 口径一致）。
+function toPickerValue(iso: string | null): string | null {
+  if (!iso) return null
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return null
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  )
+}
+
 // ---- 概览 -------------------------------------------------------------------
 
 const stats = ref<AiStats | null>(null)
@@ -853,6 +907,7 @@ const routeColumns = [
   { title: '通道', key: 'channel_name', width: 160 },
   { title: '上游模型名', key: 'upstream_model', width: 220 },
   { title: '优先级', dataIndex: 'priority', width: 90 },
+  { title: '有效期 / 额度', key: 'limit', width: 230 },
   { title: 'Auto 定义', key: 'auto', width: 240 },
   { title: '启用', key: 'enabled', width: 80 },
   { title: '备注', dataIndex: 'remark', ellipsis: true },
@@ -913,6 +968,11 @@ const emptyRouteForm = () => ({
   priority: 100,
   enabled: true,
   remark: '',
+  // 日期选择器按 valueFormat 绑定字符串；null = 留空不限制。
+  expires_at: null as string | null,
+  token_quota: null as number | null,
+  // 仅编辑时展示已用量，不参与提交。
+  token_used: 0,
   auto_eligible: false,
   auto_tags: ['chat'] as string[],
 })
@@ -954,6 +1014,9 @@ function openRoute(route?: AiModelRouteItem) {
         priority: route.priority,
         enabled: route.enabled,
         remark: route.remark ?? '',
+        expires_at: toPickerValue(route.expires_at),
+        token_quota: route.token_quota,
+        token_used: route.token_used,
         auto_eligible: route.auto_eligible,
         auto_tags: [...(route.auto_tags ?? [])],
       }
@@ -995,6 +1058,8 @@ async function submitRoute() {
       priority: form.priority,
       enabled: form.enabled,
       remark: form.remark || null,
+      expires_at: form.expires_at || null,
+      token_quota: form.token_quota ?? null,
       auto_eligible: form.auto_eligible,
       auto_tags: form.auto_eligible ? (form.auto_tags as AiAutoTag[]) : null,
     }
@@ -1270,6 +1335,13 @@ onMounted(async () => {
 }
 .text-danger {
   color: var(--danger);
+}
+/* 有效期与额度两行标签竖着排，长文案不把表格撑宽。 */
+.limit-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
 }
 
 /* ---- 概览 ---- */

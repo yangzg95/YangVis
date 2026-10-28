@@ -34,7 +34,10 @@ from app.services.ai_gateway.service import (  # noqa: F401 - 端点常量在这
     EMBEDDINGS_ENDPOINT,
     MODELS_ENDPOINT,
     RouteCandidate,
+    RoutesUnavailable,
+    accrue_route_tokens,
     resolve_candidates,
+    routes_unavailable,
     truncate_text,
     write_call_log,
 )
@@ -99,6 +102,8 @@ class CallRecord:
     channel_id: Optional[int] = None
     channel_name: Optional[str] = None
     upstream_model: Optional[str] = None
+    # 真正应答的那条路由 id；额度按它的 token_used 累加。故障转移时随 use() 覆盖。
+    route_id: Optional[int] = None
     # Auto 的决策快照（要什么标签、判成什么任务、最终落到哪个模型名）；点名模型时为空。
     auto_route: Optional[Dict[str, Any]] = None
     attempts: List[Dict[str, Any]] = field(default_factory=list)
@@ -128,6 +133,7 @@ class CallRecord:
         self.channel_id = candidate.channel.id
         self.channel_name = candidate.channel.name
         self.upstream_model = candidate.upstream_model
+        self.route_id = candidate.route.id
         if self.auto_route is not None:
             self.auto_route = {**self.auto_route, "resolved_model": candidate.route.model_name}
 
@@ -172,6 +178,10 @@ def persist(record: CallRecord) -> None:
             if row is not None:
                 row.call_count = (row.call_count or 0) + 1
                 row.last_used_at = datetime.now()
+        # 额度和日志同生共死：都属于「留痕」，写不进一起回滚，绝不能拖垮调用。
+        # total_tokens 为 0（上游报错 / 没报 usage）时是空操作。
+        if record.route_id is not None:
+            accrue_route_tokens(db, record.route_id, record.total_tokens)
         write_call_log(db, record.to_entity())
 
 
@@ -372,6 +382,22 @@ async def _classify_task(
     return auto.parse_task_kind(extract_chat_content(payload))
 
 
+# 「全灭」原因到 OpenAI 风格错误的映射：到期是 403（资源不再可用），额度用尽是
+# 429（insufficient_quota）。状态码只面向调用方，明细文案照样进调用日志。
+_UNAVAILABLE_STATUS = {
+    "model_expired": (403, "permission_error"),
+    "model_quota_exceeded": (429, "insufficient_quota"),
+    "model_unavailable": (429, "insufficient_quota"),
+}
+
+
+def _unavailable_error(unavailable: RoutesUnavailable) -> GatewayError:
+    status, error_type = _UNAVAILABLE_STATUS.get(
+        unavailable.code, (429, "insufficient_quota")
+    )
+    return GatewayError(status, unavailable.message, error_type=error_type, code=unavailable.code)
+
+
 async def _pick_candidates(
     db: Session, record: CallRecord, body: Dict[str, Any]
 ) -> List[RouteCandidate]:
@@ -387,9 +413,12 @@ async def _pick_candidates(
         record.auto_route = decision
         if not candidates:
             required = "、".join(decision["required"])
+            tail = ""
+            if decision.get("blocked"):
+                tail = f"；另有 {decision['blocked']} 条路由因到期或 token 额度用尽被跳过"
             raise GatewayError(
                 404,
-                f"Auto 找不到能处理这次请求的模型：需要标签 {required}。"
+                f"Auto 找不到能处理这次请求的模型：需要标签 {required}{tail}。"
                 "请在模型路由里勾选「参与 Auto」并为该模型定义这些能力",
                 error_type="model_not_found",
                 code="auto_model_not_found",
@@ -398,6 +427,11 @@ async def _pick_candidates(
 
     candidates = resolve_candidates(db, record.model)[: settings.AI_GATEWAY_MAX_ATTEMPTS]
     if not candidates:
+        # 区分「根本没配」和「配了但全部到期/超额」：后者调用方该去续期，而不是
+        # 换个模型名重试。
+        unavailable = routes_unavailable(db, record.model)
+        if unavailable is not None:
+            raise _unavailable_error(unavailable)
         raise GatewayError(
             404,
             f"模型 {record.model} 未在网关中配置，或对应通道已停用",

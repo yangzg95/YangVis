@@ -4,6 +4,7 @@
 SSE 透传与调用留痕走的都是真实代码路径。
 """
 import json
+from datetime import datetime, timedelta
 
 import httpx
 import pytest
@@ -14,7 +15,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
-from app.models.entities import AiApiKey, AiCallLog
+from app.models.entities import AiApiKey, AiCallLog, AiChannel, AiModelRoute
 from app.models.schemas import AiApiKeyUpdate, AiChannelCreate, AiModelRouteCreate
 from app.routers import ai_gateway_openai
 from app.services.ai_gateway import proxy
@@ -338,6 +339,130 @@ def test_models_lists_only_enabled_routes(env):
     payload = response.json()
     assert payload["object"] == "list"
     assert sorted(item["id"] for item in payload["data"]) == ["alias-1", "gpt-4o"]
+
+
+def _limit_gpt4o(Session, *, channel_name: str | None = None, **values) -> None:
+    """直接改 gpt-4o 的路由配置；不指定通道时两条候选一起改。"""
+    with Session() as db:
+        stmt = select(AiModelRoute).where(AiModelRoute.model_name == "gpt-4o")
+        if channel_name:
+            stmt = stmt.join(AiChannel, AiChannel.id == AiModelRoute.channel_id).where(
+                AiChannel.name == channel_name
+            )
+        for route in db.scalars(stmt):
+            for key, value in values.items():
+                setattr(route, key, value)
+        db.commit()
+
+
+def _chat(client, plain, model="gpt-4o"):
+    return client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {plain}"},
+        json={"model": model, "messages": [{"role": "user", "content": "你好"}]},
+    )
+
+
+def test_expired_primary_fails_over_to_backup(env):
+    client, Session, plain, install = env
+    _limit_gpt4o(
+        Session, channel_name="primary", expires_at=datetime.now() - timedelta(hours=1)
+    )
+    seen = install(lambda request: _ok_json(json.loads(request.content)["model"]))
+
+    response = _chat(client, plain)
+
+    assert response.status_code == 200
+    # 到期的 primary 一次都不能打，直接走 backup。
+    assert len(seen) == 1
+    assert str(seen[0].url).startswith(BACKUP)
+
+
+def test_all_routes_expired_returns_403(env):
+    client, Session, plain, install = env
+    _limit_gpt4o(Session, expires_at=datetime.now() - timedelta(minutes=1))
+
+    def must_not_call(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"过期路由不该触达上游：{request.url}")
+
+    seen = install(must_not_call)
+    response = _chat(client, plain)
+
+    assert response.status_code == 403
+    error = response.json()["error"]
+    assert error["code"] == "model_expired"
+    assert error["type"] == "permission_error"
+    assert seen == []
+
+    with Session() as db:
+        log = db.scalar(select(AiCallLog))
+        assert log.success is False
+        assert log.status_code == 403
+        assert log.channel_id is None
+        assert response.headers["X-Yangvis-Request-Id"] == log.request_id
+
+
+def test_quota_exhausted_returns_429_and_is_not_retried(env):
+    client, Session, plain, install = env
+    # 两条候选都只剩 0 可用额度：换通道也没用，一次上游都不该打。
+    _limit_gpt4o(Session, token_quota=1, token_used=1)
+    seen = install(lambda request: _ok_json("gpt-4o"))
+
+    response = _chat(client, plain)
+
+    assert response.status_code == 429
+    error = response.json()["error"]
+    assert error["code"] == "model_quota_exceeded"
+    assert error["type"] == "insufficient_quota"
+    assert seen == []
+
+
+def test_consumed_tokens_accrue_then_block_the_next_call(env):
+    client, Session, plain, install = env
+    seen = install(lambda request: _ok_json(json.loads(request.content)["model"]))
+
+    assert _chat(client, plain).status_code == 200
+    with Session() as db:
+        route = db.scalar(
+            select(AiModelRoute)
+            .join(AiChannel, AiChannel.id == AiModelRoute.channel_id)
+            .where(AiModelRoute.model_name == "gpt-4o", AiChannel.name == "primary")
+        )
+        # _ok_json 里上游回报 total_tokens=18，必须累加进应答那条路由的额度账。
+        assert route.token_used == 18
+
+    # primary 已用满，本次故障转移到 backup。
+    _limit_gpt4o(Session, token_quota=18)
+    response = _chat(client, plain)
+    assert response.status_code == 200
+    assert str(seen[-1].url).startswith(BACKUP)
+
+    # 两条都到顶：再调就是 429。
+    response = _chat(client, plain)
+    assert response.status_code == 429
+    assert response.json()["error"]["code"] == "model_quota_exceeded"
+
+
+def test_auto_pool_exhausted_reports_blocked_count(env):
+    client, Session, plain, install = env
+    install(lambda request: _ok_json("gpt-4o"))
+    with Session() as db:
+        for route in db.scalars(select(AiModelRoute).where(AiModelRoute.model_name == "gpt-4o")):
+            route.auto_eligible = True
+            route.auto_tags = ["chat"]
+            route.token_quota = 1
+            route.token_used = 1
+        db.commit()
+
+    response = _chat(client, plain, model="auto")
+    assert response.status_code == 404
+    error = response.json()["error"]
+    assert error["code"] == "auto_model_not_found"
+    assert "2 条" in error["message"]
+
+    # auto 候选池空了就不该再出现在模型列表里；点名 gpt-4o 同样被额度挡住。
+    models = client.get("/v1/models", headers={"Authorization": f"Bearer {plain}"}).json()["data"]
+    assert "auto" not in {item["id"] for item in models}
 
 
 def test_unknown_model_is_rejected(env):

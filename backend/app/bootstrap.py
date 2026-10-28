@@ -331,11 +331,15 @@ def migrate_schema() -> None:
         logger.info("added mcp_server.tools_snapshot")
 
     # Auto 模型：路由上的「对模型的定义」与日志上的决策快照。
+    # 路由级有效期与 token 额度：留空即不限制，token_used 随调用日志累加。
     route_columns = _column_names("ai_model_route")
     if route_columns:
         for column, ddl in (
             ("auto_eligible", "ADD COLUMN auto_eligible TINYINT(1) NOT NULL DEFAULT 0"),
             ("auto_tags", "ADD COLUMN auto_tags JSON NULL"),
+            ("expires_at", "ADD COLUMN expires_at DATETIME NULL"),
+            ("token_quota", "ADD COLUMN token_quota BIGINT NULL"),
+            ("token_used", "ADD COLUMN token_used BIGINT NOT NULL DEFAULT 0"),
         ):
             if column in route_columns:
                 continue

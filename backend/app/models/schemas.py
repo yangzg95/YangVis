@@ -2380,6 +2380,20 @@ class AiApiKeyCreated(BaseModel):
     api_key: str
 
 
+def _naive_local_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    """把带时区的有效期折成服务器本地 naive，与 ``db_now()`` 同口径。
+
+    库里的 DATETIME 全是本地墙上时间（见 :mod:`app.timeutil`）；前端控件给的是
+    不带偏移的字符串，直接放行，只有显式带时区的值才需要折一道，否则和
+    ``db_now()`` 比大小会错开 8 小时。
+    """
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        value = value.astimezone().replace(tzinfo=None)
+    return value
+
+
 def _normalize_auto_tags(tags: Optional[List[str]]) -> Optional[List[str]]:
     """去空白、转小写、去重，并拒绝词表之外的标签。
 
@@ -2409,11 +2423,15 @@ class AiModelRouteCreate(BaseModel):
     priority: int = Field(default=100, ge=0, le=9999)
     enabled: bool = True
     remark: Optional[str] = Field(default=None, max_length=512)
+    # 有效期截止时刻与 token 总额度：都可选，留空（null）表示不限制。
+    expires_at: Optional[datetime] = None
+    token_quota: Optional[int] = Field(default=None, ge=1)
     # 参与 Auto 路由：进入 model=auto 的候选池。
     auto_eligible: bool = False
     auto_tags: Optional[List[str]] = None
 
     _clean_tags = field_validator("auto_tags")(_normalize_auto_tags)
+    _naive_expires = field_validator("expires_at")(_naive_local_datetime)
 
 
 class AiModelRouteUpdate(BaseModel):
@@ -2425,10 +2443,14 @@ class AiModelRouteUpdate(BaseModel):
     priority: Optional[int] = Field(default=None, ge=0, le=9999)
     enabled: Optional[bool] = None
     remark: Optional[str] = Field(default=None, max_length=512)
+    # 显式传 null 表示清除限制；字段没出现在请求里才是「不动」。
+    expires_at: Optional[datetime] = None
+    token_quota: Optional[int] = Field(default=None, ge=1)
     auto_eligible: Optional[bool] = None
     auto_tags: Optional[List[str]] = None
 
     _clean_tags = field_validator("auto_tags")(_normalize_auto_tags)
+    _naive_expires = field_validator("expires_at")(_naive_local_datetime)
 
 
 class AiModelRouteItem(BaseModel):
@@ -2442,6 +2464,11 @@ class AiModelRouteItem(BaseModel):
     priority: int = 100
     enabled: bool = True
     remark: Optional[str] = None
+    expires_at: Optional[datetime] = None
+    token_quota: Optional[int] = None
+    token_used: int = 0
+    # 服务端按当前时刻算出的限制状态：null=未受限，expired / quota_exceeded。
+    limit_reason: Optional[str] = None
     auto_eligible: bool = False
     auto_tags: Optional[List[str]] = None
     created_at: datetime
