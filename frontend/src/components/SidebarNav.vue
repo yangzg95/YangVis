@@ -32,6 +32,8 @@
             <span class="sidebar-menu-label">{{ node.title }}</span>
           </template>
           <a-menu-item v-for="child in node.children" :key="child.path">
+            <!-- 子项缺图标时回退父级图标，与顶栏标签页的 LEAVES 兜底口径一致。 -->
+            <component :is="child.icon ?? node.icon" />
             <span class="sidebar-menu-label">{{ child.title }}</span>
           </a-menu-item>
         </a-sub-menu>
@@ -51,7 +53,7 @@
 export interface MenuChild {
   path: string
   title: string
-  /** 可选；缺省时标签页会回退用父级的图标。 */
+  /** 可选；缺省时侧栏子项与顶栏标签页都会回退用父级的图标。 */
   icon?: unknown
   /** 只对管理员显示。真正的权限判定在后端。 */
   adminOnly?: boolean

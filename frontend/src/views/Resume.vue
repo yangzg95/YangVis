@@ -336,11 +336,6 @@
       <a-tab-pane key="notes" tab="笔记">
         <NotesPanel />
       </a-tab-pane>
-
-      <!-- ================= 面试记录 ================= -->
-      <a-tab-pane key="interviews" tab="面试记录">
-        <InterviewRecords />
-      </a-tab-pane>
     </a-tabs>
 
     <!-- ================= 上传弹窗 ================= -->
@@ -587,7 +582,6 @@ import {
 import { saveBlobResponse } from '@/utils/download'
 import { fmtSize } from '@/utils/format'
 import { useIsMobile } from '@/utils/useIsMobile'
-import InterviewRecords from '@/components/InterviewRecords.vue'
 import NotesPanel from '@/components/NotesPanel.vue'
 import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
 

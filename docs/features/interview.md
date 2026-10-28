@@ -1,6 +1,7 @@
 # 智能办公 · 面试记录
 
-「简历」页最后一个 tab「面试记录」。一场面试一条记录（公司、岗位、日期、轮次、结果、
+侧栏「AI 应用 → 面试」页（路由 `/office/interviews`；早期版本是「简历」页里的
+「面试记录」tab，因实体与接口完全独立而拆出）。一场面试一条记录（公司、岗位、日期、轮次、结果、
 整场复盘备注）加一份问题清单；问题由用户手工录入（可附「我当时的回答」与备注），
 每题可点「生成参考答案」让 AI 后台产出一段 markdown 答案。问题明细在新开标签页的整页
 详情（`/office/interview/:id`，`bare` 路由）里处理，列表只管场次元数据。
@@ -58,8 +59,8 @@ questions 会被三处并发写：`PUT /interviews/{id}` 只改元数据、根�
 
 ### 面试记录与简历/报告没有数据关联
 
-它只是同挂在「简历」页（求职办公域）的独立记录本，没有任何指向 Resume/报告的外键或
-引用；参考答案的背景只来自该场记录的公司、岗位、轮次与本题的「我的回答」。详情页做成
+它是求职办公域里与简历平级的独立记录本，没有任何指向 Resume/报告的外键或引用；
+参考答案的背景只来自该场记录的公司、岗位、轮次与本题的「我的回答」。详情页做成
 bare 整页新标签页，与报告页同一外壳模式（无侧边栏、max-width 960px）。
 
 ### owner 隔离在 service 层收口
@@ -79,11 +80,12 @@ owner，删除闸门读的是运行状态而不是 JSON 标记。
 | `backend/app/services/workflows/builtin.py` | 内置工作流 `interview-answer`：单步骤，agent `interview-answerer`，输入 company/position/round_note/question/answer_note |
 | `backend/app/services/agents.py` | 内置人设 `interview-answerer`「面试答题教练」，`chat_visible=false` |
 | `backend/app/services/workflows/__init__.py` | `SUBJECT_INTERVIEW_QUESTION = "interview-question"` |
-| `frontend/src/components/InterviewRecords.vue` | 列表 tab：筛选、场次新增/编辑/删除弹窗、详情新开标签页 |
+| `frontend/src/views/Interviews.vue` | 面试页外壳（page-card + 标题），渲染 InterviewRecords |
+| `frontend/src/components/InterviewRecords.vue` | 场次列表：筛选、新增/编辑/删除弹窗、详情新开标签页 |
 | `frontend/src/views/InterviewDetailView.vue` | bare 整页详情：元数据展示/编辑、题目添加与内联编辑、生成与 2.5s 轮询、运行记录抽屉 |
 | `frontend/src/components/WorkflowRunsDrawer.vue` | 按 subject（interview-question + qid）看该题运行流水 |
 | `frontend/src/api/interview.ts` | `interviewApi`：list/create/detail/update/remove、add/update/removeQuestion、generateAnswer |
-| `frontend/src/router/index.ts` | `/office/interview/:id(\\d+)`，name `InterviewDetail`，`bare: true` |
+| `frontend/src/router/index.ts` | `/office/interviews`（列表，name `Interviews`）与 `/office/interview/:id(\\d+)`（name `InterviewDetail`，`bare: true`） |
 
 ## 接口
 

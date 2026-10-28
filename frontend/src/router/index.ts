@@ -14,9 +14,9 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/Home.vue'),
         meta: {title: '首页'},
     },
-    // 以下顺序就是侧栏菜单的叶子顺序：智能体 / 工作流 / 知识库 / 对话 / 简历 / 幻灯片 /
-    // 服务器 / 数据库 / 系统。分组 key（/build、/apps）只是 a-menu 的标识、不是路由，
-    // 也不要求与叶子前缀一致——/knowledge 与 /office/* 各自带历史前缀，保持不动。
+    // 以下顺序就是侧栏菜单的叶子顺序：智能体 / 工作流 / 工具 / 知识库 / 对话 / 简历 /
+    // 面试 / 幻灯片 / 服务器 / 数据库 / 系统。分组 key（/build、/apps）只是 a-menu 的标识、
+    // 不是路由，也不要求与叶子前缀一致——/knowledge 与 /office/* 各自带历史前缀，保持不动。
     {
         path: '/agents',
         name: 'Agents',
@@ -65,16 +65,20 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '运行对比'},
     },
     {
+        // 工具页：MCP 服务与本地工具两个页签合并在一页（views/Tools.vue）。
+        // 旧路径重定向过来，书签和外发链接不会 404。
+        path: '/tools',
+        name: 'Tools',
+        component: () => import('@/views/Tools.vue'),
+        meta: {title: '工具'},
+    },
+    {
         path: '/mcp',
-        name: 'McpServers',
-        component: () => import('@/views/McpServers.vue'),
-        meta: {title: 'MCP 服务'},
+        redirect: '/tools',
     },
     {
         path: '/tools/local',
-        name: 'LocalTools',
-        component: () => import('@/views/LocalTools.vue'),
-        meta: {title: '本地工具'},
+        redirect: '/tools',
     },
     {
         path: '/devtools/yapi',
@@ -103,6 +107,15 @@ const routes: RouteRecordRaw[] = [
         name: 'Resume',
         component: () => import('@/views/Resume.vue'),
         meta: {title: '简历'},
+    },
+    {
+        // 面试记录从简历页拆出独占一页（场次列表 + 新增/编辑弹窗），问题明细仍在
+        // /office/interview/:id 的 bare 整页详情里。路由是面试列表、/office/interview
+        // （单数）是详情，两条共存于求职办公域。
+        path: '/office/interviews',
+        name: 'Interviews',
+        component: () => import('@/views/Interviews.vue'),
+        meta: {title: '面试'},
     },
     {
         // 在线简历工作台：整页编辑（模块导航 + 表单 + A4 实时预览），bare 跳过

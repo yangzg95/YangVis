@@ -145,6 +145,7 @@ import {
   CloudServerOutlined,
   CodeOutlined,
   DatabaseOutlined,
+  DesktopOutlined,
   FundProjectionScreenOutlined,
   HomeOutlined,
   LogoutOutlined,
@@ -154,9 +155,10 @@ import {
   ProfileOutlined,
   RobotOutlined,
   SettingOutlined,
+  SolutionOutlined,
   SyncOutlined,
-  FunctionOutlined,
   TeamOutlined,
+  ThunderboltOutlined,
   ToolOutlined,
   UserOutlined,
 } from '@ant-design/icons-vue'
@@ -179,6 +181,8 @@ interface MenuLeaf {
 // （智能体的人设与工具开关、工作流的流水线、知识库的文档与索引），AI 应用装的是
 // 选一个智能体跑出结果的业务页。智能体不再单列一级——它和知识库、工作流同属配置侧，
 // 放在一起反而更容易看懂它为什么被所有业务页复用。
+// 名字保留「AI」不写「智能」：「智能构建」会被读成“智能地构建”，且要与系统设置里的
+// 「AI 网关」等既有术语保持一致。
 // 分组的 path 只当 a-menu 的 key 用，永远不会被导航；/build、/apps 因此不是路由。
 // 注意：叶子仍保留各自的历史前缀（/knowledge、/office/*），组 key 不再与路由前缀
 // 一一对应，SidebarNav 的手风琴与图标回退都只读 MENU，不依赖前缀。
@@ -191,8 +195,8 @@ const MENU: MenuNode[] = [
     children: [
       { path: '/agents', title: '智能体', icon: RobotOutlined },
       { path: '/workflows', title: '工作流', icon: PartitionOutlined },
-      { path: '/mcp', title: 'MCP 服务', icon: ToolOutlined },
-      { path: '/tools/local', title: '本地工具', icon: FunctionOutlined },
+      // MCP 服务与本地工具是同一份「可调用工具目录」的两个来源，合并到工具页的两个页签。
+      { path: '/tools', title: '工具', icon: ToolOutlined },
       { path: '/knowledge', title: '知识库', icon: BookOutlined },
     ],
   },
@@ -203,6 +207,8 @@ const MENU: MenuNode[] = [
     children: [
       { path: '/chat', title: '对话', icon: MessageOutlined },
       { path: '/office/resume', title: '简历', icon: ProfileOutlined },
+      // 面试记录曾是简历页里的一个 tab，实体和接口都独立，拆成同级叶子。
+      { path: '/office/interviews', title: '面试', icon: SolutionOutlined },
       { path: '/office/slides', title: '幻灯片', icon: FundProjectionScreenOutlined },
     ],
   },
@@ -211,7 +217,7 @@ const MENU: MenuNode[] = [
     title: '运维',
     icon: CloudServerOutlined,
     children: [
-      { path: '/ops/server', title: '服务器' },
+      { path: '/ops/server', title: '服务器', icon: DesktopOutlined },
       { path: '/ops/database', title: '数据库', icon: DatabaseOutlined },
     ],
   },
@@ -229,7 +235,7 @@ const MENU: MenuNode[] = [
     title: '系统设置',
     icon: SettingOutlined,
     children: [
-      { path: '/system/settings', title: '模型与集成' },
+      { path: '/system/settings', title: '模型与集成', icon: ThunderboltOutlined },
       { path: '/system/ai-gateway', title: 'AI 网关', icon: ApiOutlined, adminOnly: true },
       { path: '/system/users', title: '用户管理', icon: TeamOutlined, adminOnly: true },
     ],

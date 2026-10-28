@@ -1,11 +1,5 @@
 <template>
-  <div class="page-card">
-    <div class="page-title">MCP 服务</div>
-    <div class="subtitle">
-      配置 MCP（Model Context Protocol）服务，并在工作流上挂载。运行工作流时，
-      模型可以调用这些服务提供的工具获取信息或执行动作。
-    </div>
-
+  <div>
     <div class="toolbar">
       <a-space>
         <a-button @click="openImport">
@@ -229,70 +223,70 @@
     >
       <template v-if="toolsServer">
         <div class="tools-sub">
-            <span class="tools-time">
-              测试于 {{ formatTime(toolsServer.last_test_at) }} · 重新测试可刷新清单
-            </span>
-            <a-button
-              size="small"
-              :loading="testingId === toolsServer.id"
-              @click="onTest(toolsServer.id)"
-            >
-              重新测试
-            </a-button>
-          </div>
+          <span class="tools-time">
+            测试于 {{ formatTime(toolsServer.last_test_at) }} · 重新测试可刷新清单
+          </span>
+          <a-button
+            size="small"
+            :loading="testingId === toolsServer.id"
+            @click="onTest(toolsServer.id)"
+          >
+            重新测试
+          </a-button>
+        </div>
 
-          <a-alert
-            v-if="toolsServer.last_test_ok === false"
-            type="error"
-            show-icon
-            class="tools-failed"
-            :message="toolsServer.last_test_msg || '连接失败'"
-          />
+        <a-alert
+          v-if="toolsServer.last_test_ok === false"
+          type="error"
+          show-icon
+          class="tools-failed"
+          :message="toolsServer.last_test_msg || '连接失败'"
+        />
 
-          <a-empty
-            v-if="!drawerTools.length"
-            description="暂无工具快照，请先通过连通测试"
-          />
+        <a-empty
+          v-if="!drawerTools.length"
+          description="暂无工具快照，请先通过连通测试"
+        />
 
-          <div v-else class="tool-cards">
-            <div v-for="tool in drawerTools" :key="tool.name" class="tool-card">
-              <div class="tool-head">
-                <AppstoreOutlined class="tool-icon" />
-                <span class="tool-name">{{ tool.name }}</span>
-                <a-button
-                  type="link"
-                  size="small"
-                  class="tool-test-btn"
-                  @click="openToolTest(toolsServer?.id ?? 0, tool)"
-                >
-                  <ThunderboltOutlined />
-                  方法测试
-                </a-button>
-              </div>
-              <div v-if="tool.description" class="tool-desc">{{ tool.description }}</div>
-              <div v-if="toolParams(tool).length" class="param-list">
-                <div
-                  v-for="param in toolParams(tool)"
-                  :key="param.name"
-                  class="param-line"
-                >
-                  <span class="param-name">{{ param.name }}</span>
-                  <span v-if="param.required" class="param-required" title="必填">*</span>
-                  <span class="param-type">{{ param.type }}</span>
-                  <span v-if="param.description" class="param-desc">
-                    — {{ param.description }}
-                  </span>
-                  <span v-if="param.enumText" class="param-meta">
-                    （可选值 {{ param.enumText }}）
-                  </span>
-                  <span v-else-if="param.hasDefault" class="param-meta">
-                    （默认 {{ param.defaultText }}）
-                  </span>
-                </div>
-              </div>
-              <div v-else class="param-none">无参数</div>
+        <div v-else class="tool-cards">
+          <div v-for="tool in drawerTools" :key="tool.name" class="tool-card">
+            <div class="tool-head">
+              <AppstoreOutlined class="tool-icon" />
+              <span class="tool-name">{{ tool.name }}</span>
+              <a-button
+                type="link"
+                size="small"
+                class="tool-test-btn"
+                @click="openToolTest(toolsServer?.id ?? 0, tool)"
+              >
+                <ThunderboltOutlined />
+                方法测试
+              </a-button>
             </div>
+            <div v-if="tool.description" class="tool-desc">{{ tool.description }}</div>
+            <div v-if="toolParams(tool).length" class="param-list">
+              <div
+                v-for="param in toolParams(tool)"
+                :key="param.name"
+                class="param-line"
+              >
+                <span class="param-name">{{ param.name }}</span>
+                <span v-if="param.required" class="param-required" title="必填">*</span>
+                <span class="param-type">{{ param.type }}</span>
+                <span v-if="param.description" class="param-desc">
+                  — {{ param.description }}
+                </span>
+                <span v-if="param.enumText" class="param-meta">
+                  （可选值 {{ param.enumText }}）
+                </span>
+                <span v-else-if="param.hasDefault" class="param-meta">
+                  （默认 {{ param.defaultText }}）
+                </span>
+              </div>
+            </div>
+            <div v-else class="param-none">无参数</div>
           </div>
+        </div>
       </template>
     </a-drawer>
 
@@ -891,11 +885,6 @@ onMounted(load)
 </script>
 
 <style scoped>
-.subtitle {
-  color: var(--text-3);
-  font-size: var(--fs-sm);
-  margin-bottom: 16px;
-}
 .toolbar {
   margin-bottom: 16px;
   justify-content: flex-end;

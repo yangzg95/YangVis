@@ -1,11 +1,5 @@
 <template>
-  <div class="page-card">
-    <div class="page-title">本地工具</div>
-    <div class="subtitle">
-      后端代码注册、可以在对话里勾选给大模型调用的本地方法。对话页的「选择工具」
-      里出现的「本地工具」分组就是这份目录。
-    </div>
-
+  <div>
     <div class="toolbar">
       <a-alert
         type="info"
@@ -104,11 +98,6 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.subtitle {
-  color: var(--text-3);
-  font-size: var(--fs-sm);
-  margin-bottom: 16px;
-}
 .toolbar {
   margin-bottom: 16px;
 }

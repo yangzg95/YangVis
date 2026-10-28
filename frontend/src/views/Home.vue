@@ -110,6 +110,7 @@ import {
   PartitionOutlined,
   ProfileOutlined,
   RobotOutlined,
+  SolutionOutlined,
   UploadOutlined,
 } from '@ant-design/icons-vue'
 import {
@@ -204,7 +205,15 @@ const modules = computed<HomeModule[]>(() => {
       icon: ProfileOutlined,
       unit: '份简历',
       value: s?.resume_count ?? null,
-      extra: s ? `面试记录 ${s.interview_count} · 笔记 ${s.note_count}` : undefined,
+      extra: s ? `笔记 ${s.note_count}` : undefined,
+    },
+    {
+      path: '/office/interviews',
+      name: '面试',
+      desc: '场次复盘与 AI 参考答案',
+      icon: SolutionOutlined,
+      unit: '场面试',
+      value: s?.interview_count ?? null,
     },
     {
       path: '/office/slides',

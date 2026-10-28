@@ -2,8 +2,9 @@
 
 对话页「选择工具」里能挂给模型的工具有两个来源：**本地工具**是后端代码里的 Python
 函数，用 `@local_tool` 注册、启动时自动发现与校验，代码是唯一事实源，不入库、没有
-后台 CRUD；**MCP 服务**是用户在「AI 构建 → MCP 服务」页自己配置的外部 Model Context
-Protocol 服务（stdio / SSE / Streamable HTTP 三种传输），配置入库、按用户隔离。
+后台 CRUD；**MCP 服务**是用户在「AI 构建 → 工具」页的「MCP 服务」页签里自己配置的
+外部 Model Context Protocol 服务（stdio / SSE / Streamable HTTP 三种传输），
+配置入库、按用户隔离；同一页的「本地工具」页签是只读目录。
 两类选择都在会话级勾选并记住，发问时本地函数直接在后端进程里执行，MCP 工具则随每次
 回答现连现关。
 
@@ -14,9 +15,9 @@ Protocol 服务（stdio / SSE / Streamable HTTP 三种传输），配置入库�
 - 勾选随会话记住，存 `chat_conversation` 的 `local_tool_keys` / `mcp_server_ids`
   两个 JSON 列，与智能体、模型、项目同口径：重开会话自动恢复，后续追问沿用；恢复时按
   现存目录裁剪，已下线的本地工具、被删除或停用的 MCP 服务自动从选择器消失。
-- 后台「AI 构建 → 本地工具」是只读目录：标题、工具名、描述、参数（类型/必填/默认值）、
+- 「AI 构建 → 工具」页的「本地工具」页签是只读目录：标题、工具名、描述、参数（类型/必填/默认值）、
   同步异步、源码位置（`services/tools/builtins/xxx.py:行号`），没有任何写操作。
-- 「AI 构建 → MCP 服务」是完整管理页：新建/编辑/删除/启停，**连通测试**（真正建连并
+- 同页「MCP 服务」页签是完整管理台：新建/编辑/删除/启停，**连通测试**（真正建连并
   `initialize` + `tools/list`，成功后可展开「发现的工具」抽屉看原始参数 schema，并对
   单个工具做**方法测试**——填 JSON 入参现场调用，参数与结果不落库）；支持导入/导出
   Claude Desktop / Cursor 通用的 `mcpServers` JSON（重名策略 rename/skip/overwrite），
@@ -88,8 +89,9 @@ default=str)`），超过 `TOOL_OUTPUT_LIMIT = 8000` 字符截断并追加「…
 | `backend/app/models/entities.py` `McpServer` | 表 `mcp_server`，唯一约束 `(owner_id, name)`；`env_enc`/`headers_enc` 两个 Fernet 密钥袋、`tools_snapshot` 与最近测试结果 |
 | `backend/app/services/chat/service.py` | 会话选择的保存校验与回答时的工具装配（内置/知识库/运维箱 → 本地 → MCP → 末尾查重） |
 | `backend/app/bootstrap.py` / `main.py` | `validate_local_tools()`，lifespan 启动步骤中表迁移之后执行，坏注册拒绝启动 |
-| `frontend/src/views/LocalTools.vue` | 只读目录页 |
-| `frontend/src/views/McpServers.vue` | MCP 管理页：表单/启停/连通测试/工具抽屉/方法测试/导入导出 |
+| `frontend/src/views/Tools.vue` | 工具页外壳与「MCP 服务」「本地工具」两个页签 |
+| `frontend/src/components/tools/LocalToolsPanel.vue` | 只读目录面板 |
+| `frontend/src/components/tools/McpPanel.vue` | MCP 管理面板：表单/启停/连通测试/工具抽屉/方法测试/导入导出 |
 | `frontend/src/views/Chat.vue` | 工具选择器（复合值 `local:<key>` / `mcp:<id>`）、恢复裁剪、简历深链预勾选 |
 | `frontend/src/utils/chatTools.ts` | 工具调用时间线的中文标题（本地标题由目录动态登记，MCP 走默认兜底） |
 

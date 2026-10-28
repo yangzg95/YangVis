@@ -1,6 +1,6 @@
 # 简历分析与多份对比
 
-「办公 · 简历」里上传一条线：把 PDF / DOCX / 纯文本简历在上传时抽成纯文本存库，需要时点
+「AI 应用 → 简历」里上传一条线：把 PDF / DOCX / 纯文本简历在上传时抽成纯文本存库，需要时点
 「生成分析」让 LLM 读全文产出 markdown 报告与结构化改进意见；勾选 2–10 份可以发起一次
 横向对比，产出一份对比报告。同一页还有「求职助手」六类一次性生成（简历优化、JD 匹配审计、
 面试准备等），与分析/对比共用完全相同的执行链路。所有报告在独立的报告页新开标签页查看，
@@ -9,8 +9,9 @@
 
 ## 用户可见行为
 
-- 页面四个页签（另有「在线简历」「面试记录」两条独立业务）：**简历列表**上传与单份分析、
-  **对比记录**、**求职助手**（六张工具卡 + 生成记录）。
+- 页面五个页签：**在线简历**（在线编辑工作台入口）、**简历列表**上传与单份分析、
+  **对比记录**、**求职助手**（六张工具卡 + 生成记录）、**笔记**（见 notes.md）。
+  面试记录是「AI 应用 → 面试」独立页，见 interview.md。
 - 上传：拖拽或选文件（`.pdf/.docx/.txt/.md/.markdown`，单文件 10 MB），可填标题（留空取
   文件名）与补充描述；上传只做本地文本抽取，**不自动分析**，抽取失败或正文为空直接报错。
 - 列表每行有状态标签（未分析 / 分析中 / 已完成 / 失败），失败时悬浮显示原因；点标签打开
@@ -121,7 +122,7 @@ python-docx，都是本地 CPU 解析，用 `asyncio.to_thread()` 扔线程池�
 | `backend/app/services/workflows/runs.py` | `subject_state()` 运行→状态翻译、`latest_run(s)` 批量取最近运行、`running_subjects()` 删除/重触发闸门、`fail_run()`、`reset_stale_runs()` 重启收尾、`prune_runs()` 历史清理 |
 | `backend/app/routers/resume.py` | `/office` 下 resumes / comparisons / toolkit 三组接口；上传同步解析、网盘 best-effort 备份与代理下载、BackgroundTasks 调度；ValueError→`code=-1` 信封、LookupError→404 |
 | `backend/app/services/agent_run.py` | `require_chat_model()` 模型门槛、`labeled_section()` 材料边界、`model_error_text()` |
-| `frontend/src/views/Resume.vue` | 四页签整页：上传/编辑弹窗、对比确认弹窗、TOOL_DEFS 驱动的助手表单、预览抽屉、2.5s 轮询与完成通知、状态标签打开运行现场抽屉 |
+| `frontend/src/views/Resume.vue` | 五页签整页：上传/编辑弹窗、对比确认弹窗、TOOL_DEFS 驱动的助手表单、预览抽屉、2.5s 轮询与完成通知、状态标签打开运行现场抽屉 |
 | `frontend/src/views/ReportView.vue` | 三类报告共用整页 `/office/report/:kind(resume|comparison|toolkit)/:id(\\d+)`：改进意见列表（仅 resume）、markdown 渲染（`html:false`）、下载、存网盘、发起对话 |
 | `frontend/src/components/WorkflowRunsDrawer.vue` | 状态标签点开的运行现场（按 subject 查，不绑定具体工作流） |
 

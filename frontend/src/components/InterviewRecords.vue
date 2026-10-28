@@ -118,7 +118,7 @@
 </template>
 
 <script setup lang="ts">
-// 面试记录列表：简历页第 4 个 tab。问题明细与 AI 参考答案都在整页详情
+// 面试记录列表：「AI 应用 → 面试」页主体。问题明细与 AI 参考答案都在整页详情
 // （/office/interview/<id>，views/InterviewDetailView.vue）里处理，这里只管场次元数据。
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
