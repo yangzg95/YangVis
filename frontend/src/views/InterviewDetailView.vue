@@ -577,7 +577,7 @@ onUnmounted(() => {
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--text-3);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-base);
   line-height: 1.7;
   margin-bottom: 4px;
 }
@@ -620,7 +620,7 @@ onUnmounted(() => {
   display: flex;
   gap: 8px;
   margin-top: 8px;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-base);
   line-height: 1.7;
 }
 .field-label {
@@ -663,7 +663,7 @@ onUnmounted(() => {
   border: none;
   background: transparent;
   font: inherit;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-base);
   cursor: pointer;
 }
 .ref-answer-title {
@@ -684,11 +684,25 @@ onUnmounted(() => {
 .ref-answer-head:hover .ref-answer-switch {
   color: var(--signal-text);
 }
-/* 展开时头部和正文之间一条虚线，和 ref-section 顶部分隔同一语言。 */
+/* 展开时头部和正文之间一条虚线，和 ref-section 顶部分隔同一语言。
+   参考答案是整页最主要的阅读内容，长中文按正文档（base）排，行高也放宽。 */
 .ref-answer {
   padding: 10px 12px;
   border-top: 1px dashed var(--signal-border);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-base);
+  line-height: 1.75;
+}
+/* 全局 .markdown 的 h3/h4 也是 base，长答案里只靠加粗分不出层级；
+   盒内标题整体抬一档。v-html 节点不带 scoped 标记，要 :deep()。 */
+.ref-answer :deep(h1) {
+  font-size: var(--fs-2xl);
+}
+.ref-answer :deep(h2) {
+  font-size: var(--fs-xl);
+}
+.ref-answer :deep(h3),
+.ref-answer :deep(h4) {
+  font-size: var(--fs-lg);
 }
 .full-width {
   width: 100%;
