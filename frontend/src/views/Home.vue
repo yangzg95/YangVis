@@ -204,7 +204,7 @@ const modules = computed<HomeModule[]>(() => {
       icon: ProfileOutlined,
       unit: '份简历',
       value: s?.resume_count ?? null,
-      extra: s ? `面试记录 ${s.interview_count}` : undefined,
+      extra: s ? `面试记录 ${s.interview_count} · 笔记 ${s.note_count}` : undefined,
     },
     {
       path: '/office/slides',

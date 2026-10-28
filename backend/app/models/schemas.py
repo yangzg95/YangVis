@@ -2188,6 +2188,49 @@ class InterviewDetail(InterviewItem):
     questions: List[InterviewQuestion] = []
 
 
+# ---- 智能办公 · 求职笔记 -------------------------------------------------------
+
+
+def _clean_note_title(value: Optional[str]) -> Optional[str]:
+    """标题 strip 后必须非空：min_length 只数字符数，挡不住纯空格。"""
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        raise ValueError("标题不能为空")
+    return value
+
+
+class NoteCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    content: Optional[str] = Field(default=None, max_length=100_000)
+
+    _clean_title = field_validator("title")(_clean_note_title)
+
+
+class NoteUpdate(BaseModel):
+    """全字段可选、部分更新；显式传 null 会把正文清空（与面试记录同一约定）。"""
+
+    title: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    content: Optional[str] = Field(default=None, max_length=100_000)
+
+    _clean_title = field_validator("title")(_clean_note_title)
+
+
+class NoteItem(BaseModel):
+    """列表里的一行笔记：不带正文，只给折叠空白后的摘要。"""
+
+    id: int
+    title: str
+    snippet: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class NoteDetail(NoteItem):
+    content: Optional[str] = None
+
+
 class NetdiskStatus(BaseModel):
     """当前用户的百度网盘绑定状态。configured=false 时前端隐藏网盘入口。"""
 
@@ -2511,6 +2554,7 @@ class DashboardSummary(BaseModel):
     resume_count: int = 0
     slide_count: int = 0
     interview_count: int = 0
+    note_count: int = 0
     workflow_count: int = 0
     # 调用方今天发起过的运行次数：工作流是「流水线定义」，光数条数说明不了有没有
     # 在用，配上当天的执行次数才看得出这是不是一条活着的链路。

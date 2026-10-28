@@ -336,6 +336,16 @@ CREATE TABLE IF NOT EXISTS interview_record (
   KEY idx_owner (owner_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='面试场次记录（含问题清单与 AI 参考答案）';
 
+CREATE TABLE IF NOT EXISTS job_note (
+  id         BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id   BIGINT       NOT NULL,
+  title      VARCHAR(200) NOT NULL,
+  content    MEDIUMTEXT   NULL COMMENT 'markdown 纯文本，渲染在前端（markdown-it，html:false）',
+  created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='智能应用 · 求职笔记（简历页的独立记录本，与简历/面试无外键关联）';
+
 CREATE TABLE IF NOT EXISTS slide_deck (
   id          BIGINT PRIMARY KEY AUTO_INCREMENT,
   owner_id    BIGINT       NOT NULL,

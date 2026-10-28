@@ -11,6 +11,7 @@ export interface DashboardSummary {
   resume_count: number
   slide_count: number
   interview_count: number
+  note_count: number
   workflow_count: number
   /** 今天发起过的运行次数：流水线的存在感不在「有几条定义」，在「今天跑过没有」。 */
   run_count_today: number

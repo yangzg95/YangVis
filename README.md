@@ -44,6 +44,7 @@
 - 在线简历工作台（[文档](docs/features/resume-builder.md)）：整页三栏编辑（模块导航 + 表单 + A4 实时预览），五模块拖拽排序、富文本、3 版式 × 7 主题，AI 帮写/润色/检查走三个专用智能体，浏览器打印导出 PDF
 - 幻灯片（[文档](docs/features/slides.md)）：AI 按结构化 JSON 生成自包含 HTML 幻灯片，工作台支持表单与源码双模式编辑+实时预览，放映页满屏播放/键盘翻页/就地改内容，浏览器打印出 PDF
 - 面试记录（[文档](docs/features/interview.md)）：面试场次与题目手工录入，参考答案走内置工作流异步生成、轮询看进度
+- 求职笔记（[文档](docs/features/notes.md)）：简历页的个人 markdown 笔记本，标题/正文关键词搜索，编辑预览一键切换
 - 百度网盘（[文档](docs/features/netdisk.md)）：xpan 开放平台绑定（oob 授权码模式，无需公网回调），简历/报告/数据库备份可存至网盘应用目录，也可作为对话工具让模型存文本
 
 ### 🧰 开发工具
@@ -96,6 +97,7 @@
 | 在线简历工作台 | [resume-builder.md](docs/features/resume-builder.md) |
 | 幻灯片 | [slides.md](docs/features/slides.md) |
 | 面试记录 | [interview.md](docs/features/interview.md) |
+| 求职笔记 | [notes.md](docs/features/notes.md) |
 | 百度网盘 | [netdisk.md](docs/features/netdisk.md) |
 | YApi 同步 | [yapi-sync.md](docs/features/yapi-sync.md) |
 | AI 网关 | [ai-gateway.md](docs/features/ai-gateway.md) |
@@ -276,7 +278,7 @@ location ^~ /api/ops/servers/ {
 | `/api/settings` | 模型配置 CRUD + 连通性测试 |
 | `/api/ops` | 服务器/数据库台账、SQL 执行与收藏、表结构与设计表、数据浏览与行级写、全量导出、Redis 浏览与结构化写、审计、WS 终端 |
 | `/api/ops/servers/{id}/files` | SFTP 列目录/上传/下载/新建/删除 |
-| `/api/office` | 简历上传/分析/对比/下载 |
+| `/api/office` | 简历上传/分析/对比/下载、求职笔记 CRUD |
 | `/api/office/netdisk` | 网盘绑定状态、授权链接、绑定/解绑 |
 | `/api/ai-gateway` | 网关概览、上游通道、模型路由、统一密钥、调用日志与统计（仅管理员） |
 

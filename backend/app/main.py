@@ -39,6 +39,7 @@ from app.routers import (
     mcp,
     memory,
     netdisk,
+    note,
     ops,
     ops_files,
     resume,
@@ -127,6 +128,7 @@ app.include_router(ops_files.router, prefix=API_PREFIX)
 app.include_router(resume.router, prefix=API_PREFIX)
 app.include_router(resume_builder.router, prefix=API_PREFIX)
 app.include_router(interview.router, prefix=API_PREFIX)
+app.include_router(note.router, prefix=API_PREFIX)
 app.include_router(slides.router, prefix=API_PREFIX)
 app.include_router(netdisk.router, prefix=API_PREFIX)
 app.include_router(mcp.router, prefix=API_PREFIX)

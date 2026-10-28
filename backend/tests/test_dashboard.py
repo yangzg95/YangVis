@@ -21,6 +21,7 @@ from app.models.entities import (
     InterviewRecord,
     KbDocument,
     KbProject,
+    Note,
     OpsDatabase,
     OpsServer,
     Resume,
@@ -61,6 +62,7 @@ def _mine(db, owner_id: int = OWNER) -> None:
             Resume(owner_id=owner_id, title="r", filename="r.pdf", content="x"),
             SlideDeck(owner_id=owner_id, title="s", source_text="x"),
             InterviewRecord(owner_id=owner_id, company="c", position="p"),
+            Note(owner_id=owner_id, title="n"),
             OpsServer(owner_id=owner_id, name=f"s{owner_id}", host="1.1.1.1", username="root"),
             OpsDatabase(owner_id=owner_id, name=f"d{owner_id}", host="1.1.1.1"),
             workflow,
@@ -90,6 +92,7 @@ def test_counts_are_scoped_to_owner(db):
     assert data.resume_count == 1
     assert data.slide_count == 1
     assert data.interview_count == 1
+    assert data.note_count == 1
     assert data.server_count == 1
     assert data.database_count == 1
     # 会话按 owner 隔离；内置智能体（owner_id=0）对所有人可用，算进每个人的计数。

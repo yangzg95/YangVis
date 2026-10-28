@@ -1578,3 +1578,30 @@ class WorkflowEvaluation(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<WorkflowEvaluation id={self.id} run_a={self.run_a_id} run_b={self.run_b_id}>"
+
+
+class Note(Base):
+    """求职笔记本里的一条笔记（「简历」页的独立记录本，与面试记录同一性质）。
+
+    正文按 markdown 纯文本存，前端编辑/预览切换，渲染在前端做（html:false 的
+    markdown-it 基座）。没有标签、分本子之类的结构：一个人求职期间的笔记量级
+    几十到几百条，标题/正文关键词搜索已经够用，不提前建复杂度。
+    """
+
+    __tablename__ = "job_note"
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    content: Mapped[str | None] = mapped_column(_LONG_TEXT, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<Note id={self.id} title={self.title!r}>"

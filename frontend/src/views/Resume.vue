@@ -332,6 +332,11 @@
         </a-table>
       </a-tab-pane>
 
+      <!-- ================= 笔记 ================= -->
+      <a-tab-pane key="notes" tab="笔记">
+        <NotesPanel />
+      </a-tab-pane>
+
       <!-- ================= 面试记录 ================= -->
       <a-tab-pane key="interviews" tab="面试记录">
         <InterviewRecords />
@@ -583,6 +588,7 @@ import { saveBlobResponse } from '@/utils/download'
 import { fmtSize } from '@/utils/format'
 import { useIsMobile } from '@/utils/useIsMobile'
 import InterviewRecords from '@/components/InterviewRecords.vue'
+import NotesPanel from '@/components/NotesPanel.vue'
 import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
 
 const simpleEmpty = Empty.PRESENTED_IMAGE_SIMPLE
