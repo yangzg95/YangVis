@@ -130,7 +130,7 @@
                 :disabled="modal.readonly"
                 size="small"
               />
-              <span style="font-size: 12px; color: #888">跟随模型配置</span>
+              <span style="font-size: 12px; color: var(--text-3)">跟随模型配置</span>
             </div>
           </template>
           <a-slider
@@ -474,7 +474,7 @@ onMounted(load)
   background: var(--hairline);
 }
 .version-row.active {
-  background: rgba(22, 119, 255, 0.1);
+  background: var(--signal-bg);
 }
 .version-time {
   font-size: var(--fs-xs);

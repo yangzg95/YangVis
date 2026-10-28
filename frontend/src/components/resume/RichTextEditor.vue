@@ -300,13 +300,13 @@ defineExpose({ insertHtml, getSelectionText, focusEditor, placeCaretAtEnd })
 
 <style scoped>
 .rte {
-  border: 1px solid #d9d9d9;
+  border: 1px solid var(--hairline);
   border-radius: 6px;
   overflow: hidden;
-  background: #fff;
+  background: var(--surface);
 }
 .rte--disabled {
-  background: #f5f5f5;
+  background: var(--chrome);
 }
 .rte-bar {
   display: flex;
@@ -314,8 +314,8 @@ defineExpose({ insertHtml, getSelectionText, focusEditor, placeCaretAtEnd })
   flex-wrap: wrap;
   gap: 2px;
   padding: 4px 8px;
-  border-bottom: 1px solid #f0f0f0;
-  background: #fafafa;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--chrome);
 }
 .rte-bar button {
   width: 26px;
@@ -323,25 +323,25 @@ defineExpose({ insertHtml, getSelectionText, focusEditor, placeCaretAtEnd })
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: #4b5563;
+  color: var(--text-2);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 .rte-bar button:hover {
-  background: #e6f4f5;
-  color: #0a7e86;
+  background: var(--signal-bg);
+  color: var(--signal-text);
 }
 .rte-bar button.active {
-  background: #d6ecee;
-  color: #0a7e86;
+  background: var(--signal-bg-strong);
+  color: var(--signal-text);
 }
 .rte-sep {
   width: 1px;
   height: 16px;
   margin: 0 4px;
-  background: #e0e0e0;
+  background: var(--hairline);
 }
 .rte-ai-slot {
   margin-left: auto;
@@ -374,7 +374,7 @@ defineExpose({ insertHtml, getSelectionText, focusEditor, placeCaretAtEnd })
 }
 .rte-content:empty::before {
   content: attr(data-placeholder);
-  color: #bfbfbf;
+  color: var(--text-3);
   pointer-events: none;
 }
 .rte-content p {
@@ -389,6 +389,6 @@ defineExpose({ insertHtml, getSelectionText, focusEditor, placeCaretAtEnd })
   margin-bottom: 4px;
 }
 .rte-content a {
-  color: #0a7e86;
+  color: var(--signal-text);
 }
 </style>

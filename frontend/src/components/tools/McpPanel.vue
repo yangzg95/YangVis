@@ -896,10 +896,10 @@ onMounted(load)
   word-break: break-all;
 }
 .test-ok {
-  color: #389e0d;
+  color: var(--success);
 }
 .test-failed {
-  color: #cf1322;
+  color: var(--danger);
   cursor: help;
 }
 .test-none {
@@ -935,7 +935,7 @@ onMounted(load)
   gap: 12px;
 }
 .tool-card {
-  border: 1px solid #f0f0f0;
+  border: 1px solid var(--hairline);
   border-radius: 8px;
   padding: 12px 14px;
 }
@@ -982,7 +982,7 @@ onMounted(load)
 }
 .param-required {
   margin-left: 2px;
-  color: #cf1322;
+  color: var(--danger);
 }
 .param-type {
   margin-left: 6px;
@@ -1020,7 +1020,7 @@ onMounted(load)
   word-break: break-all;
 }
 .report-line.error {
-  color: #cf1322;
+  color: var(--danger);
 }
 /* 方法测试弹窗 */
 .tt-desc {
@@ -1047,7 +1047,7 @@ onMounted(load)
 }
 .tt-args-error {
   margin-top: 6px;
-  color: #cf1322;
+  color: var(--danger);
   font-size: var(--fs-sm);
 }
 .tt-result {
@@ -1068,8 +1068,8 @@ onMounted(load)
 .tt-pre {
   margin: 0;
   padding: 10px 12px;
-  background: var(--fill-quaternary, #fafafa);
-  border: 1px solid #f0f0f0;
+  background: var(--chrome);
+  border: 1px solid var(--hairline);
   border-radius: 6px;
   font-family: var(--font-mono, monospace);
   font-size: var(--fs-sm);
@@ -1081,7 +1081,7 @@ onMounted(load)
 }
 .tt-img {
   max-width: 100%;
-  border: 1px solid #f0f0f0;
+  border: 1px solid var(--hairline);
   border-radius: 6px;
 }
 .tt-audio {
@@ -1092,7 +1092,7 @@ onMounted(load)
   align-items: center;
   gap: 6px;
   padding: 8px 12px;
-  border: 1px solid #f0f0f0;
+  border: 1px solid var(--hairline);
   border-radius: 6px;
   font-size: var(--fs-sm);
 }

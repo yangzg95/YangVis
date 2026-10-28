@@ -764,7 +764,7 @@ onMounted(load)
   margin: 0 0 12px;
   padding-left: 18px;
   line-height: 1.9;
-  color: rgba(0, 0, 0, 0.75);
+  color: var(--text-2);
 }
 .bind-code-input {
   margin-top: 12px;

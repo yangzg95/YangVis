@@ -20,7 +20,8 @@ import {
   highlightActiveLine,
 } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap, insertNewlineAndIndent } from '@codemirror/commands'
-import { bracketMatching, defaultHighlightStyle, syntaxHighlighting } from '@codemirror/language'
+import { bracketMatching, HighlightStyle, syntaxHighlighting } from '@codemirror/language'
+import { tags as hlTags } from '@lezer/highlight'
 import {
   autocompletion,
   closeBrackets,
@@ -60,6 +61,16 @@ let view: EditorView | null = null
 // 编辑器实例和用户输入都保留。
 const sqlConf = new Compartment()
 
+// 自带的 defaultHighlightStyle 全是深色 (#708/#a11)，暗色表面上直接不可读。
+// 自定义一套走 CSS 变量：明暗切换时颜色跟着翻，不用重建编辑器。
+const sqlHighlightStyle = HighlightStyle.define([
+  { tag: [hlTags.keyword, hlTags.operatorKeyword], color: 'var(--cm-keyword)', fontWeight: '600' },
+  { tag: [hlTags.string, hlTags.special(hlTags.string)], color: 'var(--cm-string)' },
+  { tag: [hlTags.number, hlTags.bool, hlTags.atom], color: 'var(--cm-number)' },
+  { tag: hlTags.typeName, color: 'var(--cm-type)' },
+  { tag: hlTags.comment, color: 'var(--text-3)', fontStyle: 'italic' },
+])
+
 function buildExtensions(): Extension[] {
   return [
     // Enter 执行、Shift+Enter 换行——与原来 textarea 的行为保持一致。
@@ -89,7 +100,7 @@ function buildExtensions(): Extension[] {
     autocompletion(),
     bracketMatching(),
     highlightActiveLine(),
-    syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+    syntaxHighlighting(sqlHighlightStyle, { fallback: true }),
     sqlConf.of(sql({ dialect: MySQL, upperCaseKeywords: true })),
     cmPlaceholder(props.placeholder),
     EditorView.lineWrapping,
@@ -104,34 +115,43 @@ function buildExtensions(): Extension[] {
         fontSize: '13px',
         minHeight: `${props.rows * 22 + 8}px`,
         maxHeight: '240px',
-        border: '1px solid #d9d9d9',
+        border: '1px solid var(--hairline)',
         borderRadius: '6px',
-        backgroundColor: '#fff',
+        backgroundColor: 'var(--surface)',
+        color: 'var(--text-1)',
       },
       // 聚焦态描边跟 antd 输入框的 signal 色一致。
       '&.cm-focused': {
         outline: 'none',
-        borderColor: 'var(--signal-border, #4096ff)',
-        boxShadow: '0 0 0 2px rgba(5, 145, 255, 0.1)',
+        borderColor: 'var(--signal-border)',
+        boxShadow: '0 0 0 2px var(--signal-bg-strong)',
       },
       '.cm-scroller': {
         fontFamily: 'var(--font-mono)',
         lineHeight: '22px',
         overflow: 'auto',
       },
-      '.cm-content': { padding: '4px 8px' },
+      '.cm-content': { padding: '4px 8px', caretColor: 'var(--signal-text)' },
       '.cm-line': { padding: '0' },
-      '.cm-placeholder': { color: '#bfbfbf' },
-      '.cm-activeLine': { backgroundColor: 'rgba(0, 0, 0, 0.03)' },
+      '.cm-placeholder': { color: 'var(--text-3)' },
+      '.cm-activeLine': { backgroundColor: 'var(--surface-2)' },
+      '&.cm-focused .cm-selectionBackground, & ::selection': {
+        backgroundColor: 'var(--cm-selection)',
+      },
+      // 补全浮层抬到 raised 表面，否则暗底下默认白底浮层和编辑器糊在一起。
+      '.cm-tooltip': {
+        backgroundColor: 'var(--surface-raised)',
+        border: '1px solid var(--hairline)',
+        color: 'var(--text-1)',
+      },
       // 提示浮层：关键字 / 表 / 字段的类型小图标列宽对齐。
       '.cm-tooltip.cm-tooltip-autocomplete': {
-        border: '1px solid var(--hairline, #f0f0f0)',
         borderRadius: '6px',
-        boxShadow: 'var(--shadow-overlay, 0 6px 16px rgba(0,0,0,0.12))',
+        boxShadow: 'var(--shadow-overlay)',
       },
       '.cm-tooltip-autocomplete ul li[aria-selected]': {
-        backgroundColor: 'var(--signal-bg, #e6f4ff)',
-        color: 'inherit',
+        backgroundColor: 'var(--signal-bg)',
+        color: 'var(--text-1)',
       },
     }),
   ]

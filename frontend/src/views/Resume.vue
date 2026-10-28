@@ -1433,7 +1433,7 @@ onUnmounted(() => {
 }
 .netdisk-icon {
   margin-left: 6px;
-  color: #0a7e86;
+  color: var(--signal-text);
 }
 .compare-form {
   margin-top: 4px;

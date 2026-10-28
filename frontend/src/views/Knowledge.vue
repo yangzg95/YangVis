@@ -1102,7 +1102,7 @@ onUnmounted(stopPolling)
 .hit-content {
   white-space: pre-wrap;
   word-break: break-word;
-  color: rgba(0, 0, 0, 0.65);
+  color: var(--text-2);
   font-size: var(--fs-xs);
   line-height: 1.7;
 }

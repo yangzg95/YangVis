@@ -185,7 +185,7 @@ async function copyBlock(nodeKey: string, blockIndex: number, text: string) {
   color: var(--success);
 }
 .tn-icon-error {
-  color: var(--danger, #ff4d4f);
+  color: var(--danger);
 }
 .tn-llm-icon {
   color: var(--signal-text);
@@ -232,7 +232,7 @@ async function copyBlock(nodeKey: string, blockIndex: number, text: string) {
   color: var(--text-3);
 }
 .tn-error-text {
-  color: var(--danger, #ff4d4f);
+  color: var(--danger);
 }
 .tn-copy {
   display: inline-flex;
@@ -252,7 +252,7 @@ async function copyBlock(nodeKey: string, blockIndex: number, text: string) {
   margin: 0;
   padding: 6px 8px;
   border-radius: var(--radius-sm);
-  background: var(--surface-2, rgba(0, 0, 0, 0.04));
+  background: var(--surface-2);
   font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: var(--fs-xs);
   line-height: 1.5;
@@ -261,6 +261,6 @@ async function copyBlock(nodeKey: string, blockIndex: number, text: string) {
   color: var(--text-2);
 }
 .tn-code-error {
-  color: var(--danger, #ff4d4f);
+  color: var(--danger);
 }
 </style>

@@ -181,7 +181,7 @@ onMounted(() => {
 .report-page {
   min-height: 100vh;
   min-height: 100dvh;
-  background: #f5f5f5;
+  background: var(--paper);
 }
 .report-header {
   position: sticky;
@@ -192,8 +192,8 @@ onMounted(() => {
   justify-content: space-between;
   gap: 16px;
   padding: 12px 24px;
-  background: #fff;
-  border-bottom: 1px solid #f0f0f0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
 }
 .report-title {
   font-size: var(--fs-lg);
@@ -210,7 +210,7 @@ onMounted(() => {
   max-width: 880px;
   margin: 0 auto;
   padding: 24px 32px 64px;
-  background: #fff;
+  background: var(--surface);
   min-height: calc(100vh - 54px);
   min-height: calc(100dvh - 54px);
 }
@@ -238,8 +238,8 @@ onMounted(() => {
   height: 20px;
   margin-right: 8px;
   border-radius: 50%;
-  background: rgba(10, 126, 134, 0.1);
-  color: #0a7e86;
+  background: var(--signal-bg);
+  color: var(--signal-text);
   font-size: var(--fs-xs);
   flex: none;
 }

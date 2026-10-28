@@ -461,7 +461,7 @@ function onRightClick(info: { event: MouseEvent; node: { dataRef: TreeNode } }) 
 
 /* 连接未打开时图标压灰，一眼区分打开状态。 */
 .icon.off {
-  color: #bfbfbf;
+  color: var(--text-3);
 }
 
 .icon.schema {
@@ -472,8 +472,9 @@ function onRightClick(info: { event: MouseEvent; node: { dataRef: TreeNode } }) 
   color: var(--success);
 }
 
+/* 视图图标用紫：#9254de 比旧值 #722ed1 亮一档，暗底上仍有 ~4:1。 */
 .icon.view {
-  color: #722ed1;
+  color: #9254de;
 }
 
 .icon.rkey {
@@ -489,7 +490,7 @@ function onRightClick(info: { event: MouseEvent; node: { dataRef: TreeNode } }) 
   height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
-  background: #d9d9d9;
+  background: var(--dot-idle);
 }
 
 .dot.ok {

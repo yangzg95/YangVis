@@ -165,19 +165,19 @@ function onApplied(html: string, mode: 'replace' | 'append' | 'insert') {
   display: block;
   margin: 12px 0 6px;
   font-size: 13px;
-  color: #4b5563;
+  color: var(--text-2);
 }
 .field-label--block {
   margin-top: 18px;
 }
 .required {
-  color: #ff4d4f;
+  color: var(--danger);
   margin-right: 2px;
 }
 .field-hint {
   margin-left: 8px;
   font-size: 12px;
   font-weight: 400;
-  color: #9ca3af;
+  color: var(--text-3);
 }
 </style>

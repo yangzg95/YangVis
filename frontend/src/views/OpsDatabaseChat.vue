@@ -62,6 +62,7 @@
           <OpsChat
             ref="chatRef"
             target="database"
+            :dark="themeStore.isDark"
             :target-id="conn ? connId : null"
             placeholder="例如：哪张表最近增长最快"
             :empty-hint="loadError || '正在加载连接信息…'"
@@ -95,6 +96,9 @@ import { clampSize, readSize, saveSize, startDragResize } from '@/components/ops
 import '@/components/ops/resizer.css'
 import { opsApi, type OpsDatabase } from '@/api'
 import { storageKeys } from '@/utils/storage'
+import { useThemeStore } from '@/stores/theme'
+
+const themeStore = useThemeStore()
 
 const CHAT_SAMPLES = [
   '这个库里最大的几张表是什么',
@@ -183,7 +187,7 @@ function onAskAi(payload: { connId: number; sql: string; error?: string; schema?
   flex-direction: column;
   height: 100vh;
   height: 100dvh;
-  background: #f5f6f8;
+  background: var(--paper);
 }
 
 .chat-topbar {
@@ -262,7 +266,7 @@ function onAskAi(payload: { connId: number; sql: string; error?: string; schema?
 
 .stage-error-icon {
   font-size: var(--fs-5xl);
-  color: rgba(0, 0, 0, 0.15);
+  color: var(--ghost-icon);
 }
 
 .stage-error-text {

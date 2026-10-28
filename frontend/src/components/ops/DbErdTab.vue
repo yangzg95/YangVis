@@ -78,6 +78,10 @@ import {
 } from '@ant-design/icons-vue'
 import { message as toast } from 'ant-design-vue'
 import { opsApi, type DbErd, type DbErdRelation, type DbErdTable } from '@/api'
+import { applyMermaidTheme } from '@/utils/mermaidTheme'
+import { useThemeStore } from '@/stores/theme'
+
+const themeStore = useThemeStore()
 
 const props = defineProps<{
   connId: number
@@ -120,16 +124,23 @@ let mermaidPromise: Promise<Mermaid> | null = null
 function loadMermaid(): Promise<Mermaid> {
   if (!mermaidPromise) {
     mermaidPromise = import('mermaid').then((mod) => {
-      mod.default.initialize({
-        startOnLoad: false,
-        securityLevel: 'strict',
-        theme: 'default',
-      })
+      applyMermaidTheme(mod.default, themeStore.isDark)
       return mod.default
     })
   }
   return mermaidPromise
 }
+
+// 明暗切换：重配单例主题后，有图才重绘，空态/报错态不折腾。
+watch(
+  () => themeStore.isDark,
+  async (isDark) => {
+    if (mermaidPromise && erd.value?.tables.length) {
+      applyMermaidTheme(await mermaidPromise, isDark)
+      await draw()
+    }
+  },
+)
 
 let renderSeq = 0
 
@@ -306,7 +317,7 @@ onMounted(load)
   overflow: auto;
   border: 1px solid var(--grid-line);
   border-radius: var(--tool-radius);
-  background: #fff;
+  background: var(--surface);
 }
 
 /* 缩放以左上角为基准，配合 canvas 的滚动条看大图时不会把图甩出可视区。 */
@@ -341,7 +352,7 @@ onMounted(load)
   padding: 8px;
   max-height: 200px;
   overflow: auto;
-  background: var(--paper, #fafafa);
+  background: var(--paper);
   border-radius: var(--radius-sm);
   font-size: var(--fs-xs);
   white-space: pre-wrap;
@@ -358,11 +369,11 @@ onMounted(load)
 }
 
 .chip {
-  border: 1px solid var(--hairline, #f0f0f0);
+  border: 1px solid var(--hairline);
   border-radius: 12px;
   padding: 1px 8px;
-  background: #fff;
-  color: var(--text-2, rgba(0, 0, 0, 0.65));
+  background: var(--surface);
+  color: var(--text-2);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   cursor: pointer;
@@ -370,6 +381,6 @@ onMounted(load)
 
 .chip:hover {
   border-color: var(--signal-border);
-  color: var(--signal-text, #0958d9);
+  color: var(--signal-text);
 }
 </style>

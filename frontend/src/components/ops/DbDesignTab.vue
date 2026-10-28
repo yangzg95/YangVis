@@ -677,7 +677,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 .section-title {
   font-size: var(--fs-xs);
   font-weight: 500;
-  color: rgba(0, 0, 0, 0.6);
+  color: var(--text-2);
 }
 
 /* 表单表格的单元格内边距跟其他网格同一组 token（grid.css），不再单独压一档。 */
@@ -714,7 +714,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   align-items: center;
   gap: 10px;
   padding-top: 10px;
-  border-top: 1px solid var(--hairline, #f0f0f0);
+  border-top: 1px solid var(--hairline);
 }
 
 .foot-hint {
@@ -747,12 +747,12 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 }
 
 .stmt-list li.destructive {
-  border-color: #ffccc7;
-  background: #fff2f0;
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
 }
 
 .stmt-list li.failed {
-  border-color: #ffccc7;
+  border-color: var(--danger-border);
 }
 
 .stmt-head {

@@ -746,7 +746,7 @@ function formatDuration(ms: number) {
 
 .field-hint,
 .token-hint {
-  color: #8a94a0;
+  color: var(--text-3);
   font-size: 12px;
 }
 
@@ -796,7 +796,7 @@ function formatDuration(ms: number) {
 }
 
 .selection-count {
-  color: #0a7e86;
+  color: var(--signal-text);
   font-size: 13px;
   font-weight: 500;
 }
@@ -807,12 +807,12 @@ function formatDuration(ms: number) {
 }
 
 .group-meta {
-  color: #8a94a0;
+  color: var(--text-3);
   font-size: 12px;
 }
 
 .group-count {
-  color: #0a7e86;
+  color: var(--signal-text);
   font-size: 12px;
 }
 
@@ -824,7 +824,7 @@ function formatDuration(ms: number) {
 .method-text,
 .source-text,
 .muted {
-  color: #8a94a0;
+  color: var(--text-3);
   font-size: 12px;
 }
 
@@ -837,7 +837,7 @@ function formatDuration(ms: number) {
 }
 
 .confirm-note {
-  color: #5a6572;
+  color: var(--text-2);
   font-size: 13px;
   margin-bottom: 0;
 }
@@ -848,7 +848,7 @@ function formatDuration(ms: number) {
 }
 
 .preview-error {
-  color: #c0392b;
+  color: var(--danger);
   font-size: 12px;
   margin-left: 8px;
 }
@@ -863,7 +863,7 @@ function formatDuration(ms: number) {
   padding: 12px;
   max-height: 320px;
   overflow: auto;
-  background: #f6f8fa;
+  background: var(--chrome);
   border-radius: 6px;
   font-size: 12px;
   line-height: 1.5;

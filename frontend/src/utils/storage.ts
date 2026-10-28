@@ -19,4 +19,6 @@ export const storageKeys = {
   opsDbColWidths: 'noetix-ops-db-colwidths',
   /** 工作流编辑器结构图折叠状态，'1' 折叠 / '0' 展开。 */
   workflowCanvasCollapsed: 'noetix-workflow-canvas-collapsed',
+  /** 外观模式：'dark' / 'light'。纯前端偏好，不进后端用户设置。 */
+  themeMode: 'noetix-theme-mode',
 } as const

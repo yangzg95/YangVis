@@ -2517,7 +2517,7 @@ onUnmounted(() => abort?.())
   cursor: pointer;
 }
 .compaction-head:hover {
-  background: rgba(0, 0, 0, 0.03);
+  background: var(--hover-neutral);
 }
 .compaction-icon {
   flex: none;
@@ -2731,7 +2731,7 @@ onUnmounted(() => abort?.())
 }
 
 .copy-btn:hover {
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--hover-neutral);
   color: var(--signal-text);
 }
 
@@ -2759,7 +2759,7 @@ onUnmounted(() => abort?.())
 }
 .composer {
   position: relative;
-  border-top: 1px solid #f0f0f0;
+  border-top: 1px solid var(--hairline);
   padding-top: 12px;
 }
 /* 挂起的简历上下文：输入框上方的一条提示卡，提醒先选智能体/工具再发送。 */
@@ -2769,13 +2769,13 @@ onUnmounted(() => abort?.())
   gap: 8px;
   margin-bottom: 8px;
   padding: 8px 10px;
-  background: #f3f9fa;
-  border: 1px solid #d4e7ea;
+  background: var(--signal-bg);
+  border: 1px solid var(--signal-border);
   border-radius: var(--tool-radius);
 }
 .context-icon {
   margin-top: 2px;
-  color: #0a7e86;
+  color: var(--signal-text);
   font-size: 15px;
 }
 .context-meta {
@@ -2788,24 +2788,24 @@ onUnmounted(() => abort?.())
   line-height: 1.5;
 }
 .context-title {
-  color: #1f2329;
+  color: var(--text-1);
   font-weight: 600;
 }
 .context-sub {
-  color: #6b7280;
+  color: var(--text-3);
 }
 .context-remove {
   flex: none;
   border: 0;
   padding: 2px 4px;
   background: transparent;
-  color: #8a8f99;
+  color: var(--text-3);
   cursor: pointer;
   border-radius: 4px;
 }
 .context-remove:hover:not(:disabled) {
-  color: #b4534f;
-  background: #fdf0ef;
+  color: var(--danger);
+  background: var(--danger-bg);
 }
 .context-remove:disabled {
   cursor: not-allowed;
@@ -2835,7 +2835,7 @@ onUnmounted(() => abort?.())
   transition: all 0.15s;
 }
 .attach-btn:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--hover-neutral);
   color: var(--signal-text);
 }
 .attach-btn:disabled {
@@ -2931,7 +2931,7 @@ onUnmounted(() => abort?.())
   cursor: pointer;
 }
 .pending-remove:hover {
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--hover-neutral);
   color: var(--danger);
 }
 /* 按钮和提示悬浮在输入框右下角，不再单独占一行；给 textarea 右侧留出

@@ -458,15 +458,15 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: #f5f6f7;
+  background: var(--paper);
 }
 .rb-head {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 8px 16px;
-  background: #fff;
-  border-bottom: 1px solid #ebedf0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
   flex-shrink: 0;
 }
 .title-input {
@@ -476,7 +476,7 @@ onUnmounted(() => {
 }
 .dirty-hint {
   font-size: 12px;
-  color: #fa8c16;
+  color: var(--warning);
 }
 .template-select {
   width: 188px;
@@ -484,7 +484,7 @@ onUnmounted(() => {
 .tpl-hint {
   margin-left: 8px;
   font-size: 12px;
-  color: #9ca3af;
+  color: var(--text-3);
 }
 .theme-swatches {
   display: inline-flex;
@@ -496,9 +496,9 @@ onUnmounted(() => {
   width: 18px;
   height: 18px;
   padding: 0;
-  border: 2px solid #fff;
+  border: 2px solid var(--surface);
   border-radius: 50%;
-  box-shadow: 0 0 0 1px #d9d9d9;
+  box-shadow: 0 0 0 1px var(--hairline);
   cursor: pointer;
   transition: transform 0.12s ease;
 }
@@ -506,7 +506,7 @@ onUnmounted(() => {
   transform: scale(1.15);
 }
 .theme-dot.active {
-  box-shadow: 0 0 0 2px #1f2329;
+  box-shadow: 0 0 0 2px var(--text-1);
 }
 .head-spacer {
   flex: 1;
@@ -538,7 +538,7 @@ onUnmounted(() => {
 .rb-nav-pane {
   width: 180px;
   flex-shrink: 0;
-  background: #fff;
+  background: var(--surface);
   border-radius: 8px;
   padding: 12px;
   overflow-y: auto;
@@ -546,7 +546,7 @@ onUnmounted(() => {
 .rb-form-pane {
   flex: 1;
   min-width: 0;
-  background: #fff;
+  background: var(--surface);
   border-radius: 8px;
   padding: 16px 20px;
   overflow-y: auto;
@@ -554,15 +554,15 @@ onUnmounted(() => {
 .form-title {
   font-size: 16px;
   font-weight: 700;
-  color: #1f2329;
+  color: var(--text-1);
   margin-bottom: 8px;
   padding-bottom: 10px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--hairline);
 }
 .rb-preview-pane {
   width: 560px;
   flex-shrink: 0;
-  background: #fff;
+  background: var(--surface);
   border-radius: 8px;
   padding: 12px 0;
 }

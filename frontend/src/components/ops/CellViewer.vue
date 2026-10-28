@@ -43,7 +43,7 @@ async function copy() {
   padding: 10px 12px;
   overflow: auto;
   border-radius: var(--radius-md, 6px);
-  background: rgba(17, 24, 31, 0.03);
+  background: var(--surface-2);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   line-height: 1.6;

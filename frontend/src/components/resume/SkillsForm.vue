@@ -102,6 +102,6 @@ function onApplied(html: string, mode: 'replace' | 'append' | 'insert') {
 }
 .skills-hint {
   font-size: 12px;
-  color: #9ca3af;
+  color: var(--text-3);
 }
 </style>

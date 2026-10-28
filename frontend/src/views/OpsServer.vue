@@ -677,7 +677,7 @@ onMounted(() => {
   height: 8px;
   flex-shrink: 0;
   border-radius: 50%;
-  background: #d9d9d9;
+  background: var(--dot-idle);
 }
 
 .status-dot.ok {
@@ -711,7 +711,7 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: rgba(0, 0, 0, 0.65);
+  color: var(--text-2);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
 }

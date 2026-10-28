@@ -830,18 +830,18 @@ void reload()
   font-weight: 600;
 }
 .tag-a {
-  background: rgba(22, 119, 255, 0.1);
-  color: #1677ff;
+  background: var(--compare-a-bg);
+  color: var(--compare-a);
 }
 .tag-b {
-  background: rgba(82, 196, 26, 0.12);
-  color: #389e0d;
+  background: var(--compare-b-bg);
+  color: var(--compare-b);
 }
 .tag-a-text {
-  color: #1677ff;
+  color: var(--compare-a);
 }
 .tag-b-text {
-  color: #389e0d;
+  color: var(--compare-b);
 }
 
 /* 两列对齐布局：整页只有这一套列宽，运行摘要、输入、每步输出都往里套。 */

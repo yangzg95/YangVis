@@ -180,6 +180,7 @@
         <OpsChat
           ref="chatRef"
           target="database"
+          :dark="themeStore.isDark"
           :target-id="selectedId"
           placeholder="例如：哪张表最近增长最快"
           empty-hint="先在左侧选中一个连接"
@@ -389,11 +390,13 @@ import {
   type OpsDatabasePayload,
 } from '@/api'
 import { useAuthStore } from '@/stores/auth'
+import { useThemeStore } from '@/stores/theme'
 
 const simpleEmpty = Empty.PRESENTED_IMAGE_SIMPLE
 
 const router = useRouter()
 const auth = useAuthStore()
+const themeStore = useThemeStore()
 
 const TYPE_OPTIONS = [
   { value: '', label: '全部类型' },
@@ -1238,12 +1241,12 @@ body.dragging-col .col-resizer::after {
 
 .empty-icon {
   font-size: 40px;
-  color: rgba(0, 0, 0, 0.15);
+  color: var(--ghost-icon);
 }
 
 .empty-hint {
   font-size: var(--fs-xs);
-  color: rgba(0, 0, 0, 0.25);
+  color: var(--disabled-text);
 }
 
 .writable-hint {
@@ -1363,7 +1366,7 @@ body.dragging-col .col-resizer::after {
   width: 22px;
   height: 22px;
   padding: 0;
-  border: 1px solid rgba(0, 0, 0, 0.15);
+  border: 1px solid var(--hairline);
   border-radius: var(--radius-sm);
   cursor: pointer;
 }
@@ -1375,7 +1378,7 @@ body.dragging-col .col-resizer::after {
 
 .swatch-none {
   position: relative;
-  background: #fff;
+  background: var(--surface);
 }
 
 .swatch-none::after {
@@ -1408,7 +1411,7 @@ body.dragging-col .col-resizer::after {
   padding: 4px;
   border: 1px solid var(--hairline);
   border-radius: var(--tool-radius);
-  background: var(--surface);
+  background: var(--surface-raised);
   box-shadow: var(--shadow-overlay);
 }
 
@@ -1431,7 +1434,7 @@ body.dragging-col .col-resizer::after {
 }
 
 .menu-item.disabled {
-  color: rgba(0, 0, 0, 0.25);
+  color: var(--disabled-text);
   cursor: not-allowed;
 }
 

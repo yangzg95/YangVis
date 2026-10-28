@@ -108,7 +108,7 @@ const activeLabel = computed(() =>
   font-size: var(--fs-xs);
 }
 .tt-errors {
-  color: var(--danger, #ff4d4f);
+  color: var(--danger);
 }
 .tt-active {
   max-width: 260px;

@@ -70,6 +70,18 @@
               @pick="onTabMenuPick"
               @close="tabMenu.open = false"
             />
+            <a-tooltip :title="themeStore.isDark ? '切换浅色模式' : '切换深色模式'">
+              <button
+                type="button"
+                class="icon-btn theme-toggle"
+                :aria-label="themeStore.isDark ? '切换浅色模式' : '切换深色模式'"
+                @click="themeStore.toggle()"
+              >
+                <!-- 当前图标库无月/日图标，用灯泡隐喻：浅色时线框（关灯进深色）、深色时实心（开灯回浅色）。 -->
+                <BulbOutlined v-if="!themeStore.isDark" />
+                <BulbFilled v-else />
+              </button>
+            </a-tooltip>
             <div class="topbar-user">
               <a-dropdown placement="bottomRight" :trigger="['click']">
                 <button type="button" class="user-dropdown-trigger">
@@ -141,6 +153,8 @@ import {
   AppstoreOutlined,
   BookOutlined,
   BuildOutlined,
+  BulbFilled,
+  BulbOutlined,
   CloseOutlined,
   CloudServerOutlined,
   CodeOutlined,
@@ -162,10 +176,12 @@ import {
   ToolOutlined,
   UserOutlined,
 } from '@ant-design/icons-vue'
+import { theme as antdTheme } from 'ant-design-vue'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
 import SidebarNav, { type MenuNode } from '@/components/SidebarNav.vue'
 import GridContextMenu, { type GridMenuEntry } from '@/components/ops/GridContextMenu.vue'
 import { useAuthStore } from '@/stores/auth'
+import { useThemeStore } from '@/stores/theme'
 import { leafForPath as resolveTabLeaf } from '@/utils/appTabs'
 import { storageKeys } from '@/utils/storage'
 import { useIsMobile } from '@/utils/useIsMobile'
@@ -247,36 +263,66 @@ const MENU: MenuNode[] = [
 //   的颜色在 style.css 里覆盖，这里 components.Menu 只放主题无关项，否则会
 //   污染顶栏用户下拉的 light 菜单。
 // - Button 组件 token 是空接口，主按钮 ink 化也在 style.css 里做。
-const theme = {
-  hashed: false,
-  token: {
-    // 深 teal 而不是亮青：白底对比度 ~4.7:1 过 AA；AntD 派生的 hover 色
-    // 正好落在亮青 #0FB5BF 附近，色阶自然。
-    colorPrimary: '#0a7e86',
-    colorInfo: '#0a7e86',
-    borderRadius: 8,
-    borderRadiusLG: 10,
-    borderRadiusSM: 4,
-    fontFamily:
-      "'IBM Plex Sans', -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif",
-    colorText: '#1c232b',
-    colorTextSecondary: '#5a6572',
-    colorBorder: '#d9dfe3',
-    colorBorderSecondary: 'rgba(17,24,31,0.09)',
-    colorBgLayout: '#f4f6f7',
-    colorBgContainer: '#ffffff',
-  },
-  components: {
-    Menu: { radiusItem: 8, itemMarginInline: 8 },
-    Table: {
-      tableHeaderBg: '#f4f6f7',
-      tableHeaderTextColor: '#5a6572',
-      tableBorderColor: 'rgba(17,24,31,0.09)',
-      tableRowHoverBg: 'rgba(15,181,191,0.05)',
+// 明暗两套：暗色走 darkAlgorithm，容器/边框/底色对齐 style.css 里的同名
+// 自定义 token（#1b2530 / #232e38 / --paper），自绘组件与 antd 组件才会同色。
+const FONT_FAMILY =
+  "'IBM Plex Sans', -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif"
+
+const themeStore = useThemeStore()
+
+const theme = computed(() => {
+  const dark = themeStore.isDark
+  return {
+    hashed: false,
+    algorithm: dark ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
+    token: {
+      // 浅底用深 teal（对比度 ~4.7:1 过 AA）；暗底翻亮青，否则 4.7:1 掉到 ~3:1。
+      colorPrimary: dark ? '#0fb5bf' : '#0a7e86',
+      colorInfo: dark ? '#0fb5bf' : '#0a7e86',
+      borderRadius: 8,
+      borderRadiusLG: 10,
+      borderRadiusSM: 4,
+      fontFamily: FONT_FAMILY,
+      ...(dark
+        ? {
+            // 与 style.css 的 --paper/--surface/--surface-raised 对齐。
+            colorBgLayout: '#0f141a',
+            colorBgContainer: '#1b2530',
+            colorBgElevated: '#232e38',
+            colorBorder: '#33404c',
+            colorBorderSecondary: 'rgba(255,255,255,0.1)',
+          }
+        : {
+            colorText: '#1c232b',
+            colorTextSecondary: '#5a6572',
+            colorBorder: '#d9dfe3',
+            colorBorderSecondary: 'rgba(17,24,31,0.09)',
+            colorBgLayout: '#f4f6f7',
+            colorBgContainer: '#ffffff',
+          }),
     },
-    Tabs: { tabsHoverColor: '#0a7e86', tabsActiveColor: '#0a7e86' },
-  },
-}
+    components: {
+      Menu: { radiusItem: 8, itemMarginInline: 8 },
+      Table: dark
+        ? {
+            tableHeaderBg: '#222c36',
+            tableHeaderTextColor: '#a7b2bd',
+            tableBorderColor: 'rgba(255,255,255,0.12)',
+            tableRowHoverBg: 'rgba(255,255,255,0.06)',
+          }
+        : {
+            tableHeaderBg: '#f4f6f7',
+            tableHeaderTextColor: '#5a6572',
+            tableBorderColor: 'rgba(17,24,31,0.09)',
+            tableRowHoverBg: 'rgba(15,181,191,0.05)',
+          },
+      Tabs: {
+        tabsHoverColor: dark ? '#3ad6de' : '#0a7e86',
+        tabsActiveColor: dark ? '#3ad6de' : '#0a7e86',
+      },
+    },
+  }
+})
 
 // 子菜单没配图标时回退用父级的，标签页和左侧菜单的图标就保持一致了。
 const LEAVES: MenuLeaf[] = MENU.flatMap((node) =>
@@ -586,7 +632,8 @@ const onUserMenuClick = async ({ key }: { key: string | number }) => {
    抽屉 teleport 到 body，这里的全局样式才够得着。内容复用 style.css 里
    的 sidebar-* 全局类，只补抽屉壳本身的差异：ink 底、去掉 body 内边距、
    关闭钮用浅色。 */
-.nav-drawer-trigger {
+.nav-drawer-trigger,
+.theme-toggle {
   flex-shrink: 0;
 }
 

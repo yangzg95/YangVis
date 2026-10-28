@@ -64,6 +64,10 @@ import { ref, watch } from 'vue'
 import { message as toast } from 'ant-design-vue'
 import { CopyOutlined, DownloadOutlined, EditOutlined } from '@ant-design/icons-vue'
 import { copyText } from '@/utils/clipboard'
+import { applyMermaidTheme } from '@/utils/mermaidTheme'
+import { useThemeStore } from '@/stores/theme'
+
+const themeStore = useThemeStore()
 
 const props = defineProps<{
   /** Mermaid 图源码（不含围栏）。 */
@@ -83,12 +87,7 @@ let mermaidPromise: Promise<Mermaid> | null = null
 function loadMermaid(): Promise<Mermaid> {
   if (!mermaidPromise) {
     mermaidPromise = import('mermaid').then((mod) => {
-      mod.default.initialize({
-        startOnLoad: false,
-        // strict：标签里的 HTML 一律转义。模型输出不可信，这条不能松。
-        securityLevel: 'strict',
-        theme: 'default',
-      })
+      applyMermaidTheme(mod.default, themeStore.isDark)
       return mod.default
     })
   }
@@ -125,6 +124,17 @@ async function render(source: string) {
 
 // source 变化（含父组件保存后回写）时重新渲染。immediate 覆盖首屏。
 watch(() => props.source, (source) => void render(source), { immediate: true })
+
+// 明暗切换：mermaid 是全局单例，先重配主题再重绘当前图。
+watch(
+  () => themeStore.isDark,
+  async (isDark) => {
+    if (mermaidPromise) {
+      applyMermaidTheme(await mermaidPromise, isDark)
+      if (!editing.value) void render(props.source)
+    }
+  },
+)
 
 // ---- 编辑 -------------------------------------------------------------------
 
@@ -189,7 +199,7 @@ function downloadSvg() {
   margin: 8px 0;
   border: 1px solid var(--hairline);
   border-radius: var(--radius-md);
-  background: #fff;
+  background: var(--surface);
   overflow: hidden;
 }
 .diagram {
@@ -260,7 +270,7 @@ function downloadSvg() {
   transition: all 0.15s;
 }
 .action-btn:hover {
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--hover-neutral);
   color: var(--signal-text);
 }
 .edit-error {

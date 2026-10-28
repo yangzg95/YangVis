@@ -556,7 +556,7 @@ watch(
   border: 1px solid var(--hairline);
   border-radius: var(--radius-sm);
   background: var(--surface);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--shadow-overlay);
 }
 .completion button {
   border: 1px solid var(--hairline);

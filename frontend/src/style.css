@@ -11,11 +11,18 @@
    ========================================================================== */
 
 :root {
-  /* -- 表面 ------------------------------------------------------------ */
-  --ink: #11181f;            /* 导航轨、主按钮、终端/代码深色面板 */
+  /* -- 表面 ------------------------------------------------------------
+     双主题只换 token：浅色色值写在 :root，暗色覆盖写在
+     :root[data-theme='dark']。组件样式一律引用变量，不准再写死表面色。 */
+  --ink: #11181f;            /* 导航轨、终端/代码深色面板（暗色模式也保持） */
   --ink-hover: #232e38;
   --paper: #f4f6f7;          /* 内容区背景，纯色 */
-  --surface: #ffffff;
+  --surface: #ffffff;        /* 卡片 / 顶栏 / 输入控件 */
+  /* 浮在页面之上的表面（自绘菜单、右键浮层）：浅色同卡片，暗色抬一档，
+     否则浮层和底下的卡片同色，只靠阴影分不出来。 */
+  --surface-raised: #ffffff;
+  /* 比卡片再弱一档的填充：trace 代码块、内嵌小块。 */
+  --surface-2: rgba(17, 24, 31, 0.04);
 
   /* -- 信号色：唯一非语义强调色 -----------------------------------------
      亮青只用在 ink 深色表面上做装饰信号；浅底文字/控件用 signal-text。 */
@@ -42,6 +49,7 @@
   --danger-bright: #ff4d4f;
   --danger-soft: #ff7875;
   --danger-bg: rgba(207, 19, 34, 0.08);
+  --danger-border: rgba(207, 19, 34, 0.28);
   --success: #389e0d;
   --success-bright: #52c41a;
   --success-bg: rgba(56, 158, 13, 0.08);
@@ -102,12 +110,153 @@
   /* -- 阴影只给浮层（下拉/弹窗/菜单）；静态卡片一律用发丝线 ------------ */
   --shadow-overlay: 0 8px 24px rgba(17, 24, 31, 0.12);
 
+  /* -- 双主题派生量：组件需要「中性悬停/弱文字/空状态」时统一引这些，
+     暗色覆盖集中在 :root[data-theme='dark']，别在组件里写黑白透明色。 -- */
+  --hover-neutral: rgba(17, 24, 31, 0.055);   /* 图标钮、列表项中性悬停 */
+  --code-inline-bg: rgba(17, 24, 31, 0.06);  /* 行内代码底 */
+  --dot-idle: #d9d9d9;                        /* 状态点的「未知/空闲」档 */
+  --ghost-icon: rgba(17, 24, 31, 0.14);       /* 超大空状态图标 */
+  --disabled-text: rgba(17, 24, 31, 0.3);
+  --scrollbar-thumb: rgba(17, 24, 31, 0.2);
+  --scrollbar-thumb-hover: rgba(17, 24, 31, 0.32);
+
+  /* 主按钮在浅色世界里是 ink 实底（见下方 .ant-btn-primary）；暗色世界里
+     ink 底会和导航轨糊成一团，改打信号色实底。 */
+  --btn-primary-bg: var(--ink);
+  --btn-primary-hover: var(--ink-hover);
+  --btn-primary-text: #ffffff;
+
+  /* 运行对比两列的辨识色（非语义，A 蓝 B 绿）。 */
+  --compare-a: #1677ff;
+  --compare-a-bg: rgba(22, 119, 255, 0.1);
+  --compare-b: #389e0d;
+  --compare-b-bg: rgba(82, 196, 26, 0.12);
+
+  /* 登录页图纸底：浅色用冷灰 + 深网格，暗色翻转。 */
+  --login-grid-bg: #eaeef1;
+  --login-grid-line: rgba(17, 24, 31, 0.045);
+
+  /* CodeMirror SQL 着色与选区。 */
+  --cm-keyword: #0a7e86;
+  --cm-string: #0a7e4f;
+  --cm-number: #b15c00;
+  --cm-type: #9254de;
+  --cm-selection: rgba(10, 126, 134, 0.15);
+
   --font-sans:
     'IBM Plex Sans', -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
     'Noto Sans SC', sans-serif;
   --font-mono:
     'IBM Plex Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
 
+}
+
+/* ==========================================================================
+   暗色主题
+   只覆盖随明暗翻转的 token；ink 导航轨、终端、markdown 代码块这些永远
+   深色的表面引用的是 --ink/--surface-dark/--on-dark-* 一族，不在此翻转。
+   色阶取意：页面底沉到 ink 之下，卡片抬到既有的 --surface-dark #1b2530，
+   浮层再抬一档。文字直接复用 --text-dark 族，两套色板本就是同一家族。
+   ========================================================================== */
+:root[data-theme='dark'] {
+  --paper: #0f141a;
+  --surface: #1b2530;
+  --surface-raised: #232e38;
+  --surface-2: rgba(255, 255, 255, 0.05);
+
+  /* 浅底信号色 #0a7e86 在暗底上只有 ~3:1，亮青 #3ad6de 提到 ~6:1。 */
+  --signal-text: #3ad6de;
+  --signal-bg: rgba(58, 214, 222, 0.12);
+  --signal-bg-strong: rgba(58, 214, 222, 0.2);
+  --signal-border: rgba(58, 214, 222, 0.42);
+
+  --hairline: rgba(255, 255, 255, 0.1);
+  --text-1: #d8dee4;
+  --text-2: #a7b2bd;
+  --text-3: #8b98a5;
+
+  /* 文字档换用 *-bright 一族（暗底上浅色才够对比），底色同步加深。 */
+  --danger: #ff7875;
+  --danger-bg: rgba(255, 77, 79, 0.14);
+  --danger-border: rgba(255, 77, 79, 0.35);
+  --success: #73d13d;
+  --success-bg: rgba(82, 196, 26, 0.14);
+  --warning: #ffc53d;
+  --warning-bg: rgba(250, 173, 20, 0.13);
+
+  /* 工作台网格：表头抬一档，所有线条翻成白系。 */
+  --chrome: #222c36;
+  --grid-line: rgba(255, 255, 255, 0.12);
+  --grid-line-soft: rgba(255, 255, 255, 0.07);
+  --grid-stripe: rgba(255, 255, 255, 0.025);
+  --grid-hover: rgba(255, 255, 255, 0.06);
+
+  --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.5);
+
+  --hover-neutral: rgba(255, 255, 255, 0.07);
+  --code-inline-bg: rgba(255, 255, 255, 0.09);
+  --dot-idle: rgba(255, 255, 255, 0.26);
+  --ghost-icon: rgba(255, 255, 255, 0.16);
+  --disabled-text: rgba(255, 255, 255, 0.3);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.2);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.32);
+
+  /* 主按钮翻成亮青实底，文字压深色，对比度 > 7:1。 */
+  --btn-primary-bg: #0fb5bf;
+  --btn-primary-hover: #16c2cc;
+  --btn-primary-text: #082226;
+
+  --compare-a: #69b1ff;
+  --compare-a-bg: rgba(105, 177, 255, 0.16);
+  --compare-b: #73d13d;
+  --compare-b-bg: rgba(115, 209, 61, 0.16);
+
+  --login-grid-bg: #0d1217;
+  --login-grid-line: rgba(255, 255, 255, 0.045);
+
+  /* CodeMirror：关键字翻亮青，字符串/数字/类型全部提亮。 */
+  --cm-keyword: #3ad6de;
+  --cm-string: #7ee2a8;
+  --cm-number: #ffb86b;
+  --cm-type: #b37feb;
+  --cm-selection: rgba(58, 214, 222, 0.25);
+
+  color-scheme: dark;
+}
+
+/* ---- 暗色：命令式弹层兜底 ----------------------------------------------
+   message / notification / Modal.confirm 走静态函数调用，不消费 ConfigProvider
+   的 darkAlgorithm（antdv 4 的已知行为），弹层默认仍是白底。这里统一压暗，
+   表面取 elevated 同值；模板里的 <a-modal> 已被 algorithm 变暗，同值覆盖无色差。 */
+:root[data-theme='dark'] .ant-message-notice-content,
+:root[data-theme='dark'] .ant-notification-notice,
+:root[data-theme='dark'] .ant-modal-content {
+  background: var(--surface-raised);
+  border: 1px solid var(--hairline);
+}
+
+:root[data-theme='dark'] .ant-message-notice-content,
+:root[data-theme='dark'] .ant-notification-notice-message,
+:root[data-theme='dark'] .ant-modal-title,
+:root[data-theme='dark'] .ant-modal-confirm-title {
+  color: var(--text-1);
+}
+
+:root[data-theme='dark'] .ant-modal-header,
+:root[data-theme='dark'] .ant-modal-footer {
+  background: transparent;
+  border-color: var(--hairline);
+}
+
+:root[data-theme='dark'] .ant-modal-body,
+:root[data-theme='dark'] .ant-modal-confirm-content,
+:root[data-theme='dark'] .ant-notification-notice-description {
+  color: var(--text-2);
+}
+
+:root[data-theme='dark'] .ant-modal-close-x,
+:root[data-theme='dark'] .ant-notification-notice-close {
+  color: var(--text-3);
 }
 
 /* ---- Base ------------------------------------------------------------- */
@@ -238,7 +387,7 @@ input {
 .grid-wrap .ant-table-body,
 .grid-wrap .ant-table-content {
   scrollbar-width: thin;
-  scrollbar-color: rgba(17, 24, 31, 0.22) transparent;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 
 .conn-tree::-webkit-scrollbar,
@@ -266,12 +415,12 @@ input {
 .grid-wrap .ant-table-body::-webkit-scrollbar-thumb,
 .grid-wrap .ant-table-content::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: rgba(17, 24, 31, 0.2);
+  background: var(--scrollbar-thumb);
 }
 
 .conn-tree::-webkit-scrollbar-thumb:hover,
 .grid-wrap .ant-table-body::-webkit-scrollbar-thumb:hover {
-  background: rgba(17, 24, 31, 0.32);
+  background: var(--scrollbar-thumb-hover);
 }
 
 /* 辅助说明文字：曾经每个页面各定义一份 .muted/.hint 且色值不一（0.45/0.55
@@ -336,7 +485,7 @@ input {
   transition: all 0.15s;
 }
 .icon-btn:hover {
-  background: rgba(17, 24, 31, 0.06);
+  background: var(--hover-neutral);
   color: var(--text-1);
 }
 
@@ -360,19 +509,22 @@ input {
    antd-vue 4.2.6 的 Button ComponentToken 是空接口，只能靠覆盖。 */
 
 .ant-btn-primary {
-  background: var(--ink);
-  border-color: var(--ink);
+  background: var(--btn-primary-bg);
+  border-color: var(--btn-primary-bg);
+  color: var(--btn-primary-text);
   box-shadow: none;
 }
 
 .ant-btn-primary:not(:disabled):not(.ant-btn-dangerous):hover {
-  background: var(--ink-hover);
-  border-color: var(--ink-hover);
+  background: var(--btn-primary-hover);
+  border-color: var(--btn-primary-hover);
+  color: var(--btn-primary-text);
 }
 
 .ant-btn-primary:not(:disabled):not(.ant-btn-dangerous):active {
-  background: var(--ink);
-  border-color: var(--ink);
+  background: var(--btn-primary-bg);
+  border-color: var(--btn-primary-bg);
+  color: var(--btn-primary-text);
 }
 
 /* ---- 登录页 ------------------------------------------------------------
@@ -473,10 +625,10 @@ input {
 .login-main {
   position: relative;
   overflow: hidden;
-  background: #eaeef1;
+  background: var(--login-grid-bg);
   background-image:
-    linear-gradient(rgba(17, 24, 31, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(17, 24, 31, 0.045) 1px, transparent 1px);
+    linear-gradient(var(--login-grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--login-grid-line) 1px, transparent 1px);
   background-size: 34px 34px;
   background-position: center;
 }
@@ -505,7 +657,7 @@ input {
   background: var(--surface);
   border: 1px solid var(--hairline);
   border-radius: var(--radius-lg);
-  box-shadow: 0 12px 32px rgba(17, 24, 31, 0.08);
+  box-shadow: var(--shadow-overlay);
 }
 
 .login-header {
@@ -559,7 +711,7 @@ input {
 .login-form .ant-input-affix-wrapper-focused,
 .login-form .ant-input:focus {
   border-color: var(--signal-text);
-  box-shadow: 0 0 0 3px rgba(15, 181, 191, 0.15);
+  box-shadow: 0 0 0 3px var(--signal-bg-strong);
 }
 
 .login-form .ant-input-password .ant-input-suffix {
@@ -626,7 +778,7 @@ input {
   border-radius: var(--radius-md);
   cursor: pointer;
   user-select: none;
-  background: #f5f7fa;
+  background: var(--chrome);
 }
 
 .captcha-placeholder {
@@ -643,7 +795,7 @@ input {
   align-items: center;
   gap: 5px;
   margin-top: 8px;
-  color: #d46b08;
+  color: var(--warning);
   font-size: var(--fs-xs);
 }
 
@@ -1054,7 +1206,7 @@ input {
 
 .header-tablist.ant-tabs .ant-tabs-tab:hover {
   color: var(--text-1);
-  background: rgba(17, 24, 31, 0.04);
+  background: var(--hover-neutral);
 }
 
 .header-tablist.ant-tabs .ant-tabs-tab-btn {

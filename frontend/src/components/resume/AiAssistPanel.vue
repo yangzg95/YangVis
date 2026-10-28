@@ -168,14 +168,14 @@ function apply(mode: 'replace' | 'append' | 'insert') {
   margin-bottom: 12px;
 }
 .streaming-hint {
-  color: #0a7e86;
+  color: var(--signal-text);
   font-size: 13px;
   margin-bottom: 10px;
 }
 .assist-output {
   font-size: 13.5px;
   line-height: 1.75;
-  color: #1f2329;
+  color: var(--text-1);
   word-break: break-word;
 }
 .rich-output p {
@@ -189,7 +189,7 @@ function apply(mode: 'replace' | 'append' | 'insert') {
 .markdown-body h2 {
   font-size: 15px;
   margin: 14px 0 6px;
-  color: #0a7e86;
+  color: var(--signal-text);
 }
 .markdown-body h2:first-child {
   margin-top: 0;
@@ -202,7 +202,7 @@ function apply(mode: 'replace' | 'append' | 'insert') {
   margin-bottom: 4px;
 }
 .markdown-body code {
-  background: #f5f5f5;
+  background: var(--code-inline-bg);
   padding: 1px 4px;
   border-radius: 3px;
 }

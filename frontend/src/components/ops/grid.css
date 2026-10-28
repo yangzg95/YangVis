@@ -17,7 +17,7 @@
 .db-grid .ant-table-tbody > tr > td {
   padding: var(--grid-pad-block) var(--grid-pad-inline);
   border-bottom: 1px solid var(--grid-line-soft);
-  color: rgba(0, 0, 0, 0.8);
+  color: var(--text-1);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   line-height: 18px;
@@ -67,7 +67,7 @@
 
 /* 空值占位：灰斜体，和真实内容一眼分开。 */
 .db-grid .cell .null {
-  color: rgba(0, 0, 0, 0.3);
+  color: var(--disabled-text);
   font-style: italic;
 }
 
@@ -145,7 +145,7 @@
   align-items: center;
   gap: var(--tool-gap);
   padding: 3px var(--grid-pad-inline);
-  border: 1px solid var(--hairline, #f0f0f0);
+  border: 1px solid var(--hairline);
   border-radius: var(--tool-radius);
   background: var(--chrome);
 }
@@ -180,7 +180,7 @@
   align-items: center;
   padding: 1px 3px;
   border-radius: 3px;
-  background: var(--signal-bg, #e6f4ff);
+  background: var(--signal-bg);
   color: var(--signal-text);
   font-size: var(--fs-xs);
   cursor: pointer;

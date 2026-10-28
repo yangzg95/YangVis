@@ -57,7 +57,7 @@ const emit = defineEmits<{
   font-size: var(--fs-base);
 }
 .agent-desc {
-  color: rgba(0, 0, 0, 0.65);
+  color: var(--text-2);
   font-size: var(--fs-sm);
   min-height: 40px;
   line-height: 1.5;

@@ -194,19 +194,19 @@ function onApplied(html: string, mode: 'replace' | 'append' | 'insert') {
   display: block;
   margin: 10px 0 6px;
   font-size: 13px;
-  color: #4b5563;
+  color: var(--text-2);
 }
 .field-label--block {
   margin-top: 14px;
 }
 .required {
-  color: #ff4d4f;
+  color: var(--danger);
   margin-right: 2px;
 }
 .degree-tag {
   margin-left: 8px;
   font-size: 12px;
   font-weight: 400;
-  color: #0a7e86;
+  color: var(--signal-text);
 }
 </style>

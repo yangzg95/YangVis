@@ -74,10 +74,10 @@ const simpleEmpty = Empty.PRESENTED_IMAGE_SIMPLE
   gap: 12px;
 }
 .entry-card {
-  border: 1px solid #ebedf0;
+  border: 1px solid var(--hairline);
   border-radius: 8px;
   padding: 12px 14px;
-  background: #fff;
+  background: var(--surface);
 }
 .entry-head {
   display: flex;
@@ -89,7 +89,7 @@ const simpleEmpty = Empty.PRESENTED_IMAGE_SIMPLE
 .head-slot {
   font-size: 13.5px;
   font-weight: 600;
-  color: #1f2329;
+  color: var(--text-1);
   min-width: 0;
 }
 .entry-ops {

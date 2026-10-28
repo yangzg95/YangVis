@@ -94,13 +94,10 @@ function onPick(entry: GridMenuEntry) {
   position: fixed;
   min-width: 168px;
   padding: 4px;
-  background: var(--surface);
+  background: var(--surface-raised);
   border: 1px solid var(--hairline);
   border-radius: var(--tool-radius);
-  box-shadow:
-    0 6px 16px 0 rgba(0, 0, 0, 0.08),
-    0 3px 6px -4px rgba(0, 0, 0, 0.12),
-    0 9px 28px 8px rgba(0, 0, 0, 0.05);
+  box-shadow: var(--shadow-overlay);
 }
 
 .gmenu-item {
@@ -111,7 +108,7 @@ function onPick(entry: GridMenuEntry) {
   padding: 5px var(--grid-pad-inline);
   border-radius: var(--radius-sm);
   font-size: var(--fs-sm);
-  color: rgba(0, 0, 0, 0.88);
+  color: var(--text-1);
   cursor: pointer;
   white-space: nowrap;
 }
@@ -121,7 +118,7 @@ function onPick(entry: GridMenuEntry) {
 }
 
 .gmenu-item.disabled {
-  color: rgba(0, 0, 0, 0.25);
+  color: var(--disabled-text);
   cursor: not-allowed;
 }
 
@@ -144,7 +141,7 @@ function onPick(entry: GridMenuEntry) {
 .gmenu-divider {
   height: 1px;
   margin: 4px 8px;
-  background: rgba(5, 5, 5, 0.06);
+  background: var(--hairline);
 }
 
 .gmenu-sub {

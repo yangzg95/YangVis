@@ -13,6 +13,8 @@ import '@fontsource/ibm-plex-sans/700.css'
 import '@fontsource/ibm-plex-mono/400.css'
 import '@fontsource/ibm-plex-mono/500.css'
 
+// 主题 store 的模块副作用会在挂载前把 data-theme 写到 <html>，必须早于 App 引入。
+import './stores/theme'
 import App from './App.vue'
 import router from './router'
 import './style.css'

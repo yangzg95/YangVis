@@ -57,6 +57,6 @@ function onCurrent(event: { target: { checked: boolean } }) {
   min-width: 120px;
 }
 .dash {
-  color: #999;
+  color: var(--text-3);
 }
 </style>

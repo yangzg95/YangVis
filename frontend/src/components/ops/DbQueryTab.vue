@@ -976,7 +976,7 @@ body.dragging-row .row-resizer::after {
 /* 例子点一下只是填进编辑器，不直接执行——让用户先看清要跑什么。 */
 .sample {
   padding: 4px 10px;
-  border: 1px solid #d9d9d9;
+  border: 1px solid var(--hairline);
   border-radius: var(--tool-radius);
   background: var(--chrome);
   color: var(--signal-text);
@@ -1118,6 +1118,6 @@ body.dragging-row .row-resizer::after {
 }
 
 .his-flag.write {
-  color: #fa8c16;
+  color: var(--warning);
 }
 </style>

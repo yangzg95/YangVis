@@ -923,7 +923,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: var(--bg, #f4f6f7);
+  background: var(--paper);
 }
 
 .wb-head {
@@ -932,8 +932,8 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   justify-content: space-between;
   gap: 12px;
   padding: 10px 16px;
-  background: #fff;
-  border-bottom: 1px solid var(--hairline, rgba(17, 24, 31, 0.09));
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
   flex-wrap: wrap;
 }
 
@@ -973,8 +973,8 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
 .wb-editor,
 .wb-preview {
   min-height: 0;
-  background: #fff;
-  border: 1px solid var(--hairline, rgba(17, 24, 31, 0.09));
+  background: var(--surface);
+  border: 1px solid var(--hairline);
   border-radius: var(--radius-md, 10px);
   display: flex;
   flex-direction: column;
@@ -989,7 +989,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--text-3);
-  border-bottom: 1px solid var(--hairline, rgba(17, 24, 31, 0.09));
+  border-bottom: 1px solid var(--hairline);
 }
 
 .page-list {
@@ -1010,11 +1010,11 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
 }
 
 .page-item:hover {
-  background: rgba(15, 181, 191, 0.06);
+  background: var(--signal-bg);
 }
 
 .page-item.active {
-  background: rgba(15, 181, 191, 0.12);
+  background: var(--signal-bg-strong);
 }
 
 .page-no {
@@ -1125,7 +1125,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
 /* 一层是一个小组：层名一行，它的模块缩进一行。 */
 .layer-group {
   padding-left: 10px;
-  border-left: 2px solid var(--line, rgba(0, 0, 0, 0.06));
+  border-left: 2px solid var(--hairline);
   margin-bottom: 8px;
 }
 
@@ -1184,11 +1184,11 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
 }
 
 .json-area-bad {
-  border-color: #d4380d;
+  border-color: var(--danger);
 }
 
 .source-error {
-  color: #d4380d;
+  color: var(--danger);
   font-size: var(--fs-xs);
 }
 
@@ -1200,14 +1200,14 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--text-3);
-  border-bottom: 1px solid var(--hairline, rgba(17, 24, 31, 0.09));
+  border-bottom: 1px solid var(--hairline);
 }
 
 .preview-frame {
   flex: 1;
   width: 100%;
   border: 0;
-  background: #000;
+  background: var(--surface);
 }
 
 .preview-empty {
@@ -1237,7 +1237,7 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   height: 92px;
   object-fit: cover;
   border-radius: var(--radius-md);
-  border: 1px solid var(--hairline, rgba(17, 24, 31, 0.09));
+  border: 1px solid var(--hairline);
   display: block;
 }
 

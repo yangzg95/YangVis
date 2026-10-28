@@ -58,7 +58,7 @@
 .markdown code {
   padding: 1px 5px;
   border-radius: var(--radius-sm);
-  background: rgba(17, 24, 31, 0.06);
+  background: var(--code-inline-bg);
   font-family: var(--font-mono);
   font-size: 0.9em;
 }
@@ -99,7 +99,7 @@
   text-align: left;
 }
 .markdown th {
-  background: rgba(17, 24, 31, 0.04);
+  background: var(--surface-2);
   font-weight: 600;
 }
 

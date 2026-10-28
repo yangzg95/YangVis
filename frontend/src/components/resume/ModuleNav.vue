@@ -102,7 +102,7 @@ function onDrop(index: number) {
 .nav-title {
   font-size: 13px;
   font-weight: 600;
-  color: #4b5563;
+  color: var(--text-2);
 }
 .nav-list {
   list-style: none;
@@ -121,26 +121,26 @@ function onDrop(index: number) {
   border-radius: 6px;
   cursor: pointer;
   font-size: 13.5px;
-  color: #374151;
+  color: var(--text-1);
   user-select: none;
 }
 .nav-item:hover {
-  background: #f5f7f8;
+  background: var(--hover-neutral);
 }
 .nav-item.active {
-  background: #e6f4f5;
-  border-color: #b7dddf;
-  color: #0a7e86;
+  background: var(--signal-bg);
+  border-color: var(--signal-border);
+  color: var(--signal-text);
   font-weight: 600;
 }
 .nav-item.dragging {
   opacity: 0.5;
 }
 .nav-item.over {
-  border-color: #0a7e86;
+  border-color: var(--signal-text);
 }
 .drag-handle {
-  color: #b5b5b5;
+  color: var(--text-3);
   cursor: grab;
 }
 .nav-label {
@@ -160,7 +160,7 @@ function onDrop(index: number) {
 }
 .nav-hint {
   font-size: 12px;
-  color: #9ca3af;
+  color: var(--text-3);
   display: flex;
   align-items: center;
   gap: 4px;

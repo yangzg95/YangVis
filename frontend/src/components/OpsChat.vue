@@ -1093,7 +1093,7 @@ defineExpose({
   justify-content: space-between;
   padding-bottom: 8px;
   margin-bottom: 4px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--hairline);
 }
 
 .tool-btn {
@@ -1111,7 +1111,7 @@ defineExpose({
 }
 
 .tool-btn:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--hover-neutral);
   color: var(--signal-text);
 }
 
@@ -1427,14 +1427,14 @@ defineExpose({
 }
 
 .copy-btn:hover {
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--hover-neutral);
   color: var(--signal-text);
 }
 
 .chat-composer {
   position: relative;
   padding-top: 8px;
-  border-top: 1px solid #f0f0f0;
+  border-top: 1px solid var(--hairline);
 }
 
 /* 模型选择条：窄条压在输入框上方，不换行、不抢输入区的位置。 */
@@ -1462,9 +1462,9 @@ defineExpose({
 /* antd 的 disabled primary 圆钮会把箭头压到 rgba(0,0,0,.25)，
    在浅底上只剩一个空圈。这里固定一条可读的描边与箭头色。 */
 .composer-send :deep(.ant-btn[disabled]) {
-  background: #fff;
-  border-color: #c8ced6;
-  color: rgba(0, 0, 0, 0.45);
+  background: var(--surface);
+  border-color: var(--hairline);
+  color: var(--disabled-text);
 }
 
 .ops-chat.dark .composer-send :deep(.ant-btn[disabled]) {
@@ -1665,7 +1665,7 @@ defineExpose({
   flex-shrink: 0;
   padding: 2px;
   border-radius: var(--radius-sm);
-  color: rgba(0, 0, 0, 0.4);
+  color: var(--text-3);
   font-size: var(--fs-xs);
   opacity: 0;
   transition: all 0.15s;
@@ -1676,8 +1676,8 @@ defineExpose({
 }
 
 .ops-history-overlay .history-del:hover {
-  background: rgba(255, 77, 79, 0.12);
-  color: var(--danger-bright);
+  background: var(--danger-bg);
+  color: var(--danger);
 }
 
 /* 重命名图标与删除同一交互：悬停整行才显形，hover 各自上色。 */
@@ -1685,7 +1685,7 @@ defineExpose({
   flex-shrink: 0;
   padding: 2px;
   border-radius: var(--radius-sm);
-  color: rgba(0, 0, 0, 0.4);
+  color: var(--text-3);
   font-size: var(--fs-xs);
   opacity: 0;
   transition: all 0.15s;
@@ -1696,12 +1696,12 @@ defineExpose({
 }
 
 .ops-history-overlay .history-rename:hover {
-  background: rgba(0, 128, 255, 0.12);
-  color: #0080ff;
+  background: var(--signal-bg);
+  color: var(--signal-text);
 }
 
 .ops-history-overlay .history-meta {
-  color: rgba(0, 0, 0, 0.45);
+  color: var(--text-3);
   font-size: var(--fs-xs);
 }
 
