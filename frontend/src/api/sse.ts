@@ -139,6 +139,8 @@ export function streamSse(
       const response = await fetch(url, {
         method,
         headers: {
+          // 显式声明拉流：后端凭这个头跳过 gzip（压缩缓冲会把流攒成一坨）。
+          Accept: 'text/event-stream',
           'Content-Type': 'application/json',
           ...(getAccessToken() ? { Authorization: getAccessToken() as string } : {}),
         },

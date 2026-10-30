@@ -35,12 +35,22 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: 'dist',
       emptyOutDir: true,
-      chunkSizeWarningLimit: 1500,
+      // 1000KB：路由块与功能域 vendor 块一旦超过就是新增回归。
+      // 目前已知会超限的只有三块历史债，都在报告里登记过：
+      //   antd（全量注册遗留，改成按文件引入后才会降下来）
+      //   elk / elk.bundled（mermaid 与工作流画布各打了一份，待去重）
+      chunkSizeWarningLimit: 1000,
       rollupOptions: {
         output: {
-          manualChunks: {
-            vue: ['vue', 'vue-router', 'pinia'],
-            antd: ['ant-design-vue'],
+          // 按功能域切稳定 vendor 块：业务代码改动不会让这些大依赖的 hash 变化，
+          // 浏览器强缓存可以一直命中；其余依赖交给 Rollup 按动态 import 自动切。
+          manualChunks(id) {
+            const normalized = id.replace(/\\/g, '/')
+            if (!normalized.includes('/node_modules/')) return
+            if (/\/node_modules\/(vue|vue-router|pinia|@vue)\//.test(normalized)) return 'vue'
+            if (/\/node_modules\/ant-design-vue\//.test(normalized)) return 'antd'
+            if (/\/node_modules\/(@codemirror|@lezer|codemirror)\//.test(normalized)) return 'codemirror'
+            if (/\/node_modules\/(@xterm|xterm)\//.test(normalized)) return 'xterm'
           },
         },
       },

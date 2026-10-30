@@ -11,6 +11,8 @@ from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.middleware.gzip import GZipMiddleware
 
 from app.bootstrap import (
     bootstrap_admin,
@@ -109,6 +111,93 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---- 响应压缩与缓存 -------------------------------------------------------
+
+_ASSETS_CACHE = "public, max-age=31536000, immutable"
+_UPLOADS_CACHE = "public, max-age=86400"
+_STATIC_CACHE = "public, max-age=3600"
+_NO_STORE = "no-store"
+
+
+class SseAwareGZipMiddleware(GZipMiddleware):
+    """SSE 不能走 gzip。
+
+    Starlette 的 GZipResponder 会把首段响应攒到 minimum_size 才吐，流式事件
+    因此被压成「连上了但一直不出字」。浏览器 EventSource 与 OpenAI 兼容 SDK
+    拉流时都会带 ``Accept: text/event-stream``，前端 fetch 也显式带了该头，
+    所以按请求头放过流式响应，其余 JSON/JS/CSS/HTML 照常压缩。
+    """
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            accept = Headers(scope=scope).get("accept", "")
+            if "text/event-stream" in accept:
+                await self.app(scope, receive, send)
+                return
+        await super().__call__(scope, receive, send)
+
+
+class CacheControlMiddleware:
+    """按路径补齐 Cache-Control。
+
+    不往每个 FileResponse 里逐条写：SPA 回退、StaticFiles 挂载、上传目录是三种
+    不同出口，中间件一层能全覆盖，以后新增出口也不会漏。接口响应一律不打缓存头，
+    避免带用户数据的 GET 被浏览器缓存下来。
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+
+        async def send_with_cache_headers(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                if "cache-control" not in headers:
+                    value = _cache_control(
+                        path,
+                        headers.get("content-type", ""),
+                        message.get("status", 200),
+                    )
+                    if value:
+                        headers["cache-control"] = value
+            await send(message)
+
+        await self.app(scope, receive, send_with_cache_headers)
+
+
+def _cache_control(path: str, content_type: str, status: int) -> str | None:
+    # 接口（含 OpenAI 兼容端点和 SSE）不缓存；SSE 已带 no-cache 语义的头，这里不掺和。
+    if path.startswith(f"{API_PREFIX}/") or path.startswith("/v1/"):
+        return None
+    # index.html 与 SPA 回退必须每次回源：发版后旧 HTML 会去找已被替换的 hash 资源。
+    if content_type.startswith("text/html"):
+        return _NO_STORE
+    # 4xx/5xx 一律不给强缓存：发版后旧的 hash 资源被删，谁撞上这个 404 都不能
+    # 跟着缓存一年，否则以后每次都要等到清缓存才能恢复。
+    if status >= 400:
+        return None
+    # Vite 产物文件名带 hash，内容变了文件名必变，可以放心永久缓存。
+    if path.startswith("/assets/"):
+        return _ASSETS_CACHE
+    # 幻灯片配图文件名是随机 id，一天缓存足够，避免用户重新上传后仍看旧图。
+    if path.startswith(settings.UPLOAD_MEDIA_URL):
+        return _UPLOADS_CACHE
+    if path.startswith("/static/"):
+        return _STATIC_CACHE
+    return None
+
+
+# 谁后加谁在外层：缓存头要在压缩前写好，压缩在最内层只处理业务响应。
+app.add_middleware(SseAwareGZipMiddleware, minimum_size=1024)
+app.add_middleware(CacheControlMiddleware)
 
 
 # ---- 路由 ---------------------------------------------------------------
