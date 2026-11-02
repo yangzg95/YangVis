@@ -267,6 +267,7 @@ import {
   type WorkflowRunSubject,
 } from '@/api'
 import { createMarkdown } from '@/utils/markdown'
+import { createPollLoop } from '@/utils/polling'
 import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
 
 /** 面试记录详情的整页展示：/office/interview/<id>，由列表页新开标签页打开。 */
@@ -448,8 +449,8 @@ async function onRemoveQuestion(q: InterviewQuestion) {
 // ---- AI 参考答案与轮询 -----------------------------------------------------------
 
 // 生成是后台任务：触发后接口立刻返回 analyzing 状态，这里用轮询跟随进度；
-// 没有生成中的题目就停表。
-let pollTimer: number | undefined
+// 没有生成中的题目就停表。失败自动退避、页面隐藏暂停（详见 utils/polling.ts）。
+const pollLoop = createPollLoop(refreshDetail, { shouldContinue: hasAnalyzing })
 
 async function onGenerate(q: InterviewQuestion) {
   // 默认收起的例外：用户刚点了生成，生成完要让他直接看到结果。
@@ -494,12 +495,8 @@ async function refreshDetail() {
 }
 
 function syncPolling() {
-  if (hasAnalyzing() && pollTimer === undefined) {
-    pollTimer = window.setInterval(refreshDetail, 2500)
-  } else if (!hasAnalyzing() && pollTimer !== undefined) {
-    window.clearInterval(pollTimer)
-    pollTimer = undefined
-  }
+  if (hasAnalyzing()) pollLoop.start()
+  else pollLoop.stop()
 }
 
 // 参考答案默认收起：记的是「被展开」的 qid。按 qid 单独记账——生成中的
@@ -536,7 +533,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  if (pollTimer !== undefined) window.clearInterval(pollTimer)
+  pollLoop.stop()
 })
 </script>
 

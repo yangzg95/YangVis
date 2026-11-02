@@ -22,6 +22,20 @@ export interface RequestConfig extends AxiosRequestConfig {
 
 const LOGIN_PATH = '/login'
 
+/** 同一文案在窗口期内只弹一次：轮询失败时后端通常连着报同一个错，
+ * 不做去重会一秒一条把整屏刷满。 */
+const TOAST_DEDUPE_MS = 3000
+let lastToastText = ''
+let lastToastAt = 0
+
+function errorToast(text: string) {
+  const now = Date.now()
+  if (text === lastToastText && now - lastToastAt < TOAST_DEDUPE_MS) return
+  lastToastText = text
+  lastToastAt = now
+  message.error(text)
+}
+
 const http: AxiosInstance = axios.create({
   baseURL: '/api',
   timeout: 30000,
@@ -60,7 +74,7 @@ http.interceptors.response.use(
           handleUnauthorized()
         }
         if (!(response.config as RequestConfig).skipErrorToast) {
-          message.error(envelope.message || '请求失败')
+          errorToast(envelope.message || '请求失败')
         }
         return Promise.reject(envelope)
       }
@@ -74,7 +88,7 @@ http.interceptors.response.use(
     }
     const detail = error?.response?.data?.message || error.message || '网络错误'
     if (!(error?.config as RequestConfig | undefined)?.skipErrorToast) {
-      message.error(detail)
+      errorToast(detail)
     }
     return Promise.reject(error)
   },

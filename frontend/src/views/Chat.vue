@@ -608,7 +608,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { message as toast, Empty } from 'ant-design-vue'
 import {
   CloseOutlined,
@@ -959,6 +959,39 @@ const streaming = ref(false)
 const pendingText = ref('')
 const scrollEl = ref<HTMLElement | null>(null)
 
+// ---- 流式合批 -----------------------------------------------------------------
+// 逐 token 改 bubble.content 会按 token 频率重渲染整个消息列表：长会话里每次
+// 都要重算所有历史消息的切段与 markdown 缓存命中判断，肉眼可见地卡。
+// 这里把 token 先攒进普通字符串（非响应式），每 80ms 才提交一次，与
+// streamRender 的 100ms 渲染节拍合在一起，视觉上仍是连续打字。
+const STREAM_FLUSH_MS = 80
+/** 页面是否在前台：keep-alive 切走后 token 只进缓冲，不再驱动 DOM。 */
+const pageActive = ref(true)
+let streamTextBuffer = ''
+let streamFlushTimer: number | undefined
+let streamFlushBubble: Bubble | null = null
+
+function flushStreamText() {
+  if (streamFlushTimer !== undefined) {
+    window.clearTimeout(streamFlushTimer)
+    streamFlushTimer = undefined
+  }
+  const bubble = streamFlushBubble
+  if (!bubble || !streamTextBuffer) return
+  const chunk = streamTextBuffer
+  streamTextBuffer = ''
+  settleSteps(bubble)
+  pendingText.value += chunk
+  bubble.content = pendingText.value
+  appendTextEntry(bubble, chunk)
+  // 节拍器只节流当前活跃正文段：一轮工具后新开的正文段是新的 key，
+  // 与模板 renderCached 的 key 保持一致，落定段不被重复解析。
+  const lastSection = assistantSections(bubble).at(-1)
+  beginStream(lastSection && lastSection.type === 'text' ? lastSection.key : bubble.key)
+  schedule()
+  scrollToBottom()
+}
+
 // ---- 待发附件 ---------------------------------------------------------------
 // 上传与发送是两次请求：先拿到服务端 id 做预览/移除，发送时只带 id 列表。
 // 数量与大小上限跟后端 settings.CHAT_* 对齐，超限在这里就拦掉。
@@ -1200,6 +1233,8 @@ function onMessagesScroll() {
 
 // 流式过程中调用：尊重贴底状态，用户上翻时不动视图。
 function scrollToBottom() {
+  // keep-alive 缓存期间不在隐藏 DOM 上做强制布局。
+  if (!pageActive.value) return
   void nextTick(() => {
     const el = scrollEl.value
     if (el && stickToBottom.value) el.scrollTop = el.scrollHeight
@@ -1354,17 +1389,14 @@ function makeStreamHandlers(
     },
     onToken: (token) => {
       ensureBubble()
-      // 开始吐正文说明这一轮工具都返回了；之后若再调工具，新的 step 会重新转圈。
-      settleSteps(bubble)
-      pendingText.value += token
-      bubble.content = pendingText.value
-      appendTextEntry(bubble, token)
-      // 节拍器只节流当前活跃正文段：一轮工具后新开的正文段是新的 key，
-      // 与模板 renderCached 的 key 保持一致，落定段不被重复解析。
-      const lastSection = assistantSections(bubble).at(-1)
-      beginStream(lastSection && lastSection.type === 'text' ? lastSection.key : bubble.key)
-      schedule()
-      scrollToBottom()
+      // 攒着，由一个 80ms 的合批定时器统一提交（见 flushStreamText）。
+      streamFlushBubble = bubble
+      streamTextBuffer += token
+      // keep-alive 缓存期间只进缓冲：切回来时 onActivated 一次补上。
+      if (!pageActive.value) return
+      if (streamFlushTimer === undefined) {
+        streamFlushTimer = window.setTimeout(flushStreamText, STREAM_FLUSH_MS)
+      }
     },
     onConfirm: (data) => {
       // 模型提议写命令后可能直接结束本轮、一个 token 都不吐：先保证
@@ -2294,12 +2326,16 @@ function stop() {
 }
 
 function finish() {
+  // 收尾前先把缓冲里的残文提交掉，再清节拍：停止/出错时半段也要以完整
+  // markdown 落定，不能因为没等到 80ms 的定时器就丢掉。
+  flushStreamText()
   streaming.value = false
   pendingText.value = ''
   abort = null
   streamingBubbleKey.value = null
   // 收尾推一次全量渲染：停止/出错时残文也要以完整 markdown 落定。
   endStream()
+  streamFlushBubble = null
 }
 
 async function copyMessage(msg: Bubble) {
@@ -2363,7 +2399,24 @@ onMounted(async () => {
   await handleConversationDeepLink()
 })
 
-onUnmounted(() => abort?.())
+// keep-alive：切走不中断 SSE（回来还要看到完整回答），但停止驱动视图——
+// token 只进缓冲，滚动/强制布局全部跳过，避免在隐藏 DOM 上空转。
+onDeactivated(() => {
+  pageActive.value = false
+})
+
+onActivated(() => {
+  pageActive.value = true
+  // 缓存期间积压的正文一次补上；若恰好没积压，也让视图回到最新状态。
+  flushStreamText()
+  scrollToBottom()
+})
+
+onUnmounted(() => {
+  abort?.()
+  // 卸载时把合批定时器收掉，避免回调落到已销毁的实例上。
+  if (streamFlushTimer !== undefined) window.clearTimeout(streamFlushTimer)
+})
 </script>
 
 <style scoped>

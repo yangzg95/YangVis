@@ -244,7 +244,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { message as toast, Modal } from 'ant-design-vue'
 import {
   RobotOutlined,
@@ -525,6 +525,15 @@ function isStreaming(item: TalkItem): boolean {
 }
 const thinking = ref(false)
 const streamingText = ref(false)
+
+// ---- 流式合批 -----------------------------------------------------------------
+// token 先攒进普通字符串，每 80ms 提交一次：逐 token 改 item.text / chunk.detail
+// 会让整条气泡（含历史 chunk 折叠逻辑）按 token 频率重渲染。
+const STREAM_FLUSH_MS = 80
+/** 页面是否在前台：keep-alive 切走后 token 只进缓冲，不再驱动 DOM。 */
+const pageActive = ref(true)
+/** 当前活跃流的合批提交函数，由 streamHandlers 挂上；收尾与切回页面时直接调用。 */
+let flushStreamTextHook: () => void = () => {}
 /** 当前正在执行的步骤摘要（step 事件到达时写入，下一个 token 到达时清空）。 */
 const currentStepDetail = ref('')
 const scrollEl = ref<HTMLElement | null>(null)
@@ -553,6 +562,8 @@ function onBodyScroll() {
 }
 
 function scrollToBottom() {
+  // keep-alive 缓存期间不在隐藏 DOM 上做强制布局。
+  if (!pageActive.value) return
   nextTick(() => {
     const el = scrollEl.value
     if (el && stickToBottom.value) el.scrollTop = el.scrollHeight
@@ -866,9 +877,38 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
     textChunk = null
     reasonChunk = null
   }
+
+  // 正文合批：token 攒在非响应式字符串里，80ms 提交一次；思考段仍逐条追加。
+  let textBuffer = ''
+  let bufferKey = ''
+  let bufferItem: TalkItem | null = null
+  let bufferChunk: TalkChunk | null = null
+  let flushTimer: number | undefined
+  const flushText = () => {
+    if (flushTimer !== undefined) {
+      window.clearTimeout(flushTimer)
+      flushTimer = undefined
+    }
+    if (!textBuffer || !bufferItem || !bufferChunk) return
+    const chunk = textBuffer
+    textBuffer = ''
+    bufferItem.text += chunk
+    bufferChunk.detail += chunk
+    // 收到 token 后步骤已执行完，清掉步骤状态。
+    if (currentStepDetail.value && streamingText.value) currentStepDetail.value = ''
+    streamingText.value = true
+    // 节流 key 在开始攒时就定好（活跃文字块的稳定下标），不能等到提交时再算：
+    // 期间若插入了 step/reason 块，下标会漂移，renderCached 对不上就每 tick 全量解析。
+    beginStream(bufferKey)
+    schedule()
+    scrollToBottom()
+  }
+  flushStreamTextHook = flushText
   return {
     onStep: (data) => {
       const item = answer()
+      // 换块前先把还没提交的正文结掉，否则这段文字会被算到下一步骤后的新块里。
+      flushText()
       closeTextChunk()
       const { text, full } = describeStep(data)
       currentStepDetail.value = text
@@ -885,19 +925,19 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
     },
     onToken: (token) => {
       const item = answer()
-      item.text += token
       const tc = ensureTextChunk(item)
-      tc.detail += token
-      // 收到第一个 token 后，步骤已执行完，清空步骤状态。
-      if (currentStepDetail.value && streamingText.value) {
-        currentStepDetail.value = ''
+      // 切到新文字块时，先把上一块的缓冲提交掉。
+      if (bufferChunk && bufferChunk !== tc) flushText()
+      bufferItem = item
+      bufferChunk = tc
+      // key 用本块在 chunks 里的稳定下标，提交时不再重算。
+      bufferKey = `${item.key}-${item.chunks.length - 1}`
+      textBuffer += token
+      // keep-alive 缓存期间只进缓冲：切回来时 onActivated 一次补上。
+      if (!pageActive.value) return
+      if (flushTimer === undefined) {
+        flushTimer = window.setTimeout(flushText, STREAM_FLUSH_MS)
       }
-      streamingText.value = true
-      // 节流 key 必须与模板 renderCached 的 key 一致（活跃文字块永远是最后一块），
-      // 否则 streamRender 的「同 tick 回旧 HTML」判断对不上，每个 token 都全量重解析。
-      beginStream(`${item.key}-${item.chunks.length - 1}`)
-      schedule()
-      scrollToBottom()
     },
     onConfirm: (data) => {
       // 模型提议后可能直接结束本轮、一个 token 都不吐：先保证气泡存在，
@@ -908,6 +948,7 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
       streamActions.push(action)
       // 卡片就地插在提议发生的这个位置（与后端 timeline 的 confirm 条目同一
       // 时刻），后面的正文从新的一块 chunk 开始。
+      flushText()
       closeTextChunk()
       item.chunks.push({ type: 'confirm', detail: '', actionId: action.id })
       scrollToBottom()
@@ -917,6 +958,7 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
       // 只读命令（action_id 为空）在 step 里已经亮过命令，不再重复打标签。
       if (ev.action_id != null) {
         const item = answer()
+        flushText()
         closeTextChunk()
         // 命令全文在上面那张确认卡片里，这里只报结果，不再摊一遍命令。
         item.chunks.push({
@@ -951,6 +993,9 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
 }
 
 function finishStream() {
+  // 收尾前先提交缓冲里的残文，停止/出错时半段也要完整落定。
+  flushStreamTextHook()
+  flushStreamTextHook = () => {}
   thinking.value = false
   streamingText.value = false
   streamingAnswerKey.value = null
@@ -1064,6 +1109,18 @@ watch(
   () => void loadTarget(),
   { immediate: true },
 )
+
+// keep-alive：切走不中断 SSE，但停止驱动视图——token 只进缓冲，滚动全部跳过。
+onDeactivated(() => {
+  pageActive.value = false
+})
+
+onActivated(() => {
+  pageActive.value = true
+  // 缓存期间积压的正文一次补上。
+  flushStreamTextHook()
+  scrollToBottom()
+})
 
 onBeforeUnmount(() => {
   loadSeq += 1

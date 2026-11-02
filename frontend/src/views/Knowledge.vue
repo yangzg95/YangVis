@@ -386,6 +386,7 @@ import {
 } from '@ant-design/icons-vue'
 import { useRouter } from 'vue-router'
 import { fmtSize } from '@/utils/format'
+import { createPollLoop } from '@/utils/polling'
 import {
   knowledgeApi,
   settingsApi,
@@ -672,7 +673,8 @@ function onBatchDelete() {
 // 索引是在后台任务里跑的，没有推送通道，所以只要还有任务在进行，表格就轮询，
 // 全部落定之后立刻停下来——没有任务时连定时器都不挂，不空转。keep-alive 下
 // 切去别的标签页（deactivated）也要停表，回来时先补一轮再决定要不要继续。
-let pollTimer: number | undefined
+// 失败自动退避、页面隐藏暂停（详见 utils/polling.ts）。
+const pollLoop = createPollLoop(pollOnce, { shouldContinue: () => hasRunningJobs.value })
 
 async function pollOnce() {
   if (!activeTypeId.value || !hasRunningJobs.value) return
@@ -683,17 +685,13 @@ async function pollOnce() {
 }
 
 function stopPolling() {
-  if (pollTimer) window.clearInterval(pollTimer)
-  pollTimer = undefined
+  pollLoop.stop()
 }
 
 /** 有后台任务才挂表；hasRunningJobs 翻边时由 watch 调进来，落定即停。 */
 function syncPolling() {
-  if (hasRunningJobs.value && pollTimer === undefined) {
-    pollTimer = window.setInterval(pollOnce, 2500)
-  } else if (!hasRunningJobs.value) {
-    stopPolling()
-  }
+  if (hasRunningJobs.value) pollLoop.start()
+  else pollLoop.stop()
 }
 
 watch(hasRunningJobs, syncPolling)

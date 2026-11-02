@@ -450,7 +450,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowDownOutlined,
@@ -477,6 +477,7 @@ import {
 } from '@/api'
 import { saveBlobResponse } from '@/utils/download'
 import { fmtSize } from '@/utils/format'
+import { createPollLoop } from '@/utils/polling'
 import { printSlideDeck } from '@/utils/slidePrint'
 import {
   appendArchBlock,
@@ -618,19 +619,18 @@ function applyDetail(detail: SlideDeckDetail) {
 }
 
 // 生成是后台任务，从列表页点进来时可能还在跑：状态一跳完就重取一次。
-let pollTimer: number | undefined
+// 失败自动退避、页面隐藏暂停（详见 utils/polling.ts）。
+const pollLoop = createPollLoop(
+  async () => {
+    await load(true)
+    if (!generating.value) void refreshPreview()
+  },
+  { shouldContinue: () => generating.value },
+)
 
 function syncPolling() {
-  if (generating.value && pollTimer === undefined) {
-    pollTimer = window.setInterval(async () => {
-      await load(true)
-      if (!generating.value) {
-        window.clearInterval(pollTimer)
-        pollTimer = undefined
-        void refreshPreview()
-      }
-    }, 2500)
-  }
+  if (generating.value) pollLoop.start()
+  else pollLoop.stop()
 }
 
 async function refreshPreview() {
@@ -904,8 +904,13 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  if (pollTimer !== undefined) window.clearInterval(pollTimer)
+  pollLoop.stop()
 })
+
+// keep-alive：切去别的标签页时停表，回来时按状态恢复；轮询本身不再固定 2.5s
+// 硬打，失败会退避（详见 utils/polling.ts）。
+onDeactivated(() => pollLoop.stop())
+onActivated(() => syncPolling())
 
 // 关标签页前提醒未保存的改动（新窗口打开，浏览器不会问第二次）。
 function guard(event: BeforeUnloadEvent) {

@@ -581,6 +581,7 @@ import {
 } from '@/api'
 import { saveBlobResponse } from '@/utils/download'
 import { fmtSize } from '@/utils/format'
+import { createPollLoop } from '@/utils/polling'
 import { useIsMobile } from '@/utils/useIsMobile'
 import NotesPanel from '@/components/NotesPanel.vue'
 import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
@@ -900,7 +901,11 @@ const rowSelection = computed(() => ({
 // ---- 加载与轮询 --------------------------------------------------------------
 
 // 分析是后台任务，这里用轮询跟随状态变化；没有进行中的任务就停表。
-let pollTimer: number | undefined
+// 失败自动退避、页面隐藏暂停（详见 utils/polling.ts），不再固定 2.5s 硬打。
+const pollLoop = createPollLoop(
+  () => Promise.all([loadResumes(), loadComparisons(), loadToolkit()]),
+  { shouldContinue: needsPolling },
+)
 
 async function loadResumes() {
   loadingResumes.value = true
@@ -944,21 +949,8 @@ function needsPolling(): boolean {
 }
 
 function syncPolling() {
-  if (needsPolling() && pollTimer === undefined) {
-    pollTimer = window.setInterval(async () => {
-      try {
-        await Promise.all([loadResumes(), loadComparisons(), loadToolkit()])
-      } catch {
-        // 本轮失败不致命（拦截器已弹 toast）：不停表也不让 rejection 裸奔，
-        // 一次网络抖动不该让「分析中」的进度永远卡住。
-        return
-      }
-      if (!needsPolling()) {
-        window.clearInterval(pollTimer)
-        pollTimer = undefined
-      }
-    }, 2500)
-  }
+  if (needsPolling()) pollLoop.start()
+  else pollLoop.stop()
 }
 
 async function loadReadiness() {
@@ -1374,10 +1366,7 @@ onMounted(async () => {
 // keep-alive：切去别的标签页时停表，回来时按当前状态恢复。
 // watchedComparisonId 刻意留着：回来时那份对比还没跑完就接着盯。
 onDeactivated(() => {
-  if (pollTimer !== undefined) {
-    window.clearInterval(pollTimer)
-    pollTimer = undefined
-  }
+  pollLoop.stop()
   if (watchTimer !== undefined) {
     window.clearInterval(watchTimer)
     watchTimer = undefined
@@ -1393,7 +1382,7 @@ onActivated(() => {
 })
 
 onUnmounted(() => {
-  if (pollTimer !== undefined) window.clearInterval(pollTimer)
+  pollLoop.stop()
   stopWatchingComparison()
 })
 </script>
