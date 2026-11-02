@@ -59,9 +59,10 @@ import { onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Empty, message } from 'ant-design-vue'
 import { CloudUploadOutlined, CommentOutlined, DownloadOutlined } from '@ant-design/icons-vue'
-import MarkdownIt from 'markdown-it'
 import { netdiskApi, resumeApi } from '@/api'
 import { saveTextFile } from '@/utils/download'
+import { errorText } from '@/utils/errors'
+import { createMarkdown } from '@/utils/markdown'
 import { composeReportMarkdown } from '@/utils/report'
 
 /** 三类报告共用的整页展示：/office/report/<kind>/<id>，由列表页新开标签页打开。 */
@@ -81,14 +82,11 @@ const state = reactive({
   suggestions: null as string[] | null,
 })
 
-const md = new MarkdownIt({ html: false, linkify: true })
+// 与全站共用 html:false 安全基座和外链处理；报告正文不需要把单个换行
+// 渲染成 <br>，否则段落间的软换行会被拆得很碎。
+const md = createMarkdown({ breaks: false })
 function renderMarkdown(text: string | null): string {
   return md.render(text || '')
-}
-
-function errorText(err: unknown, fallback: string): string {
-  const envelope = err as { message?: string } | undefined
-  return envelope?.message || fallback
 }
 
 async function loadReport() {

@@ -66,6 +66,23 @@
   --on-dark-border-strong: rgba(255, 255, 255, 0.2);
   --scrim: rgba(0, 0, 0, 0.65);
 
+  /* -- 深色面板（终端 / 运维 AI 面板）内部的派生色 ---------------------
+     这些面板无论站点明暗都保持深底，所以下面这组值只在 :root 定义，
+     不在暗色主题里翻转。 ---------------------------------------------- */
+  --text-dark-3: rgba(216, 222, 228, 0.42);  /* 暗底最弱一档（步骤分隔线） */
+  --surface-dark-inset: #141d26;             /* 深色面板里的输入控件底 */
+  --code-action-bg: #3c3c3c;                 /* 深色代码块上浮起的动作按钮 */
+  --code-action-bg-hover: #4f4f4f;
+  --signal-on-dark-bg: rgba(58, 214, 222, 0.1);
+  --signal-on-dark-bg-strong: rgba(58, 214, 222, 0.16);
+  --signal-on-dark-border: rgba(58, 214, 222, 0.45);
+  --signal-on-dark-border-hover: rgba(58, 214, 222, 0.6);
+  --warning-bg-strong: rgba(212, 136, 6, 0.16);
+  --warning-on-dark-bg: rgba(250, 173, 20, 0.1);
+  --warning-on-dark-bg-strong: rgba(250, 173, 20, 0.18);
+  --warning-on-dark-border: rgba(250, 173, 20, 0.45);
+  --danger-on-dark-bg: rgba(255, 77, 79, 0.18);
+
   /* -- 圆角层级：小元素 / 控件 / 卡片；药丸只留给状态标签 --------------- */
   --radius-sm: 4px;
   --radius-md: 8px;
@@ -224,41 +241,6 @@
   color-scheme: dark;
 }
 
-/* ---- 暗色：命令式弹层兜底 ----------------------------------------------
-   message / notification / Modal.confirm 走静态函数调用，不消费 ConfigProvider
-   的 darkAlgorithm（antdv 4 的已知行为），弹层默认仍是白底。这里统一压暗，
-   表面取 elevated 同值；模板里的 <a-modal> 已被 algorithm 变暗，同值覆盖无色差。 */
-:root[data-theme='dark'] .ant-message-notice-content,
-:root[data-theme='dark'] .ant-notification-notice,
-:root[data-theme='dark'] .ant-modal-content {
-  background: var(--surface-raised);
-  border: 1px solid var(--hairline);
-}
-
-:root[data-theme='dark'] .ant-message-notice-content,
-:root[data-theme='dark'] .ant-notification-notice-message,
-:root[data-theme='dark'] .ant-modal-title,
-:root[data-theme='dark'] .ant-modal-confirm-title {
-  color: var(--text-1);
-}
-
-:root[data-theme='dark'] .ant-modal-header,
-:root[data-theme='dark'] .ant-modal-footer {
-  background: transparent;
-  border-color: var(--hairline);
-}
-
-:root[data-theme='dark'] .ant-modal-body,
-:root[data-theme='dark'] .ant-modal-confirm-content,
-:root[data-theme='dark'] .ant-notification-notice-description {
-  color: var(--text-2);
-}
-
-:root[data-theme='dark'] .ant-modal-close-x,
-:root[data-theme='dark'] .ant-notification-notice-close {
-  color: var(--text-3);
-}
-
 /* ---- Base ------------------------------------------------------------- */
 
 html,
@@ -296,6 +278,16 @@ input {
    各页面 scoped 样式里重复出现的模式集中在这里。注意 scoped 的 [data-v]
    特异性高于这里的裸类，组件里残留同属性局部规则会盖掉它们。 */
 
+/* flex 布局里当面板用的 antd Card：卡片由外层拉伸，body 把高度继续往下
+   传，滚动交给内部区域。页面里不要再各自写一套 :deep(.ant-card-body)。 */
+.card-fill .ant-card-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .page-card {
   background: var(--surface);
   border: 1px solid var(--hairline);
@@ -318,6 +310,27 @@ input {
   gap: 12px;
   margin-bottom: 12px;
   flex-wrap: wrap;
+}
+
+/* 工具条各页的差异只有「对齐」和「上下间距」两类，收成修饰类；
+   组件里不要再重复写 display/gap/flex-wrap 这一套。 */
+.toolbar--between {
+  justify-content: space-between;
+}
+.toolbar--end {
+  justify-content: flex-end;
+}
+/* 列表页的小节工具条：与上方标题贴紧、与表格拉开。 */
+.toolbar--snug {
+  margin: 4px 0 16px;
+}
+/* 更紧的版本：两行控件挨着（YApi 同步）。 */
+.toolbar--tight {
+  margin: 4px 0 8px;
+}
+/* 只有下边距加宽，页面结束在工具条下面时用。 */
+.toolbar--roomy {
+  margin-bottom: 16px;
 }
 
 /* 运维工作台页签（数据/查询/结构/设计/ER/Redis 六件套，根元素都挂 .tab-page）

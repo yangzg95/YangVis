@@ -86,7 +86,7 @@
 
     <div class="chat-body">
       <!-- 会话列表 -->
-      <a-card class="side" size="small" title="会话">
+      <a-card class="side card-fill" size="small" title="会话">
         <template #extra>
           <a-button type="primary" size="small" @click="startNew">
             <PlusOutlined /> 新会话
@@ -154,7 +154,7 @@
       </a-card>
 
       <!-- 消息区 -->
-      <a-card class="main" size="small">
+      <a-card class="main card-fill" size="small">
         <!-- 选择器放在正文顶部的工具栏行，而不是卡片 #title 槽里：卡片标题自带
              overflow:hidden + 省略号规则，会把下拉的底边线裁掉一截。
              四个下拉各自按需取宽、总长控制在 ~560px：之前每个都按 200px
@@ -291,111 +291,24 @@
             </div>
           </div>
 
-          <div v-for="msg in visibleMessages" :key="msg.key" :class="['msg', msg.role]">
-            <div class="bubble">
-              <!-- 助手气泡按 timeline 原顺序切成「过程组 / 正文段 / 确认卡」交替渲染：
-                   每波思考+工具调用就地待在它那轮解说文字旁边，多轮排查时读起来才是
-                   「思考（工具）→ 结论 → 再思考（工具）→ 再结论」，而不是全部过程
-                   堆在气泡头部、所有正文沉在下面。 -->
-              <template v-if="msg.role === 'assistant'">
-                <template v-for="sec in assistantSections(msg)" :key="sec.key">
-                  <ThinkingTrace
-                    v-if="sec.type === 'trace'"
-                    :entries="sec.entries ?? []"
-                    :streaming="!!sec.streaming"
-                  />
-                  <!-- 正文段按 markdown 渲染：流式中的活跃段走整段渲染（mermaid
-                       围栏多半还没闭合）；落定段切分，mermaid 块升级成可编辑图卡。 -->
-                  <div v-else-if="sec.type === 'text' && sec.text" class="content markdown">
-                    <div v-if="sec.streaming" v-html="renderCached(sec.key, sec.text)" />
-                    <template v-else>
-                      <template v-for="(part, pi) in sectionParts(sec)" :key="pi">
-                        <MermaidCard
-                          v-if="part.seg.kind === 'mermaid'"
-                          :source="part.seg.text"
-                          :can-edit="!!msg.id && !streaming"
-                          @save="(src) => saveDiagram(msg, part.globalIndex, src)"
-                        />
-                        <div v-else v-html="renderCached(`${sec.key}:p${pi}`, part.seg.text)" />
-                      </template>
-                    </template>
-                  </div>
-                  <!-- 写命令确认卡：按提议发生的时刻就地插在过程与正文之间。 -->
-                  <ConfirmCard
-                    v-else-if="sec.type === 'confirm' && sec.action"
-                    :action="sec.action"
-                    :acting="isActing(sec.action)"
-                    :can-approve="auth.canOpsWrite"
-                    @approve="approveAction"
-                    @reject="rejectAction"
-                  />
-                </template>
-              </template>
-              <div v-else class="content">
-                <!-- 附件挂在提问上方：图片给缩略图（点开可看原图），文档只露
-                     文件名。只传附件不写字时，气泡里就只有附件。
-                     用户输入保持纯文本：打的字不该被当成标记语言解释。 -->
-                <div v-if="msg.attachments?.length" class="msg-attachments">
-                  <template v-for="att in msg.attachments" :key="att.id ?? att.filename">
-                    <a-image
-                      v-if="att.kind === 'image' && att.url"
-                      :src="att.url"
-                      :width="140"
-                      class="msg-image"
-                    />
-                    <span v-else class="msg-file">
-                      <FileOutlined />
-                      <span class="msg-file-name" :title="att.filename">{{ att.filename }}</span>
-                    </span>
-                  </template>
-                </div>
-                <div v-if="msg.content" v-text="msg.content" />
-              </div>
-
-              <!-- 兜底：时间线里没有 confirm 条目的待确认项（老消息、以及未落库
-                   就中断的极端情况）仍挂在气泡末尾。 -->
-              <ConfirmCard
-                v-for="act in actionsOf(msg)"
-                :key="act.id"
-                :action="act"
-                :acting="isActing(act)"
-                :can-approve="auth.canOpsWrite"
-                @approve="approveAction"
-                @reject="rejectAction"
-              />
-
-              <!-- 复制的是原始 markdown 文本，不是渲染后的 HTML——贴到别处还能用。 -->
-              <div v-if="msg.role === 'assistant' && msg.content" class="bubble-actions">
-                <a-tooltip title="复制">
-                  <button type="button" class="copy-btn" @click="copyMessage(msg)">
-                    <CopyOutlined />
-                  </button>
-                </a-tooltip>
-              </div>
-
-              <div v-if="msg.failed" class="send-failed">
-                发送失败
-                <a-button type="link" size="small" danger @click="retryMessage(msg)">
-                  重试
-                </a-button>
-              </div>
-
-              <div v-if="msg.citations.length" class="citations">
-                <div class="citations-title">来源</div>
-                <a-tooltip
-                  v-for="c in msg.citations"
-                  :key="c.chunk_id"
-                  :title="c.excerpt"
-                  placement="top"
-                >
-                  <a-tag class="citation">
-                    [{{ c.index }}] {{ c.filename }}
-                    <span class="score">{{ c.score.toFixed(2) }}</span>
-                  </a-tag>
-                </a-tooltip>
-              </div>
-            </div>
-          </div>
+          <MessageBubble
+            v-for="msg in visibleMessages"
+            :key="msg.key"
+            :msg="msg"
+            :actions="actions"
+            :action-by-id="actionById"
+            :streaming-key="streamingBubbleKey"
+            :tail-key="tailAssistantKey"
+            :streaming="streaming"
+            :can-ops-write="auth.canOpsWrite"
+            :is-acting="isActing"
+            :render="renderCached"
+            @approve="approveAction"
+            @reject="rejectAction"
+            @copy="copyMessage"
+            @retry="retryMessage"
+            @save="(p) => saveDiagram(p.msg, p.index, p.source)"
+          />
 
           <!-- 第一个过程事件（思考/工具/正文）到达前的占位；事件一到，过程就
                挂到助手气泡自身的时间线上，这个独立占位随即消失。 -->
@@ -447,63 +360,14 @@
           </div>
           <!-- 上传区：回形针常驻，待发附件以缩略图/文件名条展示在上方。
                图片能否发给当前模型由 attachmentGate 在前端先拦一道。 -->
-          <div class="attach-bar">
-            <a-tooltip :title="`上传文件或图片（最多 ${MAX_ATTACHMENTS} 个）`">
-              <button
-                type="button"
-                class="attach-btn"
-                :disabled="!canSend || pendingAttachments.length >= MAX_ATTACHMENTS"
-                @click="openFilePicker"
-              >
-                <PaperClipOutlined />
-              </button>
-            </a-tooltip>
-            <span class="attach-count" v-if="pendingAttachments.length">
-              {{ pendingAttachments.length }}/{{ MAX_ATTACHMENTS }}
-            </span>
-            <span v-if="attachmentGate" class="attach-warn">{{ attachmentGate }}</span>
-          </div>
-          <input
-            ref="fileInput"
-            type="file"
-            multiple
-            class="file-input"
-            accept=".pdf,.docx,.txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.log,.yaml,.yml,.xml,.toml,.ini,.conf,.properties,.env,.sql,.py,.js,.mjs,.cjs,.ts,.tsx,.jsx,.vue,.java,.kt,.go,.rs,.c,.h,.cpp,.hpp,.cs,.php,.rb,.sh,.bash,.zsh,.bat,.ps1,.html,.htm,.css,.scss,.less,.png,.jpg,.jpeg,.gif,.webp,.bmp"
-            @change="onFilesPicked"
+          <AttachmentPicker
+            :pending="pendingAttachments"
+            :can-send="canSend"
+            :max="MAX_ATTACHMENTS"
+            :gate="attachmentGate"
+            @files="addFiles"
+            @remove="removePending"
           />
-          <div v-if="pendingAttachments.length" class="pending-list">
-            <div
-              v-for="att in pendingAttachments"
-              :key="att.key"
-              :class="['pending-item', { 'is-error': att.status === 'error' }]"
-            >
-              <img
-                v-if="att.kind === 'image' && att.previewUrl"
-                :src="att.previewUrl"
-                class="pending-thumb"
-                alt=""
-              />
-              <span v-else class="pending-file-icon"><FileOutlined /></span>
-              <span class="pending-meta">
-                <span class="pending-name" :title="att.filename">{{ att.filename }}</span>
-                <span class="pending-sub">
-                  <a-spin v-if="att.status === 'uploading'" size="small" />
-                  <template v-else-if="att.status === 'error'">
-                    {{ att.error || '上传失败' }}
-                  </template>
-                  <template v-else>{{ formatSize(att.size) }}</template>
-                </span>
-              </span>
-              <button
-                type="button"
-                class="pending-remove"
-                title="移除"
-                @click="removePending(att)"
-              >
-                <CloseOutlined />
-              </button>
-            </div>
-          </div>
           <!-- 行高跟着内容走：短问题只占两行、省出消息区高度，长问题自动
                撑到 8 行后出现内部滚动，不再憋在固定 3 行里。 -->
           <a-textarea
@@ -613,33 +477,28 @@ import { message as toast, Empty } from 'ant-design-vue'
 import {
   CloseOutlined,
   CompressOutlined,
-  CopyOutlined,
   DeleteOutlined,
   EditOutlined,
-  FileOutlined,
   FileTextOutlined,
-  PaperClipOutlined,
   PlusOutlined,
   RobotOutlined,
   SearchOutlined,
   VerticalAlignBottomOutlined,
 } from '@ant-design/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
-import MermaidCard from '@/components/MermaidCard.vue'
-import ConfirmCard from '@/components/ConfirmCard.vue'
-import ThinkingTrace from '@/components/ThinkingTrace.vue'
+import MessageBubble from '@/components/chat/MessageBubble.vue'
+import AttachmentPicker from '@/components/chat/AttachmentPicker.vue'
 import { useAuthStore } from '@/stores/auth'
 import { createMarkdown } from '@/utils/markdown'
 import { useOpsConfirm, actionFromConfirm } from '@/utils/useOpsConfirm'
 import { useStreamRender } from '@/utils/streamRender'
-import {
-  replaceMermaidSegment,
-  splitMessageSegments,
-  type MessageSegment,
-} from '@/utils/messageSegments'
+import { replaceMermaidSegment } from '@/utils/messageSegments'
+import { assistantSections, clearSectionCache, type Bubble } from '@/utils/chatSections'
 import { copyText } from '@/utils/clipboard'
 import { loadReportForChat } from '@/utils/report'
 import { registerToolLabels } from '@/utils/chatTools'
+import { errorText } from '@/utils/errors'
+import { useStickToBottom } from '@/utils/useStickToBottom'
 import {
   agentsApi,
   chatApi,
@@ -650,7 +509,6 @@ import {
   toolsApi,
   type Agent,
   type ChatAttachment,
-  type Citation,
   type CompactMeta,
   type CompactionState,
   type Conversation,
@@ -679,21 +537,6 @@ const md = createMarkdown()
 const { schedule, beginStream, endStream, renderCached, clearCache } = useStreamRender((text) =>
   md.render(text || ''),
 )
-
-interface Bubble {
-  key: string
-  /** 落库后的消息 id；流式刚结束才有。手动改图要拿它调更新接口。 */
-  id?: number
-  role: 'user' | 'assistant'
-  content: string
-  citations: Citation[]
-  /** 思考与工具调用的交错时间线；用户消息恒无此字段，纯问答也为空。 */
-  timeline?: TimelineEntry[]
-  /** 用户提问时带的附件；助手消息恒为空。 */
-  attachments?: ChatAttachment[]
-  /** 这条提问的回答失败过，界面上给出重试入口。 */
-  failed?: boolean
-}
 
 // 正在流式追加的那条气泡的 key。它在模板里走整段 markdown 渲染（图围栏多半
 // 还没闭合），finish() 清空后切换成分段渲染，mermaid 块此时才升级成图卡片。
@@ -724,148 +567,10 @@ const tailAssistantKey = computed(() => {
 /** 待确认项 id → 实体：时间线里的 confirm 条目靠它就地对位出卡片。 */
 const actionById = computed(() => new Map(actions.value.map((a) => [a.id, a])))
 
-function actionsOf(msg: Bubble): OpsAction[] {
-  // 已在时间线里就地渲染的确认卡不再挂气泡末尾，避免同一条命令出现两张卡。
-  const inline = new Set(
-    (msg.timeline ?? []).filter((e) => e.type === 'confirm').map((e) => e.action_id),
-  )
-  return actions.value.filter((a) => {
-    if (inline.has(a.id)) return false
-    if (a.message_id != null) return a.message_id === msg.id
-    // message_id 没回填（整轮回答没落库就断了：停止/刷新/断线）：宁可挂到最后
-    // 一条助手气泡，也不能让它谁都不匹配——这条命令在界面上根本不存在。
-    return msg.key === streamingBubbleKey.value || msg.key === tailAssistantKey.value
-  })
-}
-
-// ---- 助手气泡的交错切段 ------------------------------------------------------
-// timeline 按到达顺序混着 reason/step/llm/text/confirm 五类条目，渲染时切成
-// 交替的三种段：
-// - trace：连续的过程条目（思考 + 工具 + 模型计时），交给 ThinkingTrace；
-// - text：连续正文条目的拼接，走 markdown（落定后再切 mermaid 图卡）；
-// - confirm：写命令提议，就地插确认卡。
-type AssistantSection = {
-  key: string
-  type: 'trace' | 'text' | 'confirm'
-  /** trace 段：组内的原始 timeline 条目（ThinkingTrace 自己适配成节点）。 */
-  entries?: TimelineEntry[]
-  /** text 段：这段正文的完整文本。 */
-  text?: string
-  /** confirm 段：对位到的待确认项；对位不到时不在原地渲染，走 actionsOf 兜底。 */
-  action?: OpsAction | null
-  actionId?: number
-  /** 流式中只有最后一段是活跃的：trace 段展开转圈，text 段走整段流式渲染。 */
-  streaming?: boolean
-  /** 本段之前各正文段累计的子段数：图卡保存按「全文第 i 段」回写，要跨段累计。 */
-  segmentBase?: number
-}
-
-function assistantSections(msg: Bubble): AssistantSection[] {
-  const sections: AssistantSection[] = []
-  let traceBuf: TimelineEntry[] = []
-  let textBuf: string[] = []
-  let traceSeq = 0
-  let textSeq = 0
-  let confirmSeq = 0
-
-  const flushTrace = () => {
-    if (!traceBuf.length) return
-    const entries = traceBuf
-    traceBuf = []
-    // 只剩「模型往返计时点」的过程组不展示：纯问答末尾那颗 llm 节点没有工具
-    // 也没有思考内容，露一个折叠框纯属噪音。
-    if (!entries.some((e) => e.type !== 'llm')) return
-    sections.push({
-      key: `${msg.key}:tr${traceSeq++}`,
-      type: 'trace',
-      entries,
-    })
-  }
-  const flushText = () => {
-    if (!textBuf.length) return
-    const text = textBuf.join('')
-    textBuf = []
-    if (text) sections.push({ key: `${msg.key}:tx${textSeq++}`, type: 'text', text })
-  }
-
-  for (const entry of msg.timeline ?? []) {
-    if (entry.type === 'reason' || entry.type === 'step' || entry.type === 'llm') {
-      // 过程条目连续收进同一组：ReAct 循环里「工具返回 → 思考 → 再调工具」
-      // 中间没有正文，本就是同一轮排查；组只在遇到正文/确认卡时断开，保证每组
-      // 后面紧跟的就是这一轮解说文字，而不是把整条回答的过程全堆到气泡头部。
-      flushText()
-      traceBuf.push(entry)
-    } else if (entry.type === 'text') {
-      flushTrace()
-      textBuf.push(entry.detail ?? '')
-    } else if (entry.type === 'confirm') {
-      flushTrace()
-      flushText()
-      sections.push({
-        key: `${msg.key}:cf${confirmSeq++}`,
-        type: 'confirm',
-        actionId: entry.action_id ?? -1,
-      })
-    }
-  }
-  flushTrace()
-  flushText()
-
-  // 没有时间线（老消息/纯问答）、或整条时间线里没有正文（只思考调工具，后端
-  // 补了固定话术）：用整段 content 兜底成一个正文段，保证结论一定有地方渲染。
-  if (!sections.some((s) => s.type === 'text') && msg.content) {
-    sections.push({ key: `${msg.key}:content`, type: 'text', text: msg.content })
-  }
-
-  for (const sec of sections) {
-    if (sec.type === 'confirm') {
-      sec.action = actionById.value.get(sec.actionId ?? -1) ?? null
-    }
-  }
-
-  // 活跃态只给最后一段：模型转到下一段（思考→工具→正文）后，前一组就地落定，
-  // ThinkingTrace 随即自动折叠，不必等整条回答结束。
-  if (msg.key === streamingBubbleKey.value && sections.length) {
-    sections[sections.length - 1].streaming = true
-  }
-
-  // 子段全局序号基数：图卡保存按全文 splitMessageSegments 的下标回写
-  // （markdown 段也占下标），基数 = 之前各正文段的子段数之和。
-  let segmentBase = 0
-  for (const sec of sections) {
-    if (sec.type !== 'text' || !sec.text) continue
-    // 活跃正文段流式时走整段渲染、不切子段，也不可能有排在它后面的段需要基数。
-    if (sec.streaming) break
-    sec.segmentBase = segmentBase
-    segmentBase += segmentsOfText(sec.key, sec.text).length
-  }
-  return sections
-}
-
-// 正文段 → mermaid 子段的缓存：与 renderCached 同理，文本没变就不重新切分，
-// 避免流式期间每个 token 都把已经落定的正文段重切一遍。
-const sectionSegCache = new Map<string, { text: string; segments: MessageSegment[] }>()
-
-function segmentsOfText(key: string, text: string): MessageSegment[] {
-  const hit = sectionSegCache.get(key)
-  if (hit && hit.text === text) return hit.segments
-  const segments = splitMessageSegments(text)
-  sectionSegCache.set(key, { text, segments })
-  return segments
-}
-
-/** 模板用：子段附上它在整条消息里的全局子段序号（非图段用不到，给 -1）。 */
-function sectionParts(sec: AssistantSection): { seg: MessageSegment; globalIndex: number }[] {
-  return segmentsOfText(sec.key, sec.text ?? '').map((seg, i) => ({
-    seg,
-    globalIndex: seg.kind === 'mermaid' ? (sec.segmentBase ?? 0) + i : -1,
-  }))
-}
-
-/** 两套渲染缓存一起清（streamRender 的 HTML 缓存 + 这里的分段缓存）。 */
+/** 两套渲染缓存一起清（streamRender 的 HTML 缓存 + 切段缓存）。 */
 function clearRenderCaches() {
   clearCache()
-  sectionSegCache.clear()
+  clearSectionCache()
 }
 
 const booting = ref(true)
@@ -986,7 +691,11 @@ function flushStreamText() {
   appendTextEntry(bubble, chunk)
   // 节拍器只节流当前活跃正文段：一轮工具后新开的正文段是新的 key，
   // 与模板 renderCached 的 key 保持一致，落定段不被重复解析。
-  const lastSection = assistantSections(bubble).at(-1)
+  const lastSection = assistantSections(
+    bubble,
+    actionById.value,
+    streamingBubbleKey.value,
+  ).at(-1)
   beginStream(lastSection && lastSection.type === 'text' ? lastSection.key : bubble.key)
   schedule()
   scrollToBottom()
@@ -1023,7 +732,6 @@ interface PendingAttachment {
   error?: string
 }
 
-const fileInput = ref<HTMLInputElement | null>(null)
 const pendingAttachments = ref<PendingAttachment[]>([])
 
 const readyAttachments = computed(() =>
@@ -1059,21 +767,6 @@ function isImageFile(file: File): boolean {
   return file.type.startsWith('image/') || IMAGE_EXTENSIONS.includes(fileExtension(file.name))
 }
 
-function formatSize(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
-  return `${bytes} B`
-}
-
-/** 上传失败时的可读原因：业务拒绝走 envelope，网络错误走 Error。 */
-function errorText(err: unknown): string {
-  if (err && typeof err === 'object' && 'message' in err) {
-    const text = (err as { message?: unknown }).message
-    if (typeof text === 'string' && text) return text
-  }
-  return '上传失败，请稍后重试'
-}
-
 /** 前端先做一遍格式/大小检查，省得把大文件传完才被后端拒绝。 */
 function validateFile(file: File): string {
   const image = isImageFile(file)
@@ -1091,18 +784,6 @@ function validateFile(file: File): string {
     return `文件超过 ${MAX_FILE_BYTES / 1024 / 1024}MB 上限`
   }
   return ''
-}
-
-function openFilePicker() {
-  fileInput.value?.click()
-}
-
-function onFilesPicked(event: Event) {
-  const input = event.target as HTMLInputElement
-  const files = Array.from(input.files ?? [])
-  // 清空 value：同一个文件连选两次也要能再次触发 change。
-  input.value = ''
-  if (files.length) void addFiles(files)
 }
 
 function onComposerPaste(event: ClipboardEvent) {
@@ -1165,7 +846,7 @@ async function uploadAttachment(item: PendingAttachment, file: File) {
     const live = pendingAttachments.value.find((a) => a.key === item.key)
     if (!live) return
     live.status = 'error'
-    live.error = errorText(err)
+    live.error = errorText(err, '上传失败，请稍后重试')
   }
 }
 
@@ -1219,33 +900,13 @@ function restorePending(attachments: ChatAttachment[]) {
 
 // ---- 贴底滚动 ---------------------------------------------------------------
 // 用户上翻查看历史时，新 token 不该硬把视图拽回底部；只有原本贴着底，
-// 才跟着回答往下滚。
-const STICK_THRESHOLD = 40
-const stickToBottom = ref(true)
-
-function onMessagesScroll() {
-  const el = scrollEl.value
-  if (el) {
-    stickToBottom.value =
-      el.scrollHeight - el.scrollTop - el.clientHeight < STICK_THRESHOLD
-  }
-}
-
-// 流式过程中调用：尊重贴底状态，用户上翻时不动视图。
-function scrollToBottom() {
-  // keep-alive 缓存期间不在隐藏 DOM 上做强制布局。
-  if (!pageActive.value) return
-  void nextTick(() => {
-    const el = scrollEl.value
-    if (el && stickToBottom.value) el.scrollTop = el.scrollHeight
-  })
-}
-
-// 用户主动动作（发送 / 重试 / 审批 / 切换会话）：强制贴底跟随。
-function pinToBottom() {
-  stickToBottom.value = true
-  scrollToBottom()
-}
+// 才跟着回答往下滚。clamp / 隐藏态判断走全站共用的 composable。
+const {
+  stickToBottom,
+  onScroll: onMessagesScroll,
+  scrollToBottom,
+  pinToBottom,
+} = useStickToBottom(scrollEl, pageActive)
 
 // ---- 回答时间线：思考过程 + 工具调用过程 -------------------------------------
 // 流式期间按到达顺序累积，渲染成交错的「思考 / 调工具」时间线；落库后后端按
@@ -2452,14 +2113,6 @@ onUnmounted(() => {
   flex-direction: column;
   min-height: 0;
 }
-.side :deep(.ant-card-body),
-.main :deep(.ant-card-body) {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
 .conv-list {
   overflow-y: auto;
 }
@@ -2469,13 +2122,6 @@ onUnmounted(() => {
 /* 骨架行的内边距对齐真实会话项，加载完不跳。 */
 .conv-skeleton {
   padding: 8px 10px;
-}
-/* 发送失败的提问下方给重试入口（气泡内，右对齐跟随用户消息）。 */
-.send-failed {
-  margin-top: 6px;
-  font-size: var(--fs-xs);
-  color: var(--danger);
-  text-align: right;
 }
 /* hover/active 底色用全局 .list-row（style.css），这里只留布局。 */
 .conv-item {
@@ -2699,12 +2345,11 @@ onUnmounted(() => {
   font-size: var(--fs-6xl);
   color: var(--signal-text);
 }
+/* 消息气泡的版式与内容样式都在 components/chat/MessageBubble.vue；
+   这里只留流式占位气泡复用到的两条。 */
 .msg {
   display: flex;
   margin-bottom: 14px;
-}
-.msg.user {
-  justify-content: flex-end;
 }
 .bubble {
   max-width: 78%;
@@ -2712,99 +2357,6 @@ onUnmounted(() => {
   border-radius: 10px;
   background: var(--paper);
   line-height: 1.7;
-}
-.msg.user .bubble {
-  background: var(--signal-bg-strong);
-}
-/* 提问附件：图片给缩略图（ant-image 自带点击预览），文档只露文件名。 */
-.msg-attachments {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-.msg-image {
-  display: block;
-  overflow: hidden;
-  border-radius: var(--radius-sm);
-}
-.msg-file {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 220px;
-  padding: 2px 8px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  font-size: var(--fs-xs);
-  color: var(--text-2);
-}
-.msg-file-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.content {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-/* markdown 排版在全局 assets/markdown.css（.markdown）；这里只留 scoped
-   才能打赢的覆盖：.content 的 pre-wrap 会叠到块级元素上，多出一堆空行。 */
-.content.markdown {
-  white-space: normal;
-}
-/* 气泡操作行（复制）：悬停整条消息才出现，常显会让每段回答都挂一排图标。 */
-.bubble-actions {
-  display: flex;
-  margin-top: 6px;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-
-.msg:hover .bubble-actions,
-.msg:focus-within .bubble-actions {
-  opacity: 1;
-}
-
-.copy-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-3);
-  font-size: var(--fs-sm);
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.copy-btn:hover {
-  background: var(--hover-neutral);
-  color: var(--signal-text);
-}
-
-.citations {
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px dashed var(--hairline);
-}
-.citations-title {
-  font-size: var(--fs-xs);
-  color: var(--text-3);
-  margin-bottom: 6px;
-}
-.citation {
-  margin-bottom: 4px;
-  cursor: help;
-}
-.score {
-  color: var(--text-3);
-  margin-left: 4px;
 }
 .thinking {
   margin-left: 8px;
@@ -2864,129 +2416,7 @@ onUnmounted(() => {
   cursor: not-allowed;
   opacity: 0.5;
 }
-/* 上传入口：常驻在输入框上方一行。就一个回形针，不抢视觉重量。 */
-.attach-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 24px;
-  margin-bottom: 4px;
-}
-.attach-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-3);
-  font-size: var(--fs-base);
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.attach-btn:hover:not(:disabled) {
-  background: var(--hover-neutral);
-  color: var(--signal-text);
-}
-.attach-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-.attach-count {
-  font-size: var(--fs-xs);
-  color: var(--text-3);
-}
-.attach-warn {
-  font-size: var(--fs-xs);
-  color: var(--warning);
-}
-.file-input {
-  display: none;
-}
-/* 待发附件条：缩略图 + 文件名 + 大小/进度，移除按钮固定在行尾。 */
-.pending-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-.pending-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  max-width: 260px;
-  padding: 4px 6px 4px 4px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-}
-.pending-item.is-error {
-  border-color: var(--danger-soft);
-  background: var(--danger-bg);
-}
-.pending-thumb {
-  display: block;
-  width: 40px;
-  height: 40px;
-  object-fit: cover;
-  border-radius: 4px;
-}
-.pending-file-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  flex-shrink: 0;
-  border-radius: 4px;
-  background: var(--paper);
-  color: var(--text-3);
-  font-size: var(--fs-lg);
-}
-.pending-meta {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 0;
-}
-.pending-name {
-  overflow: hidden;
-  font-size: var(--fs-xs);
-  color: var(--text-1);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.pending-sub {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: var(--fs-xs);
-  color: var(--text-3);
-}
-.pending-item.is-error .pending-sub {
-  color: var(--danger);
-}
-.pending-remove {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  flex-shrink: 0;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--text-3);
-  cursor: pointer;
-}
-.pending-remove:hover {
-  background: var(--hover-neutral);
-  color: var(--danger);
-}
+/* 上传入口与待发附件条的样式都在 components/chat/AttachmentPicker.vue。 */
 /* 按钮和提示悬浮在输入框右下角，不再单独占一行；给 textarea 右侧留出
    空隙，避免输入的长文本钻到按钮底下。打字时提示已隐藏、只剩发送按钮，
    留白只需盖住按钮；流式期间出现的「停止」按钮更宽，但那时输入框是
@@ -3004,9 +2434,8 @@ onUnmounted(() => {
 }
 
 @media (max-width: 768px) {
-  /* 触屏没有 hover：操作入口常显，不然手机上找不到重命名/删除/复制。 */
-  .conv-actions,
-  .bubble-actions {
+  /* 触屏没有 hover：操作入口常显，不然手机上找不到重命名/删除。 */
+  .conv-actions {
     opacity: 1;
   }
   /* 小屏放宽气泡：78% 在手机上白白浪费一截宽度。 */

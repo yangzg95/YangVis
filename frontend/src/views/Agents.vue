@@ -5,7 +5,7 @@
       智能体决定客服回答问题的方式。内置智能体不可直接修改，可「复制」后调整为自己的版本。
     </div>
 
-    <div class="toolbar">
+    <div class="toolbar toolbar--end toolbar--roomy">
       <a-button type="primary" @click="openCreate">
         <PlusOutlined /> 新建智能体
       </a-button>
@@ -419,11 +419,6 @@ onMounted(load)
   color: var(--text-3);
   font-size: var(--fs-sm);
   margin-bottom: 16px;
-}
-/* flex 基底用全局 .toolbar（style.css），这里只留本页差异。 */
-.toolbar {
-  margin-bottom: 16px;
-  justify-content: flex-end;
 }
 .agent-grid {
   display: grid;

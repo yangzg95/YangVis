@@ -109,8 +109,10 @@
     <a-divider style="margin: 16px 0">{{ subject ? '历次运行' : '最近运行' }}</a-divider>
 
     <!-- 筛完再翻页：条件变了总数就重算，停在第 3 页筛一个只剩 1 条的状态会看到
-         空列表，所以筛选项一律把页码拨回第一页。 -->
-    <div v-if="total" class="runs-bar">
+         空列表，所以筛选项一律把页码拨回第一页。
+         筛出 0 条时这一栏必须留着：不然清筛选的入口跟着空列表一起消失，只能关掉
+         重开——所以渲染条件是「有结果」或「正被筛着」。 -->
+    <div v-if="total || statusFilter" class="runs-bar">
       <a-select
         v-model:value="statusFilter"
         :options="statusOptions"
@@ -224,6 +226,7 @@ import RunScene from '@/components/workflow/RunScene.vue'
 import StepOverrideModal from '@/components/workflow/StepOverrideModal.vue'
 import TraceNodeList from '@/components/trace/TraceNodeList.vue'
 import { stepInputFields, type StepField } from '@/components/workflow/runFields'
+import { errorText } from '@/utils/errors'
 import { workflowTraceNodes, type TraceNode } from '@/utils/traceModel'
 import { subjectLink } from '@/components/workflow/runLinks'
 import {
@@ -409,11 +412,6 @@ async function loadRuns() {
   } finally {
     loading.value = false
   }
-}
-
-function errorText(err: unknown, fallback: string): string {
-  const envelope = err as { message?: string } | undefined
-  return envelope?.message || fallback
 }
 
 async function onExpand(keys: number | number[]) {

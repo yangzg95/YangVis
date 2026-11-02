@@ -9,8 +9,14 @@
  */
 import MarkdownIt from 'markdown-it'
 
-export function createMarkdown(): MarkdownIt {
-  const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
+export interface MarkdownOptions {
+  /** 单个换行是否渲染成 <br>。对话类正文需要（模型经常按行写）；
+   * 报告正文不需要，保持标准 Markdown 语义。默认 true。 */
+  breaks?: boolean
+}
+
+export function createMarkdown(options: MarkdownOptions = {}): MarkdownIt {
+  const md = new MarkdownIt({ html: false, linkify: true, breaks: options.breaks ?? true })
 
   // 让链接在新标签页打开，并加上 noopener，避免新页面拿到 window.opener。
   const defaultLinkOpen =

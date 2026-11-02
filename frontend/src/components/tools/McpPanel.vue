@@ -1,6 +1,6 @@
 <template>
   <div>
-    <div class="toolbar">
+    <div class="toolbar toolbar--end toolbar--roomy">
       <a-space>
         <a-button @click="openImport">
           <UploadOutlined /> 导入
@@ -62,13 +62,13 @@
               <AppstoreOutlined />
               {{ record.tools.length }} 个工具
             </a-button>
-            <span v-else class="test-ok">已通过 · {{ formatTime(record.last_test_at) }}</span>
+            <span v-else class="test-ok">已通过 · {{ fmtShortDateTime(record.last_test_at) }}</span>
             <div v-if="record.tools?.length" class="test-time">
-              {{ formatTime(record.last_test_at) }}
+              {{ fmtShortDateTime(record.last_test_at) }}
             </div>
           </template>
           <a-tooltip v-else-if="record.last_test_ok === false" :title="record.last_test_msg">
-            <span class="test-failed">未通过 · {{ formatTime(record.last_test_at) }}</span>
+            <span class="test-failed">未通过 · {{ fmtShortDateTime(record.last_test_at) }}</span>
           </a-tooltip>
           <span v-else class="test-none">未测试</span>
         </template>
@@ -224,7 +224,7 @@
       <template v-if="toolsServer">
         <div class="tools-sub">
           <span class="tools-time">
-            测试于 {{ formatTime(toolsServer.last_test_at) }} · 重新测试可刷新清单
+            测试于 {{ fmtShortDateTime(toolsServer.last_test_at) }} · 重新测试可刷新清单
           </span>
           <a-button
             size="small"
@@ -420,6 +420,7 @@ import {
 } from '@/api'
 import SecretRows from '@/components/SecretRows.vue'
 import { saveTextFile } from '@/utils/download'
+import { fmtShortDateTime } from '@/utils/format'
 
 const servers = ref<McpServer[]>([])
 const loading = ref(false)
@@ -877,18 +878,10 @@ function transportLabel(transport: McpTransport) {
 function transportColor(transport: McpTransport) {
   return transport === 'stdio' ? 'purple' : 'cyan'
 }
-function formatTime(value?: string | null) {
-  return value ? dayjs(value).format('MM-DD HH:mm') : ''
-}
-
 onMounted(load)
 </script>
 
 <style scoped>
-.toolbar {
-  margin-bottom: 16px;
-  justify-content: flex-end;
-}
 .secret-tag {
   margin-left: 6px;
 }

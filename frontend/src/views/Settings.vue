@@ -46,7 +46,7 @@
           </template>
         </a-alert>
 
-        <div class="toolbar">
+        <div class="toolbar toolbar--between toolbar--snug">
           <a-radio-group v-model:value="filterPurpose" button-style="solid" @change="load">
             <a-radio-button value="">全部</a-radio-button>
             <a-radio-button value="chat">对话</a-radio-button>
@@ -162,7 +162,7 @@
           description="只有开了「长期记忆」开关的智能体会使用并积累记忆；你可以在这里查看、修改或删除任何一条。"
         />
 
-        <div class="toolbar">
+        <div class="toolbar toolbar--between toolbar--snug">
           <a-button type="primary" @click="openMemoryCreate">
             <PlusOutlined /> 手动添加
           </a-button>
@@ -361,6 +361,7 @@ import {
   type ReasoningMode,
   type ReadinessStatus,
 } from '@/api'
+import { errorText } from '@/utils/errors'
 import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
@@ -728,11 +729,6 @@ async function onUnbindNetdisk() {
   }
 }
 
-function errorText(err: unknown, fallback: string): string {
-  const envelope = err as { message?: string } | undefined
-  return envelope?.message || fallback
-}
-
 onMounted(load)
 </script>
 
@@ -741,10 +737,6 @@ onMounted(load)
   margin-bottom: 12px;
 }
 /* flex 基底用全局 .toolbar（style.css），这里只留本页差异。 */
-.toolbar {
-  margin-bottom: 16px;
-  justify-content: space-between;
-}
 /* 打码后的 API key 用等宽显示；颜色/字号继承全局 .muted（style.css）。 */
 .muted {
   font-family: var(--font-mono);

@@ -176,7 +176,7 @@ import {
   ToolOutlined,
   UserOutlined,
 } from '@ant-design/icons-vue'
-import { theme as antdTheme } from 'ant-design-vue'
+import { ConfigProvider, theme as antdTheme } from 'ant-design-vue'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
 import SidebarNav, { type MenuNode } from '@/components/SidebarNav.vue'
 import GridContextMenu, { type GridMenuEntry } from '@/components/ops/GridContextMenu.vue'
@@ -322,6 +322,16 @@ const theme = computed(() => {
       },
     },
   }
+})
+
+// 静态 message / notification / Modal.confirm 不经过模板里的 <a-config-provider>，
+// 单独用全局 config 挂同一套主题：暗色下弹层才能跟着 darkAlgorithm 变暗，
+// style.css 里不用再写一组「命令式弹层」兜底。主题切换时重挂一次。
+// 这里的 config 类型还停在旧版颜色主题（primaryColor 那套），但运行时会原样
+// 透传给 ConfigProvider，所以按 ThemeConfig 强转。
+type StaticTheme = Parameters<typeof ConfigProvider.config>[0]['theme']
+watch(theme, (value) => ConfigProvider.config({ theme: value as unknown as StaticTheme }), {
+  immediate: true,
 })
 
 // 子菜单没配图标时回退用父级的，标签页和左侧菜单的图标就保持一致了。
@@ -654,12 +664,12 @@ const onUserMenuClick = async ({ key }: { key: string | number }) => {
   top: 16px;
   right: 12px;
   z-index: var(--z-raised);
-  color: rgba(255, 255, 255, 0.68);
+  color: var(--text-dark-2);
 }
 
 .mobile-nav-close:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+  background: var(--on-dark-hover);
+  color: var(--text-dark);
 }
 
 /* 窄屏顶栏：用户名让位给标签页，只留头像（退出登录还在下拉里）。 */

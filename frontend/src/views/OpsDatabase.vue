@@ -11,7 +11,7 @@
       </div>
 
       <template v-else>
-      <a-card class="panel list-panel" size="small" :style="{ width: `${listWidth}px` }">
+      <a-card class="panel card-fill list-panel" size="small" :style="{ width: `${listWidth}px` }">
         <template #title>
           <div class="panel-title">
             <span>连接</span>
@@ -65,7 +65,7 @@
       <div class="col-resizer" @mousedown="startListDrag" />
       </template>
 
-      <a-card class="panel main-panel" size="small">
+      <a-card class="panel card-fill main-panel" size="small">
         <a-tabs
           v-model:active-key="activeTabKey"
           class="workbench"
@@ -159,7 +159,7 @@
 
       <template v-else>
       <div class="col-resizer" @mousedown="startChatDrag" />
-      <a-card class="panel chat-panel" size="small" :style="{ width: `${chatWidth}px` }">
+      <a-card class="panel card-fill chat-panel" size="small" :style="{ width: `${chatWidth}px` }">
         <template #title>
           <div class="panel-title">
             <span>智能问答</span>
@@ -1122,14 +1122,6 @@ watch(isMobile, (mobile) => {
   border: 1px solid var(--hairline);
   border-radius: var(--radius-lg);
   background: var(--surface);
-  overflow: hidden;
-}
-
-.panel :deep(.ant-card-body) {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
   overflow: hidden;
 }
 

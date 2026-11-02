@@ -6,7 +6,7 @@
       Prompt 模板、输出格式都在这儿改，不用发版。步骤之间可以并行，点任意一行进编辑器。
     </div>
 
-    <div class="toolbar">
+    <div class="toolbar toolbar--end toolbar--roomy">
       <!-- 运行记录也是启动时自动清理的（保留窗口之外的、且不再是某个业务对象
            当前状态的那些）；这里给一个不用等重启的手动入口。 -->
       <a-popconfirm
@@ -143,6 +143,7 @@ import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { PlusOutlined } from '@ant-design/icons-vue'
 import { workflowsApi, type Workflow, type WorkflowStep } from '@/api'
+import { errorText } from '@/utils/errors'
 import { fmtElapsed, runStatusColor, runStatusText } from '@/utils/format'
 import { requestEditor } from '@/stores/workflowEditor'
 
@@ -225,11 +226,6 @@ async function load() {
   }
 }
 
-function errorText(err: unknown, fallback: string): string {
-  const envelope = err as { message?: string } | undefined
-  return envelope?.message || fallback
-}
-
 // 编辑器是顶栏上的独立标签页：把「打开谁」写进 store 再切过去，
 // 页面自己拉数据，列表这边不用再把整份定义传下去。
 function openCreate() {
@@ -300,11 +296,6 @@ onActivated(() => {
   color: var(--text-3);
   font-size: var(--fs-sm);
   margin-bottom: 16px;
-}
-/* flex 基底用全局 .toolbar（style.css），这里只留本页差异。 */
-.toolbar {
-  margin-bottom: 16px;
-  justify-content: flex-end;
 }
 /* 清理确认框里的那一小块：窗口选择 + 一句保留规则。 */
 .prune-pop {

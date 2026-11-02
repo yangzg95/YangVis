@@ -201,19 +201,19 @@ const modules = computed<HomeModule[]>(() => {
     {
       path: '/office/resume',
       name: '简历',
-      desc: '分析、对比与求职助手',
+      desc: '在线编辑、上传分析与对比',
       icon: ProfileOutlined,
       unit: '份简历',
       value: s?.resume_count ?? null,
-      extra: s ? `笔记 ${s.note_count}` : undefined,
     },
     {
       path: '/office/interviews',
       name: '面试',
-      desc: '场次复盘与 AI 参考答案',
+      desc: '场次复盘、求职助手与笔记',
       icon: SolutionOutlined,
       unit: '场面试',
       value: s?.interview_count ?? null,
+      extra: s ? `笔记 ${s.note_count}` : undefined,
     },
     {
       path: '/office/slides',

@@ -1,14 +1,16 @@
 # 智能办公 · 面试记录
 
 侧栏「AI 应用 → 面试」页（路由 `/office/interviews`；早期版本是「简历」页里的
-「面试记录」tab，因实体与接口完全独立而拆出）。一场面试一条记录（公司、岗位、日期、轮次、结果、
+「面试记录」tab，因实体与接口完全独立而拆出）。这一页是求职过程的落点，三个页签：
+**面试记录**（本页主体）、**求职助手**（六类一次性生成，见下）、**笔记**（见 notes.md）。
+一场面试一条记录（公司、岗位、日期、轮次、结果、
 整场复盘备注）加一份问题清单；问题由用户手工录入（可附「我当时的回答」与备注），
 每题可点「生成参考答案」让 AI 后台产出一段 markdown 答案。问题明细在新开标签页的整页
 详情（`/office/interview/:id`，`bare` 路由）里处理，列表只管场次元数据。
 
 ## 用户可见行为
 
-- 列表：按公司/岗位前端筛选，展示公司岗位、面试日期、轮次、结果（待定/通过/未通过/
+- 「面试记录」页签：按公司/岗位前端筛选，展示公司岗位、面试日期、轮次、结果（待定/通过/未通过/
   已 offer 四种彩色标签）、题目数、记录时间；行内可编辑元数据、删除、详情新标签页打开
 - 「记录一场面试」弹窗：公司、岗位必填，日期可选，轮次是可自由输入的自动补全
   （一面/二面/三面/HR面/电话面/笔试/终面），可写整场复盘备注
@@ -25,6 +27,10 @@
 - 生成失败题卡内联显示错误，可重新生成；只要发起过（状态非 none）就显示「运行记录」，
   打开统一的 WorkflowRunsDrawer（subject 为 `interview-question` + qid）
 - 同一题重复触发生成会被拒绝；题目或整场记录在生成中删除也会被拒绝
+- 「求职助手」页签：六张工具卡（简历优化、职业匹配分析、简历匹配审计、面试准备策略、
+  证明构建计划、薪资最大化框架），点卡片弹窗发起，下方「生成记录」表跟随状态；没配好可用
+  对话模型时卡片禁用并在页签内给一条引导横幅。它与分析共用同一条内置工作流执行链路，
+  报告页（`/office/report/toolkit/{id}`）与接口口径见 resume.md，本文不重复
 
 ## 关键取舍
 
@@ -80,8 +86,10 @@ owner，删除闸门读的是运行状态而不是 JSON 标记。
 | `backend/app/services/workflows/builtin.py` | 内置工作流 `interview-answer`：单步骤，agent `interview-answerer`，输入 company/position/round_note/question/answer_note |
 | `backend/app/services/agents.py` | 内置人设 `interview-answerer`「面试答题教练」，`chat_visible=false` |
 | `backend/app/services/workflows/__init__.py` | `SUBJECT_INTERVIEW_QUESTION = "interview-question"` |
-| `frontend/src/views/Interviews.vue` | 面试页外壳（page-card + 标题），渲染 InterviewRecords |
+| `frontend/src/views/Interviews.vue` | 面试页外壳（page-card + 标题）与「面试记录 / 求职助手 / 笔记」三个页签 |
 | `frontend/src/components/InterviewRecords.vue` | 场次列表：筛选、新增/编辑/删除弹窗、详情新开标签页 |
+| `frontend/src/components/JobToolkitPanel.vue` | 「求职助手」页签：工具卡与发起弹窗（TOOL_DEFS 驱动）、生成记录表、自己的轮询与运行现场抽屉 |
+| `frontend/src/components/NotesPanel.vue` | 「笔记」页签，机制见 notes.md |
 | `frontend/src/views/InterviewDetailView.vue` | bare 整页详情：元数据展示/编辑、题目添加与内联编辑、生成与 2.5s 轮询、运行记录抽屉 |
 | `frontend/src/components/WorkflowRunsDrawer.vue` | 按 subject（interview-question + qid）看该题运行流水 |
 | `frontend/src/api/interview.ts` | `interviewApi`：list/create/detail/update/remove、add/update/removeQuestion、generateAnswer |

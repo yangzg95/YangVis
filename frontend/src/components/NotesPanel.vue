@@ -1,6 +1,6 @@
 <template>
   <div>
-    <div class="toolbar notes-toolbar">
+    <div class="toolbar toolbar--between toolbar--snug">
       <span class="muted">
         共 {{ total }} 条笔记<template v-if="appliedKeyword">，「{{ appliedKeyword }}」匹配 {{ records.length }} 条</template>
       </span>
@@ -34,7 +34,7 @@
           <div class="cell-sub note-snippet">{{ record.snippet || '（无正文）' }}</div>
         </template>
         <template v-else-if="column.key === 'updated_at'">
-          <span class="muted">{{ formatTime(record.updated_at) }}</span>
+          <span class="muted">{{ fmtDateTime(record.updated_at) }}</span>
         </template>
         <template v-else-if="column.key === 'actions'">
           <a-space :size="4">
@@ -107,6 +107,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { Empty, message } from 'ant-design-vue'
 import { PlusOutlined } from '@ant-design/icons-vue'
 import { noteApi, type NoteItem } from '@/api'
+import { fmtDateTime } from '@/utils/format'
 import { createMarkdown } from '@/utils/markdown'
 import { useIsMobile } from '@/utils/useIsMobile'
 
@@ -234,18 +235,10 @@ async function onRemove(record: NoteItem) {
 
 // ---- 展示辅助 -----------------------------------------------------------------
 
-function formatTime(value: string | null): string {
-  return value ? new Date(value).toLocaleString() : '—'
-}
-
 onMounted(loadNotes)
 </script>
 
 <style scoped>
-.notes-toolbar {
-  margin: 4px 0 16px;
-  justify-content: space-between;
-}
 .keyword-input {
   width: 220px;
 }

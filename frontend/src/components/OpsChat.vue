@@ -25,7 +25,7 @@
                   </a-tooltip>
                 </div>
                 <span class="history-meta">
-                  {{ formatTime(conv.updated_at) }} · {{ conv.message_count }} 条
+                  {{ fmtShortDateTime(conv.updated_at) }} · {{ conv.message_count }} 条
                 </span>
               </div>
             </a-menu-item>
@@ -260,6 +260,8 @@ import {
 import ConfirmCard from '@/components/ConfirmCard.vue'
 import { useAuthStore } from '@/stores/auth'
 import { createMarkdown } from '@/utils/markdown'
+import { fmtShortDateTime } from '@/utils/format'
+import { useStickToBottom } from '@/utils/useStickToBottom'
 import { toolLabel } from '@/utils/chatTools'
 import { useOpsConfirm, actionFromConfirm } from '@/utils/useOpsConfirm'
 import { useStreamRender } from '@/utils/streamRender'
@@ -550,30 +552,12 @@ const aiStatusText = computed(() => {
 
 // ---- 贴底滚动 ---------------------------------------------------------------
 // 与 Chat.vue 同一口径：上翻时流式事件不抢视图，原本贴底才往下跟。
-const STICK_THRESHOLD = 40
-const stickToBottom = ref(true)
-
-function onBodyScroll() {
-  const el = scrollEl.value
-  if (el) {
-    stickToBottom.value =
-      el.scrollHeight - el.scrollTop - el.clientHeight < STICK_THRESHOLD
-  }
-}
-
-function scrollToBottom() {
-  // keep-alive 缓存期间不在隐藏 DOM 上做强制布局。
-  if (!pageActive.value) return
-  nextTick(() => {
-    const el = scrollEl.value
-    if (el && stickToBottom.value) el.scrollTop = el.scrollHeight
-  })
-}
-
-function pinToBottom() {
-  stickToBottom.value = true
-  scrollToBottom()
-}
+const {
+  stickToBottom,
+  onScroll: onBodyScroll,
+  scrollToBottom,
+  pinToBottom,
+} = useStickToBottom(scrollEl, pageActive)
 
 // ---- 模型选择 ---------------------------------------------------------------
 // 只把测通过的模型放进下拉；选择存 localStorage，纯查看者偏好，丢了就用默认。
@@ -827,14 +811,6 @@ function onHistoryOpen(open: boolean) {
 function deriveTitle(question: string): string {
   const title = question.split(/\s+/).join(' ')
   return title.length <= 40 ? title : `${title.slice(0, 40)}…`
-}
-
-/** 历史下拉里的一行时间：MM-DD HH:mm，够认就行。 */
-function formatTime(value: string): string {
-  const d = new Date(value)
-  if (Number.isNaN(d.getTime())) return ''
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 // ---- SSE 事件处理 -------------------------------------------------------------
@@ -1197,17 +1173,17 @@ defineExpose({
 }
 
 .pending-bar:hover {
-  background: rgba(212, 136, 6, 0.16);
+  background: var(--warning-bg-strong);
 }
 
 .ops-chat.dark .pending-bar {
   color: var(--warning-bright);
-  border-color: rgba(250, 173, 20, 0.45);
-  background: rgba(250, 173, 20, 0.1);
+  border-color: var(--warning-on-dark-border);
+  background: var(--warning-on-dark-bg);
 }
 
 .ops-chat.dark .pending-bar:hover {
-  background: rgba(250, 173, 20, 0.18);
+  background: var(--warning-on-dark-bg-strong);
 }
 
 .chat-body {
@@ -1248,7 +1224,7 @@ defineExpose({
 }
 
 .ops-chat.dark .jump-bottom:hover {
-  border-color: rgba(58, 214, 222, 0.6);
+  border-color: var(--signal-on-dark-border-hover);
   color: var(--signal-bright);
 }
 
@@ -1538,7 +1514,7 @@ defineExpose({
   padding: 8px;
   border-radius: var(--radius-sm);
   background: var(--ink);
-  color: #d4d4d4;
+  color: var(--text-dark);
   overflow-x: auto;
 }
 
@@ -1563,7 +1539,7 @@ defineExpose({
   border: none;
   border-radius: var(--radius-sm);
   /* 代码可能正好写到按钮底下，底色得够实才能读。 */
-  background: #3c3c3c;
+  background: var(--code-action-bg);
   color: var(--signal-bright);
   font-size: var(--fs-xs);
   cursor: pointer;
@@ -1571,7 +1547,7 @@ defineExpose({
 }
 
 .markdown :deep(.snippet-open:hover) {
-  background: #4f4f4f;
+  background: var(--code-action-bg-hover);
 }
 
 /* ---- 深色变体（全屏终端页右侧的 AI 面板，与终端 #11181f 同一族） ------------ */
@@ -1582,12 +1558,12 @@ defineExpose({
 
 .ops-chat.dark .sample {
   border-color: var(--on-dark-border);
-  color: #aab6c2;
+  color: var(--text-dark-2);
 }
 
 .ops-chat.dark .sample:hover {
-  border-color: rgba(58, 214, 222, 0.45);
-  background: rgba(58, 214, 222, 0.1);
+  border-color: var(--signal-on-dark-border);
+  background: var(--signal-on-dark-bg);
   color: var(--signal-bright);
 }
 
@@ -1597,7 +1573,7 @@ defineExpose({
 }
 
 .ops-chat.dark .msg.user .bubble {
-  background: rgba(58, 214, 222, 0.16);
+  background: var(--signal-on-dark-bg-strong);
   color: var(--text-dark);
 }
 
@@ -1606,7 +1582,7 @@ defineExpose({
 }
 
 .ops-chat.dark .step-line {
-  color: rgba(216, 222, 228, 0.42);
+  color: var(--text-dark-3);
 }
 
 .ops-chat.dark .step-text {
@@ -1654,7 +1630,7 @@ defineExpose({
 }
 
 .ops-chat.dark .composer-model :deep(.ant-select-selector) {
-  background: #141d26;
+  background: var(--surface-dark-inset);
   border-color: var(--on-dark-border);
   color: var(--text-dark);
 }
@@ -1669,7 +1645,7 @@ defineExpose({
 }
 
 .ops-chat.dark .chat-composer :deep(textarea) {
-  background: #141d26;
+  background: var(--surface-dark-inset);
   border-color: var(--on-dark-border);
   color: var(--text-dark);
 }
@@ -1680,7 +1656,7 @@ defineExpose({
 
 .ops-chat.dark .chat-composer :deep(textarea:hover),
 .ops-chat.dark .chat-composer :deep(textarea:focus) {
-  border-color: rgba(58, 214, 222, 0.45);
+  border-color: var(--signal-on-dark-border);
   box-shadow: none;
 }
 </style>
@@ -1773,7 +1749,7 @@ defineExpose({
 
 .ops-history-overlay.dark .ant-dropdown-menu-item:hover,
 .ops-history-overlay.dark .ant-dropdown-menu-item-selected {
-  background: rgba(58, 214, 222, 0.12) !important;
+  background: var(--signal-on-dark-bg-strong) !important;
   color: var(--signal-bright);
 }
 
@@ -1790,7 +1766,7 @@ defineExpose({
 }
 
 .ops-history-overlay.dark .history-del:hover {
-  background: rgba(255, 77, 79, 0.18);
+  background: var(--danger-on-dark-bg);
   color: var(--danger-soft);
 }
 </style>

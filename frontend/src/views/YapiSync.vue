@@ -69,7 +69,7 @@
       </a-row>
     </a-form>
 
-    <div class="toolbar">
+    <div class="toolbar toolbar--between toolbar--tight">
       <a-space wrap>
         <a-button :loading="scanning" :disabled="!scanReady || syncing || picking" @click="onScan">
           <ScanOutlined /> 扫描接口
@@ -758,14 +758,6 @@ function formatDuration(ms: number) {
 .field-hint {
   margin-top: 4px;
   line-height: 1.5;
-}
-
-.toolbar {
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin: 4px 0 8px;
 }
 
 .stat-row {

@@ -266,6 +266,7 @@ import {
   type Workflow,
   type WorkflowPayload,
 } from '@/api'
+import { errorText } from '@/utils/errors'
 import { editorTarget, type EditorTarget } from '@/stores/workflowEditor'
 import WorkflowCanvas from '@/components/workflow/WorkflowCanvas.vue'
 import WorkflowStepForm from '@/components/workflow/WorkflowStepForm.vue'
@@ -624,11 +625,6 @@ function applySteps(steps: StepForm[]) {
   form.steps.splice(0, form.steps.length, ...steps)
   autoExpandAdvanced(form.steps)
   wizardPage.value = 0
-}
-
-function errorText(err: unknown, fallback: string): string {
-  const envelope = err as { message?: string } | undefined
-  return envelope?.message || fallback
 }
 
 // keep-alive 下首次挂载会连着触发 mounted 与 activated，第二次的 boot 跳过。

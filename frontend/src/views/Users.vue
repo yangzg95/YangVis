@@ -10,7 +10,7 @@
     />
 
     <template v-else>
-      <div class="toolbar">
+      <div class="toolbar toolbar--between toolbar--roomy">
         <a-input
           v-model:value="keyword"
           allow-clear
@@ -53,11 +53,11 @@
           </template>
 
           <template v-else-if="column.key === 'last_login_at'">
-            <span class="muted">{{ formatTime(record.last_login_at) }}</span>
+            <span class="muted">{{ fmtDateTime(record.last_login_at) }}</span>
           </template>
 
           <template v-else-if="column.key === 'created_at'">
-            <span class="muted">{{ formatTime(record.created_at) }}</span>
+            <span class="muted">{{ fmtDateTime(record.created_at) }}</span>
           </template>
 
           <template v-else-if="column.key === 'action'">
@@ -167,6 +167,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { PlusOutlined, SearchOutlined } from '@ant-design/icons-vue'
 import { usersApi, type UserItem } from '@/api'
+import { fmtDateTime } from '@/utils/format'
 import { useAuthStore } from '@/stores/auth'
 
 const MIN_PASSWORD_LENGTH = 8
@@ -227,10 +228,6 @@ const reset = reactive({
   password: '',
   confirm: '',
 })
-
-function formatTime(value: string | null): string {
-  return value ? new Date(value).toLocaleString() : '—'
-}
 
 async function load() {
   loading.value = true
@@ -359,10 +356,6 @@ onMounted(async () => {
 
 <style scoped>
 /* flex 基底用全局 .toolbar（style.css），这里只留本页差异。 */
-.toolbar {
-  margin-bottom: 16px;
-  justify-content: space-between;
-}
 .search-input {
   max-width: 280px;
 }

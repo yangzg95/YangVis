@@ -15,7 +15,7 @@
       </template>
     </a-alert>
 
-    <div class="toolbar">
+    <div class="toolbar toolbar--between toolbar--snug">
       <span class="muted">
         共 {{ decks.length }} 份幻灯片；材料可以是文档、粘贴的文案，配图在建立后逐张上传
       </span>
@@ -51,7 +51,7 @@
           </a-tooltip>
         </template>
         <template v-else-if="column.key === 'updated_at'">
-          <span class="muted">{{ formatTime(record.updated_at) }}</span>
+          <span class="muted">{{ fmtDateTime(record.updated_at) }}</span>
         </template>
         <template v-else-if="column.key === 'actions'">
           <a-space :size="4" wrap>
@@ -180,6 +180,9 @@ import {
   type WorkflowRunSubject,
 } from '@/api'
 import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
+import { errorText } from '@/utils/errors'
+import { fmtDateTime } from '@/utils/format'
+import { createPollLoop } from '@/utils/polling'
 
 // 智能应用 · 幻灯片列表：材料进来 → 后台生成 → 进工作台改 → 新开窗口放映。
 // 生成本身不在本页等（一次要读完全部材料再产出整份结构，远超 axios 超时），
@@ -295,23 +298,14 @@ function notifyFinished(item: SlideDeckItem) {
   }
 }
 
-let pollTimer: number | undefined
+// 生成是后台任务，列表靠轮询跟随；失败退避、页面隐藏暂停见 utils/polling.ts。
+const pollLoop = createPollLoop(load, {
+  shouldContinue: () => decks.value.some((item) => item.status === 'analyzing'),
+})
 
 function syncPolling() {
-  const running = decks.value.some((item) => item.status === 'analyzing')
-  if (running && pollTimer === undefined) {
-    pollTimer = window.setInterval(async () => {
-      try {
-        await load()
-      } catch {
-        // 一轮失败不致命（拦截器已弹提示）：一次网络抖动不该让进度永远卡住。
-        return
-      }
-    }, 2500)
-  } else if (!running && pollTimer !== undefined) {
-    window.clearInterval(pollTimer)
-    pollTimer = undefined
-  }
+  if (decks.value.some((item) => item.status === 'analyzing')) pollLoop.start()
+  else pollLoop.stop()
 }
 
 async function loadReadiness() {
@@ -338,11 +332,6 @@ function openShow(id: number) {
 
 function goToSettings() {
   router.push('/system/settings')
-}
-
-function errorText(err: unknown, fallback: string): string {
-  const envelope = err as { message?: string } | undefined
-  return envelope?.message || fallback
 }
 
 async function onCreate() {
@@ -406,20 +395,13 @@ function statusColor(status: SlideStatus | string): string {
   return { analyzing: 'processing', ready: 'success', error: 'error' }[status] || 'default'
 }
 
-function formatTime(value: string | null): string {
-  return value ? new Date(value).toLocaleString() : '—'
-}
-
 onMounted(() => {
   void Promise.all([loadReadiness(), load()])
 })
 
 // keep-alive：切去别的标签页时停表，回来时按当前状态恢复。
 onDeactivated(() => {
-  if (pollTimer !== undefined) {
-    window.clearInterval(pollTimer)
-    pollTimer = undefined
-  }
+  pollLoop.stop()
 })
 
 onActivated(() => {
@@ -427,22 +409,13 @@ onActivated(() => {
 })
 
 onUnmounted(() => {
-  if (pollTimer !== undefined) window.clearInterval(pollTimer)
+  pollLoop.stop()
 })
 </script>
 
 <style scoped>
 .gate-alert {
   margin-bottom: 12px;
-}
-
-.toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin: 4px 0 16px;
-  flex-wrap: wrap;
 }
 
 .cell-title {

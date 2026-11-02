@@ -1,6 +1,6 @@
 <template>
   <div>
-    <div class="toolbar">
+    <div class="toolbar toolbar--roomy">
       <a-alert
         type="info"
         show-icon
@@ -98,9 +98,6 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.toolbar {
-  margin-bottom: 16px;
-}
 .key-tag {
   font-family: var(--font-mono, monospace);
 }

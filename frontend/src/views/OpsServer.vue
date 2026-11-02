@@ -13,7 +13,7 @@
     </div>
 
     <div class="ops-body">
-      <a-card class="panel list-panel" size="small">
+      <a-card class="panel card-fill list-panel" size="small">
         <template #title>
           <div class="panel-title">
             <span>服务器列表</span>
@@ -113,7 +113,7 @@
         </div>
       </a-card>
 
-      <a-card class="panel audit-panel" size="small">
+      <a-card class="panel card-fill audit-panel" size="small">
         <template #title>
           <div class="panel-title">
             <span>最近操作记录</span>
@@ -563,14 +563,6 @@ onMounted(() => {
   border: 1px solid var(--hairline);
   border-radius: var(--radius-lg);
   background: var(--surface);
-  overflow: hidden;
-}
-
-.panel :deep(.ant-card-body) {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
   overflow: hidden;
 }
 

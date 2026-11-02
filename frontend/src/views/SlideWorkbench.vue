@@ -476,6 +476,7 @@ import {
   type SlideTheme,
 } from '@/api'
 import { saveBlobResponse } from '@/utils/download'
+import { errorText } from '@/utils/errors'
 import { fmtSize } from '@/utils/format'
 import { createPollLoop } from '@/utils/polling'
 import { printSlideDeck } from '@/utils/slidePrint'
@@ -589,11 +590,6 @@ function statusText(value: string) {
 
 function statusColor(value: string) {
   return { analyzing: 'processing', ready: 'success', error: 'error' }[value] || 'default'
-}
-
-function errorText(err: unknown, fallback: string): string {
-  const envelope = err as { message?: string } | undefined
-  return envelope?.message || fallback
 }
 
 // ---- 载入与轮询 --------------------------------------------------------------

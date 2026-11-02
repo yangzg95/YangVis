@@ -1,5 +1,22 @@
 /** 展示用的格式化小工具。 */
 
+/** 后端 ISO 时间 → 本地完整时间；空值显示占位。
+ *
+ * 页面原先各写一份 `value ? new Date(value).toLocaleString() : '—'`，
+ * 口径统一在这里，避免某处忘了判空渲染出 Invalid Date。 */
+export function fmtDateTime(value: string | null | undefined, placeholder = '—'): string {
+  return value ? new Date(value).toLocaleString() : placeholder
+}
+
+/** ISO → 「MM-DD HH:mm」，对话气泡上的短时间戳；时间非法时给空串不显示。 */
+export function fmtShortDateTime(value: string | null | undefined): string {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 /** 字节数 → 「812 B / 4.2 K / 30.1 M / 1.5 G」。 */
 export function fmtSize(size: number): string {
   if (size < 1024) return `${size} B`

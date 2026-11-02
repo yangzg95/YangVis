@@ -1,6 +1,6 @@
 <template>
   <div>
-    <div class="toolbar interview-toolbar">
+    <div class="toolbar toolbar--between toolbar--snug">
       <span class="muted">
         共 {{ records.length }} 场面试<template v-if="keyword.trim()">，筛选出 {{ filteredRecords.length }} 场</template>
       </span>
@@ -46,7 +46,7 @@
           <span class="muted">{{ record.question_count }} 题</span>
         </template>
         <template v-else-if="column.key === 'created_at'">
-          <span class="muted">{{ formatTime(record.created_at) }}</span>
+          <span class="muted">{{ fmtDateTime(record.created_at) }}</span>
         </template>
         <template v-else-if="column.key === 'actions'">
           <a-space :size="4">
@@ -125,6 +125,7 @@ import { useRouter } from 'vue-router'
 import { Empty, message } from 'ant-design-vue'
 import { PlusOutlined, SearchOutlined } from '@ant-design/icons-vue'
 import { interviewApi, type InterviewItem, type InterviewResult } from '@/api'
+import { fmtDateTime } from '@/utils/format'
 
 const simpleEmpty = Empty.PRESENTED_IMAGE_SIMPLE
 const router = useRouter()
@@ -272,21 +273,13 @@ function resultMeta(result: InterviewResult): { text: string; color: string } {
   return RESULT_META[result] ?? { text: result, color: 'default' }
 }
 
-function formatTime(value: string | null): string {
-  return value ? new Date(value).toLocaleString() : '—'
-}
-
 // ---- 生命周期 -----------------------------------------------------------------
 
 onMounted(loadRecords)
 </script>
 
 <style scoped>
-/* flex 基底用全局 .toolbar（style.css），这里只留本组件差异。 */
-.interview-toolbar {
-  margin: 4px 0 16px;
-  justify-content: space-between;
-}
+/* flex 基底与对齐/间距走全局 .toolbar 及其修饰类，这里只留本组件差异。 */
 .keyword-input {
   width: 220px;
 }

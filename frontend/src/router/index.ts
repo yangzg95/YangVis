@@ -109,7 +109,8 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '简历'},
     },
     {
-        // 面试记录从简历页拆出独占一页（场次列表 + 新增/编辑弹窗），问题明细仍在
+        // 面试记录从简历页拆出独占一页；求职助手与笔记两个页签后来从简历页搬进这一页，
+        // 于是「面试」页收着求职过程的三段（场次复盘、一次性生成、零散笔记）。问题明细仍在
         // /office/interview/:id 的 bare 整页详情里。路由是面试列表、/office/interview
         // （单数）是详情，两条共存于求职办公域。
         path: '/office/interviews',

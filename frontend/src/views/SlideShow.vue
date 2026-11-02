@@ -158,6 +158,7 @@ import {
   type SlidePageInput,
 } from '@/api'
 import { saveBlobResponse } from '@/utils/download'
+import { errorText } from '@/utils/errors'
 import { printSlideDeck } from '@/utils/slidePrint'
 
 // 放映页（bare 整页，从列表或工作台新开标签页进来）。
@@ -238,10 +239,6 @@ function statusText(value: string) {
 
 function statusColor(value: string) {
   return { analyzing: 'processing', error: 'error' }[value] || 'default'
-}
-
-function errorText(err: unknown, fallback: string): string {
-  return (err as { message?: string } | undefined)?.message || fallback
 }
 
 // ---- 父子页面通信 ------------------------------------------------------------

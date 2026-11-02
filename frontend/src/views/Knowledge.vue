@@ -39,7 +39,7 @@
       </template>
     </a-alert>
 
-    <div class="toolbar">
+    <div class="toolbar toolbar--between toolbar--snug">
       <a-space size="small" wrap class="kb-stats">
         <span>项目</span>
         <a-select
@@ -385,6 +385,7 @@ import {
   UploadOutlined,
 } from '@ant-design/icons-vue'
 import { useRouter } from 'vue-router'
+import { errorText } from '@/utils/errors'
 import { fmtSize } from '@/utils/format'
 import { createPollLoop } from '@/utils/polling'
 import {
@@ -1032,11 +1033,6 @@ function goToSettings() {
 
 // 文件大小格式化统一用 utils/format 的 fmtSize（812 B / 4.2 K / 30.1 M）。
 
-function errorText(err: unknown, fallback: string): string {
-  const envelope = err as { message?: string } | undefined
-  return envelope?.message || fallback
-}
-
 onMounted(async () => {
   loading.value = true
   try {
@@ -1063,10 +1059,6 @@ onUnmounted(stopPolling)
   margin-bottom: 12px;
 }
 /* flex 基底用全局 .toolbar（style.css），这里只留本页差异。 */
-.toolbar {
-  margin: 4px 0 16px;
-  justify-content: space-between;
-}
 .kb-stats {
   font-size: var(--fs-sm);
 }

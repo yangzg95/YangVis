@@ -204,7 +204,7 @@
             <template v-else-if="column.key === 'limit'">
               <div class="limit-cell">
                 <a-tag v-if="record.expires_at" :color="record.limit_reason === 'expired' ? 'error' : 'default'">
-                  有效期至 {{ formatTime(record.expires_at) }}
+                  有效期至 {{ fmtDateTime(record.expires_at) }}
                 </a-tag>
                 <a-tag
                   v-if="record.token_quota != null"
@@ -271,7 +271,7 @@
               </a-tag>
             </template>
             <template v-else-if="column.key === 'last_used_at'">
-              <span class="muted">{{ formatTime(record.last_used_at) }}</span>
+              <span class="muted">{{ fmtDateTime(record.last_used_at) }}</span>
             </template>
             <template v-else-if="column.key === 'action'">
               <a-space>
@@ -387,7 +387,7 @@
               </span>
             </template>
             <template v-else-if="column.key === 'created_at'">
-              <span class="muted">{{ formatTime(record.created_at) }}</span>
+              <span class="muted">{{ fmtDateTime(record.created_at) }}</span>
             </template>
           </template>
         </a-table>
@@ -628,7 +628,7 @@
               </template>
             </a-descriptions-item>
             <a-descriptions-item label="来源 IP">{{ logDrawer.detail.client_ip || '—' }}</a-descriptions-item>
-            <a-descriptions-item label="时间">{{ formatTime(logDrawer.detail.created_at) }}</a-descriptions-item>
+            <a-descriptions-item label="时间">{{ fmtDateTime(logDrawer.detail.created_at) }}</a-descriptions-item>
             <a-descriptions-item v-if="logDrawer.detail.error" label="错误" :span="2">
               <span class="text-danger">{{ logDrawer.detail.error }}</span>
             </a-descriptions-item>
@@ -673,6 +673,7 @@ import {
   type AiStatsBucket,
 } from '@/api'
 import { copyText } from '@/utils/clipboard'
+import { fmtDateTime } from '@/utils/format'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
@@ -700,10 +701,6 @@ const curlSample = computed(
 
 async function copy(text: string) {
   message.success((await copyText(text)) ? '已复制' : '复制失败，请手动选择')
-}
-
-function formatTime(value: string | null): string {
-  return value ? new Date(value).toLocaleString() : '—'
 }
 
 function formatNumber(value: number): string {
@@ -1317,9 +1314,6 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.toolbar {
-  justify-content: flex-start;
-}
 /* 主操作按钮靠右，与用户管理页的 toolbar 布局一致。 */
 .toolbar-action {
   margin-left: auto;

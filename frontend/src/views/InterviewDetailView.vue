@@ -41,7 +41,7 @@
         <a-descriptions-item label="结果">
           <a-tag :color="resultMeta(record.result).color">{{ resultMeta(record.result).text }}</a-tag>
         </a-descriptions-item>
-        <a-descriptions-item label="记录时间">{{ formatTime(record.created_at) }}</a-descriptions-item>
+        <a-descriptions-item label="记录时间">{{ fmtDateTime(record.created_at) }}</a-descriptions-item>
       </a-descriptions>
 
       <template v-if="record.notes">
@@ -267,6 +267,8 @@ import {
   type WorkflowRunSubject,
 } from '@/api'
 import { createMarkdown } from '@/utils/markdown'
+import { fmtDateTime } from '@/utils/format'
+import { errorText } from '@/utils/errors'
 import { createPollLoop } from '@/utils/polling'
 import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
 
@@ -303,11 +305,6 @@ const chatReady = ref(true)
 const pageTitle = computed(() =>
   record.value ? `${record.value.company} · ${record.value.position}` : '面试详情',
 )
-
-function errorText(err: unknown, fallback: string): string {
-  const envelope = err as { message?: string } | undefined
-  return envelope?.message || fallback
-}
 
 async function loadDetail() {
   try {
@@ -519,10 +516,6 @@ function resultMeta(result: InterviewResult): { text: string; color: string } {
 
 function renderMarkdown(text: string): string {
   return md.render(text)
-}
-
-function formatTime(value: string | null): string {
-  return value ? new Date(value).toLocaleString() : '—'
 }
 
 // ---- 生命周期 -----------------------------------------------------------------
