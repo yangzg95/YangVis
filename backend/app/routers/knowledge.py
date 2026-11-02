@@ -1,6 +1,7 @@
 """Knowledge-base endpoints: types, documents, indexing and retrieval."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -243,7 +244,7 @@ async def _purge_vectors(collection: str, owner_id: int, doc_id: int) -> None:
 def list_documents(
     type_id: int,
     page: Optional[int] = Query(default=None, ge=1),
-    page_size: Optional[int] = Query(default=None, ge=1, le=200),
+    page_size: Optional[int] = Query(default=None, ge=1, le=100),
     service: KnowledgeService = Depends(get_service),
 ) -> APIResponse[ListResponse[KnowledgeDocument]]:
     """不传 page/page_size 时全量返回（兼容旧调用方）；传了才分页。
@@ -262,7 +263,7 @@ def list_documents(
 def list_all_documents(
     type_id: Optional[int] = Query(default=None),
     page: Optional[int] = Query(default=None, ge=1),
-    page_size: Optional[int] = Query(default=None, ge=1, le=200),
+    page_size: Optional[int] = Query(default=None, ge=1, le=100),
     service: KnowledgeService = Depends(get_service),
 ) -> APIResponse[ListResponse[KnowledgeDocument]]:
     items, total = service.list_documents(type_id, page=page, page_size=page_size)
@@ -300,7 +301,8 @@ async def upload_document(
 
     filename = name or file.filename or "untitled.txt"
     try:
-        text = extract_text(file.filename or filename, raw)
+        # PDF/DOCX 解析是纯 CPU 活：放在事件循环里会把正在推的 SSE 一起冻住。
+        text = await asyncio.to_thread(extract_text, file.filename or filename, raw)
     except UnsupportedFileType as exc:
         return APIResponse(code=-1, message=str(exc))
 

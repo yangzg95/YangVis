@@ -1,10 +1,11 @@
 """Chat endpoints: conversations, history and the streaming answer."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import AsyncIterator
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -141,10 +142,12 @@ def delete_conversation(
 )
 def list_messages(
     conversation_id: int,
+    limit: int = Query(default=200, ge=1, le=500),
     service: ChatService = Depends(get_service),
 ) -> APIResponse[ListResponse[MessageItem]]:
     try:
-        items = service.list_messages(conversation_id)
+        # 默认只回放最近 200 条：历史消息里的正文与引用是整块大 JSON。
+        items = service.list_messages(conversation_id, limit=limit)
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return APIResponse(data=ListResponse(items=items, total=len(items)))
@@ -423,7 +426,8 @@ async def upload_attachment(
     )
     try:
         if is_image:
-            stored = store_image(service.owner_id, filename, raw)
+            # 落盘与编码是同步 IO，丢进线程别冻事件循环。
+            stored = await asyncio.to_thread(store_image, service.owner_id, filename, raw)
             row = service.create_attachment(
                 kind="image",
                 filename=filename,
@@ -432,7 +436,8 @@ async def upload_attachment(
                 rel_path=stored.rel_path,
             )
         else:
-            text = extract_file_text(filename, raw)
+            # PDF/DOCX 解析同样是纯 CPU 活。
+            text = await asyncio.to_thread(extract_file_text, filename, raw)
             row = service.create_attachment(
                 kind="file",
                 filename=filename,

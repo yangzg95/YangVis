@@ -383,9 +383,10 @@ def list_workflows(
 ) -> APIResponse[ListResponse[WorkflowItem]]:
     """内置工作流加上调用方自己的，按展示顺序排列。"""
     rows = service.list(enabled_only=enabled_only)
-    # 最近一次运行一次查完再逐行分派：交给 to_item 自己查就是每行一次往返。
+    # 最近一次运行与步骤/人设名都按整页批量取：交给 to_item 逐行自己查就是
+    # 每行两三次往返（步骤一次、人设列表一次、没传 last_run 再一次）。
     last_runs = service.last_runs([row.id for row in rows])
-    items = [service.to_item(row, last_runs.get(row.id)) for row in rows]
+    items = service.to_items(rows, last_runs)
     return APIResponse(data=ListResponse(items=items, total=len(items)))
 
 

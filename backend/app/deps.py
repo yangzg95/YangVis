@@ -28,7 +28,7 @@ logger = logging.getLogger("yangvis.deps")
 _UNAUTHORIZED = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未登录或登录已过期")
 
 
-async def require_user(
+def require_user(
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ) -> CurrentUser:
@@ -36,6 +36,9 @@ async def require_user(
 
     数据库查询并不是多余的：无状态的 JWT 无法被撤销，因此在每次请求时重新读取
     ``status`` 字段，是让「禁用账号」在 token 自然过期之前生效的唯一途径。
+
+    写成同步 ``def``：FastAPI 会把它丢进线程池，回库查用户不再冻结事件循环
+    （生产只有 1 个 worker，SSE 正在推流时这一点尤其重要）。
     """
     try:
         token = extract_bearer_token(authorization)

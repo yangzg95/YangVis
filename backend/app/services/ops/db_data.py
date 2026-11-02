@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 from typing import (
     Any,
@@ -118,11 +119,13 @@ def _browse_rows_sync(
     filters: Sequence[DbRowFilter] = (),
     sorts: Sequence[DbRowSort] = (),
     where: str = "",
+    count_total: bool = True,
 ) -> Tuple[List[str], List[Sequence[Any]], int, str]:
     """同一连接里跑 COUNT(*) + 一页数据，保证分页总数与内容一致。
 
-    返回值最后一项是数据 SELECT 的展示文本（参数已代回字面量），
-    给前端底部的「执行的 SQL」栏用。
+    ``count_total=False``（翻页时）跳过 COUNT，返回的 total 为 -1，由调用方
+    用首屏缓存的值补上。返回值最后一项是数据 SELECT 的展示文本（参数已代回
+    字面量），给前端底部的「执行的 SQL」栏用。
     """
     target = f"{_quote_ident(schema)}.{_quote_ident(table)}"
     where_sql, params, order_sql = _browse_clauses(filters, sorts, where)
@@ -136,8 +139,10 @@ def _browse_rows_sync(
     conn = _connect_mysql(item, password)
     try:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM {target}{where_sql}", args)
-            total = int(cur.fetchone()[0])
+            total = -1
+            if count_total:
+                cur.execute(f"SELECT COUNT(*) FROM {target}{where_sql}", args)
+                total = int(cur.fetchone()[0])
             cur.execute(data_sql, args)
             columns = [d[0] for d in (cur.description or [])]
             rows = list(cur.fetchall())
@@ -147,6 +152,54 @@ def _browse_rows_sync(
     finally:
         conn.close()
     return columns, rows, total, display_sql
+
+
+# 浏览页总数的短缓存：只缓存 COUNT 结果，不缓存数据本身。
+_TOTAL_CACHE_TTL = 60.0
+_TOTAL_CACHE_MAX = 256
+_total_cache: Dict[str, Tuple[float, int]] = {}
+_total_cache_lock = threading.Lock()
+
+
+def _total_cache_key(
+    item_id: int,
+    schema: str,
+    table: str,
+    filters: Sequence[DbRowFilter],
+    sorts: Sequence[DbRowSort],
+    where: str,
+) -> str:
+    return json.dumps(
+        [
+            item_id,
+            schema,
+            table,
+            [f.model_dump() for f in filters],
+            [s.model_dump() for s in sorts],
+            where,
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _read_cached_total(key: str) -> Optional[int]:
+    now = time.monotonic()
+    with _total_cache_lock:
+        hit = _total_cache.get(key)
+        if hit is None:
+            return None
+        if now - hit[0] >= _TOTAL_CACHE_TTL:
+            _total_cache.pop(key, None)
+            return None
+        return hit[1]
+
+
+def _write_cached_total(key: str, total: int) -> None:
+    with _total_cache_lock:
+        if len(_total_cache) >= _TOTAL_CACHE_MAX:
+            _total_cache.clear()
+        _total_cache[key] = (time.monotonic(), total)
 
 
 async def browse_rows(
@@ -178,12 +231,25 @@ async def browse_rows(
 
     password = _password_of(item)
     started = time.perf_counter()
+
+    # 首屏算一次 COUNT(*)，翻页沿用这次的结果：同一组筛选/排序/条件在短时间内
+    # 不会变，每翻一页都对大表做一次全量 COUNT 是白烧 IO。缓存按「目标库 + 表 +
+    # 条件」区分，换筛选就重新算。
+    cache_key = _total_cache_key(item.id, schema, table, filters, sorts, where)
+    cached = _read_cached_total(cache_key)
+    count_total = page == 1 or cached is None
     try:
         columns, rows, total, display_sql = await asyncio.to_thread(
-            _browse_rows_sync, item, password, schema, table, page, page_size, filters, sorts, where
+            _browse_rows_sync,
+            item, password, schema, table, page, page_size, filters, sorts, where,
+            count_total,
         )
     except pymysql.Error as exc:
         raise OpsDbError(f"读取数据失败：{exc}") from exc
+    if total < 0:
+        total = cached or 0
+    elif page == 1:
+        _write_cached_total(cache_key, total)
     elapsed = int((time.perf_counter() - started) * 1000)
     return DbRowsResult(
         columns=columns,

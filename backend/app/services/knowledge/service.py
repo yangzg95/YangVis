@@ -12,7 +12,7 @@ import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import Select, delete, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -334,8 +334,25 @@ class KnowledgeService:
         page: Optional[int] = None,
         page_size: Optional[int] = None,
     ) -> Tuple[List[KnowledgeDocument], int]:
-        """文档列表 + 真实总数。不传 page 时全量返回（兼容旧调用方）。"""
-        stmt = self._scope(select(KbDocument), KbDocument.owner_id)
+        """文档列表 + 真实总数。不传 page 时全量返回（兼容旧调用方）。
+
+        正文列 ``content`` 是列表里最重的一列（整篇抽取后的文本），列表页却只
+        用得到文件名、状态与计数，因此这里显式 ``load_only`` 掉它。
+        """
+        stmt = self._scope(select(KbDocument), KbDocument.owner_id).options(
+            load_only(
+                KbDocument.id,
+                KbDocument.filename,
+                KbDocument.type_id,
+                KbDocument.size,
+                KbDocument.mime,
+                KbDocument.status,
+                KbDocument.error_msg,
+                KbDocument.chunk_count,
+                KbDocument.created_at,
+                KbDocument.updated_at,
+            )
+        )
         if type_id is not None:
             stmt = stmt.where(KbDocument.type_id == type_id)
         total = self._db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
@@ -539,9 +556,15 @@ class KnowledgeService:
         ]
         self._db.add_all(chunks)
         self._db.commit()
-        for chunk in chunks:
-            self._db.refresh(chunk)
-        return chunks
+        # commit 会把刚写入的实例全部标成过期，逐个访问属性就是每块一次 SELECT。
+        # 一次性按 seq 重新读回整批，索引循环里拿到的就是已加载的实例。
+        return list(
+            self._db.scalars(
+                select(KbChunk)
+                .where(KbChunk.owner_id == self._owner_id, KbChunk.doc_id == doc.id)
+                .order_by(KbChunk.seq)
+            ).all()
+        )
 
     def pending_documents(self) -> List[KbDocument]:
         return list(

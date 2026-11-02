@@ -23,6 +23,12 @@ engine = create_engine(
     settings.database_url,
     pool_pre_ping=True,
     pool_recycle=3600,
+    # 默认池只有 5 条连接：SSE 流会把连接占在整段回答期间，几条长流就足以
+    # 让后续所有 REST 请求排队。生产是单 worker，池子放大后由线程池兜住
+    # 并发，超出上限时最多等 30s 再报错，而不是立刻失败。
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
     future=True,
 )
 

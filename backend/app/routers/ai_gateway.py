@@ -274,7 +274,7 @@ def stats(
 @router.get("/logs", response_model=APIResponse[ListResponse[AiCallLogItem]])
 def list_logs(
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=200),
+    page_size: int = Query(default=20, ge=1, le=100),
     key_id: Optional[int] = Query(default=None),
     channel_id: Optional[int] = Query(default=None),
     model: Optional[str] = Query(default=None),

@@ -607,15 +607,26 @@ class ChatService:
 
     # -- 消息 ---------------------------------------------------------------
 
-    def list_messages(self, conversation_id: int) -> List[MessageItem]:
+    def list_messages(
+        self, conversation_id: int, *, limit: Optional[int] = None
+    ) -> List[MessageItem]:
+        """回放历史消息（按时间正序）。
+
+        ``limit`` 是「只取最近 N 条」：长会话的正文与引用是大 JSON，一次全量
+        返回会把几十条消息塞进一个响应里。翻页从最新往回取，再反转成正序。
+        """
         self.get_conversation(conversation_id)
-        rows = list(
-            self._db.scalars(
-                self._scope(select(ChatMessage), ChatMessage.owner_id)
-                .where(ChatMessage.conversation_id == conversation_id)
-                .order_by(ChatMessage.id)
-            ).all()
+        stmt = (
+            self._scope(select(ChatMessage), ChatMessage.owner_id)
+            .where(ChatMessage.conversation_id == conversation_id)
         )
+        # 取最近 N 条时按 id 倒序再反转；全量回放按正序，直接顺序取。
+        stmt = stmt.order_by(ChatMessage.id.desc() if limit is not None else ChatMessage.id)
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        rows = list(self._db.scalars(stmt).all())
+        if limit is not None:
+            rows.reverse()
         attachments = self._attachments_by_message([row.id for row in rows])
         return [self.to_message(row, attachments.get(row.id)) for row in rows]
 
@@ -1484,15 +1495,18 @@ class ChatService:
         sent_execs = 0
         deadline = time.monotonic() + ANSWER_WALL_CLOCK_LIMIT
 
+        # 先把回放消息拼好（这一步要读库），随后结束事务把连接还给池子：
+        # 生成阶段可能持续几十秒，期间没有 DB 访问，没必要把一条 MySQL 连接
+        # 钉在整段 SSE 上。落库走独立的短 session（见下方 _persist_message）。
+        replay_messages = self._replay(
+            conversation_id,
+            question,
+            question_persisted=question_persisted,
+            supports_vision=config.supports_vision,
+        )
+        self._db.rollback()
         stream = executor.astream_events(
-            {
-                "messages": self._replay(
-                    conversation_id,
-                    question,
-                    question_persisted=question_persisted,
-                    supports_vision=config.supports_vision,
-                )
-            },
+            {"messages": replay_messages},
             config={
                 # 运维排查与 MCP 多工具调用都可能连续多轮，统一放宽到 25；
                 # 只挂本地小工具时循环复杂度不变，维持普通上限。

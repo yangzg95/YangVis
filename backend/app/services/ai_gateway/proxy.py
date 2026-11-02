@@ -99,6 +99,10 @@ class CallRecord:
     model: Optional[str] = None
     stream: bool = False
     client_ip: Optional[str] = None
+    # 密钥的展示字段提前拍平成普通值：日志落库要能丢进线程/后台任务，不能
+    # 依赖请求作用域的 ORM 实例还活着。
+    key_id: Optional[int] = None
+    key_name: Optional[str] = None
     channel_id: Optional[int] = None
     channel_name: Optional[str] = None
     upstream_model: Optional[str] = None
@@ -139,10 +143,15 @@ class CallRecord:
 
     def to_entity(self) -> AiCallLog:
         store_payload = settings.AI_GATEWAY_LOG_PAYLOAD
+        key_id = self.key_id if self.key_id is not None else (self.key.id if self.key else None)
+        key_name = (
+            self.key_name if self.key_name is not None
+            else (self.key.name if self.key else None)
+        )
         return AiCallLog(
             request_id=self.request_id,
-            key_id=self.key.id if self.key else None,
-            key_name=self.key.name if self.key else None,
+            key_id=key_id,
+            key_name=key_name,
             endpoint=self.endpoint,
             model=self.model,
             stream=self.stream,
@@ -173,8 +182,11 @@ def persist(record: CallRecord) -> None:
     所以这里自己开一个。
     """
     with SessionLocal() as db:
-        if record.key is not None:
-            row = db.get(AiApiKey, record.key.id)
+        key_id = record.key_id if record.key_id is not None else (
+            record.key.id if record.key else None
+        )
+        if key_id is not None:
+            row = db.get(AiApiKey, key_id)
             if row is not None:
                 row.call_count = (row.call_count or 0) + 1
                 row.last_used_at = datetime.now()
@@ -190,8 +202,19 @@ def new_record(endpoint: str, key: Optional[AiApiKey], client_ip: Optional[str])
         request_id=uuid.uuid4().hex,
         endpoint=endpoint,
         key=key,
+        key_id=key.id if key is not None else None,
+        key_name=key.name if key is not None else None,
         client_ip=client_ip,
     )
+
+
+async def persist_async(record: CallRecord) -> None:
+    """异步入口：把同步的落库动作丢进线程，事件循环不陪着等数据库。
+
+    日志写库是纯本地 IO，本可以彻底 fire-and-forget；但调用日志是排障依据，
+    保持「响应结束前写完」的确定性，测试与审计都能立刻读到这一行。
+    """
+    await asyncio.to_thread(persist, record)
 
 
 def _timeout() -> httpx.Timeout:
@@ -658,7 +681,8 @@ async def relay_stream(
         else:
             record.success = record.error is None
         record.mark_latency()
-        persist(record)
+        # 落库交给线程，事件循环不用陪同步驱动等数据库。
+        await persist_async(record)
 
 
 # ---- 通道连通性测试 ---------------------------------------------------------

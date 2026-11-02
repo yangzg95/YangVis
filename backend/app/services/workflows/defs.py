@@ -153,6 +153,24 @@ class WorkflowService:
             ).all()
         )
 
+    def steps_by_workflow(self, workflow_ids: Sequence[int]) -> Dict[int, List[WorkflowStep]]:
+        """整页流程的步骤一次查完，按 ``workflow_id`` 分组。
+
+        列表页原先对每行调用 :meth:`steps_of`，一屏 N 条流程就是 N 次往返。
+        """
+        ids = list(workflow_ids)
+        if not ids:
+            return {}
+        rows = self._db.scalars(
+            select(WorkflowStep)
+            .where(WorkflowStep.workflow_id.in_(ids))
+            .order_by(WorkflowStep.sort_order, WorkflowStep.id)
+        ).all()
+        grouped: Dict[int, List[WorkflowStep]] = {}
+        for row in rows:
+            grouped.setdefault(row.workflow_id, []).append(row)
+        return grouped
+
     def last_runs(self, workflow_ids: Sequence[int]) -> Dict[int, WorkflowRun]:
         """每条流程的**最近一次**运行，按 ``workflow_id`` 取；口径同 :func:`latest_runs`。
 
@@ -189,10 +207,17 @@ class WorkflowService:
         )
 
     def to_item(
-        self, workflow: Workflow, last_run: Optional[WorkflowRun] = None
+        self,
+        workflow: Workflow,
+        last_run: Optional[WorkflowRun] = None,
+        *,
+        steps: Optional[Sequence[WorkflowStep]] = None,
+        agent_names: Optional[Dict[str, str]] = None,
     ) -> WorkflowItem:
-        steps = self.steps_of(workflow.id)
-        agent_names = self._agent_names(step.agent_slug for step in steps)
+        if steps is None:
+            steps = self.steps_of(workflow.id)
+        if agent_names is None:
+            agent_names = self._agent_names(step.agent_slug for step in steps)
         if last_run is None:
             # 单对象端点（取一条、创建、更新、复制）各自只有一行，就地查一次；
             # 列表端点批量查完传进来，别让它退化成每行一次。
@@ -228,6 +253,27 @@ class WorkflowService:
             created_at=workflow.created_at,
             updated_at=workflow.updated_at,
         )
+
+    def to_items(
+        self,
+        workflows: Sequence[Workflow],
+        last_runs: Optional[Dict[int, WorkflowRun]] = None,
+    ) -> List[WorkflowItem]:
+        """整页序列化：步骤、人设名与最近运行都按整页各查一次。"""
+        last_runs = last_runs or {}
+        steps_map = self.steps_by_workflow([row.id for row in workflows])
+        agent_names = self._agent_names(
+            step.agent_slug for steps in steps_map.values() for step in steps
+        )
+        return [
+            self.to_item(
+                row,
+                last_runs.get(row.id),
+                steps=steps_map.get(row.id, []),
+                agent_names=agent_names,
+            )
+            for row in workflows
+        ]
 
     def _agent_names(self, slugs) -> Dict[str, str]:
         """把步骤引用到的人设名取出来，省得界面为每个步骤再查一次。"""

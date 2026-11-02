@@ -145,7 +145,7 @@ async def chat_completions(
                 record.error = text
                 record.response_body = text
                 record.mark_latency()
-                proxy.persist(record)
+                await proxy.persist_async(record)
                 return _upstream_error(status, error_body, record.request_id)
 
             record.status_code = status
@@ -169,7 +169,7 @@ async def chat_completions(
         record.status_code = exc.status_code
         record.error = exc.message
         record.mark_latency()
-        proxy.persist(record)
+        await proxy.persist_async(record)
         logger.info(
             "rejected %s for key %s: %s", record.model, key.name, exc.message
         )
@@ -227,7 +227,7 @@ async def embeddings(
         record.status_code = exc.status_code
         record.error = exc.message
         record.mark_latency()
-        proxy.persist(record)
+        await proxy.persist_async(record)
         return _error(exc, record.request_id)
 
     record.status_code = status
