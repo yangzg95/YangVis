@@ -16,7 +16,9 @@ AI 通道永远走只读路径，与开关无关。
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
+import threading
 import time
 from typing import (
     Any,
@@ -61,13 +63,137 @@ def _password_of(item: OpsDatabase) -> str:
         raise OpsDbError(str(exc)) from exc
 
 
+# ---- 连接复用 ---------------------------------------------------------------
+#
+# 运维工作台的每次翻页、每次元数据查询原本都要新建一条 MySQL 连接：三次握手 +
+# 账号认证 + 会话初始化，在跨机房实例上单次就要几十毫秒，翻页体验直接受影响。
+# 这里按「目标实例 + 默认库 + 只读/可写」缓存空闲连接，用完归还而不是关闭。
+#
+# 复用边界：
+# - 同一 key 才复用：默认库和只读状态都是连接级属性，混用会让只读通道拿到可写会话。
+# - 归还前统一 rollback：PyMySQL 默认非 autocommit，SELECT 也会开事务，不回滚会把
+#   事务和行锁一直攥在手里。
+# - 取出前 ping 一次：服务端 wait_timeout 或网络中断后连接已死，不能交给业务层。
+# - 每个 key 最多留 4 条、空闲 5 分钟即回收：运维台账的库数量有限，不为跨库并发
+#   无限扩池。
+_POOL_MAX_IDLE = 4
+_POOL_IDLE_SECONDS = 300
+_POOL_LOCK = threading.Lock()
+_POOL: dict[tuple, list[Tuple[pymysql.connections.Connection, float]]] = {}
+
+
+class _PooledConnection:
+    """连接池借用句柄：``close()`` 归还而不是关闭真实连接。
+
+    业务层原有代码一律 ``conn.close()``，这里保持同一语义，不用改任何调用点。
+    """
+
+    def __init__(self, conn: pymysql.connections.Connection, key: tuple) -> None:
+        self._conn = conn
+        self._key = key
+        self._returned = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+    def close(self) -> None:
+        if self._returned:
+            return
+        self._returned = True
+        _give_back(self._key, self._conn)
+
+
+def _pool_key(
+    item: OpsDatabase, password: str, database: Optional[str], writable: bool
+) -> tuple:
+    # 密码进 key：台账改密码后不能继续拿旧凭据的会话。
+    return (
+        item.host,
+        item.port,
+        item.username or "",
+        database or item.db_name or "",
+        writable,
+        hash(password),
+    )
+
+
+def _take_pooled(key: tuple) -> Optional[pymysql.connections.Connection]:
+    expired: List[pymysql.connections.Connection] = []
+    conn: Optional[pymysql.connections.Connection] = None
+    with _POOL_LOCK:
+        bucket = _POOL.get(key)
+        if not bucket:
+            return None
+        now = time.monotonic()
+        while bucket:
+            candidate, used_at = bucket.pop()
+            if now - used_at <= _POOL_IDLE_SECONDS:
+                conn = candidate
+                break
+            expired.append(candidate)
+    # 过期连接在锁外关闭：close 走网络，不该堵住其它线程的借还。
+    for dead in expired:
+        try:
+            dead.close()
+        except Exception:
+            pass
+    if conn is None:
+        return None
+    try:
+        # reconnect=False：宁可丢弃重建，也不让驱动在业务线程里悄悄重连。
+        conn.ping(reconnect=False)
+        return conn
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return None
+
+
+def _give_back(key: tuple, conn: pymysql.connections.Connection) -> None:
+    try:
+        conn.rollback()
+    except Exception:
+        # 连接已断：直接丢弃，归还一条坏连接只会让下次借用的查询莫名失败。
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return
+    now = time.monotonic()
+    with _POOL_LOCK:
+        bucket = _POOL.setdefault(key, [])
+        bucket.append((conn, now))
+        while len(bucket) > _POOL_MAX_IDLE:
+            old, _ = bucket.pop(0)
+            try:
+                old.close()
+            except Exception:
+                pass
+
+
+def _close_all_pooled() -> None:
+    with _POOL_LOCK:
+        conns = [conn for bucket in _POOL.values() for conn, _ in bucket]
+        _POOL.clear()
+    for conn in conns:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+atexit.register(_close_all_pooled)
+
+
 def _connect_mysql(
     item: OpsDatabase,
     password: str,
     database: Optional[str] = None,
     writable: bool = False,
-) -> pymysql.connections.Connection:
-    """建立一条 MySQL 会话，默认带只读保证。
+) -> _PooledConnection:
+    """建立（或复用）一条 MySQL 会话，默认带只读保证。
 
     所有 MySQL 通道——控制台、元数据查询、数据浏览——都必须从这里出去。
     只读保证在 ``SET SESSION TRANSACTION READ ONLY`` 这一行上，而不是在
@@ -77,6 +203,11 @@ def _connect_mysql(
 
     ``database`` 是本次会话的默认库；缺省回落到台账里的 ``db_name``。
     """
+    key = _pool_key(item, password, database, writable)
+    reused = _take_pooled(key)
+    if reused is not None:
+        return _PooledConnection(reused, key)
+
     settings = get_settings()
     try:
         conn = pymysql.connect(
@@ -116,7 +247,7 @@ def _connect_mysql(
     except Exception:
         conn.close()
         raise
-    return conn
+    return _PooledConnection(conn, key)
 
 
 def _query_mysql(

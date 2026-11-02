@@ -342,7 +342,9 @@
             :title="`清理 ${purgeDays} 天之前的调用日志？此操作不可撤销`"
             @confirm="purgeLogs"
           >
-            <a-button size="small" danger class="toolbar-action">清理历史</a-button>
+            <a-button size="small" danger class="toolbar-action" :loading="purging" :disabled="purging">
+              清理历史
+            </a-button>
           </a-popconfirm>
         </div>
 
@@ -675,6 +677,14 @@ import {
 import { copyText } from '@/utils/clipboard'
 import { fmtDateTime } from '@/utils/format'
 import { useAuthStore } from '@/stores/auth'
+import {
+  attemptColumns,
+  breakdownColumns,
+  channelColumns,
+  keyColumns,
+  logColumns,
+  routeColumns,
+} from './aiGatewayColumns'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -725,6 +735,10 @@ function toPickerValue(iso: string | null): string | null {
 const stats = ref<AiStats | null>(null)
 const statsDays = ref(7)
 const statsLoading = ref(false)
+/** 概览与日志首次进入对应页签时拉一次，之后切页签不再重复请求；
+ *  统计页的「刷新」和日志页的「查询/重置/翻页」仍会主动覆盖缓存。 */
+const statsLoaded = ref(false)
+const logsLoaded = ref(false)
 
 const successRate = computed(() => {
   const totals = stats.value?.totals
@@ -748,14 +762,6 @@ function shortDate(value: string): string {
   return parts.length === 3 ? `${parts[1]}-${parts[2]}` : value
 }
 
-const breakdownColumns = [
-  { title: '名称', dataIndex: 'name', ellipsis: true },
-  { title: '调用', dataIndex: 'calls', width: 70 },
-  { title: '失败', key: 'failed', width: 70 },
-  { title: 'Token', key: 'total_tokens', width: 100 },
-  { title: '均耗时', dataIndex: 'avg_latency_ms', width: 90 },
-]
-
 const breakdowns = computed(() => [
   { title: '按通道', rows: stats.value?.by_channel ?? [] },
   { title: '按模型', rows: stats.value?.by_model ?? [] },
@@ -766,6 +772,7 @@ async function loadStats() {
   statsLoading.value = true
   try {
     stats.value = await aiGatewayApi.stats(statsDays.value)
+    statsLoaded.value = true
   } finally {
     statsLoading.value = false
   }
@@ -779,16 +786,6 @@ async function loadOverview() {
 
 const channelLoading = ref(false)
 const testingId = ref<number | null>(null)
-
-const channelColumns = [
-  { title: '名称', dataIndex: 'name', width: 160 },
-  { title: 'base_url', dataIndex: 'base_url', ellipsis: true },
-  { title: 'api_key', key: 'api_key', width: 140 },
-  { title: '模型', key: 'models', width: 260 },
-  { title: '启用', key: 'enabled', width: 80 },
-  { title: '连通性', key: 'last_test', width: 200 },
-  { title: '操作', key: 'action', width: 200 },
-]
 
 const channelOptions = computed(() =>
   channels.value.map((channel) => ({ value: channel.id, label: channel.name })),
@@ -898,18 +895,6 @@ async function removeChannel(channel: AiChannelItem) {
 
 const routeLoading = ref(false)
 const routeFilter = ref('')
-
-const routeColumns = [
-  { title: '对外模型名', key: 'model_name', width: 220 },
-  { title: '通道', key: 'channel_name', width: 160 },
-  { title: '上游模型名', key: 'upstream_model', width: 220 },
-  { title: '优先级', dataIndex: 'priority', width: 90 },
-  { title: '有效期 / 额度', key: 'limit', width: 230 },
-  { title: 'Auto 定义', key: 'auto', width: 240 },
-  { title: '启用', key: 'enabled', width: 80 },
-  { title: '备注', dataIndex: 'remark', ellipsis: true },
-  { title: '操作', key: 'action', width: 150 },
-]
 
 // Auto 的标签词表，与后端 AI_AUTO_TAGS 一一对应。能力标签决定筛不筛得上，
 // 任务类型标签决定排在谁前面；分成两组是因为它们在路由里干的活不一样。
@@ -1089,16 +1074,6 @@ async function removeRoute(route: AiModelRouteItem) {
 
 const keyLoading = ref(false)
 
-const keyColumns = [
-  { title: '名称', dataIndex: 'name', width: 180 },
-  { title: '密钥', key: 'key_prefix', width: 200 },
-  { title: '状态', key: 'enabled', width: 90 },
-  { title: '调用次数', dataIndex: 'call_count', width: 100 },
-  { title: '最近调用', key: 'last_used_at', width: 180 },
-  { title: '备注', dataIndex: 'remark', ellipsis: true },
-  { title: '操作', key: 'action', width: 200 },
-]
-
 const keyOptions = computed(() =>
   keys.value.map((row) => ({ value: row.id, label: row.name })),
 )
@@ -1175,6 +1150,8 @@ const logs = ref<AiCallLogItem[]>([])
 const logLoading = ref(false)
 const logRange = ref<[string, string] | null>(null)
 const purgeDays = ref(30)
+// 清理是破坏性操作且可能扫很多行，请求期间禁用按钮防重复提交。
+const purging = ref(false)
 const logFilter = reactive<{
   key_id?: number
   channel_id?: number
@@ -1190,25 +1167,6 @@ const logPagination = computed(() => ({
   showSizeChanger: true,
   showTotal: (total: number) => `共 ${total} 条`,
 }))
-
-const logColumns = [
-  { title: '时间', key: 'created_at', width: 170 },
-  { title: '密钥', dataIndex: 'key_name', width: 130, ellipsis: true },
-  { title: '模型', key: 'model', width: 200 },
-  { title: '通道', dataIndex: 'channel_name', width: 140, ellipsis: true },
-  { title: '结果', key: 'success', width: 110 },
-  { title: 'Token', key: 'tokens', width: 160 },
-  { title: '缓存命中率', key: 'cache_hit', width: 110 },
-  { title: '耗时', key: 'latency', width: 170 },
-  { title: '来源', dataIndex: 'client_ip', width: 130 },
-]
-
-const attemptColumns = [
-  { title: '通道', dataIndex: 'channel_name' },
-  { title: '状态码', dataIndex: 'status_code', width: 90 },
-  { title: '耗时(ms)', dataIndex: 'latency_ms', width: 100 },
-  { title: '错误', dataIndex: 'error', ellipsis: true },
-]
 
 /** 命中率 = 命中缓存的 prompt token ÷ prompt 总数；上游没报缓存就留空。 */
 function cacheHitRate(log: AiCallLogItem): string {
@@ -1231,6 +1189,7 @@ async function loadLogs() {
     })
     logs.value = result.items
     logPage.total = result.total
+    logsLoaded.value = true
   } finally {
     logLoading.value = false
   }
@@ -1288,17 +1247,23 @@ function pretty(value: string | null): string {
 }
 
 async function purgeLogs() {
-  const result = await aiGatewayApi.purgeLogs(purgeDays.value)
-  message.success(`已清理 ${result.deleted} 条`)
-  await Promise.all([loadLogs(), loadOverview()])
+  if (purging.value) return
+  purging.value = true
+  try {
+    const result = await aiGatewayApi.purgeLogs(purgeDays.value)
+    message.success(`已清理 ${result.deleted} 条`)
+    await Promise.all([loadLogs(), loadOverview()])
+  } finally {
+    purging.value = false
+  }
 }
 
 // ---- 载入 -------------------------------------------------------------------
 
 function onTabChange(key: string | number) {
-  // 概览的统计和日志列表都不便宜，切到对应页签时才拉。
-  if (key === 'overview') loadStats()
-  if (key === 'logs') loadLogs()
+  // 概览的统计和日志列表都不便宜，首次切到对应页签才拉；来回切页签复用上次结果。
+  if (key === 'overview' && !statsLoaded.value) loadStats()
+  if (key === 'logs' && !logsLoaded.value) loadLogs()
 }
 
 onMounted(async () => {

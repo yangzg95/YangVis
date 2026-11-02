@@ -196,10 +196,10 @@
                 >
                   重建索引
                 </a-button>
-                <a-button size="small" danger :disabled="batchOperating" @click="onBatchDelete">
+                <a-button size="small" danger :loading="batchOperating" :disabled="batchOperating" @click="onBatchDelete">
                   删除
                 </a-button>
-                <a-button size="small" type="text" @click="selectedDocIds = []">取消</a-button>
+                <a-button size="small" type="text" :disabled="batchOperating" @click="selectedDocIds = []">取消</a-button>
               </div>
               <a-table
                 :data-source="documents"
@@ -217,7 +217,8 @@
                 </template>
 
                 <template v-else-if="column.key === 'status'">
-                  <a-tooltip v-if="record.error_msg" :title="record.error_msg">
+                  <a-tag v-if="batchIds.includes(record.id)" color="processing">处理中</a-tag>
+                  <a-tooltip v-else-if="record.error_msg" :title="record.error_msg">
                     <a-tag color="error">失败</a-tag>
                   </a-tooltip>
                   <a-tag v-else :color="statusMeta(record.status).color">
@@ -232,13 +233,13 @@
                   <a-space>
                     <a-button
                       size="small"
-                      :disabled="!embeddingReady || record.status === 'indexing'"
+                      :disabled="!embeddingReady || record.status === 'indexing' || batchOperating"
                       @click="onReindex(record.id)"
                     >
                       重新索引
                     </a-button>
                     <a-popconfirm title="确认删除该文档？" @confirm="onDeleteDoc(record.id)">
-                      <a-button size="small" danger>删除</a-button>
+                      <a-button size="small" danger :disabled="batchOperating">删除</a-button>
                     </a-popconfirm>
                   </a-space>
                 </template>
@@ -628,9 +629,13 @@ function selectType(id: number) {
 
 const selectedDocIds = ref<number[]>([])
 const batchOperating = ref(false)
+// 批量请求正在处理的行：表格里打「处理中」标签，并禁掉这些行的单条操作。
+const batchIds = ref<number[]>([])
 
 const docRowSelection = computed(() => ({
   selectedRowKeys: selectedDocIds.value,
+  // 批量执行期间锁住勾选，避免中途改集合导致「点了 5 篇实际删了 3 篇」。
+  getCheckboxProps: () => ({ disabled: batchOperating.value }),
   onChange: (keys: (string | number)[]) => {
     selectedDocIds.value = keys.map(Number)
   },
@@ -639,6 +644,7 @@ const docRowSelection = computed(() => ({
 async function onBatchReindex() {
   if (!selectedDocIds.value.length || batchOperating.value) return
   batchOperating.value = true
+  batchIds.value = [...selectedDocIds.value]
   try {
     const res = await knowledgeApi.batchReindexDocuments(selectedDocIds.value)
     message.success(`已重新排队索引 ${res.done} 篇文档`)
@@ -648,6 +654,7 @@ async function onBatchReindex() {
     message.error(errorText(err, '批量重建索引失败'))
   } finally {
     batchOperating.value = false
+    batchIds.value = []
   }
 }
 
@@ -661,11 +668,18 @@ function onBatchDelete() {
     okButtonProps: { danger: true },
     cancelText: '取消',
     onOk: async () => {
-      const res = await knowledgeApi.batchDeleteDocuments(ids)
-      message.success(`已删除 ${res.done} 篇文档`)
-      selectedDocIds.value = []
-      if (activeTypeId.value) {
-        await Promise.all([loadDocuments(activeTypeId.value), loadTypes(), loadIndexState()])
+      batchOperating.value = true
+      batchIds.value = ids
+      try {
+        const res = await knowledgeApi.batchDeleteDocuments(ids)
+        message.success(`已删除 ${res.done} 篇文档`)
+        selectedDocIds.value = []
+        if (activeTypeId.value) {
+          await Promise.all([loadDocuments(activeTypeId.value), loadTypes(), loadIndexState()])
+        }
+      } finally {
+        batchOperating.value = false
+        batchIds.value = []
       }
     },
   })

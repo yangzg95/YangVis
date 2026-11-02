@@ -181,6 +181,14 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '服务器终端', bare: true},
     },
     {
+        // 全屏 AI 问答页：与数据库问答页对称。服务器问答不依赖终端会话
+        // （后端自己开 SSH 连接），手机端也能用，所以不挂桌面端限制。
+        path: '/ops/server/:id(\\d+)/chat',
+        name: 'OpsServerChat',
+        component: () => import('@/views/OpsServerChat.vue'),
+        meta: {title: '服务器问答', bare: true},
+    },
+    {
         path: '/ops/database',
         name: 'OpsDatabase',
         component: () => import('@/views/OpsDatabase.vue'),

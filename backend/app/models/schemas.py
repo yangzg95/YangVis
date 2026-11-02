@@ -1400,6 +1400,17 @@ class DbForeignKeyItem(BaseModel):
     on_delete: str = ""
 
 
+class DbTableStructure(BaseModel):
+    """结构页签一次拉齐的三份元数据：列、索引、外键。
+
+    三份都读同一张表的 information_schema，合并成一个端点复用一条连接。
+    """
+
+    columns: List[DbColumnItem] = Field(default_factory=list)
+    indexes: List[DbIndexItem] = Field(default_factory=list)
+    foreign_keys: List[DbForeignKeyItem] = Field(default_factory=list)
+
+
 class DbTableDdl(BaseModel):
     """``SHOW CREATE TABLE`` 的原文。"""
 

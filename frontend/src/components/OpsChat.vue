@@ -2,39 +2,19 @@
   <div :class="['ops-chat', { dark }]">
     <!-- 工具条：历史会话下拉 + 新会话。面板每次打开都是全新窗口，旧排查从这里翻回去。 -->
     <div class="chat-toolbar">
-      <a-dropdown
-        :trigger="['click']"
-        :overlay-class-name="dark ? 'ops-history-overlay dark' : 'ops-history-overlay'"
+      <OpsHistoryMenu
+        :history="history"
+        :conversation-id="conversationId"
+        :dark="dark"
+        @open="openConversation"
+        @rename="startRename"
+        @remove="removeConversation"
         @open-change="onHistoryOpen"
       >
         <button type="button" class="tool-btn" :disabled="!targetId">
           <HistoryOutlined /> 历史
         </button>
-        <template #overlay>
-          <a-menu :selected-keys="conversationId ? [conversationId] : []">
-            <a-menu-item v-for="conv in history" :key="conv.id" @click="openConversation(conv.id)">
-              <div class="history-item">
-                <div class="history-line">
-                  <span class="history-title">{{ conv.title }}</span>
-                  <!-- stop：不触发菜单项的「打开会话」，也不让下拉收起来。 -->
-                  <a-tooltip title="重命名这段会话">
-                    <EditOutlined class="history-rename" @click.stop="startRename(conv)" />
-                  </a-tooltip>
-                  <a-tooltip title="删除这段会话">
-                    <DeleteOutlined class="history-del" @click.stop="removeConversation(conv)" />
-                  </a-tooltip>
-                </div>
-                <span class="history-meta">
-                  {{ fmtShortDateTime(conv.updated_at) }} · {{ conv.message_count }} 条
-                </span>
-              </div>
-            </a-menu-item>
-            <a-menu-item v-if="!history.length" key="empty" disabled>
-              还没有历史会话
-            </a-menu-item>
-          </a-menu>
-        </template>
-      </a-dropdown>
+      </OpsHistoryMenu>
       <a-tooltip title="清空当前窗口，另起一段排查">
         <button
           type="button"
@@ -142,6 +122,8 @@
               class="content markdown"
               v-html="renderCached(item.key, item.text)"
             />
+            <!-- 重试留痕：这条回答是超时后自动重试才生成出来的。 -->
+            <div v-if="item.note" class="retry-note">{{ item.note }}</div>
           </template>
           <div v-else class="content" v-text="item.text" />
           <!-- 兜底：没有时间线条目的待确认项（老消息）仍按 message_id 挂气泡末尾。 -->
@@ -250,21 +232,21 @@ import {
   RobotOutlined,
   ArrowUpOutlined,
   CopyOutlined,
-  DeleteOutlined,
-  EditOutlined,
   HistoryOutlined,
   PlusOutlined,
   VerticalAlignBottomOutlined,
   WarningOutlined,
 } from '@ant-design/icons-vue'
 import ConfirmCard from '@/components/ConfirmCard.vue'
+import OpsHistoryMenu from '@/components/OpsHistoryMenu.vue'
 import { useAuthStore } from '@/stores/auth'
 import { createMarkdown } from '@/utils/markdown'
-import { fmtShortDateTime } from '@/utils/format'
 import { useStickToBottom } from '@/utils/useStickToBottom'
+import { capCache } from '@/utils/cacheLimit'
 import { toolLabel } from '@/utils/chatTools'
 import { useOpsConfirm, actionFromConfirm } from '@/utils/useOpsConfirm'
 import { useStreamRender } from '@/utils/streamRender'
+import { foldChunks, type FoldChunk, type FoldedChunk } from '@/utils/opsChunks'
 import { copyText } from '@/utils/clipboard'
 import { storageKeys } from '@/utils/storage'
 import {
@@ -327,6 +309,7 @@ md.renderer.rules.fence = (tokens, idx, options, env, self) => {
   if (!kind) return rendered
   const key = `s${++snippetSeq}`
   snippetBlocks.set(key, tokens[idx].content)
+  capCache(snippetBlocks, 300)
   const label = kind === 'query' ? '在查询框中打开' : '在终端中打开'
   return `<div class="sql-block">${rendered}<button type="button" class="snippet-open" data-key="${key}" data-kind="${kind}">${label}</button></div>`
 }
@@ -349,15 +332,7 @@ const { schedule, beginStream, endStream, renderCached, clearCache } = useStream
 )
 
 /** 一条助手回复由若干 chunk 按到达顺序拼接：步骤、文字、思考、确认卡片交替。 */
-interface TalkChunk {
-  type: 'step' | 'text' | 'reason' | 'confirm'
-  /** step 时是命令摘要，text 时是这段文字，reason 时是这段推理，confirm 时留空。 */
-  detail: string
-  /** confirm 时指向 actions 里的那条待确认项。 */
-  actionId?: number
-  /** step 时的完整命令：detail 已被 toolLabel 截断，悬停看全文。 */
-  full?: string
-}
+type TalkChunk = FoldChunk
 
 interface TalkItem {
   key: string
@@ -368,16 +343,16 @@ interface TalkItem {
   text: string
   /** 按到达顺序排列的步骤与文字片段，用于交错渲染。 */
   chunks: TalkChunk[]
+  /** 自动重试过的说明（只在本次页面内可见，不落库不参与复制）。 */
+  note?: string
 }
 
 const items = ref<TalkItem[]>([])
 const draft = ref('')
 
 // ---- 步骤折叠 ---------------------------------------------------------------
-// 一条回答里可能有多波「执行命令」，每波后面紧跟一段解说文字。折叠按波就地收：
-// 只要有 ≥2 条连续命令就默认收成一行「已执行 N 步」，点开看完整列表；单条命令
-// 不折叠（折叠它省不了空间，还把命令藏起来）。文字块始终保留，阅读流不受影响。
-const STEP_COLLAPSE_THRESHOLD = 1
+// 折叠规则（按波就地收、单条命令不折叠）在 utils/opsChunks.ts 里，这里只管
+// 展开状态与点击切换。
 const expandedSteps = ref<Set<string>>(new Set())
 
 function toggleSteps(key: string) {
@@ -386,69 +361,10 @@ function toggleSteps(key: string) {
   else set.add(key)
 }
 
-interface RenderChunk extends TalkChunk {
-  index: number
-  summary: boolean
-  /** 本组连续步骤的条数（摘要行文案用）。 */
-  runCount: number
-  /** 本组折叠状态的键：一条回答里多组命令各自独立展开/收起。 */
-  runKey: string
-  expanded: boolean
-  /** confirm 条目对位的待确认项（已按 id 查好，查不到就不渲染）。 */
-  action?: OpsAction
-}
+type RenderChunk = FoldedChunk<TalkChunk, OpsAction>
 
 function displayChunks(item: TalkItem): RenderChunk[] {
-  const chunks = item.chunks
-  const out: RenderChunk[] = []
-  let i = 0
-  let runIndex = 0
-  while (i < chunks.length) {
-    const chunk = chunks[i]
-    if (chunk.type === 'text' || chunk.type === 'confirm') {
-      // 正文与确认卡片都不参与折叠，各自把相邻的步骤/思考组隔开。
-      out.push({
-        ...chunk,
-        index: i,
-        summary: false,
-        runCount: 0,
-        runKey: '',
-        expanded: false,
-        action: chunk.type === 'confirm' ? actionById.value.get(chunk.actionId ?? -1) : undefined,
-      })
-      i += 1
-      continue
-    }
-    // 收一段「同类型的连续 chunk」为一组：一组命令，或一段思考。正文和确认卡片
-    // 把组隔开，所以每组对应模型的一轮动作，后面紧跟的解说文字留在原位——折叠必须
-    // 按组就地收，若把整条回答的步骤全堆到顶部，各组命令就和它们各自的解说被拆散了。
-    const runType = chunk.type // 'step' | 'reason'
-    let j = i
-    while (j < chunks.length && chunks[j].type === runType) j += 1
-    const runCount = j - i
-    const runKey = `${item.key}:${runType}:${runIndex}`
-    // 命令：≥2 条才折叠（单条命令藏起来省不了空间）；思考：整段可折叠。
-    const collapsible = runType === 'step' ? runCount > STEP_COLLAPSE_THRESHOLD : true
-    const inSet = expandedSteps.value.has(runKey)
-    // 两组默认都是收起：命令组藏起来省地方，思考组动辄上千行，摊开会把真正的
-    // 结论挤出视口——一轮回答里出现三五段思考是常态，全展开就没法读了。
-    const expanded = inSet
-    if (collapsible && !expanded) {
-      // 折叠态：整组收成一行摘要，就地待在这组原本的位置。
-      out.push({ ...chunk, index: i, summary: true, runCount, runKey, expanded })
-    } else {
-      // 展开态（或本组不折叠）：可折叠时先给一行「收起」摘要，再逐条列出。
-      if (collapsible) {
-        out.push({ ...chunk, index: i, summary: true, runCount, runKey, expanded })
-      }
-      for (let k = i; k < j; k += 1) {
-        out.push({ ...chunks[k], index: k, summary: false, runCount, runKey, expanded })
-      }
-    }
-    runIndex += 1
-    i = j
-  }
-  return out
+  return foldChunks(item.chunks, item.key, expandedSteps.value, actionById.value)
 }
 
 // ---- 会话与写命令确认 ---------------------------------------------------------
@@ -528,6 +444,13 @@ function isStreaming(item: TalkItem): boolean {
 const thinking = ref(false)
 const streamingText = ref(false)
 
+/** 自动重试上限：一次提问最多再试 2 次（加首次共 3 次尝试）。 */
+const MAX_AUTO_RETRIES = 2
+/** 本轮已经自动重试过几次；每次新提问归零。 */
+let retryCount = 0
+/** 重试中的提示状态（attempt 从 1 开始）；不在重试时为 null。 */
+const retryState = ref<{ attempt: number; max: number } | null>(null)
+
 // ---- 流式合批 -----------------------------------------------------------------
 // token 先攒进普通字符串，每 80ms 提交一次：逐 token 改 item.text / chunk.detail
 // 会让整条气泡（含历史 chunk 折叠逻辑）按 token 频率重渲染。
@@ -536,6 +459,8 @@ const STREAM_FLUSH_MS = 80
 const pageActive = ref(true)
 /** 当前活跃流的合批提交函数，由 streamHandlers 挂上；收尾与切回页面时直接调用。 */
 let flushStreamTextHook: () => void = () => {}
+/** 同一条流的缓冲清理钩子：自动重试丢弃半截气泡时先调它，免得迟到的 flush 写脏数据。 */
+let cancelStreamBufferHook: () => void = () => {}
 /** 当前正在执行的步骤摘要（step 事件到达时写入，下一个 token 到达时清空）。 */
 const currentStepDetail = ref('')
 const scrollEl = ref<HTMLElement | null>(null)
@@ -543,6 +468,11 @@ const inputEl = ref<{ focus: () => void } | null>(null)
 
 /** 持久状态指示文案：区分 AI 在思考、执行命令、还是空闲。 */
 const aiStatusText = computed(() => {
+  // 重试中上一轮的步骤与正文都已丢弃，这里只报重试进度。
+  if (retryState.value) {
+    const { attempt, max } = retryState.value
+    return `请求超时，正在自动重试（${attempt}/${max}）…`
+  }
   // 步骤文案走 toolLabel，动词自带（「执行只读命令：…」），再套一层
   // 「正在执行：」就重复了；进行中由那三个跳动的点表示。
   if (currentStepDetail.value) return currentStepDetail.value
@@ -816,11 +746,19 @@ function deriveTitle(question: string): string {
 // ---- SSE 事件处理 -------------------------------------------------------------
 // completions 与 confirm 两条流共用同一组回调：step/token/confirm/done/error
 // 语义一致；exec 只有 confirm 流会发。
-function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
+//
+// ``onStreamError`` 只有提问流传：超时这类可重试的失败交给它决定要不要自动重试；
+// 确认流没传，出错就直接弹提示收尾（那一轮没有可重放的提问）。
+function streamHandlers(
+  streamActions: OpsAction[],
+  onStreamError?: (message: string, retryable: boolean) => void,
+): StreamHandlers {
   // 一轮流式 = 一条助手气泡。确认流的续答绝不能并进提问流那条气泡：卡片是
   // 按时间线插在气泡里的，两轮流式混在一条气泡里就会让先到的卡片被后到的
   // 步骤与正文压在中间。后端本来也是每轮流式各落一条消息，这样两边对得上。
   let bubble: TalkItem | null = null
+  // 已经提议过写命令：重试会让确认卡片多出一张，所以这种情况不自动重试。
+  let sawProposal = false
   const answer = () => {
     if (!bubble) {
       const created: TalkItem = { key: nextKey(), kind: 'assistant', text: '', chunks: [] }
@@ -880,6 +818,17 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
     scrollToBottom()
   }
   flushStreamTextHook = flushText
+  // 自动重试要丢掉这一轮的气泡：连没提交的缓冲和定时器一起扔，否则 80ms
+  // 后那次 flush 会往一条已经移除的气泡里写字。
+  cancelStreamBufferHook = () => {
+    if (flushTimer !== undefined) {
+      window.clearTimeout(flushTimer)
+      flushTimer = undefined
+    }
+    textBuffer = ''
+    bufferItem = null
+    bufferChunk = null
+  }
   return {
     onStep: (data) => {
       const item = answer()
@@ -919,6 +868,8 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
       // 模型提议后可能直接结束本轮、一个 token 都不吐：先保证气泡存在，
       // 确认卡片才有地方挂。
       const item = answer()
+      // 已经落了一条待确认命令，本轮不再自动重试：重放会多出一张一样的卡片。
+      sawProposal = true
       const action = actionFromConfirm(data, conversationId.value)
       actions.value.push(action)
       streamActions.push(action)
@@ -955,13 +906,28 @@ function streamHandlers(streamActions: OpsAction[]): StreamHandlers {
       // 记下落库 id 并回填本轮提议的 message_id：卡片已按时间线就地渲染，
       // 这个 id 只服务「老消息没有时间线」那条兜底路径。
       const item = bubble ?? items.value[items.value.length - 1]
-      if (item && item.kind === 'assistant') item.id = message_id
+      if (item && item.kind === 'assistant') {
+        item.id = message_id
+        // 重试成功也要在页面上留痕：用户得知道这段回答是第二次才生成的。
+        if (retryCount > 0) item.note = `请求超时，已自动重试 ${retryCount} 次后生成`
+      }
       for (const a of streamActions) a.message_id = message_id
       finishStream()
-      // 本轮问答落库了：历史列表里这条会话的条数/活跃时间变了，顺手刷新。
-      void refreshHistory(loadSeq)
+      // 本轮只改变当前会话的条数与活跃时间，历史下拉里已有这条就就地更新；
+      // 新会话首次落库（列表里还没有它）才回源，省掉每轮一次整表请求。
+      const row = history.value.find((c) => c.id === conversationId.value)
+      if (row) {
+        row.message_count += 2
+        row.updated_at = new Date().toISOString()
+      } else {
+        void refreshHistory(loadSeq)
+      }
     },
-    onError: ({ message }) => {
+    onError: ({ message, retryable }) => {
+      if (onStreamError) {
+        onStreamError(message, Boolean(retryable) && !sawProposal)
+        return
+      }
       toast.error(message)
       finishStream()
     },
@@ -972,10 +938,13 @@ function finishStream() {
   // 收尾前先提交缓冲里的残文，停止/出错时半段也要完整落定。
   flushStreamTextHook()
   flushStreamTextHook = () => {}
+  cancelStreamBufferHook = () => {}
   thinking.value = false
   streamingText.value = false
   streamingAnswerKey.value = null
   currentStepDetail.value = ''
+  retryState.value = null
+  retryCount = 0
   abort = null
   endStream()
 }
@@ -1042,6 +1011,8 @@ async function ask(question: string) {
   items.value.push({ key: nextKey(), kind: 'user', text: question, chunks: [] })
   thinking.value = true
   streamingText.value = false
+  retryCount = 0
+  retryState.value = null
   pinToBottom()
 
   const streamActions: OpsAction[] = []
@@ -1052,8 +1023,41 @@ async function ask(question: string) {
       agent_id: convAgentId.value ?? undefined,
       model_config_id: activeModelConfigId.value,
     },
-    streamHandlers(streamActions),
+    streamHandlers(streamActions, handleStreamError),
   )
+}
+
+/**
+ * 可重试失败（目前是模型调用超时）的处理：自动用 /retry 再答一遍。
+ *
+ * 超时意味着这一问已落库、回答没有落库，正好对上 retry 接口的前提——
+ * 它会先删掉那条悬空提问再重新回答，历史里不会留下重复的一问。
+ * 重试前把这一轮流出来的半截气泡丢掉，从干净气泡重新生成。
+ */
+function handleStreamError(message: string, retryable: boolean) {
+  const convId = conversationId.value
+  if (retryable && convId && retryCount < MAX_AUTO_RETRIES) {
+    retryCount += 1
+    retryState.value = { attempt: retryCount, max: MAX_AUTO_RETRIES }
+    discardStreamingBubble()
+    const streamActions: OpsAction[] = []
+    abort = chatApi.streamRetry(convId, streamHandlers(streamActions, handleStreamError))
+    return
+  }
+  // 到顶或不可重试：把「试过几次」一并写进提示，用户不会以为是一次就失败。
+  toast.error(retryCount > 0 ? `已自动重试 ${retryCount} 次仍失败：${message}` : message)
+  finishStream()
+}
+
+/** 丢弃正在流的那条半截气泡：它的内容会被重新生成的完整回答取代。 */
+function discardStreamingBubble() {
+  cancelStreamBufferHook()
+  const key = streamingAnswerKey.value
+  if (key) items.value = items.value.filter((item) => item.key !== key)
+  streamingAnswerKey.value = null
+  streamingText.value = false
+  currentStepDetail.value = ''
+  endStream()
 }
 
 // 确认一条写命令：exec 结果由 useOpsConfirm 写回卡片，续答进新气泡，
@@ -1285,6 +1289,9 @@ defineExpose({
 .msg {
   display: flex;
   margin-bottom: 10px;
+  /* 离屏消息跳过布局与绘制；auto 记住上次高度，滚动回看不抖。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
 }
 
 .msg.user {
@@ -1428,6 +1435,14 @@ defineExpose({
   word-break: break-word;
   max-height: 200px;
   overflow-y: auto;
+}
+
+/* 重试留痕：一条小字旁白，跟在回答末尾，不参与复制。 */
+.retry-note {
+  margin-top: 6px;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--text-3);
 }
 
 /* 气泡操作行（复制）：悬停整条消息才出现。 */
@@ -1599,6 +1614,10 @@ defineExpose({
   color: var(--text-dark-2);
 }
 
+.ops-chat.dark .retry-note {
+  color: var(--text-dark-3);
+}
+
 .ops-chat.dark .thinking-hint {
   color: var(--text-dark-2);
 }
@@ -1661,112 +1680,3 @@ defineExpose({
 }
 </style>
 
-<!-- 历史下拉渲染在 body（scoped 够不到），样式只能全局：一律用
-     ops-history 前缀避免撞名。 -->
-<style>
-.ops-history-overlay .ant-dropdown-menu {
-  max-width: 300px;
-  max-height: 320px;
-  overflow-y: auto;
-}
-
-.ops-history-overlay .history-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 2px 0;
-}
-
-.ops-history-overlay .history-line {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.ops-history-overlay .history-title {
-  flex: 1;
-  min-width: 0;
-  max-width: 240px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--fs-sm);
-}
-
-/* 删除图标平时藏着，悬停该条才出现：列表主要还是用来「打开」的。 */
-.ops-history-overlay .history-del {
-  flex-shrink: 0;
-  padding: 2px;
-  border-radius: var(--radius-sm);
-  color: var(--text-3);
-  font-size: var(--fs-xs);
-  opacity: 0;
-  transition: all 0.15s;
-}
-
-.ops-history-overlay .ant-dropdown-menu-item:hover .history-del {
-  opacity: 1;
-}
-
-.ops-history-overlay .history-del:hover {
-  background: var(--danger-bg);
-  color: var(--danger);
-}
-
-/* 重命名图标与删除同一交互：悬停整行才显形，hover 各自上色。 */
-.ops-history-overlay .history-rename {
-  flex-shrink: 0;
-  padding: 2px;
-  border-radius: var(--radius-sm);
-  color: var(--text-3);
-  font-size: var(--fs-xs);
-  opacity: 0;
-  transition: all 0.15s;
-}
-
-.ops-history-overlay .ant-dropdown-menu-item:hover .history-rename {
-  opacity: 1;
-}
-
-.ops-history-overlay .history-rename:hover {
-  background: var(--signal-bg);
-  color: var(--signal-text);
-}
-
-.ops-history-overlay .history-meta {
-  color: var(--text-3);
-  font-size: var(--fs-xs);
-}
-
-/* 深色变体（全屏终端页的 AI 面板）：菜单底色/文字与面板同族。 */
-.ops-history-overlay.dark .ant-dropdown-menu {
-  background: var(--surface-dark);
-}
-
-.ops-history-overlay.dark .ant-dropdown-menu-item {
-  color: var(--text-dark);
-}
-
-.ops-history-overlay.dark .ant-dropdown-menu-item:hover,
-.ops-history-overlay.dark .ant-dropdown-menu-item-selected {
-  background: var(--signal-on-dark-bg-strong) !important;
-  color: var(--signal-bright);
-}
-
-.ops-history-overlay.dark .ant-dropdown-menu-item-disabled {
-  color: var(--text-dark-2) !important;
-}
-
-.ops-history-overlay.dark .history-meta {
-  color: var(--text-dark-2);
-}
-
-.ops-history-overlay.dark .history-del {
-  color: var(--text-dark-2);
-}
-
-.ops-history-overlay.dark .history-del:hover {
-  background: var(--danger-on-dark-bg);
-  color: var(--danger-soft);
-}
-</style>

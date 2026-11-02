@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -51,6 +51,19 @@ settings = get_settings()
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+
+_TIMEOUT_HINTS = ("timed out", "timeout")
+
+
+def _retryable_failure(exc: Exception) -> bool:
+    """模型调用超时这类失败再试一次往往就好了，前端据此自动重试。
+
+    只看超时：鉴权失败、模型名写错、余额不足这些重试多少次都一样，不能
+    让界面假装「正在重试」而只是把等待时间拉长。
+    """
+    return isinstance(exc, TimeoutError) or any(
+        hint in str(exc).lower() for hint in _TIMEOUT_HINTS
+    )
 
 
 def _display_filename(raw: str | None) -> str:
@@ -143,11 +156,13 @@ def delete_conversation(
 def list_messages(
     conversation_id: int,
     limit: int = Query(default=200, ge=1, le=500),
+    before_id: Optional[int] = Query(default=None, ge=1),
     service: ChatService = Depends(get_service),
 ) -> APIResponse[ListResponse[MessageItem]]:
     try:
         # 默认只回放最近 200 条：历史消息里的正文与引用是整块大 JSON。
-        items = service.list_messages(conversation_id, limit=limit)
+        # before_id 用于向上翻页，只取比该消息更早的一段。
+        items = service.list_messages(conversation_id, limit=limit, before_id=before_id)
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return APIResponse(data=ListResponse(items=items, total=len(items)))
@@ -580,7 +595,14 @@ async def completions(
                 "chat completion failed for conversation %s",
                 getattr(conversation, "id", None),
             )
-            yield sse_event("error", {"code": -1, "message": f"回答生成失败：{exc}"})
+            yield sse_event(
+                "error",
+                {
+                    "code": -1,
+                    "message": f"回答生成失败：{exc}",
+                    "retryable": _retryable_failure(exc),
+                },
+            )
 
     return StreamingResponse(
         with_heartbeat(stream()),
@@ -671,7 +693,14 @@ async def retry_last_answer(
             yield sse_event("error", {"code": -1, "message": str(exc)})
         except Exception as exc:  # noqa: BLE001 - the stream must not just stop
             logger.exception("chat retry failed for conversation %s", conversation_id)
-            yield sse_event("error", {"code": -1, "message": f"重试失败：{exc}"})
+            yield sse_event(
+                "error",
+                {
+                    "code": -1,
+                    "message": f"重试失败：{exc}",
+                    "retryable": _retryable_failure(exc),
+                },
+            )
 
     return StreamingResponse(
         with_heartbeat(stream()),

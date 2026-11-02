@@ -1,4 +1,5 @@
 import { onBeforeUnmount, ref } from 'vue'
+import { capCache } from './cacheLimit'
 
 /**
  * 流式 markdown 渲染的「缓存 + 节拍器」。
@@ -67,6 +68,7 @@ export function useStreamRender(render: (text: string) => string) {
     if (key === streamingKey && hit && hit.tick === currentTick) return hit.html
     const html = render(text)
     cache.set(key, { text, html, tick: currentTick })
+    capCache(cache, 400)
     return html
   }
 

@@ -104,22 +104,6 @@ RETIRED_STATUS_COLUMNS = {
 }
 
 
-def _column_names(table: str) -> set[str]:
-    """返回 ``table`` 的列名集合；表不存在时返回空集合。"""
-    inspector = inspect(engine)
-    if table not in inspector.get_table_names():
-        return set()
-    return {column["name"] for column in inspector.get_columns(table)}
-
-
-def _index_names(table: str) -> set[str]:
-    """返回 ``table`` 的索引名集合；表不存在时返回空集合。"""
-    inspector = inspect(engine)
-    if table not in inspector.get_table_names():
-        return set()
-    return {index["name"] for index in inspector.get_indexes(table)}
-
-
 def migrate_schema() -> None:
     """补上 ``create_all`` 无法添加的列，删掉退役的列，然后回填数据。
 
@@ -130,7 +114,22 @@ def migrate_schema() -> None:
     删列同样先看当前有没有这一列，所以重复执行是空操作；它是这里唯一的破坏性动作，
     范围锁在 :data:`RETIRED_STATUS_COLUMNS` 那份清单上。
     """
-    type_columns = _column_names("knowledge_type")
+    # 近二十张表要逐张确认列是否存在。每次 inspect(engine) 都会重新拉表名再拉列，
+    # 启动时的元数据查询因此翻倍；同一次迁移内结构稳定（新增列都只查一次），
+    # 所以复用同一个 Inspector 并缓存结果。
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    columns_cache: dict[str, list[dict]] = {}
+
+    def columns_of(table: str) -> list[dict]:
+        if table not in columns_cache:
+            columns_cache[table] = inspector.get_columns(table) if table in tables else []
+        return columns_cache[table]
+
+    def column_names(table: str) -> set[str]:
+        return {column["name"] for column in columns_of(table)}
+
+    type_columns = column_names("knowledge_type")
     if type_columns and "project_id" not in type_columns:
         # 用 DEFAULT 0 是为了让 ALTER 在已有数据的表上也能成功；下面的回填会把
         # 每一个 0 替换成真实的项目。
@@ -143,7 +142,7 @@ def migrate_schema() -> None:
             )
         logger.info("added knowledge_type.project_id")
 
-    conversation_columns = _column_names("chat_conversation")
+    conversation_columns = column_names("chat_conversation")
     if conversation_columns:
         for column, ddl in (
             ("project_id", "ADD COLUMN project_id BIGINT NULL"),
@@ -160,14 +159,14 @@ def migrate_schema() -> None:
                 conn.execute(text(f"ALTER TABLE chat_conversation {ddl}"))
             logger.info("added chat_conversation.%s", column)
 
-    message_columns = _column_names("chat_message")
+    message_columns = column_names("chat_message")
     if message_columns and "timeline" not in message_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE chat_message ADD COLUMN timeline JSON NULL"))
         logger.info("added chat_message.timeline")
 
     # 手动对话压缩：锚点消息 id 与用户给的压缩要求；chat_summary 表由 create_all 建。
-    summary_columns = _column_names("chat_summary")
+    summary_columns = column_names("chat_summary")
     if summary_columns:
         for column, ddl in (
             ("cut_message_id", "ADD COLUMN cut_message_id BIGINT NULL"),
@@ -179,7 +178,7 @@ def migrate_schema() -> None:
                 conn.execute(text(f"ALTER TABLE chat_summary {ddl}"))
             logger.info("added chat_summary.%s", column)
 
-    model_config_columns = _column_names("model_config")
+    model_config_columns = column_names("model_config")
     if model_config_columns:
         for column, ddl in (
             ("reasoning_mode", "ADD COLUMN reasoning_mode VARCHAR(16) NOT NULL DEFAULT 'auto'"),
@@ -193,7 +192,7 @@ def migrate_schema() -> None:
                 conn.execute(text(f"ALTER TABLE model_config {ddl}"))
             logger.info("added model_config.%s", column)
 
-    database_columns = _column_names("ops_database")
+    database_columns = column_names("ops_database")
     if database_columns:
         for column, ddl in (
             ("writable", "ADD COLUMN writable TINYINT(1) NOT NULL DEFAULT 0"),
@@ -205,7 +204,7 @@ def migrate_schema() -> None:
                 conn.execute(text(f"ALTER TABLE ops_database {ddl}"))
             logger.info("added ops_database.%s", column)
 
-    user_columns = _column_names("sys_user")
+    user_columns = column_names("sys_user")
     if user_columns and "ops_write" not in user_columns:
         with engine.begin() as conn:
             conn.execute(
@@ -220,7 +219,7 @@ def migrate_schema() -> None:
             conn.execute(text("UPDATE sys_user SET ops_write = 1"))
         logger.info("added sys_user.ops_write and backfilled existing users")
 
-    audit_columns = _column_names("ops_audit_log")
+    audit_columns = column_names("ops_audit_log")
     if audit_columns and "pending_action_id" not in audit_columns:
         with engine.begin() as conn:
             conn.execute(
@@ -228,7 +227,7 @@ def migrate_schema() -> None:
             )
         logger.info("added ops_audit_log.pending_action_id")
 
-    agent_columns = _column_names("agent")
+    agent_columns = column_names("agent")
     if agent_columns:
         for column, ddl in (
             ("use_ops", "ADD COLUMN use_ops TINYINT(1) NOT NULL DEFAULT 0"),
@@ -243,8 +242,7 @@ def migrate_schema() -> None:
 
         # agent.temperature 从 NOT NULL DEFAULT 30 改为 nullable，让智能体能表达
         # 「跟随模型配置」。先检测当前 nullability，只在 NOT NULL 时执行 MODIFY，保证幂等。
-        inspector = inspect(engine)
-        agent_cols_meta = {c["name"]: c for c in inspector.get_columns("agent")}
+        agent_cols_meta = {c["name"]: c for c in columns_of("agent")}
         temp_col = agent_cols_meta.get("temperature")
         if temp_col and not temp_col["nullable"]:
             with engine.begin() as conn:
@@ -253,7 +251,7 @@ def migrate_schema() -> None:
                 )
             logger.info("modified agent.temperature to nullable")
 
-    resume_columns = _column_names("resume")
+    resume_columns = column_names("resume")
     if resume_columns:
         for column, ddl in (
             ("netdisk_fs_id", "ADD COLUMN netdisk_fs_id BIGINT NULL"),
@@ -266,14 +264,14 @@ def migrate_schema() -> None:
             logger.info("added resume.%s", column)
 
     # 在线简历「保存到简历」：记录同步到 resume 表的那一行。
-    resume_doc_columns = _column_names("resume_doc")
+    resume_doc_columns = column_names("resume_doc")
     if resume_doc_columns and "resume_id" not in resume_doc_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE resume_doc ADD COLUMN resume_id BIGINT NULL"))
         logger.info("added resume_doc.resume_id")
 
     # 运行认领业务对象：状态从 workflow_run 翻译出来。
-    run_columns = _column_names("workflow_run")
+    run_columns = column_names("workflow_run")
     if run_columns:
         for column, ddl in (
             ("subject_kind", "ADD COLUMN subject_kind VARCHAR(32) NULL"),
@@ -285,7 +283,7 @@ def migrate_schema() -> None:
             with engine.begin() as conn:
                 conn.execute(text(f"ALTER TABLE workflow_run {ddl}"))
             logger.info("added workflow_run.%s", column)
-        if "idx_run_subject" not in _index_names("workflow_run"):
+        if "idx_run_subject" not in {i["name"] for i in inspector.get_indexes("workflow_run")}:
             with engine.begin() as conn:
                 conn.execute(
                     text(
@@ -296,14 +294,14 @@ def migrate_schema() -> None:
             logger.info("added workflow_run.idx_run_subject")
 
     # 工作流挂载的 MCP 服务 id 列表（mcp_server 新表由 create_all 建立）。
-    workflow_columns = _column_names("workflow")
+    workflow_columns = column_names("workflow")
     if workflow_columns and "mcp_server_ids" not in workflow_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE workflow ADD COLUMN mcp_server_ids JSON NULL"))
         logger.info("added workflow.mcp_server_ids")
 
     # 步骤行绑定开跑时的人设版本（agent_version 新表由 create_all 建立）。
-    run_step_columns = _column_names("workflow_run_step")
+    run_step_columns = column_names("workflow_run_step")
     if run_step_columns:
         for column, ddl in (
             ("agent_id", "ADD COLUMN agent_id BIGINT NULL"),
@@ -317,14 +315,14 @@ def migrate_schema() -> None:
             logger.info("added workflow_run_step.%s", column)
 
     # 节点级 MCP 挂载：仅对所属步骤生效，与 workflow.mcp_server_ids 取并集。
-    step_columns = _column_names("workflow_step")
+    step_columns = column_names("workflow_step")
     if step_columns and "mcp_server_ids" not in step_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE workflow_step ADD COLUMN mcp_server_ids JSON NULL"))
         logger.info("added workflow_step.mcp_server_ids")
 
     # MCP 连通测试发现的工具快照，随 last_test_* 展示/作废。
-    mcp_columns = _column_names("mcp_server")
+    mcp_columns = column_names("mcp_server")
     if mcp_columns and "tools_snapshot" not in mcp_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE mcp_server ADD COLUMN tools_snapshot JSON NULL"))
@@ -332,7 +330,7 @@ def migrate_schema() -> None:
 
     # Auto 模型：路由上的「对模型的定义」与日志上的决策快照。
     # 路由级有效期与 token 额度：留空即不限制，token_used 随调用日志累加。
-    route_columns = _column_names("ai_model_route")
+    route_columns = column_names("ai_model_route")
     if route_columns:
         for column, ddl in (
             ("auto_eligible", "ADD COLUMN auto_eligible TINYINT(1) NOT NULL DEFAULT 0"),
@@ -347,7 +345,7 @@ def migrate_schema() -> None:
                 conn.execute(text(f"ALTER TABLE ai_model_route {ddl}"))
             logger.info("added ai_model_route.%s", column)
 
-    call_log_columns = _column_names("ai_call_log")
+    call_log_columns = column_names("ai_call_log")
     if call_log_columns:
         for column, ddl in (
             ("auto_route", "ADD COLUMN auto_route JSON NULL"),
@@ -360,7 +358,7 @@ def migrate_schema() -> None:
             logger.info("added ai_call_log.%s", column)
 
     for table, retired in RETIRED_STATUS_COLUMNS.items():
-        existing = _column_names(table)
+        existing = column_names(table)
         for column in retired:
             if column not in existing:
                 continue

@@ -247,6 +247,13 @@
         </div>
 
         <div ref="scrollEl" class="messages" @scroll="onMessagesScroll">
+          <!-- 向上翻页：只在还有更早消息时出现，加载期间禁用防连点。 -->
+          <div v-if="activeId && hasMoreHistory" class="load-older">
+            <a-button size="small" :loading="historyLoading" :disabled="streaming" @click="loadOlder">
+              加载更早的消息
+            </a-button>
+          </div>
+
           <div v-if="!messages.length && !streaming" class="empty-state">
             <RobotOutlined class="empty-icon" />
             <div>{{ activeAgent?.description || '开始一个新的对话吧' }}</div>
@@ -509,6 +516,7 @@ import {
   toolsApi,
   type Agent,
   type ChatAttachment,
+  type ChatMessage,
   type CompactMeta,
   type CompactionState,
   type Conversation,
@@ -617,6 +625,25 @@ const conversations = ref<Conversation[]>([])
 const convsLoaded = ref(false)
 const activeId = ref<number | null>(null)
 const messages = ref<Bubble[]>([])
+// 历史消息按「最近一页 + 向上加载」收敛：一页 200 条，滚到顶再手动补一页，
+// 避免长会话一次把全部正文与引用塞进一个响应里。
+const HISTORY_PAGE = 200
+const historyLoading = ref(false)
+const hasMoreHistory = ref(false)
+
+/** 后端消息 → 气泡视图模型（首屏回放与向上翻页共用同一口径）。 */
+function toBubble(m: ChatMessage): Bubble {
+  return {
+    key: `m${m.id}`,
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    citations: m.citations,
+    // 老消息没有 timeline：空数组，时间线不渲染，只显示正文。
+    timeline: m.timeline ?? [],
+    attachments: m.attachments ?? [],
+  }
+}
 
 // 会话列表搜索：纯前端按标题过滤。
 const convKeyword = ref('')
@@ -1080,7 +1107,15 @@ function makeStreamHandlers(
       // 与历史回放的定位方式一致。
       for (const a of streamActions) a.message_id = message_id
       finish()
-      void loadConversations()
+      // 落库只改变当前会话的条数与活跃时间，标题不变：列表里已有这条就就地更新，
+      // 首次落库（列表里还没有它）才回源，省掉每轮一次整表拉取。
+      const conv = conversations.value.find((c) => c.id === activeId.value)
+      if (conv) {
+        conv.message_count += 2
+        conv.updated_at = new Date().toISOString()
+      } else if (convsLoaded.value) {
+        void loadConversations()
+      }
     },
     onError: ({ message }) => {
       toast.error(message)
@@ -1395,7 +1430,7 @@ async function selectConversation(id: number) {
     // 确认卡片、压缩状态与消息一起回放：普通会话的 actions 恒为空、compaction
     // 恒为 null，多两个轻请求换一次渲染齐套，不额外转圈。
     ;[data, acts, compact] = await Promise.all([
-      chatApi.listMessages(id),
+      chatApi.listMessages(id, { limit: HISTORY_PAGE }),
       chatApi.listActions(id),
       chatApi.getCompaction(id),
     ])
@@ -1404,16 +1439,8 @@ async function selectConversation(id: number) {
     return
   }
   if (seq !== convLoadSeq || id !== activeId.value) return
-  messages.value = data.items.map((m) => ({
-    key: `m${m.id}`,
-    id: m.id,
-    role: m.role,
-    content: m.content,
-    citations: m.citations,
-    // 老消息没有 timeline：空数组，时间线不渲染，只显示正文。
-    timeline: m.timeline ?? [],
-    attachments: m.attachments ?? [],
-  }))
+  messages.value = data.items.map(toBubble)
+  hasMoreHistory.value = data.items.length >= HISTORY_PAGE
   actions.value = acts.items
   compaction.value = compact
   summaryExpanded.value = false
@@ -1450,6 +1477,42 @@ async function selectConversation(id: number) {
   pinToBottom()
 }
 
+/** 向上补一页历史。先记原滚动高度，插入后把视口钉在原来的位置，避免跳动。 */
+async function loadOlder() {
+  const id = activeId.value
+  if (!id || historyLoading.value || streaming.value) return
+  const first = messages.value.find((m) => m.id != null)
+  if (!first?.id) {
+    hasMoreHistory.value = false
+    return
+  }
+  const el = scrollEl.value
+  const prevHeight = el?.scrollHeight ?? 0
+  historyLoading.value = true
+  try {
+    const data = await chatApi.listMessages(id, {
+      limit: HISTORY_PAGE,
+      before_id: first.id,
+    })
+    // 等请求期间切走会话：这一页属于旧会话，丢弃。
+    if (id !== activeId.value) return
+    const known = new Set(messages.value.map((m) => m.id))
+    const older = data.items.map(toBubble).filter((b) => b.id == null || !known.has(b.id))
+    if (!older.length) {
+      hasMoreHistory.value = false
+      return
+    }
+    messages.value = [...older, ...messages.value]
+    hasMoreHistory.value = data.items.length >= HISTORY_PAGE
+    await nextTick()
+    if (el) el.scrollTop += el.scrollHeight - prevHeight
+  } catch {
+    // 拦截器已提示；保留按钮让用户可以重试。
+  } finally {
+    historyLoading.value = false
+  }
+}
+
 function startNew() {
   if (streaming.value) return
   // 让还在路上的 selectConversation 响应失效，别把旧会话的消息灌进新会话。
@@ -1458,6 +1521,7 @@ function startNew() {
   // 新建会话等于放弃这次深链带入的挂起上下文。
   pendingContext.value = null
   messages.value = []
+  hasMoreHistory.value = false
   actions.value = []
   compaction.value = null
   summaryExpanded.value = false
@@ -2192,6 +2256,11 @@ onUnmounted(() => {
   flex: 1;
   overflow-y: auto;
   padding: 4px 4px 12px;
+}
+.load-older {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0 8px;
 }
 
 /* 压缩分界卡：交代被压掉消息的去向，整行可点展开摘要原文。 */

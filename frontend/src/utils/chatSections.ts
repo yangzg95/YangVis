@@ -7,6 +7,7 @@
  */
 import type { ChatAttachment, Citation, OpsAction, TimelineEntry } from '@/api'
 import { splitMessageSegments, type MessageSegment } from '@/utils/messageSegments'
+import { capCache } from '@/utils/cacheLimit'
 
 export interface Bubble {
   key: string
@@ -163,6 +164,7 @@ function segmentsOfText(key: string, text: string): MessageSegment[] {
   if (hit && hit.text === text) return hit.segments
   const segments = splitMessageSegments(text)
   sectionSegCache.set(key, { text, segments })
+  capCache(sectionSegCache, 200)
   return segments
 }
 

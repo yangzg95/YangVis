@@ -52,7 +52,7 @@
                 v-for="item in filteredServers"
                 :key="item.id"
                 class="server-card"
-                @dblclick="connect(item)"
+                @dblclick="onCardDblClick(item)"
               >
                 <div class="card-head">
                   <a-tooltip :title="statusTitle(item)">
@@ -80,7 +80,22 @@
                 <div v-if="item.remark" class="server-remark">{{ item.remark }}</div>
 
                 <div class="card-foot" @click.stop @dblclick.stop>
-                  <a-button size="small" type="primary" @click="connect(item)">连接</a-button>
+                  <!-- 手机端没有终端页，主操作换成 AI 问答；桌面端两者都给。 -->
+                  <a-button
+                    v-if="!isMobile"
+                    size="small"
+                    type="primary"
+                    @click="connect(item)"
+                  >
+                    连接
+                  </a-button>
+                  <a-button
+                    size="small"
+                    :type="isMobile ? 'primary' : 'default'"
+                    @click="openChat(item)"
+                  >
+                    <RobotOutlined /> AI 问答
+                  </a-button>
                   <a-dropdown :trigger="['click']">
                     <a-button size="small" type="text"><MoreOutlined /></a-button>
                     <template #overlay>
@@ -230,6 +245,7 @@ import {
   MoreOutlined,
   PlusOutlined,
   ReloadOutlined,
+  RobotOutlined,
   SearchOutlined,
 } from '@ant-design/icons-vue'
 import {
@@ -240,8 +256,10 @@ import {
   type ServerAuthType,
 } from '@/api'
 import { useAuthStore } from '@/stores/auth'
+import { useIsMobile } from '@/utils/useIsMobile'
 
 const auth = useAuthStore()
+const isMobile = useIsMobile()
 
 const simpleEmpty = Empty.PRESENTED_IMAGE_SIMPLE
 
@@ -335,6 +353,21 @@ function connect(item: OpsServer) {
   // 普通标签页而不是弹出窗口。
   const { href } = router.resolve({ name: 'OpsServerTerminal', params: { id: item.id } })
   window.open(href, '_blank', 'noopener')
+}
+
+/** 双击进终端只在桌面端生效：手机端没有终端页。 */
+function onCardDblClick(item: OpsServer) {
+  if (!isMobile.value) connect(item)
+}
+
+/** AI 问答：桌面端新标签页打开，手机端直接整页切换。 */
+function openChat(item: OpsServer) {
+  const { href } = router.resolve({ name: 'OpsServerChat', params: { id: item.id } })
+  if (isMobile.value) {
+    void router.push(href)
+  } else {
+    window.open(href, '_blank', 'noopener')
+  }
 }
 
 function confirmDelete(item: OpsServer) {
@@ -808,5 +841,42 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 手机断点（≤768px）：固定高度会让统计 + 列表 + 审计出现两段以上嵌套滚动，
+   这里全部改成内容撑开、由外层内容区统一滚动。终端入口已换成 AI 问答，
+   所以列表卡片不再需要为终端窗口预留高度。 */
+@media (max-width: 768px) {
+  .ops-page {
+    height: auto;
+    gap: 8px;
+  }
+  .stats-row {
+    gap: 8px;
+  }
+  .stat-card {
+    padding: 10px 12px;
+  }
+  .ops-body {
+    overflow: visible;
+  }
+  .list-panel {
+    height: auto;
+  }
+  .audit-panel {
+    height: auto;
+  }
+  .list-wrap {
+    flex: none;
+    overflow: visible;
+  }
+  .server-list {
+    height: auto;
+    overflow: visible;
+  }
+  .audit-list {
+    height: auto;
+    overflow: visible;
+  }
 }
 </style>

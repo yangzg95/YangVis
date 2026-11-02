@@ -35,11 +35,10 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: 'dist',
       emptyOutDir: true,
-      // 1000KB：路由块与功能域 vendor 块一旦超过就是新增回归。
-      // 目前已知会超限的只有三块历史债，都在报告里登记过：
-      //   antd（全量注册遗留，改成按文件引入后才会降下来）
-      //   elk / elk.bundled（mermaid 与工作流画布各打了一份，待去重）
-      chunkSizeWarningLimit: 1000,
+      // 800KB：路由块与功能域 vendor 块一旦超过就是新增回归。
+      // 已知会超限的只有 antd（全量注册遗留，改成按文件引入后才会降下来）；
+      // elk 只由工作流画布的动态 import 引入，mermaid 内部复用同一份模块。
+      chunkSizeWarningLimit: 800,
       rollupOptions: {
         output: {
           // 按功能域切稳定 vendor 块：业务代码改动不会让这些大依赖的 hash 变化，

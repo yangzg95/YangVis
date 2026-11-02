@@ -50,7 +50,8 @@ export interface StreamHandlers {
   // ---- 手动压缩预览流（compact_meta → token* → compact_done）----
   onCompactMeta?: (data: CompactMeta) => void
   onCompactDone?: (data: { cut_message_id: number }) => void
-  onError?: (data: { code: number; message: string }) => void
+  /** 后端判定这次失败「再试一次可能就好」（目前只对模型调用超时置位）。 */
+  onError?: (data: { code: number; message: string; retryable?: boolean }) => void
   // ---- 工作流运行的进度事件（对话用不到这几项）----
 
   onRunStart?: (data: {

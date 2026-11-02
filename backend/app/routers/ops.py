@@ -62,6 +62,7 @@ from app.models.schemas import (
     DbTableDefUpdate,
     DbTableDdl,
     DbTableItem,
+    DbTableStructure,
     ListResponse,
     OpsAuditItem,
     OpsDatabaseCreate,
@@ -613,6 +614,30 @@ async def list_database_table_foreign_keys(
         raise _browse_error(exc) from exc
     _note_browse_success(service, row)
     return APIResponse(data=ListResponse(items=items, total=len(items)))
+
+
+@router.get(
+    "/databases/{database_id}/schemas/{schema}/tables/{table}/structure",
+    response_model=APIResponse[DbTableStructure],
+)
+async def read_database_table_structure(
+    database_id: int,
+    schema: str,
+    table: str,
+    service: db_ops.OpsDatabaseService = Depends(get_database_service),
+) -> APIResponse[DbTableStructure]:
+    """结构页签的聚合端点：列、索引、外键一次取完，复用同一条只读连接。
+
+    单份元数据仍保留各自的端点（设计表等页面按需单独取）；这里是列表页
+    首屏那条贵的路径，合并后少两次建连。
+    """
+    row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
+    try:
+        data = await db_schema.table_structure(row, schema, table)
+    except db_ops.OpsDbError as exc:
+        raise _browse_error(exc) from exc
+    _note_browse_success(service, row)
+    return APIResponse(data=data)
 
 
 @router.get(
@@ -1264,7 +1289,7 @@ def _audit(
 def list_audit(
     target_type: Optional[str] = Query(default=None, pattern="^(server|database)$"),
     target_id: Optional[int] = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=200),
+    limit: int = Query(default=100, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     user: CurrentUser = Depends(require_user),
     db: Session = Depends(get_db),

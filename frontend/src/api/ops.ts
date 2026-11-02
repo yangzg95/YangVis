@@ -26,6 +26,7 @@ import type {
   DbTableDef,
   DbTableDefUpdate,
   DbTableItem,
+  DbTableStructure,
   OpsAuditItem,
   RedisElementAddPayload,
   RedisElementDeletePayload,
@@ -336,6 +337,13 @@ export const opsApi = {
   dbColumns: (id: number, schema: string, table: string) =>
     request<{ items: DbColumnItem[]; total: number }>({
       url: `/ops/databases/${id}/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/columns`,
+      timeout: 60000,
+      skipErrorToast: true,
+    }),
+  /** 结构页签的聚合端点：列、索引、外键一次拉齐，复用同一条只读连接。 */
+  dbTableStructure: (id: number, schema: string, table: string) =>
+    request<DbTableStructure>({
+      url: `/ops/databases/${id}/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/structure`,
       timeout: 60000,
       skipErrorToast: true,
     }),

@@ -19,8 +19,18 @@
       </div>
     </header>
 
+    <!-- 手机端只显示一个面板：查询台与 AI 问答各占满整屏，用分段切换，
+         避免 60vh + 60vh 上下堆叠后两头都要滚。 -->
+    <a-segmented
+      v-if="isMobile"
+      v-model:value="mobilePane"
+      :options="MOBILE_TABS"
+      block
+      class="mobile-switch"
+    />
+
     <div class="chat-main">
-      <div class="stage">
+      <div class="stage" v-show="!isMobile || mobilePane === 'query'">
         <!-- v-if=conn：连接信息没加载完之前不发任何查询/元数据请求。 -->
         <DbQueryTab
           v-if="conn"
@@ -40,19 +50,19 @@
       </div>
 
       <!-- 收起后右缘留一根竖条作为展开入口，和工作台页两侧面板的模式一致。 -->
-      <div v-if="!showAi" class="rail" @click="showAi = true">
+      <div v-if="!showAi && !isMobile" class="rail" @click="showAi = true">
         <LeftOutlined />
         <span class="rail-text">AI 问答</span>
       </div>
 
       <!-- 藏在缝隙里的拖拽条：负边距叠在 gap 上，不改变布局（与工作台页同款）。 -->
-      <div v-if="showAi" class="col-resizer" @mousedown="startAiDrag" />
+      <div v-if="showAi && !isMobile" class="col-resizer" @mousedown="startAiDrag" />
 
       <!-- v-show 而不是 v-if：折叠只是藏起来，会话和 WebSocket 都保住。 -->
-      <aside v-show="showAi" class="ai-panel" :style="{ width: `${aiWidth}px` }">
+      <aside v-show="isMobile ? mobilePane === 'ai' : showAi" class="ai-panel" :style="{ width: `${aiWidth}px` }">
         <div class="ai-head">
           <span>AI 问答</span>
-          <a-tooltip title="收起">
+          <a-tooltip v-if="!isMobile" title="收起">
             <button type="button" class="icon-btn" @click="showAi = false">
               <RightOutlined />
             </button>
@@ -97,13 +107,20 @@ import '@/components/ops/resizer.css'
 import { opsApi, type OpsDatabase } from '@/api'
 import { storageKeys } from '@/utils/storage'
 import { useThemeStore } from '@/stores/theme'
+import { useIsMobile } from '@/utils/useIsMobile'
 
 const themeStore = useThemeStore()
+const isMobile = useIsMobile()
 
 const CHAT_SAMPLES = [
   '这个库里最大的几张表是什么',
   '有没有正在跑的慢查询',
   '订单表的结构是怎样的',
+]
+
+const MOBILE_TABS = [
+  { value: 'ai', label: 'AI 问答' },
+  { value: 'query', label: '查询台' },
 ]
 
 const route = useRoute()
@@ -114,6 +131,8 @@ const connId = Number(route.params.id)
 const conn = ref<OpsDatabase | null>(null)
 const loadError = ref('')
 const showAi = ref(true)
+// 手机端同一时刻只显示一个面板，默认落在 AI 问答（这个页面本来就是问答入口）。
+const mobilePane = ref<'ai' | 'query'>('ai')
 const queryRef = ref<InstanceType<typeof DbQueryTab> | null>(null)
 
 // ---- AI 面板拖拽调宽 -----------------------------------------------------------
@@ -158,6 +177,8 @@ function back() {
 /** AI 回答里 SQL 代码块的「在查询框中打开」：填进编辑器，不自动执行。 */
 function onChatSql(sql: string) {
   queryRef.value?.setSql(sql)
+  // 手机端查询台是隐藏的另一屏，填完直接切过去，否则用户看不到反馈。
+  if (isMobile.value) mobilePane.value = 'query'
 }
 
 const chatRef = ref<InstanceType<typeof OpsChat> | null>(null)
@@ -165,6 +186,7 @@ const chatRef = ref<InstanceType<typeof OpsChat> | null>(null)
 /** 查询页「询问 AI」：面板是 v-show 常驻的，展开后直接发，不用等挂载。 */
 function onAskAi(payload: { connId: number; sql: string; error?: string; schema?: string }) {
   showAi.value = true
+  if (isMobile.value) mobilePane.value = 'ai'
   // 带上连接和默认库上下文，AI 才知道这条 SQL 是跑在哪个库上的。
   const where = `连接「${conn.value?.name ?? payload.connId}」${payload.schema ? ` 的库 \`${payload.schema}\`` : ''}`
   const prompt = payload.error
@@ -381,5 +403,65 @@ body.dragging-col .col-resizer::after {
 .statusbar-hint {
   margin-left: auto;
   white-space: nowrap;
+}
+
+/* 手机断点（≤768px）：不再上下并排两个 60vh 面板，改成分段切换、单屏占满。
+   分段控件贴在顶栏下，面板内部各自滚动，整页不再出现第二层纵向滚动。 */
+.mobile-switch {
+  flex-shrink: 0;
+  margin: 8px 12px 0;
+}
+
+@media (max-width: 768px) {
+  .chat-topbar {
+    padding: 0 8px;
+  }
+
+  /* 左上角已有返回箭头，右上角的文字按钮重复且占宽度。 */
+  .topbar-right {
+    display: none;
+  }
+
+  .mobile-switch {
+    margin: 8px 8px 0;
+  }
+
+  .chat-main {
+    padding: 8px;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .stage {
+    flex: 1;
+    height: auto;
+    min-height: 0;
+    padding: 8px;
+  }
+
+  .ai-panel {
+    flex: 1;
+    height: auto;
+    min-height: 0;
+  }
+
+  /* 分段控件已经表达了「切到查询台」，这里不再留一条重复的收起按钮。 */
+  .ai-head {
+    display: none;
+  }
+
+  .chat-statusbar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    height: auto;
+    padding: 6px 10px calc(6px + env(safe-area-inset-bottom));
+  }
+
+  .statusbar-hint {
+    margin-left: 0;
+    text-align: left;
+    white-space: normal;
+  }
 }
 </style>

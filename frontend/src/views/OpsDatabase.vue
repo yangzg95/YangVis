@@ -1,8 +1,8 @@
 <template>
   <div class="ops-page">
-    <!-- 手机端整个工作台不可用（SQL 编辑器、数据网格都是桌面交互），
-         换成桌面端提示；v-if 直接卸载，不留重组件 DOM。 -->
-    <DesktopNotice v-if="isMobile" sub-title="数据库工作台包含 SQL 编辑器、数据网格等桌面端交互，请在电脑或平板上使用。" />
+    <!-- 手机端换成独立只读浏览页：桌面工作台的树、SQL 编辑器、宽数据网格都依赖
+         鼠标交互，不复用；只沿用 opsApi 的数据契约。 -->
+    <DbMobileBrowser v-if="isMobile" />
     <div v-else class="ops-body">
       <!-- 收起后原位留一条竖条，否则面板消失了没有任何回来的入口。 -->
       <div v-if="!showList" class="rail" @click="showList = true">
@@ -367,7 +367,7 @@ import {
   TableOutlined,
 } from '@ant-design/icons-vue'
 import OpsChat from '@/components/OpsChat.vue'
-import DesktopNotice from '@/components/DesktopNotice.vue'
+import DbMobileBrowser from '@/components/ops/DbMobileBrowser.vue'
 import DbConnectionTree from '@/components/ops/DbConnectionTree.vue'
 import DbDataTab from '@/components/ops/DbDataTab.vue'
 import DbDesignTab from '@/components/ops/DbDesignTab.vue'
@@ -1089,8 +1089,8 @@ async function submit() {
   }
 }
 
-// 手机端不拉连接列表（工作台整个被桌面提示换掉）；窗口从手机拉宽回桌面时
-// keep-alive 不会重跑 onMounted，靠 watch 补一次加载。
+// 手机端由 DbMobileBrowser 自己拉连接列表，桌面工作台不重复请求；窗口从手机
+// 拉宽回桌面时 keep-alive 不会重跑 onMounted，靠 watch 补一次加载。
 const isMobile = useIsMobile()
 onMounted(() => {
   if (!isMobile.value) load()
@@ -1170,8 +1170,11 @@ body.dragging-col .col-resizer::after {
   gap: 8px;
 }
 
-/* 连接面板的内边距比通用卡片紧一档，和右侧工作台同一份密度。 */
-.list-panel :deep(.ant-card-body) {
+/* 连接面板与右侧工作台的内边距比通用卡片紧一档：DBX 的页签栏离面板边缘
+   只有一条窄缝，密度与工作台保持一致。 */
+.list-panel :deep(.ant-card-body),
+.main-panel :deep(.ant-card-body) {
+  position: relative;
   padding: var(--tool-gap) var(--grid-pad-inline);
 }
 
@@ -1262,12 +1265,6 @@ body.dragging-col .col-resizer::after {
   margin-left: 8px;
   font-size: var(--fs-xs);
   color: var(--text-3);
-}
-
-.main-panel :deep(.ant-card-body) {
-  position: relative;
-  /* 工作台卡片内边距贴住内容：DBX 的页签栏离面板边缘只有一条窄缝。 */
-  padding: var(--tool-gap) var(--grid-pad-inline);
 }
 
 .tab-label {

@@ -10,7 +10,7 @@ Redis 连接展开的是逻辑库，库列表由 :mod:`app.services.ops.db_redis
 from __future__ import annotations
 
 import asyncio
-from typing import Dict, List
+from typing import Any, Dict, List, Sequence
 
 import pymysql
 
@@ -29,9 +29,10 @@ from app.models.schemas import (
     DbSchemaItem,
     DbTableDdl,
     DbTableItem,
+    DbTableStructure,
 )
 from app.services.ops.database import OpsDbError
-from app.services.ops.db_exec import _password_of, _query_mysql
+from app.services.ops.db_exec import _connect_mysql, _password_of, _query_mysql
 from app.services.ops.db_redis import _list_redis_dbs
 
 # ---- 浏览（Navicat 式界面的数据源） -------------------------------------------
@@ -101,21 +102,34 @@ async def list_tables(item: OpsDatabase, schema: str) -> List[DbTableItem]:
     ]
 
 
-async def list_columns(item: OpsDatabase, schema: str, table: str) -> List[DbColumnItem]:
-    """一张表的列定义，按建表顺序。"""
-    sql = (
-        "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, "
-        "EXTRA, COLUMN_COMMENT, ORDINAL_POSITION "
-        "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s "
-        "ORDER BY ORDINAL_POSITION"
-    )
-    password = _password_of(item)
-    try:
-        _, rows, _, _ = await asyncio.to_thread(
-            _query_mysql, item, password, sql, _BROWSE_CAP, (schema, table)
-        )
-    except pymysql.Error as exc:
-        raise OpsDbError(f"读取表结构失败：{exc}") from exc
+# 结构页签的三份元数据各自一条 SQL；单条端点与聚合端点共用，避免口径漂移。
+_COLUMNS_SQL = (
+    "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, "
+    "EXTRA, COLUMN_COMMENT, ORDINAL_POSITION "
+    "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s "
+    "ORDER BY ORDINAL_POSITION"
+)
+
+_INDEXES_SQL = (
+    "SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME, CARDINALITY, "
+    "INDEX_TYPE, COMMENT "
+    "FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s "
+    "ORDER BY INDEX_NAME, SEQ_IN_INDEX"
+)
+
+_FOREIGN_KEYS_SQL = (
+    "SELECT k.CONSTRAINT_NAME, k.COLUMN_NAME, k.REFERENCED_TABLE_SCHEMA, "
+    "k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME, "
+    "IFNULL(r.UPDATE_RULE,''), IFNULL(r.DELETE_RULE,'') "
+    "FROM information_schema.KEY_COLUMN_USAGE k "
+    "LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS r "
+    "ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME "
+    "WHERE k.TABLE_SCHEMA=%s AND k.TABLE_NAME=%s AND k.REFERENCED_TABLE_NAME IS NOT NULL "
+    "ORDER BY k.CONSTRAINT_NAME, k.ORDINAL_POSITION"
+)
+
+
+def _parse_columns(rows: List[Sequence[Any]]) -> List[DbColumnItem]:
     return [
         DbColumnItem(
             name=str(r[0]),
@@ -129,6 +143,57 @@ async def list_columns(item: OpsDatabase, schema: str, table: str) -> List[DbCol
         )
         for r in rows
     ]
+
+
+def _parse_indexes(rows: List[Sequence[Any]]) -> List[DbIndexItem]:
+    grouped: Dict[str, DbIndexItem] = {}
+    for row in rows:
+        name = str(row[0])
+        entry = grouped.get(name)
+        if entry is None:
+            entry = DbIndexItem(
+                name=name,
+                primary=name == "PRIMARY",
+                unique=str(row[1]) in ("0", "False"),
+                index_type=str(row[5] or ""),
+                cardinality=int(row[4]) if row[4] is not None else None,
+                comment=str(row[6] or ""),
+            )
+            grouped[name] = entry
+        entry.columns.append(str(row[3]))
+    # 主键排最前，其余按名字；和 Navicat 的索引列表顺序一致。
+    return sorted(grouped.values(), key=lambda i: (not i.primary, i.name))
+
+
+def _parse_foreign_keys(rows: List[Sequence[Any]]) -> List[DbForeignKeyItem]:
+    grouped: Dict[str, DbForeignKeyItem] = {}
+    for row in rows:
+        name = str(row[0])
+        entry = grouped.get(name)
+        if entry is None:
+            entry = DbForeignKeyItem(
+                name=name,
+                ref_schema=str(row[2] or ""),
+                ref_table=str(row[3] or ""),
+                on_update=str(row[5] or ""),
+                on_delete=str(row[6] or ""),
+            )
+            grouped[name] = entry
+        entry.columns.append(str(row[1]))
+        entry.ref_columns.append(str(row[4] or ""))
+    return sorted(grouped.values(), key=lambda f: f.name)
+
+
+async def list_columns(item: OpsDatabase, schema: str, table: str) -> List[DbColumnItem]:
+    """一张表的列定义，按建表顺序。"""
+    password = _password_of(item)
+    try:
+        _, rows, _, _ = await asyncio.to_thread(
+            _query_mysql, item, password, _COLUMNS_SQL, _BROWSE_CAP, (schema, table)
+        )
+    except pymysql.Error as exc:
+        raise OpsDbError(f"读取表结构失败：{exc}") from exc
+    return _parse_columns(rows)
 
 
 async def list_completion_meta(item: OpsDatabase, schema: str) -> List[DbCompletionTable]:
@@ -194,75 +259,58 @@ async def table_ddl(item: OpsDatabase, schema: str, table: str) -> DbTableDdl:
 
 async def list_indexes(item: OpsDatabase, schema: str, table: str) -> List[DbIndexItem]:
     """一张表的索引，联合索引按列序归拢。"""
-    sql = (
-        "SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME, CARDINALITY, "
-        "INDEX_TYPE, COMMENT "
-        "FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s "
-        "ORDER BY INDEX_NAME, SEQ_IN_INDEX"
-    )
     password = _password_of(item)
     try:
         _, rows, _, _ = await asyncio.to_thread(
-            _query_mysql, item, password, sql, _BROWSE_CAP, (schema, table)
+            _query_mysql, item, password, _INDEXES_SQL, _BROWSE_CAP, (schema, table)
         )
     except pymysql.Error as exc:
         raise OpsDbError(f"读取索引失败：{exc}") from exc
-
-    grouped: Dict[str, DbIndexItem] = {}
-    for row in rows:
-        name = str(row[0])
-        entry = grouped.get(name)
-        if entry is None:
-            entry = DbIndexItem(
-                name=name,
-                primary=name == "PRIMARY",
-                unique=str(row[1]) in ("0", "False"),
-                index_type=str(row[5] or ""),
-                cardinality=int(row[4]) if row[4] is not None else None,
-                comment=str(row[6] or ""),
-            )
-            grouped[name] = entry
-        entry.columns.append(str(row[3]))
-    # 主键排最前，其余按名字；和 Navicat 的索引列表顺序一致。
-    return sorted(grouped.values(), key=lambda i: (not i.primary, i.name))
+    return _parse_indexes(rows)
 
 
 async def list_foreign_keys(item: OpsDatabase, schema: str, table: str) -> List[DbForeignKeyItem]:
     """一张表上的外键约束（联合外键按列序合并成一条）。"""
-    sql = (
-        "SELECT k.CONSTRAINT_NAME, k.COLUMN_NAME, k.REFERENCED_TABLE_SCHEMA, "
-        "k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME, "
-        "IFNULL(r.UPDATE_RULE,''), IFNULL(r.DELETE_RULE,'') "
-        "FROM information_schema.KEY_COLUMN_USAGE k "
-        "LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS r "
-        "ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME "
-        "WHERE k.TABLE_SCHEMA=%s AND k.TABLE_NAME=%s AND k.REFERENCED_TABLE_NAME IS NOT NULL "
-        "ORDER BY k.CONSTRAINT_NAME, k.ORDINAL_POSITION"
-    )
     password = _password_of(item)
     try:
         _, rows, _, _ = await asyncio.to_thread(
-            _query_mysql, item, password, sql, _BROWSE_CAP, (schema, table)
+            _query_mysql, item, password, _FOREIGN_KEYS_SQL, _BROWSE_CAP, (schema, table)
         )
     except pymysql.Error as exc:
         raise OpsDbError(f"读取外键失败：{exc}") from exc
+    return _parse_foreign_keys(rows)
 
-    grouped: Dict[str, DbForeignKeyItem] = {}
-    for row in rows:
-        name = str(row[0])
-        entry = grouped.get(name)
-        if entry is None:
-            entry = DbForeignKeyItem(
-                name=name,
-                ref_schema=str(row[2] or ""),
-                ref_table=str(row[3] or ""),
-                on_update=str(row[5] or ""),
-                on_delete=str(row[6] or ""),
-            )
-            grouped[name] = entry
-        entry.columns.append(str(row[1]))
-        entry.ref_columns.append(str(row[4] or ""))
-    return sorted(grouped.values(), key=lambda f: f.name)
+
+def _table_structure_sync(
+    item: OpsDatabase, password: str, schema: str, table: str
+) -> DbTableStructure:
+    """一条只读连接跑完三份元数据查询。
+
+    结构页签本来要发三次请求、建三次会话；这里合成一次，连接复用后往返从
+    3 次握手降到 1 次。SQL 与单条端点完全一致（同一批常量）。
+    """
+    conn = _connect_mysql(item, password, database=schema)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_COLUMNS_SQL, (schema, table))
+            columns = _parse_columns(list(cur.fetchmany(_BROWSE_CAP + 1)))
+            cur.execute(_INDEXES_SQL, (schema, table))
+            indexes = _parse_indexes(list(cur.fetchmany(_BROWSE_CAP + 1)))
+            cur.execute(_FOREIGN_KEYS_SQL, (schema, table))
+            foreign_keys = _parse_foreign_keys(list(cur.fetchmany(_BROWSE_CAP + 1)))
+    except pymysql.Error as exc:
+        raise OpsDbError(f"读取表结构失败：{exc}") from exc
+    finally:
+        conn.close()
+    return DbTableStructure(
+        columns=columns, indexes=indexes, foreign_keys=foreign_keys
+    )
+
+
+async def table_structure(item: OpsDatabase, schema: str, table: str) -> DbTableStructure:
+    """结构页签的聚合端点：列 + 索引 + 外键一次返回。"""
+    password = _password_of(item)
+    return await asyncio.to_thread(_table_structure_sync, item, password, schema, table)
 
 
 # 关系两端都取：TABLE_NAME 侧是「引用别人的人」，REFERENCED_TABLE_NAME 侧是「被引用的人」。

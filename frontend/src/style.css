@@ -82,6 +82,28 @@
   --warning-on-dark-bg-strong: rgba(250, 173, 20, 0.18);
   --warning-on-dark-border: rgba(250, 173, 20, 0.45);
   --danger-on-dark-bg: rgba(255, 77, 79, 0.18);
+  /* 深色终端页的页面底比 --ink 再深一层；连接状态点的「空闲」档是中性灰蓝。 */
+  --term-dark-bg: #0d141b;
+  --dot-on-dark: #6e7a86;
+  /* 终端页的浅色主题由顶栏灯泡切换，和站点明暗无关，因此这组值只在 :root
+     定义、不在暗色主题里翻转；组件里不要再写死这些浅色色值。 ------------ */
+  --term-light-bg: #f0f2f5;
+  --term-light-surface: #ffffff;
+  --term-light-text: #1a1a1a;
+  --term-light-text-2: #666666;
+  --term-light-text-3: #999999;
+  --term-light-icon: #cccccc;
+  --term-light-line: #e0e0e0;
+  --term-light-border: rgba(0, 0, 0, 0.2);
+  --term-light-hover: rgba(0, 0, 0, 0.06);
+  --term-light-accent: #0080ff;
+  --term-light-accent-bg: rgba(0, 128, 255, 0.1);
+  --term-light-accent-bg-strong: rgba(0, 128, 255, 0.12);
+  --term-light-accent-border: rgba(0, 128, 255, 0.4);
+  --term-light-accent-line: rgba(0, 128, 255, 0.5);
+  --term-light-dot-idle: #bbbbbb;
+  --term-light-status-ok: #52c41a;
+  --term-light-status-warn: #faad14;
 
   /* -- 圆角层级：小元素 / 控件 / 卡片；药丸只留给状态标签 --------------- */
   --radius-sm: 4px;

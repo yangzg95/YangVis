@@ -407,6 +407,7 @@ import { errorText } from '@/utils/errors'
 import { createPollLoop } from '@/utils/polling'
 import { useIsMobile } from '@/utils/useIsMobile'
 import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
+import { comparisonColumns, docColumns, resumeColumns } from './resumeColumns'
 
 const simpleEmpty = Empty.PRESENTED_IMAGE_SIMPLE
 const router = useRouter()
@@ -424,12 +425,6 @@ const loadingDocs = ref(false)
 const creatingDoc = ref(false)
 const docsLoaded = ref(false)
 const docRename = reactive({ open: false, loading: false, id: 0, title: '' })
-
-const docColumns = [
-  { key: 'title', title: '简历', dataIndex: 'title', ellipsis: true },
-  { key: 'updated_at', title: '更新时间', dataIndex: 'updated_at', width: 220 },
-  { key: 'actions', title: '操作', width: 300 },
-]
 
 async function loadDocs(force = false) {
   if (loadingDocs.value || (docsLoaded.value && !force)) return
@@ -550,22 +545,6 @@ const previewDrawer = reactive({
   size: 0,
   content: '',
 })
-
-const resumeColumns = [
-  { key: 'title', title: '简历', dataIndex: 'title', ellipsis: true },
-  { key: 'size', title: '大小', dataIndex: 'size', width: 90 },
-  { key: 'description', title: '描述', dataIndex: 'description', ellipsis: true },
-  { key: 'status', title: '状态', dataIndex: 'status', width: 110 },
-  { key: 'created_at', title: '上传时间', dataIndex: 'created_at', width: 180 },
-  { key: 'actions', title: '操作', width: 300 },
-]
-
-const comparisonColumns = [
-  { key: 'title', title: '对比', dataIndex: 'title', ellipsis: true },
-  { key: 'status', title: '状态', dataIndex: 'status', width: 110 },
-  { key: 'created_at', title: '发起时间', dataIndex: 'created_at', width: 180 },
-  { key: 'actions', title: '操作', width: 180 },
-]
 
 const rowSelection = computed(() => ({
   selectedRowKeys: selectedIds.value,

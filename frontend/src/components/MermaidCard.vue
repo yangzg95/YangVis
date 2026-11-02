@@ -60,7 +60,7 @@ let mermaidRenderSeq = 0
 </script>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
 import { message as toast } from 'ant-design-vue'
 import { CopyOutlined, DownloadOutlined, EditOutlined } from '@ant-design/icons-vue'
 import { copyText } from '@/utils/clipboard'
@@ -123,7 +123,28 @@ async function render(source: string) {
 }
 
 // source 变化（含父组件保存后回写）时重新渲染。immediate 覆盖首屏。
-watch(() => props.source, (source) => void render(source), { immediate: true })
+// 首次立即渲染；之后的变更合并到 300ms 后一次，避免连续回写触发多次重排。
+let renderTimer: ReturnType<typeof setTimeout> | null = null
+let renderedOnce = false
+
+function scheduleRender(source: string) {
+  if (!renderedOnce) {
+    renderedOnce = true
+    void render(source)
+    return
+  }
+  if (renderTimer) clearTimeout(renderTimer)
+  renderTimer = setTimeout(() => {
+    renderTimer = null
+    void render(source)
+  }, 300)
+}
+
+watch(() => props.source, (source) => scheduleRender(source), { immediate: true })
+
+onBeforeUnmount(() => {
+  if (renderTimer) clearTimeout(renderTimer)
+})
 
 // 明暗切换：mermaid 是全局单例，先重配主题再重绘当前图。
 watch(

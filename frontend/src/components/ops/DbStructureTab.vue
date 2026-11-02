@@ -64,7 +64,7 @@
         size="small"
         :data-source="indexes"
         :columns="INDEX_GRID"
-        :loading="indexesLoading"
+        :loading="loading"
         :pagination="false"
         :scroll="{ x: 'max-content', y: scrollY }"
         row-key="name"
@@ -88,7 +88,7 @@
         size="small"
         :data-source="foreignKeys"
         :columns="FK_GRID"
-        :loading="foreignKeysLoading"
+        :loading="loading"
         :pagination="false"
         :scroll="{ x: 'max-content', y: scrollY }"
         row-key="name"
@@ -117,7 +117,7 @@
         <a-button size="small" :disabled="!ddl.text" @click="copyDdl">
           <CopyOutlined /> 复制
         </a-button>
-        <a-button size="small" :disabled="!ddl.text" @click="formatDdl">
+        <a-button size="small" :disabled="!ddl.text || formatting" :loading="formatting" @click="formatDdl">
           <AlignLeftOutlined /> 格式化
         </a-button>
         <span class="ddl-hint">只读；改结构请用「设计表」。</span>
@@ -131,7 +131,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { nextTick, onMounted, onBeforeUnmount, reactive, ref } from 'vue'
 import {
   AlignLeftOutlined,
   CodeOutlined,
@@ -141,7 +141,7 @@ import {
   TableOutlined,
 } from '@ant-design/icons-vue'
 import { message as toast } from 'ant-design-vue'
-import { format as formatSql } from 'sql-formatter'
+import { formatSql } from '@/utils/sqlFormat'
 import {
   opsApi,
   type DbColumnItem,
@@ -191,11 +191,6 @@ const indexes = ref<DbIndexItem[]>([])
 const foreignKeys = ref<DbForeignKeyItem[]>([])
 
 const loading = ref(false)
-// 索引/外键是另两次 information_schema 查询：切到对应视图才拉，拉过一次就留着。
-const indexesLoaded = ref(false)
-const foreignKeysLoaded = ref(false)
-const indexesLoading = ref(false)
-const foreignKeysLoading = ref(false)
 
 const counts = reactive<Record<StructureView, number | null>>({
   columns: null,
@@ -218,12 +213,20 @@ function onResize() {
   windowWidth.value = window.innerWidth
 }
 
-async function loadColumns() {
+/**
+ * 结构页签一次拉齐列、索引、外键：后端复用同一条只读连接，比拆三次请求
+ * 少两次建连；切换视图纯前端渲染，不再补请求。
+ */
+async function load() {
   loading.value = true
   try {
-    const res = await opsApi.dbColumns(props.connId, props.schema, props.table)
-    columns.value = res.items
-    counts.columns = res.items.length
+    const res = await opsApi.dbTableStructure(props.connId, props.schema, props.table)
+    columns.value = res.columns
+    indexes.value = res.indexes
+    foreignKeys.value = res.foreign_keys
+    counts.columns = res.columns.length
+    counts.indexes = res.indexes.length
+    counts.foreignKeys = res.foreign_keys.length
     // 表头随数据渲染出来后才占高度，等量一下再重算表格体高度。
     await nextTick()
     measureScrollY()
@@ -231,59 +234,6 @@ async function loadColumns() {
     toast.error(err?.message || '加载失败')
   } finally {
     loading.value = false
-  }
-}
-
-async function loadIndexes() {
-  if (indexesLoaded.value) return
-  indexesLoading.value = true
-  try {
-    const res = await opsApi.dbIndexes(props.connId, props.schema, props.table)
-    indexes.value = res.items
-    counts.indexes = res.items.length
-    indexesLoaded.value = true
-    await nextTick()
-    measureScrollY()
-  } catch (err: any) {
-    toast.error(err?.message || '加载失败')
-  } finally {
-    indexesLoading.value = false
-  }
-}
-
-async function loadForeignKeys() {
-  if (foreignKeysLoaded.value) return
-  foreignKeysLoading.value = true
-  try {
-    const res = await opsApi.dbForeignKeys(props.connId, props.schema, props.table)
-    foreignKeys.value = res.items
-    counts.foreignKeys = res.items.length
-    foreignKeysLoaded.value = true
-    await nextTick()
-    measureScrollY()
-  } catch (err: any) {
-    toast.error(err?.message || '加载失败')
-  } finally {
-    foreignKeysLoading.value = false
-  }
-}
-
-watch(view, (target) => {
-  if (target === 'indexes') void loadIndexes()
-  else if (target === 'foreignKeys') void loadForeignKeys()
-  else void nextTick(measureScrollY)
-})
-
-async function load() {
-  // 刷新是「当前视图重取」，顺带把已加载过的其他视图一起更新，
-  // 免得三个视图间出现新旧混杂的结构。
-  await loadColumns()
-  if (view.value === 'indexes') {
-    indexesLoaded.value = false
-    await loadIndexes()
-  } else if (view.value === 'foreignKeys') {
-    foreignKeysLoaded.value = false
-    await loadForeignKeys()
   }
 }
 
@@ -313,21 +263,37 @@ async function copyDdl() {
   else toast.error('复制失败，浏览器拒绝了剪贴板访问')
 }
 
+// 格式化整段 DDL 是同步 CPU 活，大表下会卡主线程；推迟到 300ms 后再跑，
+//
+// 期间按钮显示 loading，连续点击也只会落一次。
+const formatting = ref(false)
+let formatTimer: ReturnType<typeof setTimeout> | null = null
+
 function formatDdl() {
-  try {
-    // 只格式化展示，取回的原文仍是 SHOW CREATE TABLE 的输出。
-    ddl.text = formatSql(ddl.text, { language: 'mysql' })
-  } catch {
-    toast.warning('这段语句没能格式化，保持原样')
-  }
+  if (formatTimer) clearTimeout(formatTimer)
+  formatting.value = true
+  formatTimer = setTimeout(() => {
+    formatTimer = null
+    try {
+      // 只格式化展示，取回的原文仍是 SHOW CREATE TABLE 的输出。
+      ddl.text = formatSql(ddl.text)
+    } catch {
+      toast.warning('这段语句没能格式化，保持原样')
+    } finally {
+      formatting.value = false
+    }
+  }, 300)
 }
 
 onMounted(() => {
-  void loadColumns()
+  void load()
   window.addEventListener('resize', onResize)
 })
 
-onBeforeUnmount(() => window.removeEventListener('resize', onResize))
+onBeforeUnmount(() => {
+  if (formatTimer) clearTimeout(formatTimer)
+  window.removeEventListener('resize', onResize)
+})
 </script>
 
 <style scoped>

@@ -158,6 +158,10 @@ function onSavePart(index: number, source: string) {
 .msg {
   display: flex;
   margin-bottom: 14px;
+  /* 历史消息离屏跳过渲染：长会话不再一次性布局全部 DOM。auto 让浏览器
+     记住上次实测高度，来回滚动时不会因估算高度而跳动。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
 }
 .msg.user {
   justify-content: flex-end;

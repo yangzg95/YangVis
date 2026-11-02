@@ -15,6 +15,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass
+from functools import lru_cache
 
 from app.config import Settings, get_settings
 from app.services.chunking import normalise
@@ -181,6 +182,13 @@ def read_image_data_url(rel_path: str, mime: str | None) -> str | None:
     if not is_safe_rel_path(rel_path):
         logger.warning("chat image replay rejected, unsafe rel_path: %r", rel_path)
         return None
+    return _cached_data_url(rel_path, mime)
+
+
+# 回放同一张图会反复读盘 + base64：一轮多图问答里同一张历史图片可能被拼进
+# 每个 ReAct 步骤。带容量上限的缓存只留最近几张，5MB 上限的图 × 4 也能兜住。
+@lru_cache(maxsize=4)
+def _cached_data_url(rel_path: str, mime: str | None) -> str | None:
     path = settings.upload_media_path / rel_path
     try:
         raw = path.read_bytes()
@@ -202,3 +210,7 @@ def delete_stored(rel_path: str | None) -> None:
         path.unlink(missing_ok=True)
     except OSError as exc:
         logger.warning("chat attachment delete failed: %s (%s)", path, exc)
+    else:
+        # 删除成功后清掉缓存：同一路径不会再被写入（文件名是随机 id），
+        # 但缓存里若还留着刚删掉的内容，回放就会拿到已不存在的图。
+        _cached_data_url.cache_clear()

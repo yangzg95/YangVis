@@ -51,7 +51,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref } from 'vue'
 import { WarningOutlined } from '@ant-design/icons-vue'
 import type { OpsAction } from '@/api'
 
@@ -139,28 +139,43 @@ const resultTruncatable = computed(() => {
   return text.split('\n').length > 3 || text.length > 160
 })
 
-onMounted(() => {
-  if (props.action.status === 'pending') {
-    // 挂载时就已经过期（本地 created_at + 窗口 < now）：不装表，直接切超时。
-    if (remainingSeconds.value <= 0) {
-      emit('expired', props.action)
-      return
-    }
-    timer = setInterval(() => {
-      now.value = Date.now()
-      // 归零后停表：displayStatus 已经切到 expired，不用再 tick。
-      if (remainingSeconds.value <= 0 && timer) {
-        clearInterval(timer)
-        timer = undefined
-        emit('expired', props.action)
-      }
-    }, 1000)
+/** 计时只在页面处于激活状态时跑：keep-alive 缓存期间停表，切回来再用真实
+ *  时间重算剩余秒数，不会拿着切走前的 now 值多等几秒。 */
+function stopTimer() {
+  if (timer) {
+    clearInterval(timer)
+    timer = undefined
   }
-})
+}
 
-onBeforeUnmount(() => {
-  if (timer) clearInterval(timer)
-})
+// 归零只通知一次：首次挂载时 onMounted 与 onActivated 会连续触发，第二次
+// 进来时 remainingSeconds 已经是 0，不能重复 emit。
+let expiredNotified = false
+
+function startTimer() {
+  if (timer || props.action.status !== 'pending' || expiredNotified) return
+  now.value = Date.now()
+  // 挂载/切回来时就已经过期（本地 created_at + 窗口 < now）：不装表，直接切超时。
+  if (remainingSeconds.value <= 0) {
+    expiredNotified = true
+    emit('expired', props.action)
+    return
+  }
+  timer = setInterval(() => {
+    now.value = Date.now()
+    // 归零后停表：displayStatus 已经切到 expired，不用再 tick。
+    if (remainingSeconds.value <= 0) {
+      stopTimer()
+      expiredNotified = true
+      emit('expired', props.action)
+    }
+  }, 1000)
+}
+
+onMounted(startTimer)
+onActivated(startTimer)
+onDeactivated(stopTimer)
+onBeforeUnmount(stopTimer)
 </script>
 
 <style scoped>

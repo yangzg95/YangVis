@@ -390,14 +390,14 @@ onBeforeUnmount(cancelAutoReconnect)
   box-sizing: border-box;
 }
 
-/* 深色独立世界：页面底比终端 (#11181f) 略深一层，顶/底栏与终端同色，
+/* 深色独立世界：页面底比终端（--ink）略深一层，顶/底栏与终端同色，
    强调青沿用终端光标色。不套站点浅色变量——这是另一个语境。 */
 .term-page {
   display: flex;
   flex-direction: column;
   height: 100vh;
   height: 100dvh;
-  background: #0d141b;
+  background: var(--term-dark-bg);
   color: var(--text-dark);
 }
 
@@ -449,7 +449,7 @@ onBeforeUnmount(cancelAutoReconnect)
    注意 ant-design-vue 4 渲染出的类名是 ant-btn-background-ghost，不是 ant-btn-ghost。 */
 .term-topbar :deep(.ant-btn-background-ghost) {
   color: var(--text-dark);
-  border-color: rgba(255, 255, 255, 0.25);
+  border-color: var(--on-dark-border-strong);
 }
 
 .term-topbar :deep(.ant-btn-background-ghost:hover) {
@@ -498,7 +498,7 @@ onBeforeUnmount(cancelAutoReconnect)
 }
 
 .rail-btn.active {
-  background: rgba(58, 214, 222, 0.15);
+  background: var(--signal-on-dark-bg-strong);
   color: var(--signal-bright);
 }
 
@@ -567,7 +567,7 @@ onBeforeUnmount(cancelAutoReconnect)
   min-width: 16px;
   padding: 0 4px;
   border-radius: var(--radius-md);
-  background: rgba(58, 214, 222, 0.2);
+  background: var(--signal-on-dark-bg-strong);
   color: var(--signal-bright);
   font-size: var(--fs-xs);
   line-height: 16px;
@@ -658,7 +658,7 @@ onBeforeUnmount(cancelAutoReconnect)
 }
 
 .ai-rail:hover {
-  border-color: rgba(58, 214, 222, 0.45);
+  border-color: var(--signal-on-dark-border);
   color: var(--signal-bright);
 }
 
@@ -668,7 +668,7 @@ onBeforeUnmount(cancelAutoReconnect)
   font-size: var(--fs-xs);
 }
 
-/* AI 面板与终端同底 (#11181f)，靠一道发丝线和终端区分开。
+/* AI 面板与终端同底（--ink），靠一道发丝线和终端区分开。
    宽度由模板里的内联样式给（可拖拽），这里只定布局。 */
 .term-ai {
   position: relative;
@@ -706,7 +706,7 @@ onBeforeUnmount(cancelAutoReconnect)
 
 .ai-resizer:hover::after,
 body.dragging-col .ai-resizer::after {
-  background: rgba(58, 214, 222, 0.6);
+  background: var(--signal-on-dark-border-hover);
 }
 
 .ai-head {
@@ -758,7 +758,7 @@ body.dragging-col .ai-resizer::after {
   height: 8px;
   flex-shrink: 0;
   border-radius: 50%;
-  background: #6e7a86;
+  background: var(--dot-on-dark);
 }
 
 .conn-dot.connecting {
@@ -774,152 +774,153 @@ body.dragging-col .ai-resizer::after {
   color: var(--text-dark-2);
 }
 
-/* ---- 浅色主题：整页从深色世界切到浅色世界 -------------------------------- */
+/* ---- 浅色主题：整页从深色世界切到浅色世界 --------------------------------
+   --term-light-* 不随站点主题翻转，见 style.css 中的定义。 */
 .term-light {
-  background: #f0f2f5;
-  color: #1a1a1a;
+  background: var(--term-light-bg);
+  color: var(--term-light-text);
 }
 
 .term-light .term-topbar {
-  background: #fff;
-  border-bottom-color: #e0e0e0;
+  background: var(--term-light-surface);
+  border-bottom-color: var(--term-light-line);
 }
 
 .term-light .server-name {
-  color: #1a1a1a;
+  color: var(--term-light-text);
 }
 
 .term-light .server-name.muted {
-  color: #666;
+  color: var(--term-light-text-2);
 }
 
 .term-light .server-addr {
-  color: #666;
+  color: var(--term-light-text-2);
 }
 
 .term-light .conn-text {
-  color: #666;
+  color: var(--term-light-text-2);
 }
 
 .term-light .term-topbar :deep(.ant-btn-background-ghost) {
-  color: #333;
-  border-color: rgba(0, 0, 0, 0.2);
+  color: var(--term-light-text-2);
+  border-color: var(--term-light-border);
 }
 
 .term-light .term-topbar :deep(.ant-btn-background-ghost:hover) {
-  color: #0080ff;
-  border-color: #0080ff;
+  color: var(--term-light-accent);
+  border-color: var(--term-light-accent);
 }
 
 .term-light .icon-btn,
 .term-light .rail-btn {
-  color: #666;
+  color: var(--term-light-text-2);
 }
 
 .term-light .icon-btn:hover,
 .term-light .rail-btn:hover {
-  background: rgba(0, 0, 0, 0.06);
-  color: #1a1a1a;
+  background: var(--term-light-hover);
+  color: var(--term-light-text);
 }
 
 .term-light .rail-btn.active {
-  background: rgba(0, 128, 255, 0.1);
-  color: #0080ff;
+  background: var(--term-light-accent-bg);
+  color: var(--term-light-accent);
 }
 
 .term-light .term-rail {
-  border-right-color: #e0e0e0;
+  border-right-color: var(--term-light-line);
 }
 
 .term-light .term-files {
-  border-color: #e0e0e0;
-  background: #fff;
+  border-color: var(--term-light-line);
+  background: var(--term-light-surface);
 }
 
 .term-light .left-tabs {
-  border-bottom-color: #e0e0e0;
+  border-bottom-color: var(--term-light-line);
 }
 
 .term-light .left-tab {
-  color: #666;
+  color: var(--term-light-text-2);
 }
 
 .term-light .left-tab:hover {
-  color: #1a1a1a;
+  color: var(--term-light-text);
 }
 
 .term-light .left-tab.active {
-  color: #0080ff;
+  color: var(--term-light-accent);
 }
 
 .term-light .left-tab.active::after {
-  background: #0080ff;
+  background: var(--term-light-accent);
 }
 
 .term-light .tab-badge {
-  background: rgba(0, 128, 255, 0.12);
-  color: #0080ff;
+  background: var(--term-light-accent-bg-strong);
+  color: var(--term-light-accent);
 }
 
 .term-light .left-tab-close {
-  color: #999;
+  color: var(--term-light-text-3);
 }
 
 .term-light .left-tab-close:hover {
-  background: rgba(0, 0, 0, 0.06);
-  color: #333;
+  background: var(--term-light-hover);
+  color: var(--term-light-text);
 }
 
 .term-light .term-error {
-  background: #fff;
-  color: #666;
+  background: var(--term-light-surface);
+  color: var(--term-light-text-2);
 }
 
 .term-light .term-error-icon {
-  color: #ccc;
+  color: var(--term-light-icon);
 }
 
 .term-light .ai-rail {
-  border-color: #e0e0e0;
-  background: #fff;
-  color: #666;
+  border-color: var(--term-light-line);
+  background: var(--term-light-surface);
+  color: var(--term-light-text-2);
 }
 
 .term-light .ai-rail:hover {
-  border-color: rgba(0, 128, 255, 0.4);
-  color: #0080ff;
+  border-color: var(--term-light-accent-border);
+  color: var(--term-light-accent);
 }
 
 .term-light .term-ai {
-  border-color: #e0e0e0;
-  background: #fff;
+  border-color: var(--term-light-line);
+  background: var(--term-light-surface);
 }
 
 .term-light .ai-resizer:hover::after,
 .term-light body.dragging-col .ai-resizer::after {
-  background: rgba(0, 128, 255, 0.5);
+  background: var(--term-light-accent-line);
 }
 
 .term-light .ai-head {
-  border-bottom-color: #e0e0e0;
-  color: #1a1a1a;
+  border-bottom-color: var(--term-light-line);
+  color: var(--term-light-text);
 }
 
 .term-light .term-statusbar {
-  background: #fff;
-  border-top-color: #e0e0e0;
-  color: #666;
+  background: var(--term-light-surface);
+  border-top-color: var(--term-light-line);
+  color: var(--term-light-text-2);
 }
 
 .term-light .conn-dot {
-  background: #bbb;
+  background: var(--term-light-dot-idle);
 }
 
 .term-light .conn-dot.connected {
-  background: #52c41a;
+  background: var(--term-light-status-ok);
 }
 
 .term-light .conn-dot.connecting {
-  background: #faad14;
+  background: var(--term-light-status-warn);
 }
 </style>

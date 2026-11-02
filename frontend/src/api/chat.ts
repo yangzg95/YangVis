@@ -198,9 +198,10 @@ export const chatApi = {
     }),
   deleteConversation: (id: number) =>
     request<null>({ url: `/chat/conversations/${id}`, method: 'DELETE' }),
-  listMessages: (id: number) =>
+  listMessages: (id: number, params?: { limit?: number; before_id?: number }) =>
     request<{ items: ChatMessage[]; total: number }>({
       url: `/chat/conversations/${id}/messages`,
+      params,
     }),
   /** 改写一条助手消息的正文（手动改图的落库通道；改后历史即随之变化）。 */
   updateMessage: (id: number, content: string) =>

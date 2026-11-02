@@ -61,6 +61,13 @@ export interface DbTableDdl {
   ddl: string
 }
 
+/** 结构页签的聚合端点：三份元数据一次返回，省掉两次建连。 */
+export interface DbTableStructure {
+  columns: DbColumnItem[]
+  indexes: DbIndexItem[]
+  foreign_keys: DbForeignKeyItem[]
+}
+
 /** 一键备份存进网盘后的落点与规模。 */
 export interface DbBackupResult {
   /** 网盘里的完整路径，/apps/<应用名>/backups/ 之下。 */

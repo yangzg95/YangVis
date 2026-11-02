@@ -608,24 +608,33 @@ class ChatService:
     # -- 消息 ---------------------------------------------------------------
 
     def list_messages(
-        self, conversation_id: int, *, limit: Optional[int] = None
+        self,
+        conversation_id: int,
+        *,
+        limit: Optional[int] = None,
+        before_id: Optional[int] = None,
     ) -> List[MessageItem]:
         """回放历史消息（按时间正序）。
 
         ``limit`` 是「只取最近 N 条」：长会话的正文与引用是大 JSON，一次全量
         返回会把几十条消息塞进一个响应里。翻页从最新往回取，再反转成正序。
+
+        ``before_id`` 用于向上翻页：只取比该消息更早的一段，同样倒序取再反转。
         """
         self.get_conversation(conversation_id)
         stmt = (
             self._scope(select(ChatMessage), ChatMessage.owner_id)
             .where(ChatMessage.conversation_id == conversation_id)
         )
-        # 取最近 N 条时按 id 倒序再反转；全量回放按正序，直接顺序取。
-        stmt = stmt.order_by(ChatMessage.id.desc() if limit is not None else ChatMessage.id)
+        if before_id is not None:
+            stmt = stmt.where(ChatMessage.id < before_id)
+        # 取最近 N 条或向上翻页时按 id 倒序再反转；全量回放按正序，直接顺序取。
+        descending = limit is not None or before_id is not None
+        stmt = stmt.order_by(ChatMessage.id.desc() if descending else ChatMessage.id)
         if limit is not None:
             stmt = stmt.limit(limit)
         rows = list(self._db.scalars(stmt).all())
-        if limit is not None:
+        if descending:
             rows.reverse()
         attachments = self._attachments_by_message([row.id for row in rows])
         return [self.to_message(row, attachments.get(row.id)) for row in rows]
@@ -1153,12 +1162,18 @@ class ChatService:
             塞进一个笼统的问题效果好。
             """
             try:
-                hits = await self._knowledge.search(
-                    query,
-                    top_k=RETRIEVAL_TOP_K,
-                    project_id=project_id,
-                    type_ids=scope,
-                )
+                # 检索在读库时要用 session；SSE 期间请求级 session 已经 rollback
+                # 交还连接，这里自己开一个短 session，用完即关，不复用请求作用域。
+                from app.database import SessionLocal
+
+                with SessionLocal() as kb_db:
+                    knowledge = KnowledgeService(kb_db, self._owner_id)
+                    hits = await knowledge.search(
+                        query,
+                        top_k=RETRIEVAL_TOP_K,
+                        project_id=project_id,
+                        type_ids=scope,
+                    )
             except Exception as exc:
                 # 不拦：ToolNode 会把异常包成 ToolMessage 喂回模型，让它换个
                 # 查法重试。但只留在那里就完全不可见，这里记一笔。
@@ -1495,10 +1510,12 @@ class ChatService:
         sent_execs = 0
         deadline = time.monotonic() + ANSWER_WALL_CLOCK_LIMIT
 
-        # 先把回放消息拼好（这一步要读库），随后结束事务把连接还给池子：
-        # 生成阶段可能持续几十秒，期间没有 DB 访问，没必要把一条 MySQL 连接
-        # 钉在整段 SSE 上。落库走独立的短 session（见下方 _persist_message）。
-        replay_messages = self._replay(
+        # 先把回放消息拼好（这一步要读库、读图片附件并转 base64），随后结束事务
+        # 把连接还给池子：生成阶段可能持续几十秒，期间没有 DB 访问，没必要把
+        # 一条 MySQL 连接钉在整段 SSE 上。回放整体丢进线程池，事件循环不被同步
+        # 读库和磁盘 IO 阻塞；落库走独立的短 session（见下方 _persist_message）。
+        replay_messages = await asyncio.to_thread(
+            self._replay,
             conversation_id,
             question,
             question_persisted=question_persisted,

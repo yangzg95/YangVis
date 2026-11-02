@@ -25,6 +25,8 @@ export function useStickToBottom(
   pageActive: Ref<boolean>,
 ): StickToBottom {
   const stickToBottom = ref(true)
+  /** 已经排了一次渲染后的贴底，同一拍内的后续调用不再重复排队。 */
+  let scrollScheduled = false
 
   function onScroll() {
     const el = scrollEl.value
@@ -36,8 +38,10 @@ export function useStickToBottom(
 
   function scrollToBottom() {
     // keep-alive 缓存期间不在隐藏 DOM 上做强制布局。
-    if (!pageActive.value) return
+    if (!pageActive.value || scrollScheduled) return
+    scrollScheduled = true
     void nextTick(() => {
+      scrollScheduled = false
       const el = scrollEl.value
       if (el && stickToBottom.value) el.scrollTop = el.scrollHeight
     })
