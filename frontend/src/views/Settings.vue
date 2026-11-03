@@ -195,6 +195,136 @@
           </template>
         </a-list>
       </a-tab-pane>
+
+      <!-- ================= 消息通知 ================= -->
+      <a-tab-pane key="notify" tab="消息通知">
+        <a-alert type="info" show-icon class="gate-alert">
+          <template #message>通知走群机器人 Webhook</template>
+          <template #description>
+            工作流跑失败、AI 提议的运维命令待确认或已过期时，按订阅关系推一条消息。发送是旁路：
+            失败只留下发送记录，不影响任务本身。正文只带标题、原因和命令首词，不含 SQL 与密钥全文。
+          </template>
+        </a-alert>
+
+        <div class="toolbar toolbar--between toolbar--snug">
+          <span class="hint">一个渠道＝一个群机器人，订阅哪些事件按渠道各配。</span>
+          <a-button type="primary" @click="openNotifyCreate">
+            <PlusOutlined /> 新增渠道
+          </a-button>
+        </div>
+
+        <a-table
+          :data-source="notifyChannels"
+          :columns="notifyColumns"
+          row-key="id"
+          :loading="notifyLoading"
+          size="middle"
+          :pagination="false"
+          :scroll="{ x: 'max-content' }"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'kind'">
+              <a-tag>{{ kindLabel(record.kind) }}</a-tag>
+            </template>
+
+            <template v-else-if="column.key === 'webhook_url'">
+              <a-tooltip v-if="record.webhook_url_error" :title="record.webhook_url_error">
+                <span class="key-error">地址无法解密</span>
+              </a-tooltip>
+              <span v-else class="muted">{{ record.webhook_url || '—' }}</span>
+              <div v-if="record.secret_error" class="key-error">加签密钥无法解密</div>
+            </template>
+
+            <template v-else-if="column.key === 'events'">
+              <a-tag v-for="key in record.events" :key="key">{{ eventLabel(key) }}</a-tag>
+              <a-tooltip v-if="!record.events.length" title="没有订阅任何事件，这个渠道一条消息也不会发">
+                <span class="hint">未订阅</span>
+              </a-tooltip>
+            </template>
+
+            <template v-else-if="column.key === 'enabled'">
+              <a-switch
+                :checked="record.enabled"
+                size="small"
+                @change="(value: boolean) => onNotifyToggle(record, value)"
+              />
+            </template>
+
+            <template v-else-if="column.key === 'test'">
+              <a-tooltip v-if="record.last_test_ok" :title="notifyTestedAtText(record)">
+                <a-tag color="success">可用</a-tag>
+              </a-tooltip>
+              <a-tooltip v-else-if="record.last_test_error" :title="record.last_test_error">
+                <a-tag color="error">测试失败</a-tag>
+              </a-tooltip>
+              <a-tag v-else>未测试</a-tag>
+            </template>
+
+            <template v-else-if="column.key === 'action'">
+              <a-space>
+                <a-button
+                  size="small"
+                  :loading="notifyTestingId === record.id"
+                  @click="onNotifyTest(record)"
+                >
+                  测试
+                </a-button>
+                <a-button size="small" @click="openNotifyEdit(record)">编辑</a-button>
+                <a-popconfirm title="确认删除该渠道？" @confirm="onNotifyDelete(record.id)">
+                  <a-button size="small" danger>删除</a-button>
+                </a-popconfirm>
+              </a-space>
+            </template>
+          </template>
+        </a-table>
+
+        <div class="toolbar toolbar--between toolbar--snug notify-logs-head">
+          <span class="hint">最近发送记录（保留 7 天）。「为什么没收到」先来这里看有没有发出去。</span>
+          <a-button
+            size="small"
+            :loading="notifyLogLoading"
+            :disabled="notifyLogLoading"
+            @click="loadNotifyLogs"
+          >
+            刷新
+          </a-button>
+        </div>
+
+        <a-table
+          :data-source="notifyLogs"
+          :columns="notifyLogColumns"
+          row-key="id"
+          :loading="notifyLogLoading"
+          size="small"
+          :pagination="{ pageSize: 10 }"
+          :scroll="{ x: 'max-content' }"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'created_at'">
+              <span class="muted">{{ fmtDateTime(record.created_at) }}</span>
+            </template>
+            <template v-else-if="column.key === 'event'">
+              {{ eventLabel(record.event) }}
+            </template>
+            <template v-else-if="column.key === 'status'">
+              <a-tooltip v-if="record.error" :title="record.error">
+                <a-tag :color="record.status === 'sent' ? 'success' : 'error'">
+                  {{ record.status === 'sent' ? '已发送' : '失败' }}
+                </a-tag>
+              </a-tooltip>
+              <a-tag v-else :color="record.status === 'sent' ? 'success' : 'error'">
+                {{ record.status === 'sent' ? '已发送' : '失败' }}
+              </a-tag>
+            </template>
+            <template v-else-if="column.key === 'elapsed'">
+              {{ record.elapsed_ms === null ? '—' : `${record.elapsed_ms} ms` }}
+            </template>
+          </template>
+          <template #emptyText>
+            <a-empty description="还没有发送记录" />
+          </template>
+        </a-table>
+      </a-tab-pane>
     </a-tabs>
 
     <!-- ================= 记忆编辑弹窗 ================= -->
@@ -245,6 +375,81 @@
       <p class="hint bind-tip">
         绑定后，各模块的原文件会同步到你网盘的应用目录（/apps/应用名/）；之后解绑不会删除已同步的文件。
       </p>
+    </a-modal>
+
+    <a-modal
+      v-model:open="notifyModal.open"
+      :title="notifyModal.id ? '编辑渠道' : '新增渠道'"
+      :confirm-loading="notifyModal.loading"
+      ok-text="保存"
+      cancel-text="取消"
+      width="520px"
+      @ok="submitNotifyChannel"
+    >
+      <a-form layout="vertical">
+        <a-form-item label="名称" required>
+          <a-input
+            v-model:value="notifyModal.form.name"
+            :maxlength="64"
+            placeholder="例如：运维值班群"
+          />
+        </a-form-item>
+        <a-form-item label="机器人类型" required>
+          <a-select v-model:value="notifyModal.form.kind" :options="KIND_OPTIONS" />
+          <div class="hint">
+            各家的文本消息格式不同，选错会发不出去或发出一条空消息；「自定义」发给自建接收端，正文是 JSON。
+          </div>
+        </a-form-item>
+        <a-form-item label="Webhook 地址" :required="!notifyModal.id || notifyModal.urlBroken">
+          <a-input
+            v-model:value="notifyModal.form.webhook_url"
+            :placeholder="
+              notifyModal.id
+                ? notifyModal.urlBroken
+                  ? '地址解不开，请重新粘贴完整地址'
+                  : '留空表示不修改已保存的地址'
+                : 'https://open.feishu.cn/open-apis/bot/v2/hook/...'
+            "
+            autocomplete="off"
+          />
+          <div class="hint">
+            <template v-if="notifyModal.id">
+              当前：{{ notifyModal.maskedUrl || '地址无法解密，请重新填写' }}。地址加密落库，列表只显示掩码。
+            </template>
+            <template v-else>
+              粘贴群里机器人详情里的完整地址（加密落库，列表只显示掩码）。填内网自建接收端时，
+              请确认这台机器允许被外发消息。
+            </template>
+          </div>
+        </a-form-item>
+        <a-form-item v-if="notifyNeedsSecret" label="加签密钥">
+          <a-input-password
+            v-model:value="notifyModal.form.secret"
+            :placeholder="
+              notifyModal.hadSecret ? '留空表示不修改已保存的密钥' : 'SEC 开头的加签密钥，未加签则留空'
+            "
+            autocomplete="new-password"
+          />
+          <div class="hint">
+            <template v-if="notifyModal.id">
+              留空表示不改动已保存的密钥；已存的密钥在页面上删不掉，不用了这个渠道直接删除重建。
+            </template>
+            <template v-else>钉钉「加签」机器人必填；飞书只有开了「签名校验」才填；只配了关键词的机器人留空。</template>
+          </div>
+        </a-form-item>
+        <a-form-item label="订阅事件">
+          <a-checkbox-group
+            v-model:value="notifyModal.form.events"
+            class="event-group"
+            :options="eventOptions"
+          />
+          <div class="hint">一个事件都不勾＝这个渠道永远不会发消息。</div>
+        </a-form-item>
+        <a-form-item label="启用">
+          <a-switch v-model:checked="notifyModal.form.enabled" />
+          <div class="hint">停用只是暂停发送，配置与发送记录都保留。</div>
+        </a-form-item>
+      </a-form>
     </a-modal>
 
     <a-modal
@@ -346,22 +551,29 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import { CloudOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import {
   memoryApi,
   netdiskApi,
+  notifyApi,
   settingsApi,
   type MemoryItem,
   type ModelConfig,
   type ModelPurpose,
   type NetdiskStatus,
+  type NotifyChannelItem,
+  type NotifyChannelPayload,
+  type NotifyEventInfo,
+  type NotifyKind,
+  type NotifyLogItem,
   type ReasoningMode,
   type ReadinessStatus,
 } from '@/api'
 import { errorText } from '@/utils/errors'
+import { fmtDateTime } from '@/utils/format'
 import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
@@ -600,6 +812,9 @@ watch(activeTab, (key) => {
   if (key === 'memory' && !memoryLoaded) {
     loadMemories()
   }
+  if (key === 'notify' && !notifyLoaded) {
+    loadNotify()
+  }
 })
 
 // ---- 长期记忆 ---------------------------------------------------------------
@@ -683,6 +898,231 @@ async function onMemoryClear() {
   await loadMemories()
 }
 
+// ---- 消息通知 ---------------------------------------------------------------
+// 事件词表来自后端而不是这里抄一份：订阅一个后端不认识的事件，结果是
+// 「配置看起来没问题但永远收不到消息」，排查完全没有方向。
+
+const KIND_LABELS: Record<NotifyKind, string> = {
+  feishu: '飞书',
+  wecom: '企业微信',
+  dingtalk: '钉钉',
+  generic: '自定义',
+}
+const KIND_OPTIONS = (Object.keys(KIND_LABELS) as NotifyKind[]).map((kind) => ({
+  value: kind,
+  label: KIND_LABELS[kind],
+}))
+
+function kindLabel(kind: NotifyKind): string {
+  return KIND_LABELS[kind] ?? kind
+}
+
+const notifyChannels = ref<NotifyChannelItem[]>([])
+const notifyEvents = ref<NotifyEventInfo[]>([])
+const notifyLogs = ref<NotifyLogItem[]>([])
+const notifyLoading = ref(false)
+const notifyLogLoading = ref(false)
+const notifyTestingId = ref<number | null>(null)
+let notifyLoaded = false
+
+const notifyColumns = [
+  { title: '名称', dataIndex: 'name', width: 150 },
+  { title: '类型', key: 'kind', width: 100 },
+  { title: 'Webhook 地址', key: 'webhook_url', width: 240, ellipsis: true },
+  { title: '订阅事件', key: 'events' },
+  { title: '启用', key: 'enabled', width: 70 },
+  { title: '连通测试', key: 'test', width: 100 },
+  { title: '操作', key: 'action', width: 200 },
+]
+
+const notifyLogColumns = [
+  { title: '时间', key: 'created_at', width: 170 },
+  { title: '渠道', dataIndex: 'channel_name', width: 140 },
+  { title: '事件', key: 'event', width: 150 },
+  { title: '内容', dataIndex: 'title' },
+  { title: '结果', key: 'status', width: 90 },
+  { title: '耗时', key: 'elapsed', width: 90 },
+]
+
+const eventLabels = computed(() =>
+  Object.fromEntries(notifyEvents.value.map((event) => [event.key, event.label])),
+)
+
+/** 'test' 是连通测试写进发送记录的保留字，不在订阅词表里。 */
+function eventLabel(key: string): string {
+  if (key === 'test') return '连通测试'
+  return eventLabels.value[key] ?? key
+}
+
+const eventOptions = computed(() =>
+  notifyEvents.value.map((event) => ({ value: event.key, label: event.label })),
+)
+
+function notifyTestedAtText(record: NotifyChannelItem): string {
+  return record.last_test_at
+    ? `最近测试：${new Date(record.last_test_at).toLocaleString()}`
+    : ''
+}
+
+const emptyNotifyForm = () => ({
+  name: '',
+  kind: 'feishu' as NotifyKind,
+  webhook_url: '',
+  secret: '',
+  events: [] as string[],
+  enabled: true,
+})
+
+const notifyModal = reactive({
+  open: false,
+  loading: false,
+  // 0＝新建；编辑时缓存原掩码与「是否已存密钥」，用于输入框提示。
+  id: 0,
+  form: emptyNotifyForm(),
+  maskedUrl: '',
+  hadSecret: false,
+  // 换过 ENCRYPTION_KEY 的渠道，掩码位置显示的是错误；这时地址必须重填，
+  // 否则保存下来仍是一个解不开的渠道。
+  urlBroken: false,
+})
+
+const notifyNeedsSecret = computed(
+  () => notifyModal.form.kind === 'dingtalk' || notifyModal.form.kind === 'feishu',
+)
+
+async function loadNotify() {
+  notifyLoading.value = true
+  try {
+    const [events, channels] = await Promise.all([notifyApi.events(), notifyApi.listChannels()])
+    notifyEvents.value = events.items
+    notifyChannels.value = channels.items
+    notifyLoaded = true
+  } finally {
+    notifyLoading.value = false
+  }
+  await loadNotifyLogs()
+}
+
+async function loadNotifyLogs() {
+  notifyLogLoading.value = true
+  try {
+    notifyLogs.value = (await notifyApi.logs()).items
+  } catch {
+    // 记录面板读不到不影响渠道维护，拦截器已弹 toast。
+  } finally {
+    notifyLogLoading.value = false
+  }
+}
+
+function openNotifyCreate() {
+  notifyModal.id = 0
+  notifyModal.maskedUrl = ''
+  notifyModal.hadSecret = false
+  notifyModal.urlBroken = false
+  notifyModal.form = {
+    ...emptyNotifyForm(),
+    events: notifyEvents.value.filter((event) => event.default_on).map((event) => event.key),
+  }
+  notifyModal.open = true
+}
+
+function openNotifyEdit(channel: NotifyChannelItem) {
+  notifyModal.id = channel.id
+  notifyModal.maskedUrl = channel.webhook_url
+  notifyModal.hadSecret = channel.has_secret
+  notifyModal.urlBroken = Boolean(channel.webhook_url_error)
+  notifyModal.form = {
+    name: channel.name,
+    kind: channel.kind,
+    // 与模型密钥同一处理：把掩码原样送回毫无意义，留空才是告诉后端保留已存的地址。
+    webhook_url: '',
+    secret: '',
+    events: [...channel.events],
+    enabled: channel.enabled,
+  }
+  notifyModal.open = true
+}
+
+async function submitNotifyChannel() {
+  const name = notifyModal.form.name.trim()
+  const url = notifyModal.form.webhook_url.trim()
+  const secret = notifyModal.form.secret.trim()
+  if (!name) {
+    message.warning('请填写渠道名称')
+    return
+  }
+  if ((!notifyModal.id || notifyModal.urlBroken) && !url) {
+    message.warning(
+      notifyModal.urlBroken
+        ? '这个渠道已存的地址解不开（ENCRYPTION_KEY 换过），请重新粘贴完整地址'
+        : '请填写 Webhook 地址',
+    )
+    return
+  }
+
+  const payload: NotifyChannelPayload = {
+    name,
+    kind: notifyModal.form.kind,
+    events: notifyModal.form.events,
+    enabled: notifyModal.form.enabled,
+  }
+  if (url) payload.webhook_url = url
+  if (secret) payload.secret = secret
+
+  notifyModal.loading = true
+  try {
+    if (notifyModal.id) {
+      await notifyApi.updateChannel(notifyModal.id, payload)
+      message.success('已更新')
+    } else {
+      await notifyApi.createChannel(payload)
+      message.success('已创建，建议点「测试」确认群里能收到')
+    }
+    notifyModal.open = false
+    await loadNotify()
+  } finally {
+    notifyModal.loading = false
+  }
+}
+
+async function onNotifyToggle(channel: NotifyChannelItem, enabled: boolean) {
+  try {
+    await notifyApi.updateChannel(channel.id, { enabled })
+    message.success(enabled ? '已启用' : '已停用')
+  } catch {
+    return // 拦截器已弹 toast。
+  }
+  await loadNotify()
+}
+
+async function onNotifyTest(channel: NotifyChannelItem) {
+  notifyTestingId.value = channel.id
+  try {
+    const result = await notifyApi.testChannel(channel.id)
+    if (result.success) {
+      message.success(result.message)
+    } else {
+      // 机器人那边的报错往往带一整段返回体，toast 里看不全。
+      Modal.error({ title: '测试发送失败', content: result.message })
+    }
+  } catch {
+    message.error('测试请求失败，请稍后重试')
+  } finally {
+    notifyTestingId.value = null
+    await loadNotify()
+  }
+}
+
+async function onNotifyDelete(id: number) {
+  try {
+    await notifyApi.removeChannel(id)
+    message.success('已删除')
+  } catch {
+    return // 拦截器已弹 toast。
+  }
+  await loadNotify()
+}
+
 function openBindNetdisk() {
   bindModal.code = ''
   bindModal.open = true
@@ -763,5 +1203,14 @@ onMounted(load)
 }
 .bind-tip {
   margin-top: 10px;
+}
+/* 订阅事件竖排：四个事件名各带一句说明，横排在 520px 弹窗里会挤成两行。 */
+.event-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.notify-logs-head {
+  margin-top: 20px;
 }
 </style>
