@@ -2689,3 +2689,90 @@ class YapiSyncResult(BaseModel):
     endpoints: List[YapiSyncEndpoint] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     duration_ms: int = 0
+
+
+# ---- 消息通知 ---------------------------------------------------------------
+
+
+class NotifyKind(str, Enum):
+    """Webhook 机器人的协议方言。"""
+
+    FEISHU = "feishu"
+    WECOM = "wecom"
+    DINGTALK = "dingtalk"
+    GENERIC = "generic"
+
+
+class NotifyEventInfo(BaseModel):
+    """一个可订阅的事件：key + 中文说明，供前端渲染勾选组。"""
+
+    key: str
+    label: str
+    default_on: bool = False
+
+
+class NotifyChannelCreate(BaseModel):
+    """新建一个通知渠道。
+
+    ``secret`` 只有飞书（可选加签）和钉钉（加签机器人）用得上，其他渠道忽略。
+    """
+
+    name: str = Field(..., min_length=1, max_length=64)
+    kind: NotifyKind
+    webhook_url: str = Field(..., min_length=1, max_length=2048)
+    secret: Optional[str] = Field(default=None, max_length=256)
+    events: List[str] = Field(default_factory=list)
+    enabled: bool = True
+
+
+class NotifyChannelUpdate(BaseModel):
+    """修改渠道。
+
+    ``webhook_url`` / ``secret`` 留空或回传掩码都表示「保持原样」——同
+    ``ModelConfigUpdate``，把掩码原样写回会在用户只改名时悄悄清掉一个能用的
+    机器人地址。
+    """
+
+    name: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    kind: Optional[NotifyKind] = None
+    webhook_url: Optional[str] = Field(default=None, max_length=2048)
+    secret: Optional[str] = Field(default=None, max_length=256)
+    events: Optional[List[str]] = None
+    enabled: Optional[bool] = None
+
+
+class NotifyChannelItem(BaseModel):
+    """渠道列表中的一行。地址与密钥只以掩码出现。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    kind: NotifyKind
+    webhook_url: str = ""
+    webhook_url_error: Optional[str] = None
+    has_secret: bool = False
+    secret_error: Optional[str] = None
+    events: List[str] = Field(default_factory=list)
+    enabled: bool = True
+    last_test_at: Optional[datetime] = None
+    last_test_ok: Optional[bool] = None
+    last_test_error: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class NotifyLogItem(BaseModel):
+    """最近发送记录里的一行。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    channel_id: int
+    channel_name: str
+    event: str
+    title: str
+    status: str
+    error: Optional[str] = None
+    elapsed_ms: Optional[int] = None
+    created_at: datetime

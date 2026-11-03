@@ -23,6 +23,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.models.entities import WorkflowRun, WorkflowRunStep
+from app.services.notify.hooks import notify_stale_runs_reset, notify_workflow_finished
 from app.services.workflows.evals import referenced_run_ids
 from app.services.workflows import (
     RUN_CANCELLED,
@@ -75,6 +76,10 @@ def reset_stale_runs(db: Session) -> None:
     )
     db.commit()
     logger.info("reset %s stale workflow run(s) after a restart", len(stale))
+    # 重启收尾正是通知最该在的场景：用户发起的异步任务悄悄死了，没有这条
+    # 消息他就得自己刷列表才能发现。stale 直接以 ORM 行传入——hooks 在
+    # fire 前同步消费属性（title/body 当场拼成字符串），不跨 session 边界。
+    notify_stale_runs_reset(stale)
 
 
 def prune_runs(
@@ -244,6 +249,14 @@ def fail_run(db: Session, owner_id: int, run_id: int, message: str) -> None:
     run.error_msg = message
     db.commit()
     logger.info("run %s marked failed by its caller: %s", run_id, message)
+    notify_workflow_finished(
+        owner_id,
+        run_id=run_id,
+        slug=run.workflow_slug,
+        status=run.status,
+        error=run.error_msg,
+        elapsed_ms=run.elapsed_ms,
+    )
 
 
 def settle_run_status(db: Session, owner_id: int, run_id: int, *, error: Optional[str] = None) -> None:
@@ -281,3 +294,11 @@ def settle_run_status(db: Session, owner_id: int, run_id: int, *, error: Optiona
         run.status, run.error_msg = RUN_SUCCEEDED, None
     run.finished_at = db_now()
     db.commit()
+    notify_workflow_finished(
+        owner_id,
+        run_id=run_id,
+        slug=run.workflow_slug,
+        status=run.status,
+        error=run.error_msg,
+        elapsed_ms=run.elapsed_ms,
+    )

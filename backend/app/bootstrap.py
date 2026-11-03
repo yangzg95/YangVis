@@ -12,6 +12,7 @@ from app.models.entities import KbProject, KnowledgeType, SysUser
 from app.security import hash_password
 from app.services.agents import seed_builtin_agents
 from app.services.knowledge import reset_stale_indexing
+from app.services.notify import dispatch as notify_dispatch
 from app.services.tools import validate_registry as validate_local_tool_registry
 from app.services.ops.actions import reset_stale_ops_actions
 from app.services.workflows.builtin import seed_builtin_workflows
@@ -473,6 +474,15 @@ def prune_workflow_runs() -> None:
     """
     with SessionLocal() as db:
         prune_runs(db)
+
+
+def prune_notify_logs() -> None:
+    """清掉过了保留窗口的通知发送记录（启动时一次，全站口径）。
+
+    只动 ``notify_log``（发送留痕），渠道配置不受影响；与收尾步骤没有
+    顺序依赖——被清掉的只是日志，不是状态本身，放最后纯粹是归类。
+    """
+    notify_dispatch.prune_notify_logs()
 
 
 def bootstrap_admin(settings: Settings) -> None:

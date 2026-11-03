@@ -18,6 +18,7 @@ from app.bootstrap import (
     bootstrap_admin,
     create_tables,
     migrate_schema,
+    prune_notify_logs,
     prune_workflow_runs,
     reset_stale_jobs,
     seed_agents,
@@ -42,6 +43,7 @@ from app.routers import (
     memory,
     netdisk,
     note,
+    notify,
     ops,
     ops_files,
     resume,
@@ -80,6 +82,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         ("reset_stale_jobs", reset_stale_jobs),
         # 清理放在收尾之后：遗留的 running 先变成失败，才谈得上按窗口删。
         ("prune_workflow_runs", prune_workflow_runs),
+        # 通知发送留痕的清理：与上面两个没有顺序依赖，纯归类放最后。
+        ("prune_notify_logs", prune_notify_logs),
     ):
         try:
             step()
@@ -218,6 +222,7 @@ app.include_router(resume.router, prefix=API_PREFIX)
 app.include_router(resume_builder.router, prefix=API_PREFIX)
 app.include_router(interview.router, prefix=API_PREFIX)
 app.include_router(note.router, prefix=API_PREFIX)
+app.include_router(notify.router, prefix=API_PREFIX)
 app.include_router(slides.router, prefix=API_PREFIX)
 app.include_router(netdisk.router, prefix=API_PREFIX)
 app.include_router(mcp.router, prefix=API_PREFIX)

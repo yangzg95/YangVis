@@ -32,6 +32,7 @@ from app.services.agent_run import model_error_text, parse_output, require_chat_
 from app.services.agents import AgentService
 from app.services.agent_versions import current_version_no
 from app.services.mcp.tools import open_bundle, plan_step_tools, resolve_servers
+from app.services.notify.hooks import notify_workflow_finished
 from app.services.workflows.template import _group_order, render_prompt
 from app.services.workflows import (
     RUN_FAILED,
@@ -477,6 +478,16 @@ async def execute_run(
             run.elapsed_ms = (run.elapsed_ms or 0) + segment_elapsed_ms
             run.finished_at = db_now()
             db.commit()
+            # 通知只拿标量：run 在本生成器的 finally 里随 session 一起关，
+            # dispatch 内部自开 session，不碰这里的连接。
+            notify_workflow_finished(
+                owner_id,
+                run_id=run_id,
+                slug=run.workflow_slug,
+                status=run.status,
+                error=run.error_msg,
+                elapsed_ms=run.elapsed_ms,
+            )
 
             yield "run_end", {
                 "run_id": run_id,

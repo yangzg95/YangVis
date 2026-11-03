@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models.entities import OpsPendingAction
+from app.services.notify.hooks import notify_stale_ops_expired
 
 logger = logging.getLogger("yangvis.ops.actions")
 
@@ -149,14 +150,23 @@ def reset_stale_ops_actions(db: Session) -> None:
     在界面上呈现为「等待超时」而不是永远可点。
     """
     cutoff = datetime.now() - timedelta(seconds=_timeout())
-    result = db.execute(
-        update(OpsPendingAction)
-        .where(
+    # 先查出待过期行再更新：通知需要 owner 与目标信息，批量 UPDATE 的
+    # rowcount 里只有数量。清单在 update 之前取——之后同一批行就不再是
+    # pending，得加 status 条件重查。
+    stale = db.scalars(
+        select(OpsPendingAction).where(
             OpsPendingAction.status == STATUS_PENDING,
             OpsPendingAction.created_at < cutoff,
         )
+    ).all()
+    if not stale:
+        return
+    result = db.execute(
+        update(OpsPendingAction)
+        .where(OpsPendingAction.id.in_([row.id for row in stale]))
         .values(status=STATUS_EXPIRED, resolved_at=datetime.now())
     )
     db.commit()
     if result.rowcount:  # type: ignore[union-attr]
         logger.info("expired %d stale ops pending action(s)", result.rowcount)  # type: ignore[union-attr]
+        notify_stale_ops_expired(stale)

@@ -35,6 +35,7 @@ from app.config import get_settings
 from app import database as app_db
 from app.models.entities import OpsAuditLog, OpsDatabase, OpsPendingAction, OpsServer
 from app.models.schemas import DatabaseType
+from app.services.notify.hooks import notify_ops_proposed
 from app.services.ops import database as db_ops
 from app.services.ops import db_exec as db_exec
 from app.services.ops import server as server_ops
@@ -385,6 +386,14 @@ class ChatOpsToolbox:
             server.id,
             server.name,
             command.split(None, 1)[0] if command.strip() else "",
+        )
+        # 待确认通知与日志同一套脱敏口径：命令只给首词，理由截断。
+        notify_ops_proposed(
+            self._owner_id,
+            action_id=action.id,
+            server_name=server.name,
+            reason=reason,
+            command=command,
         )
         return (
             f"命令已提交用户确认（action #{action.id}）。请立即结束本轮回答，"

@@ -1617,3 +1617,80 @@ class Note(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<Note id={self.id} title={self.title!r}>"
+
+
+class NotifyChannel(Base):
+    """一个 Webhook 机器人通知渠道（飞书 / 企微 / 钉钉 / 自定义）。
+
+    webhook_url 与加签 secret 都是 Fernet 密文，API 响应里只出现掩码——与
+    ``ops_server`` 的凭据字段同一套语义（见 :mod:`app.crypto`）。
+
+    ``events`` 存订阅的事件 key 列表（合法值见 ``services/notify`` 的
+    ``EVENTS``）。通知是尽力而为的旁路：发送失败只落 ``notify_log``，绝不
+    影响触发它的主流程。
+    """
+
+    __tablename__ = "notify_channel"
+    __table_args__ = (UniqueConstraint("owner_id", "name", name="uk_notify_owner_name"),)
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # feishu | wecom | dingtalk | generic
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    webhook_url_enc: Mapped[bytes] = mapped_column(LargeBinary(2048), nullable=False)
+    # 钉钉加签 / 飞书签名的密钥；非加签渠道为空。密文存储。
+    secret_enc: Mapped[bytes | None] = mapped_column(LargeBinary(1024), nullable=True)
+
+    # 订阅的事件 key 列表，如 ["workflow.failed", "ops.pending"]。
+    events: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    # 连通测试结果，随「测试」按钮刷新（与 model_config.last_test_* 同一模式）。
+    last_test_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_test_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    last_test_error: Mapped[str | None] = mapped_column(String(256), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<NotifyChannel id={self.id} kind={self.kind!r} enabled={self.enabled}>"
+
+
+class NotifyLog(Base):
+    """一次通知发送的留痕。
+
+    成功与失败都写：失败渠道在「最近发送记录」里要看得见，否则「为什么没收到」
+    只能靠翻服务端日志。``channel_name`` 是删除渠道后历史仍可读的快照——与
+    ``workflow_run.workflow_slug`` 同一个取舍。
+    """
+
+    __tablename__ = "notify_log"
+    __table_args__ = (Index("idx_notify_log_owner_time", "owner_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    channel_name: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # 事件 key（NotifyChannel.events 里同名合法值）。
+    event: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    # sent | failed
+    status: Mapped[str] = mapped_column(String(8), nullable=False)
+    error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    elapsed_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<NotifyLog id={self.id} event={self.event!r} status={self.status!r}>"
