@@ -575,6 +575,8 @@ async def test_repo_connection(
             payload.remote_url,
             private_key=payload.private_key,
             branch=payload.branch,
+            http_token=payload.http_token,
+            http_username=payload.http_username,
         )
     except (RepoError, RepoSyncError) as exc:
         return APIResponse(code=-1, message=str(exc))

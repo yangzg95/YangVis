@@ -218,8 +218,8 @@
               <a-tooltip :title="activeRepo.remote_url">
                 <span class="repo-url">{{ activeRepo.remote_url }}</span>
               </a-tooltip>
-              <a-tag :color="activeRepo.auth_type === 'ssh_key' ? 'cyan' : 'default'">
-                {{ activeRepo.auth_type === 'ssh_key' ? 'Deploy Key' : '匿名访问' }}
+              <a-tag :color="repoAuthMeta(activeRepo.auth_type).color">
+                {{ repoAuthMeta(activeRepo.auth_type).label }}
               </a-tag>
               <a-tag color="purple">{{ repoBranchLabel(activeRepo) }}</a-tag>
               <a-tag :color="repoStatusColor(activeRepo.status)">
@@ -565,8 +565,8 @@
         <a-form-item v-if="!repoModal.editing" label="Git 地址" required>
           <a-input
             v-model:value="repoModal.form.remote_url"
-            placeholder="git@host:group/repo.git、ssh://git@host:2222/group/repo.git，或内网匿名 http(s) 地址"
-            @change="invalidateProbe"
+            placeholder="git@host:group/repo.git、ssh://git@host:2222/group/repo.git，或 http(s)://group/repo.git"
+            @change="onRemoteUrlChange"
           />
         </a-form-item>
         <a-form-item v-else label="Git 地址">
@@ -582,16 +582,51 @@
           />
         </a-form-item>
 
-        <a-form-item v-if="!repoModal.editing" label="认证方式">
+        <a-form-item label="认证方式">
           <a-radio-group
             v-model:value="repoModal.form.auth_type"
             button-style="solid"
             @change="onAuthTypeChange"
           >
-            <a-radio-button value="ssh_key">SSH Deploy Key</a-radio-button>
-            <a-radio-button value="none">匿名 http(s)</a-radio-button>
+            <a-radio-button v-if="repoFormProtocol === 'ssh'" value="ssh_key">
+              SSH Deploy Key
+            </a-radio-button>
+            <template v-else>
+              <a-radio-button value="none">匿名 http(s)</a-radio-button>
+              <a-radio-button value="http_token">HTTPS 令牌</a-radio-button>
+            </template>
           </a-radio-group>
+          <div class="repo-form-hint">认证方式由地址协议决定；编辑时地址不可改。</div>
         </a-form-item>
+
+        <template v-if="repoModal.form.auth_type === 'http_token'">
+          <a-form-item
+            label="个人访问令牌"
+            :required="!repoModal.editing"
+            :extra="repoModal.editing
+              ? '已保存的令牌留空表示不更换；切到「匿名 http(s)」保存即清除令牌。'
+              : '各平台的 Personal Access Token；加密存储，提交后任何接口都无法回读。'"
+          >
+            <a-input-password
+              v-model:value="repoModal.form.http_token"
+              spellcheck="false"
+              autocomplete="new-password"
+              placeholder="粘贴个人访问令牌（PAT）"
+              @change="invalidateProbe"
+            />
+          </a-form-item>
+          <a-form-item
+            label="令牌用户名（可选）"
+            extra="多数平台任意非空即可，默认 x-access-token；Gitee 等个别平台要求填真实用户名。"
+          >
+            <a-input
+              v-model:value="repoModal.form.http_username"
+              :maxlength="128"
+              placeholder="x-access-token"
+              @change="invalidateProbe"
+            />
+          </a-form-item>
+        </template>
 
         <template v-if="repoModal.form.auth_type === 'ssh_key'">
           <a-form-item
@@ -720,6 +755,7 @@ import {
   type KnowledgeType,
   type RepoItem,
   type RepoTestConnectionResult,
+  type RepoUpdatePayload,
   type SearchHit,
 } from '@/api'
 
@@ -1463,8 +1499,10 @@ const repoModal = reactive({
     name: '',
     remote_url: '',
     branch: '',
-    auth_type: 'ssh_key' as 'ssh_key' | 'none',
+    auth_type: 'ssh_key' as 'ssh_key' | 'none' | 'http_token',
     private_key: '',
+    http_token: '',
+    http_username: '',
     exclude_globs: '',
   },
   // 弹窗里即时生成的公钥（私钥只存在 form.private_key，提交后再也读不回来）。
@@ -1495,6 +1533,8 @@ function resetRepoModal() {
     branch: '',
     auth_type: 'ssh_key',
     private_key: '',
+    http_token: '',
+    http_username: '',
     exclude_globs: '',
   }
   repoModal.generatedPublicKey = ''
@@ -1519,12 +1559,28 @@ function openEditRepo(repo: RepoItem) {
     name: repo.name,
     remote_url: repo.remote_url,
     branch: repo.branch || '',
-    auth_type: (repo.auth_type as 'ssh_key' | 'none') || 'ssh_key',
+    auth_type:
+      (repo.auth_type as 'ssh_key' | 'none' | 'http_token') || 'ssh_key',
     private_key: '',
+    // 令牌不回读：编辑框永远空白，留空=不变。
+    http_token: '',
+    http_username: '',
     exclude_globs: repo.exclude_globs || '',
   }
   repoModal.open = true
 }
+
+/** 认证方式标签/颜色（信息条用）。 */
+function repoAuthMeta(auth: string) {
+  if (auth === 'ssh_key') return { label: 'Deploy Key', color: 'cyan' }
+  if (auth === 'http_token') return { label: 'HTTPS 令牌', color: 'geekblue' }
+  return { label: '匿名访问', color: 'default' }
+}
+
+/** 弹窗里按当前地址推导协议：http(s) 才允许匿名/令牌，其余一律走 SSH。 */
+const repoFormProtocol = computed<'ssh' | 'http'>(() =>
+  /^https?:\/\//i.test(repoModal.form.remote_url.trim()) ? 'http' : 'ssh',
+)
 
 /** 地址或私钥一变，上次探测拿到的 known_hosts 就作废，不能再随提交回传。 */
 function invalidateProbe() {
@@ -1535,8 +1591,30 @@ function invalidateProbe() {
 function onAuthTypeChange() {
   invalidateProbe()
   repoModal.generatedPublicKey = ''
-  if (repoModal.form.auth_type === 'none') {
+  if (repoModal.form.auth_type !== 'ssh_key') {
     repoModal.form.private_key = ''
+  }
+  if (repoModal.form.auth_type !== 'http_token') {
+    // 切走令牌认证时清掉明文，避免误带到后端。
+    repoModal.form.http_token = ''
+    repoModal.form.http_username = ''
+  }
+}
+
+/** 地址协议变了，可选项随之切换；旧协议下的凭据必须清掉。 */
+function onRemoteUrlChange() {
+  invalidateProbe()
+  const form = repoModal.form
+  if (repoFormProtocol.value === 'http') {
+    if (form.auth_type === 'ssh_key') {
+      form.auth_type = 'none'
+      form.private_key = ''
+      repoModal.generatedPublicKey = ''
+    }
+  } else if (form.auth_type !== 'ssh_key') {
+    form.auth_type = 'ssh_key'
+    form.http_token = ''
+    form.http_username = ''
   }
 }
 
@@ -1565,13 +1643,16 @@ async function testConnection() {
   repoModal.probeError = ''
   repoModal.probe = null
   try {
+    const form = repoModal.form
     const result = await repoApi.testConnection({
       remote_url: url,
-      branch: repoModal.form.branch.trim() || null,
+      branch: form.branch.trim() || null,
       private_key:
-        repoModal.form.auth_type === 'ssh_key'
-          ? repoModal.form.private_key.trim() || null
-          : null,
+        form.auth_type === 'ssh_key' ? form.private_key.trim() || null : null,
+      http_token:
+        form.auth_type === 'http_token' ? form.http_token.trim() || null : null,
+      http_username:
+        form.auth_type === 'http_token' ? form.http_username.trim() || null : null,
     })
     repoModal.probe = result
     if (!repoModal.form.branch.trim() && result.default_branch) {
@@ -1598,6 +1679,10 @@ async function submitRepo() {
       repoModal.submitError = 'SSH 仓库需要 deploy 私钥：粘贴现有私钥或生成新密钥对'
       return
     }
+    if (form.auth_type === 'http_token' && !form.http_token.trim()) {
+      repoModal.submitError = '请粘贴个人访问令牌（PAT）'
+      return
+    }
     if (!activeProjectId.value) {
       repoModal.submitError = '请先选择项目'
       return
@@ -1610,6 +1695,9 @@ async function submitRepo() {
         branch: form.branch.trim() || null,
         auth_type: form.auth_type,
         private_key: form.auth_type === 'ssh_key' ? form.private_key.trim() : null,
+        http_token: form.auth_type === 'http_token' ? form.http_token.trim() : null,
+        http_username:
+          form.auth_type === 'http_token' ? form.http_username.trim() || null : null,
         known_hosts: repoModal.probe?.known_hosts || null,
         host_fingerprint: repoModal.probe?.host_fingerprint || null,
         name: form.name.trim() || null,
@@ -1631,15 +1719,26 @@ async function submitRepo() {
     return
   }
 
-  // 编辑：只传可改字段。私钥留空=不变；分支空串=回到远端默认分支。
+  // 编辑：只传可改字段。私钥/令牌留空=不变；分支空串=回到远端默认分支。
+  const payload: RepoUpdatePayload = {
+    name: form.name.trim(),
+    branch: form.branch.trim(),
+    exclude_globs: form.exclude_globs.trim(),
+  }
+  if (form.auth_type === 'ssh_key') {
+    if (form.private_key.trim()) payload.private_key = form.private_key.trim()
+  } else {
+    // http(s) 行允许在匿名与令牌之间切换；切到匿名时后端清掉旧令牌。
+    payload.auth_type = form.auth_type
+    if (form.auth_type === 'http_token') {
+      // 编辑时令牌/用户名留空=不变；只有显式填了才下发。
+      if (form.http_token.trim()) payload.http_token = form.http_token.trim()
+      if (form.http_username.trim()) payload.http_username = form.http_username.trim()
+    }
+  }
   repoModal.submitting = true
   try {
-    await repoApi.update(repoModal.repoId, {
-      name: form.name.trim(),
-      branch: form.branch.trim(),
-      exclude_globs: form.exclude_globs.trim(),
-      ...(form.private_key.trim() ? { private_key: form.private_key.trim() } : {}),
-    })
+    await repoApi.update(repoModal.repoId, payload)
     message.success('已保存；下次同步生效')
     repoModal.open = false
     await loadRepos()
@@ -1983,5 +2082,10 @@ onUnmounted(stopPolling)
   margin-top: 6px;
   font-size: var(--fs-xs);
   color: var(--danger);
+}
+.repo-form-hint {
+  margin-top: 4px;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
 }
 </style>

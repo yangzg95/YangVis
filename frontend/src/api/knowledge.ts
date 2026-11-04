@@ -99,7 +99,7 @@ export interface RebuildResult {
 
 // ---- 代码仓库 --------------------------------------------------------------
 
-export type RepoAuthType = 'ssh_key' | 'none'
+export type RepoAuthType = 'ssh_key' | 'none' | 'http_token'
 export type RepoStatus = 'pending' | 'syncing' | 'ready' | 'error'
 
 export interface RepoSyncResult {
@@ -160,6 +160,9 @@ export interface RepoCreatePayload {
   branch?: string | null
   auth_type?: RepoAuthType | string
   private_key?: string | null
+  /** auth_type='http_token' 时必给；加密存储，任何接口不回读。 */
+  http_token?: string | null
+  http_username?: string | null
   known_hosts?: string | null
   host_fingerprint?: string | null
   name?: string | null
@@ -172,6 +175,9 @@ export interface RepoUpdatePayload {
   exclude_globs?: string | null
   /** 缺省=不变；显式空串配合 auth_type='none' 清空私钥。 */
   private_key?: string
+  /** 缺省=令牌不变；切到匿名访问时由后端随 auth_type='none' 清空。 */
+  http_token?: string
+  http_username?: string | null
   auth_type?: RepoAuthType | string
 }
 
@@ -294,6 +300,8 @@ export const repoApi = {
     remote_url: string
     branch?: string | null
     private_key?: string | null
+    http_token?: string | null
+    http_username?: string | null
   }) =>
     request<RepoTestConnectionResult>({
       url: '/knowledge/test-connection',

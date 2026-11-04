@@ -10,7 +10,11 @@
   ``GIT_SSH_COMMAND`` 注入，不进 URL、不进 ssh-agent，finally 必删。
 - 主机指纹 TOFU：首次连接 ``accept-new`` 记录 known_hosts 行，之后严格比对；
   指纹变化同步失败，必须经 retrust 显式更新。
-- 匿名 http(s) 也允许（内网公开只读仓库），不接受内嵌凭据。
+- http(s) 允许两种认证：匿名（内网公开只读仓库）与个人访问令牌。令牌同样
+  Fernet 加密落库，同步时解密写到仓库目录下的 ``http_cred``（git
+  credential-store 格式，0600），通过 ``GIT_CONFIG_*`` 环境变量指向它注入；
+  令牌不进 URL（git 的报错信息因此也永远带不出令牌）、不进命令行参数，finally
+  必删。不接受地址内嵌凭据。
 
 git 交互一律 ``create_subprocess_exec`` 参数数组（不经 shell），环境白名单式
 构造。与文档索引同一单 worker 口径：模块级锁，重启靠启动重置兜底。
@@ -30,7 +34,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -90,7 +94,7 @@ def _host_allowed(host: str) -> None:
 
 
 def parse_git_url(raw: str) -> GitTarget:
-    """把用户填的地址解析成 :class:`GitTarget`，只放行 ssh 与匿名 http(s)。
+    """把用户填的地址解析成 :class:`GitTarget`，只放行 ssh 与 http(s)（匿名或令牌）。
 
     支持 ``ssh://[user@]host[:port]/path`` 与 scp-like ``[user@]host:path``。
     ``file://``、``ext::``、内嵌换行、``-`` 开头的主机段（option 注入）一律拒绝。
@@ -221,7 +225,7 @@ def known_host_fingerprints(known_hosts_text: str) -> List[str]:
 # ---- 子进程 -----------------------------------------------------------------
 
 
-# 只透传这几类环境变量；凭据走文件，绝不在环境里带密钥内容。
+# 只透传这几类环境变量；凭据走文件，环境里只出现文件路径，绝不带密钥内容。
 _PASSTHROUGH_ENV = (
     "PATH",
     "HOME",
@@ -242,6 +246,7 @@ def _git_env(
     *,
     ssh_command: Optional[str] = None,
     cwd_home: Optional[Path] = None,
+    http_credentials: Optional[Path] = None,
 ) -> Dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key in _PASSTHROUGH_ENV}
     if cwd_home is not None:
@@ -250,12 +255,23 @@ def _git_env(
         env["HOME"] = str(cwd_home)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_LFS_SKIP_SMUDGE"] = "1"
-    # 关掉全局配置的意外影响（insteadOf 改写、credential helper 等）。指向空设备
-    # 而不是一个不存在的路径：git 打开它读到 EOF 即视为空配置；Windows 上 /dev/null
-    # 不存在，NUL 才是等价物（开发机是 Windows，生产是 Linux）。
+    # 关掉全局/系统配置的意外影响（insteadOf 改写、credential helper 等）。指向空
+    # 设备而不是不存在的路径：git 打开读到 EOF 即视为空配置；Windows 上 /dev/null
+    # 不存在，NUL 才是等价物（开发机是 Windows，生产是 Linux）。system 一并指空，
+    # 这样下面注入的 helper 是唯一候选——不能用「空 VALUE 清空列表」技巧：空串
+    # 环境变量在 Windows C 运行时里会被直接删掉，git 会报缺少 VALUE。
     env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
     if ssh_command:
         env["GIT_SSH_COMMAND"] = ssh_command
+    if http_credentials is not None:
+        # 经 GIT_CONFIG_* 注入一个只认我们这个 store 文件的 credential helper。
+        # 令牌只在那个 0600 文件里，argv（ps 可见）与 URL（git 报错会原样回显，
+        # 进而进我们的 error_msg）都不带令牌。
+        cred = http_credentials.as_posix()
+        env["GIT_CONFIG_COUNT"] = "1"
+        env["GIT_CONFIG_KEY_0"] = "credential.helper"
+        env["GIT_CONFIG_VALUE_0"] = f"store --file={cred}"
     return env
 
 
@@ -304,11 +320,58 @@ def _git_error(stderr: bytes, prefix: str) -> RepoSyncError:
 
 def _write_secret_file(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    # 二进制写死 LF：Windows 文本模式会翻成 CRLF，credential-store 的主机名会
+    # 带上尾部 \r 导致整行失配，OpenSSH 私钥同样不容忍 CRLF。
+    path.write_bytes(content.encode("utf-8"))
     try:
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 0600
     except OSError:  # Windows 上 chmod 语义有限，部署目标是 Linux。
         pass
+
+
+# ---- http(s) 令牌认证 ---------------------------------------------------------
+
+# 令牌配套用户名缺省值：GitHub/GitLab 对用户名不挑，Gitee 等个别平台要真实用户名，
+# 用户可在表单里显式覆盖。
+DEFAULT_HTTP_USERNAME = "x-access-token"
+
+
+def validate_http_token(token: Optional[str]) -> str:
+    """令牌非空且不含控制字符（credential-store 是行格式，换行会变成字段注入）。
+
+    控制字符检查在 strip 之前：否则 ``"tok\\n"`` 会被 strip 洗白。
+    """
+    if not token or not token.strip():
+        raise RepoError("请提供个人访问令牌")
+    if any(ord(char) < 32 for char in token):
+        raise RepoError("令牌包含非法控制字符")
+    return token.strip()
+
+
+def normalize_http_username(username: Optional[str]) -> Optional[str]:
+    """用户名可缺省（传输时退化为默认值）；同样拒绝控制字符。"""
+    if username is None:
+        return None
+    if any(ord(char) < 32 for char in username):
+        raise RepoError("用户名包含非法控制字符")
+    cleaned = username.strip()
+    return cleaned[:128] or None
+
+
+def _write_http_credentials(
+    path: Path, target: "GitTarget", username: Optional[str], token: str
+) -> None:
+    """写 git credential-store 文件（一行 URL 形态），按协议+主机(+端口)匹配。
+
+    实测 git 2.5x 的 credential-store 只认 URL 形态（不是 key=value 块），令牌仅存于该文件；
+    user/token 走 quote 百分号编码，含 ``@ : / + =`` 也能原样取回；远端 URL 与
+    argv 都不含令牌，git 报错因此回显不出它。
+    """
+    user = quote(username or DEFAULT_HTTP_USERNAME, safe="")
+    secret = quote(token, safe="")
+    # 显式端口在主机里百分号编码冒号（git 自己 approve 时就写成 %3a）。
+    host = target.host if not target.port else f"{target.host}%3a{target.port}"
+    _write_secret_file(path, f"{target.protocol}://{user}:{secret}@{host}\n")
 
 
 def _force_rmtree(path: Path) -> None:
@@ -388,14 +451,17 @@ def gc_orphan_repo_dirs(db: Session) -> int:
 async def probe_remote(
     remote_url: str,
     *,
-    private_key: Optional[str],
+    private_key: Optional[str] = None,
     branch: Optional[str] = None,
     known_hosts_text: Optional[str] = None,
+    http_token: Optional[str] = None,
+    http_username: Optional[str] = None,
 ) -> Tuple[Optional[str], str, str, str, str]:
     """``git ls-remote`` 探测。
 
     返回 ``(默认分支, HEAD sha, host, known_hosts 文本, 指纹)``。SSH 首次用
     accept-new 把主机 key 收进临时 known_hosts；http(s) 后两项为空串。
+    http(s) 给了令牌就写临时 credential-store 文件，随整个临时目录一起销毁。
     """
     target = parse_git_url(remote_url)
     import tempfile
@@ -404,7 +470,10 @@ async def probe_remote(
     with tempfile.TemporaryDirectory(prefix="kbprobe-", dir=settings.KB_REPO_DATA_DIR) as tmp:
         tmp_dir = Path(tmp)
         env = _git_env(cwd_home=tmp_dir)
+        cred_path: Optional[Path] = None
         if target.protocol == "ssh":
+            if http_token:
+                raise RepoError("SSH 地址不使用访问令牌")
             if not private_key:
                 raise RepoError("SSH 地址必须提供 deploy 私钥")
             key_path = tmp_dir / "id_key"
@@ -420,6 +489,15 @@ async def probe_remote(
                 ssh_command=_ssh_command(key_path, known_path, accept_new=accept_new),
                 cwd_home=tmp_dir,
             )
+        elif http_token:
+            cred_path = tmp_dir / "http_cred"
+            _write_http_credentials(
+                cred_path,
+                target,
+                normalize_http_username(http_username),
+                validate_http_token(http_token),
+            )
+            env = _git_env(cwd_home=tmp_dir, http_credentials=cred_path)
 
         args = ["git", "ls-remote", "--symref", target.canonical_url, "HEAD"]
         code, stdout, stderr = await _run(
@@ -521,15 +599,27 @@ class RepoService:
     def create(self, payload) -> KbRepo:
         target = parse_git_url(payload.remote_url)
         auth_type = payload.auth_type
-        if auth_type not in ("ssh_key", "none"):
+        if auth_type not in ("ssh_key", "none", "http_token"):
             raise RepoError("未知的认证方式")
 
         private_enc = None
         public_key = None
+        http_token_enc = None
+        http_username = None
         if target.protocol in ("http", "https"):
-            if auth_type != "none":
-                raise RepoError("http(s) 公开仓库请选择「免认证」，不要提供凭据")
+            if auth_type == "ssh_key":
+                raise RepoError("http(s) 地址不能使用 SSH 认证")
+            if payload.private_key:
+                raise RepoError("http(s) 仓库不需要 SSH 私钥")
+            if auth_type == "http_token":
+                http_token_enc = encrypt(validate_http_token(payload.http_token))
+                http_username = normalize_http_username(payload.http_username)
+            elif payload.http_token:
+                # 匿名方式却带了令牌：拒绝而不是静默丢弃，避免用户以为令牌生效。
+                raise RepoError("匿名访问不需要令牌，请选择「HTTPS 令牌」认证")
         elif auth_type == "ssh_key":
+            if payload.http_token:
+                raise RepoError("SSH 仓库不使用访问令牌")
             if not payload.private_key:
                 raise RepoError("SSH 仓库必须提供 deploy 私钥")
             canonical, public_line = validate_private_key_sync(payload.private_key)
@@ -559,6 +649,8 @@ class RepoService:
             branch=(payload.branch or "").strip() or None,
             private_key_enc=private_enc,
             public_key=public_key,
+            http_token_enc=http_token_enc,
+            http_username=http_username,
             known_hosts=payload.known_hosts or None,
             host_fingerprint=payload.host_fingerprint or None,
             exclude_globs=(payload.exclude_globs or "").strip() or None,
@@ -579,27 +671,57 @@ class RepoService:
             repo.branch = payload.branch.strip() or None
         if payload.exclude_globs is not None:
             repo.exclude_globs = payload.exclude_globs.strip() or None
+        # remote_url 不可改，协议一开始就确定：凭据分支按它走。
+        target = parse_git_url(repo.remote_url)
         if payload.auth_type is not None:
-            if payload.auth_type not in ("ssh_key", "none"):
+            if payload.auth_type not in ("ssh_key", "none", "http_token"):
                 raise RepoError("未知的认证方式")
             repo.auth_type = payload.auth_type
-        # 私钥缺省=不变；显式空串=清空（仅在切到 none 时合理）。
-        if payload.private_key is not None:
-            if payload.private_key:
-                canonical, public_line = validate_private_key_sync(payload.private_key)
-                repo.private_key_enc = encrypt(canonical)
-                repo.public_key = public_line
-                if repo.auth_type == "none":
-                    repo.auth_type = "ssh_key"
-            elif repo.auth_type == "none":
-                repo.private_key_enc = None
-                repo.public_key = None
-        # 协议与认证方式必须自洽，不能存出「SSH 地址却没有 key」这种同步必炸的行。
-        # remote_url 不可改，所以这里校验的是「改动后是否仍与既有协议匹配」。
-        target = parse_git_url(repo.remote_url)
+
+        # SSH 私钥：缺省（None）=不变；非空=校验后替换。
+        if payload.private_key:
+            if target.protocol in ("http", "https"):
+                raise RepoError("http(s) 仓库不使用 SSH 私钥")
+            canonical, public_line = validate_private_key_sync(payload.private_key)
+            repo.private_key_enc = encrypt(canonical)
+            repo.public_key = public_line
+            repo.auth_type = "ssh_key"
+
+        # 访问令牌：None=不变；非空=校验后替换；空串=清空（配合切到匿名访问）。
+        if payload.http_token is not None:
+            if target.protocol in ("http", "https"):
+                if payload.http_token:
+                    repo.http_token_enc = encrypt(
+                        validate_http_token(payload.http_token)
+                    )
+                    repo.auth_type = "http_token"
+                else:
+                    repo.http_token_enc = None
+                    repo.http_username = None
+                    if repo.auth_type == "http_token":
+                        repo.auth_type = "none"
+            elif payload.http_token:
+                raise RepoError("SSH 仓库不使用访问令牌")
+        if (
+            payload.http_username is not None
+            and target.protocol in ("http", "https")
+            and repo.http_token_enc is not None
+        ):
+            # 只有还持有令牌时用户名才有意义；空串=回到默认用户名。
+            repo.http_username = normalize_http_username(payload.http_username)
+
+        # 协议与认证方式必须自洽，不能存出「SSH 地址却没有 key」这类同步必炸的行。
         if target.protocol in ("http", "https"):
-            if repo.auth_type != "none" or repo.private_key_enc is not None:
-                raise RepoError("http(s) 公开仓库只能使用免认证方式")
+            if repo.auth_type == "ssh_key":
+                raise RepoError("http(s) 地址不能使用 SSH 认证")
+            if repo.auth_type == "http_token":
+                if repo.http_token_enc is None:
+                    raise RepoError("请先提供个人访问令牌")
+            else:
+                # 切到匿名：令牌不允许残留。
+                repo.auth_type = "none"
+                repo.http_token_enc = None
+                repo.http_username = None
         elif repo.auth_type != "ssh_key" or repo.private_key_enc is None:
             raise RepoError("SSH 地址必须保留或重新提供 deploy 私钥")
         self._db.commit()
@@ -638,7 +760,8 @@ class RepoService:
             "auth_type": repo.auth_type,
             "remote_url": repo.remote_url,
             "branch": repo.branch,
-            "has_credential": bool(repo.private_key_enc),
+            # 私钥或令牌任一在库即视为已配置凭据；具体类型看 auth_type。
+            "has_credential": bool(repo.private_key_enc or repo.http_token_enc),
             "public_key": repo.public_key,
             "host_fingerprint": repo.host_fingerprint,
             "exclude_globs": repo.exclude_globs,
@@ -762,8 +885,10 @@ async def sync_repository(owner_id: int, repo_id: int) -> RepoSyncResult:
 
         root, work_dir, key_path = _prepare_root(owner_id, repo_id)
         known_hosts_path = root / "known_hosts"
+        cred_path = root / "http_cred"
         env = _git_env(cwd_home=root)
         ssh_accept_new = False
+        target = parse_git_url(repo.remote_url)
         try:
             if repo.auth_type == "ssh_key":
                 if not repo.private_key_enc:
@@ -780,8 +905,17 @@ async def sync_repository(owner_id: int, repo_id: int) -> RepoSyncResult:
                     ),
                     cwd_home=root,
                 )
+            elif repo.auth_type == "http_token":
+                if not repo.http_token_enc:
+                    raise RepoSyncError("仓库缺少访问令牌")
+                _write_http_credentials(
+                    cred_path,
+                    target,
+                    repo.http_username,
+                    decrypt(repo.http_token_enc),
+                )
+                env = _git_env(cwd_home=root, http_credentials=cred_path)
 
-            target = parse_git_url(repo.remote_url)
             try:
                 used_remote_default = await _materialize_worktree(
                     target=target,
@@ -860,16 +994,16 @@ async def sync_repository(owner_id: int, repo_id: int) -> RepoSyncResult:
                 )
                 return result
             finally:
-                # 私钥文件无论成败都必须消失。
-                if key_path.exists():
-                    key_path.unlink(missing_ok=True)
+                # 私钥/令牌文件无论成败都必须消失。
+                key_path.unlink(missing_ok=True)
+                cred_path.unlink(missing_ok=True)
         except Exception as exc:
             logger.exception("repo sync failed: owner=%s repo=%s", owner_id, repo_id)
             repo.status = RepoStatus.ERROR
             repo.error_msg = str(exc)[:512]
             db.commit()
-            if key_path.exists():
-                key_path.unlink(missing_ok=True)
+            key_path.unlink(missing_ok=True)
+            cred_path.unlink(missing_ok=True)
             raise
 
 

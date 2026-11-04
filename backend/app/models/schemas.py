@@ -251,6 +251,7 @@ class DocBatchResult(BaseModel):
 # 与 KbRepo.status 对齐的四态（pending 只在建行到首同步开始之间短暂出现）。
 REPO_AUTH_SSH = "ssh_key"
 REPO_AUTH_NONE = "none"
+REPO_AUTH_HTTP_TOKEN = "http_token"
 
 
 class RepoKeypair(BaseModel):
@@ -265,6 +266,9 @@ class RepoTestConnectionRequest(BaseModel):
     branch: Optional[str] = Field(default=None, max_length=255)
     # 可选私钥：给了就用它探测；匿名 http(s) 仓库不传。
     private_key: Optional[str] = Field(default=None, max_length=8000)
+    # http_token 认证时的个人访问令牌（与可选用户名）；只用于本次探测，不入库。
+    http_token: Optional[str] = Field(default=None, max_length=512)
+    http_username: Optional[str] = Field(default=None, max_length=128)
 
 
 class RepoTestConnectionResult(BaseModel):
@@ -283,6 +287,9 @@ class RepoCreate(BaseModel):
     auth_type: str = REPO_AUTH_SSH
     # ssh_key 时必给（粘贴已有私钥，或 keypair 接口生成的那份）。
     private_key: Optional[str] = Field(default=None, max_length=8000)
+    # http_token 时必给：个人访问令牌；http_username 可缺省。
+    http_token: Optional[str] = Field(default=None, max_length=512)
+    http_username: Optional[str] = Field(default=None, max_length=128)
     # 测试连接返回的 TOFU 记录；不给则首同步时现场 accept-new。
     known_hosts: Optional[str] = None
     host_fingerprint: Optional[str] = Field(default=None, max_length=255)
@@ -296,6 +303,9 @@ class RepoUpdate(BaseModel):
     exclude_globs: Optional[str] = Field(default=None, max_length=4000)
     # 缺省=不变；显式空串配合 auth_type=none 清空私钥。
     private_key: Optional[str] = Field(default=None, max_length=8000)
+    # 缺省（None）=令牌不变；显式空串=清空（配合切到匿名访问）。
+    http_token: Optional[str] = Field(default=None, max_length=512)
+    http_username: Optional[str] = Field(default=None, max_length=128)
     auth_type: Optional[str] = None
 
 

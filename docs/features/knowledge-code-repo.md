@@ -1,6 +1,6 @@
 # 知识库 · 代码仓库接入（设计方案）
 
-> 状态：P0 已实施（2026-11），P1 已交付「仓库源文件带行号只读预览」。本文是在现有知识库（见 [knowledge-base.md](knowledge-base.md)）上增加「代码仓库」
+> 状态：P0 已实施（2026-11），P1 已交付「仓库源文件带行号只读预览」与「HTTPS + 个人访问令牌认证」。本文是在现有知识库（见 [knowledge-base.md](knowledge-base.md)）上增加「代码仓库」
 > 这一内容来源的设计，不改写既有链路。目标是让对话智能体可以基于某个 Git 仓库的真实源码回答
 > 「这个功能在哪实现的」「这段逻辑什么意思」「改这里会影响谁」一类问题，并且引用能落到
 > `文件路径:行号`。
@@ -27,25 +27,35 @@ embedding 闸门、模型指纹、全量重建、引用编号与计费口径，�
 
 已确认的范围决策：
 
-- **传输走 SSH**：P0 支持 `ssh://` 与 scp-like（`git@host:group/repo.git`）地址，每个仓库
-  一对独立 deploy key；另允许**无凭据的 http(s)** 公开/内网只读仓库。https + 访问令牌放 P1。
+- **传输走 SSH 或 HTTPS**：支持 `ssh://` 与 scp-like（`git@host:group/repo.git`）地址，
+  每个仓库一对独立 deploy key；http(s) 地址支持**匿名公开/内网只读**与**个人访问令牌
+  （PAT）**两种认证。认证方式由地址协议决定：SSH 只能用 deploy key，http(s) 只能匿名或
+  令牌，互斥组合在创建/更新时直接拒绝。
 - **同步仅手动触发**：接入时首同步 + 仓库信息条上的「立即同步」；定时轮询与 webhook 放 P1。
 - **仓库与知识类型 1:1 绑定**。
 - 切片器 P0 用语言族规则识别结构边界，tree-sitter AST 放 P1。
 
-非目标（P0 不做）：定时 / webhook 自动同步、https 令牌认证、多分支与 tag、AST 级切片、
+非目标（P0 不做）：定时 / webhook 自动同步、多分支与 tag、AST 级切片、
 跨仓库联合检索的独立过滤维度、本地服务器目录作为来源。这些列入 §12 后续批次。
 
 ## 2. 用户可见行为
 
 - 知识库页「知识类型」卡片的操作区新增 **接入仓库**：选择项目（沿用当前选中项目），填
-  Git SSH 地址（`git@host:group/repo.git` 或 `ssh://git@host/group/repo.git`；也接受
-  内网匿名可读的 http(s) 地址）、分支（可空，默认探测远端默认分支）、可选排除 glob。
+  Git SSH 地址（`git@host:group/repo.git` 或 `ssh://git@host/group/repo.git`）或
+  http(s) 地址、分支（可空，默认探测远端默认分支）、可选排除 glob。**认证方式由地址
+  协议决定**：SSH 地址只出现 deploy key 单选项；http(s) 地址出现「匿名访问 / HTTPS 令牌」
+  两个单选项。编辑时地址不可改（改地址等于换来源，走移除后重新接入）。
   提交时自动在该项目下创建一个与仓库同名的知识类型，仓库与类型 **1:1 绑定**，该类型的
   文档列表就是仓库里被索引的文件列表。
-- **Deploy key 两种给法**：① 粘贴现有私钥；② 点「生成密钥对」，后端临时生成 ed25519
-  对，弹窗展示**公钥**（一键复制，附「去 GitLab/GitHub 添加 deploy key」的操作提示），
-  私钥只随本次提交加密落库。仓库详情可随时再查看公钥（公钥不是秘密），私钥任何接口都不回读。
+- **Deploy key 两种给法**（SSH）：① 粘贴现有私钥；② 点「生成密钥对」，后端临时生成
+  ed25519 对，弹窗展示**公钥**（一键复制，附「去 GitLab/GitHub 添加 deploy key」的操作
+  提示），私钥只随本次提交加密落库。仓库详情可随时再查看公钥（公钥不是秘密），私钥任何
+  接口都不回读。
+- **HTTPS 令牌**（http(s)）：粘贴平台个人访问令牌（PAT），可附带用户名（缺省
+  `x-access-token`，GitHub/GitLab 不挑用户名；Gitee 等平台要求填真实账号用户名）。
+  令牌与私钥同一保密级别：Fernet 加密落库、任何接口不回读，编辑弹窗里令牌框永远空白，
+  留空表示「不更换」，切到「匿名访问」保存即清除旧令牌。http(s) 没有主机指纹概念，
+  TOFU 信息条对令牌/匿名仓库不出现。
 - 接入前可用「测试连接」：后端对远端做一次 `git ls-remote`，返回默认分支与 HEAD 短 SHA；
   这是主机指纹的**首次记录时机**（TOFU，见下）。接入弹窗明确提示：会把仓库的受跟踪源码
   文件切片并调用向量模型，产生费用（与「上传文件夹」同一口径）。
@@ -65,8 +75,9 @@ embedding 闸门、模型指纹、全量重建、引用编号与计费口径，�
   同一仓库同时只能跑一次同步，重复点击直接返回「同步进行中」。
 - 检索预览与对话引用：命中代码分片时，来源渲染为
   `src/foo/bar.py:120-148 · handle_sync`，回答中的 `[n]` 编号机制不变。
-- 移除仓库：二次确认后删除其类型、全部文档与向量，加密私钥/指纹随仓库行一起删除，并尽力
-  清理本地目录（工作克隆与临时密钥文件）；删除类型/项目的既有级联路径会连带完成仓库清理。
+- 移除仓库：二次确认后删除其类型、全部文档与向量，加密私钥/令牌/指纹随仓库行一起删除，
+  并尽力清理本地目录（工作克隆与临时密钥、凭据文件）；删除类型/项目的既有级联路径会连带
+  完成仓库清理。
 - 既有约束原样生效：没配好向量模型时「接入仓库」「立即同步」被同一道
   `require_embedding_ready` 闸挡住；切换 embedding 模型后的「重建索引」对仓库文件同样有效
   （因为全文仍在 MySQL）。
@@ -77,7 +88,7 @@ embedding 闸门、模型指纹、全量重建、引用编号与计费口径，�
 `kb_document` 行；之后的一切（切分、embedding、检索、引用、重建、隔离）全部走既有链路。**
 
 ```
-git 远端（SSH + 每仓库 deploy key；host key TOFU 钉死）
+git 远端（SSH + 每仓库独立 deploy key，或 HTTPS + PAT 凭据文件；host key TOFU 钉死）
    │  clone --depth 1 / fetch + reset（后台任务，subprocess git，GIT_SSH_COMMAND 注入）
    ▼
 本地工作区 {DATA_DIR}/repos/{owner_id}/{repo_id}/
@@ -117,10 +128,12 @@ kb_chunk(line_start, line_end, symbol) ── embedding ──▶ Qdrant（paylo
 | `owner_id` | BIGINT, index | 全站隔离口径不变 |
 | `type_id` | BIGINT, **UNIQUE** | 1:1 绑定的知识类型；删类型即删仓库 |
 | `name` | VARCHAR(128) | 展示名，默认取 URL 末段 |
-| `auth_type` | VARCHAR(16) NOT NULL DEFAULT `'ssh_key'` | `ssh_key`（默认）/ `none`（匿名 http(s)） |
+| `auth_type` | VARCHAR(16) NOT NULL DEFAULT `'ssh_key'` | `ssh_key` / `none`（匿名 http(s)）/ `http_token`（HTTPS 个人访问令牌） |
 | `remote_url` | VARCHAR(512) | 规范化后的地址，**永不包含凭据**；SSH 走外部密钥文件，令牌不拼 URL |
 | `branch` | VARCHAR(255) | 跟踪分支；首次连接留空时由 `ls-remote` 探测后回填 |
 | `private_key_enc` | LARGEBINARY(8192) NULL | deploy 私钥（OpenSSH 文本），`app.crypto.encrypt()` 加密；任何 API 不回读，只回 `has_credential` 与可公开的公钥 |
+| `http_token_enc` | LARGEBINARY(2048) NULL | HTTPS 个人访问令牌密文（明文 ≤512），与私钥同一加密/不回读口径；只随 `auth_type='http_token'` 使用 |
+| `http_username` | VARCHAR(128) NULL | 令牌配套用户名（≤128）；NULL 表示用缺省 `x-access-token`；只随令牌认证存在，切匿名/SSH 时清空 |
 | `public_key` | TEXT NULL | 由私钥导出或随生成接口一并存下的公钥行，详情页可随时查看/复制 |
 | `known_hosts` | TEXT NULL | TOFU 记录的 host key 行（known_hosts 格式，可能多行）；同步前写入专用 known_hosts 文件 |
 | `host_fingerprint` | VARCHAR(255) NULL | 同一把 host key 的 SHA256 指纹（多把时逗号分隔），仅用于变更报错时给人看 |
@@ -138,12 +151,13 @@ kb_chunk(line_start, line_end, symbol) ── embedding ──▶ Qdrant（paylo
 {KB_REPO_DATA_DIR}/{owner_id}/{repo_id}/
 ├── work/         # bare-ish 工作克隆（--depth 1），可随时 rmtree 重建
 ├── id_key        # 当次同步解密写出的私钥，0600，同步结束（或异常）立即删除
+├── http_cred     # 当次同步解密写出的令牌凭据文件（credential-store 一行 URL 形态），0600，收尾即删
 └── known_hosts   # 从 known_hosts_line 生成，0600；首次连接前允许 accept-new
 ```
 
-私钥文件放在 `work/` **之外**：工作区会被 `git reset --hard`、rmtree 重建，凭据不能与
-仓库内容同目录。clone 支持的协议为 `ssh` 与 `http(s)`（后者仅匿名），`file://`、
-`ext::` 等一律拒绝。
+私钥/令牌文件放在 `work/` **之外**：工作区会被 `git reset --hard`、rmtree 重建，凭据
+不能与仓库内容同目录。clone 支持的协议为 `ssh` 与 `http(s)`，`file://`、`ext::` 等
+一律拒绝；URL 本身永远不含凭据（含 user:pass@ 的 http(s) 地址直接拒绝）。
 
 ### `kb_document` 加列（均为幂等 ALTER）
 
@@ -288,13 +302,50 @@ P0 用「语言族规则 + 行扫描」，覆盖代码问答里最要紧的结�
 - `ls-tree` 给的路径在拼进本地路径前仍做一次校验（拒绝绝对路径与 `..` 段、跳过符号链接），
   纵深防御不依赖「Git 不会这么返回」。
 
+### HTTPS 令牌凭据：credential-store 文件注入
+
+令牌绝不拼进 URL——git 失败时 stderr 会原样回显 URL，`error_msg` 就会泄密；也不进 argv。
+做法是把令牌写成 git credential-store 的凭据文件（`http_cred`，0600，与 id_key 同生共死，
+finally 必删），再用 `GIT_CONFIG_*` 环境变量把它注册成**唯一**的 credential helper：
+
+```
+GIT_CONFIG_COUNT=1
+GIT_CONFIG_KEY_0=credential.helper
+GIT_CONFIG_VALUE_0=store --file=<posix 绝对路径>/http_cred
+GIT_CONFIG_SYSTEM=<os.devnull>     # 压住系统级 helper（Linux 包管理器可能预置 store/cache）
+GIT_CONFIG_GLOBAL=<os.devnull>     # 压住 Windows GCM（manager）与部署机 ~/.gitconfig
+```
+
+凭据文件内容是**一行 URL 形态**（实测 git 2.55 的 credential-store 对文档里的
+`protocol=...\npassword=...` 键值块静默不认，只解析它自己 approve 写出的 URL 行）：
+
+```
+https://<urlencode(username)>:<urlencode(token)>@<host>[%3a<port>]\n
+```
+
+- 用户名/令牌全部 `urllib.parse.quote(safe="")` 百分号编码（JWT 风令牌里的 `+/=@:` 都要
+  编码）；非默认端口写成 `host%3a8443`（小写），字面冒号该版本也能匹配但统一编码；
+  用户名缺省 `x-access-token`。
+- 文件必须 **LF**：用 `write_bytes` 写死，Windows 文本模式翻成 CRLF 会让主机名带尾部
+  `\r`，整行失配后 git 直接走到「could not read Username」。
+- helper 只按查询的协议+主机回吐凭据，错主机拿不到令牌；主机段在 URL 入口已过校验
+  （无换行、无 `..`/option 注入）。令牌入库前先在**原始字符串**上拒控制字符再 strip，
+  防 `tok\npassword=evil` 一类行注入。
+- 探测（test-connection / ls-remote）走同一机制：凭据写在 TemporaryDirectory 里，
+  probe 结束目录即销；http(s) 不产生主机指纹。SSH 地址带令牌、http(s) 地址带私钥、
+  匿名却给令牌等互斥组合在 create/update 两处统一拒绝。
+- 编辑语义：`http_token` 缺省=不变；非空串=更换（同时 auth 翻到 http_token）；显式空串=
+  清除（配合切到 none）。用户名只在令牌仍在时更新；任何响应只给 `has_credential`，
+  令牌与用户名（用户名虽不算秘密，也一并省掉）都不回读。
+
 ### 同步流程（后台任务 `repo_sync_task(owner_id, repo_id)`）
 
 ```
 0. 进程内 _repo_sync_locks[repo_id] 加锁（与 _doc_index_locks 同形态、同单 worker 口径）。
    仓库行 pending/syncing，自开 SessionLocal（BackgroundTasks 的既有纪律）。
    准备 {repo_id}/known_hosts（从库里的 known_hosts 列生成）；auth_type=ssh_key 时
-   解密私钥写 id_key(0600)，组装 GIT_SSH_COMMAND；finally 中删除 id_key。
+   解密私钥写 id_key(0600)，组装 GIT_SSH_COMMAND；auth_type=http_token 时解密令牌写
+   http_cred(0600)，按上节组装 GIT_CONFIG_* 环境；finally 中 id_key / http_cred 必删。
 1. 工作区不存在 → git clone --depth 1 --single-branch [--branch {branch}]（首次且未记录
    指纹时 GIT_SSH_COMMAND 临时换 accept-new，成功后回写指纹）
    已存在 → git fetch --depth 1 origin {branch} && git reset --hard FETCH_HEAD
@@ -337,11 +388,11 @@ P0 用「语言族规则 + 行扫描」，覆盖代码问答里最要紧的结�
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/repos/keypair` | asyncssh 进程内生成一对 ed25519 deploy key，返回 `{public_key, private_key}`；**不落库**，仅供接入弹窗使用，私钥随创建请求提交后才加密存储 |
-| POST | `/test-connection` | `{remote_url, branch?, private_key?}` → 写临时 known_hosts（首次 accept-new）跑 `ls-remote`，返回默认分支、HEAD SHA、主机名与**首次见到的 host key 指纹**；私钥只用于本次探测；**有向量模型闸**（探测本身不需要，但入口统一） |
+| POST | `/test-connection` | `{remote_url, branch?, private_key?, http_token?, http_username?}` → SSH 写临时 known_hosts（首次 accept-new）、http(s) 写临时 credential-store，跑 `ls-remote`，返回默认分支、HEAD SHA、主机名与**首次见到的 host key 指纹**（http(s) 指纹为空）；私钥/令牌只用于本次探测；**有向量模型闸**（探测本身不需要，但入口统一） |
 | GET | `/repos?project_id=` | 项目下仓库列表（含状态、HEAD、`has_credential`、host 指纹、last_sync_result） |
-| POST | `/repos` | `{project_id, remote_url, branch?, auth_type, private_key?, known_hosts?, host_fingerprint?, name?, exclude_globs?}`：校验地址协议、asyncssh 导入私钥（拒绝带口令密钥）、建同名类型（重名加 `-2`）、建仓库行（连同 known_hosts 首记录）、排队首次同步；**有闸** |
+| POST | `/repos` | `{project_id, remote_url, branch?, auth_type, private_key?, http_token?, http_username?, known_hosts?, host_fingerprint?, name?, exclude_globs?}`：按协议校验认证组合（SSH 只收私钥、http(s) 在 none/http_token 中二选一），asyncssh 导入私钥（拒绝带口令密钥）或 Fernet 加密令牌，建同名类型（重名加 `-2`）、建仓库行（连同 known_hosts 首记录）、排队首次同步；**有闸** |
 | GET | `/repos/{id}` | 详情；404 口径同其余资源（不属本人 = 不存在）；另含可公开的 `ssh_public_key` |
-| PUT | `/repos/{id}` | 可改 `name / branch / exclude_globs / private_key`（私钥缺省=不变；清空需显式置空并把 auth_type 改 none）；改 URL 或分支 → 下次同步重建工作区 |
+| PUT | `/repos/{id}` | 可改 `name / branch / exclude_globs / private_key / http_token / http_username / auth_type`（密钥与令牌缺省=不变；令牌显式空串=清除；匿名/令牌互改时后端同步清理另一套凭据）；改分支 → 下次同步重建工作区；URL 不可编辑 |
 | POST | `/repos/{id}/sync` | 增量同步；锁占用时返回 HTTP 200 + `{started:false, already_running:true}`（业务口径不排队，避免页面重试刷出一串任务） |
 | POST | `/repos/{id}/retrust` | 主机指纹变更后的人工确认：重新 accept-new 探测并覆盖 `known_hosts_line`；记录操作者日志 |
 | DELETE | `/repos/{id}` | 删类型/文档/向量/仓库行，best-effort rmtree 整个 `{repo_id}/`（含密钥文件） |
@@ -359,11 +410,16 @@ P1 源文件预览用）；列表、单篇重新索引、全量重建、检索�
   - 选中仓库类型时，文档卡片上方渲染**仓库信息条**（URL、分支、SHA、状态、计数、上次
     同步结果的增删改跳），操作换成「立即同步 / 编辑 / 移除仓库」；上传与上传文件夹按钮
     对仓库类型隐藏；文档表格的单篇操作只留「重新索引」。
-  - 接入弹窗：项目固定为当前项目；SSH 地址、分支（占位「留空自动探测」）；凭据二选一：
-    粘贴私钥（多行 textarea，password 态）或「生成密钥对」（调 keypair 接口后展示公钥与
-    复制按钮、提示去 Git 服务登记，私钥暂存在弹窗内存里随提交上传）；内网公开 http(s)
-    仓库可切「无需凭据」；「测试连接」成功后回填默认分支并展示首次记录的主机指纹；
-    排除规则；确认文案带费用提示。
+  - 接入弹窗：项目固定为当前项目；Git 地址、分支（占位「留空自动探测」）；认证单选项
+    **由地址协议驱动**：SSH 地址只显示「Deploy Key」；http(s) 地址显示「匿名访问 /
+    HTTPS 令牌」。SSH 下凭据二选一：粘贴私钥（多行 textarea，password 态）或「生成密钥
+    对」（调 keypair 接口后展示公钥与复制按钮、提示去 Git 服务登记，私钥暂存在弹窗内存
+    里随提交上传）；令牌下是 `a-input-password`（PAT，autocomplete=new-password，创建时
+    必填）+ 可选用户名输入框（extra 说明缺省 `x-access-token`、Gitee 需真实用户名）。
+    改地址协议时自动切到合法认证并清掉另一套凭据输入；「测试连接」成功后回填默认分支，
+    SSH 还展示首次记录的主机指纹；排除规则；确认文案带费用提示。
+  - 编辑弹窗：地址只读；令牌框永远空白（不回读），留空=不更换，切「匿名访问」保存即
+    清令牌；信息条认证标签三态：Deploy Key（青）/ HTTPS 令牌（蓝）/ 匿名访问（默认灰）。
   - 主机指纹变更：同步失败的错误条在识别到 `Host key verification failed` /
     `REMOTE HOST IDENTIFICATION` 措辞时给出「确认变更指纹」二次确认（retrust，
     Popconfirm 文案提示先确认变更来自自己的 Git 服务器），成功后自动排队一次同步；
@@ -376,8 +432,10 @@ P1 源文件预览用）；列表、单篇重新索引、全量重建、检索�
     左侧行号 gutter（sticky，横向滚动不遮行号），头部显示语言/行数/体积/只读，无编辑下载入口。
 - 对话引用卡（`MessageBubble.vue`）：代码来源显示路径 + 行号区间 + 「代码」标签 +
   符号名，等宽字体；无行号的老分片退化为文件名。
-- `api/knowledge.ts` 增加 `repoApi` 与 `RepoItem / RepoStatus / RepoSyncResult /
-  RepoKeypair / RepoTestConnectionResult / RepoCreatePayload / RepoUpdatePayload` 类型；
+- `api/knowledge.ts` 增加 `repoApi`（`RepoAuthType = 'ssh_key' | 'none' | 'http_token'`）
+  与 `RepoItem / RepoStatus / RepoSyncResult /
+  RepoKeypair / RepoTestConnectionResult / RepoCreatePayload / RepoUpdatePayload` 类型
+  （后两者含 `http_token / http_username`，注释标明加密存储、不回读）；
   `SearchHit`、`KnowledgeDocument` 增补可选字段；`api/chat.ts` 的 `Citation` 同样增补；
   P1 增加 `DocumentContent` 与 `knowledgeApi.documentContent`；`DocumentStatus` 不变。
 
@@ -385,7 +443,7 @@ P1 源文件预览用）；列表、单篇重新索引、全量重建、检索�
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `KB_REPO_DATA_DIR` | `./data/repos` | 本地根目录，布局 `{owner_id}/{repo_id}/{work,id_key,known_hosts}`；含解密后的临时私钥，目录权限按 0700 创建；compose 挂卷且不与静态目录共享 |
+| `KB_REPO_DATA_DIR` | `./data/repos` | 本地根目录，布局 `{owner_id}/{repo_id}/{work,id_key,http_cred,known_hosts}`；含解密后的临时私钥/令牌，目录权限按 0700 创建；compose 挂卷且不与静态目录共享 |
 | `KB_REPO_MAX_FILES` | 20000 | 单次同步收录的受跟踪文件数上限，超出跳过并计入报告 |
 | `KB_REPO_MAX_FILE_BYTES` | 300000（约 300 KB） | 单源文件大小上限，超出跳过 |
 | `KB_REPO_CLONE_TIMEOUT` | 300 | 单次 clone/fetch 子进程超时（秒） |
@@ -402,7 +460,9 @@ requirements 中（运维域在用），无新增 Python 依赖；docker-compose
 ## 10. 升级行为
 
 - `kb_repo` 由 `Base.metadata.create_all` 建新表；`docs/schema.sql` 同步补可审阅 DDL。
-- `migrate_schema()` 幂等补列：`kb_document` 的 `source/repo_id/blob_hash/language`
+- `migrate_schema()` 幂等补列：`kb_repo` 的 `http_token_enc BLOB` / `http_username
+  VARCHAR(128)`（HTTPS 令牌认证上线批次，inspector 查列守卫）；`kb_document` 的
+  `source/repo_id/blob_hash/language`
   （`source` 带 DEFAULT 'upload'，老行即上传文档）、`kb_chunk` 的
   `line_start/line_end/symbol`，并在列宽不足时 `MODIFY filename VARCHAR(512)`。
   重复执行全部为空操作，SQLite 测试库由 `create_all` 直接得到新结构。
@@ -413,7 +473,7 @@ requirements 中（运维域在用），无新增 Python 依赖；docker-compose
 ## 11. 测试计划
 
 新建 `backend/tests/test_knowledge_repo.py`（service + HTTP 两层，全程不依赖真实 SSH
-服务端，45 例）：用临时目录里真实 `git init` 的非裸仓库（含多次 commit 模拟
+服务端，59 例）：用临时目录里真实 `git init` 的非裸仓库（含多次 commit 模拟
 added/changed/removed 与分支改名）模拟远端，monkeypatch `parse_git_url` 让它返回
 canonical 为该仓库本地 posix 路径的 `GitTarget`（绕开 file:// 禁令与 Windows 盘符的
 scp-like 解析问题），clone/fetch/ls-tree/rev-parse 全部跑真实 git 二进制；
@@ -437,6 +497,13 @@ scp-like 解析问题），clone/fetch/ls-tree/rev-parse 全部跑真实 git 二
   `file://`、`ext::`、换行均被拒绝；编辑仓库时私钥缺省=不变。
 - **密钥对生成**：keypair 接口经 asyncssh 进程内返回 ed25519 公私钥且不落库；粘贴的私钥
   能自动导出公钥存入 `public_key`；全程不依赖环境里存在 `ssh-keygen` 二进制。
+- **HTTPS 令牌**：令牌校验拒空白与原始串里的控制字符（`"t\npassword=evil"` 行注入）；
+  凭据文件断言为一行 URL 形态（端口 `%3a` 编码、特殊字符百分号编码、LF 而非 CRLF），
+  env 里只有 `store --file=` 路径，令牌不进任何 argv/env 值；真实 `git credential fill`
+  能从 store 取回令牌且错主机拿不到；probe 的 env 间谍断言临时凭据随探测销毁；
+  create/update 的协议×认证组合（SSH+令牌、http+私钥、匿名却带令牌、令牌缺失）五态拒绝、
+  令牌替换/翻认证/清空生命周期；解密回读往返与 `has_credential` 口径，任何列表/详情/
+  repr 不回显令牌；真跑本地 http 目标的令牌同步 e2e；clone 失败路径凭据文件仍被删除。
 - **HTTP**：接入建同名类型并重名避让；无向量模型被闸挡；同步锁占用返回
   `already_running`（非 409）；分页/列表口径；
   批量删除跳过 repo 文档；keypair/test-connection/retrust 三端点的入参校验（非法协议、
@@ -454,10 +521,11 @@ scp-like 解析问题），clone/fetch/ls-tree/rev-parse 全部跑真实 git 二
   受限；P1 评估 tree-sitter（wheel 已基本无原生构建问题）替换边界识别，切片元数据结构不变。
 - **同步是手动触发**：P0 不做定时与 webhook；后台轮询/GitLab 推送事件触发列入 P1，届时
   仓库表加 `sync_interval` / webhook 校验字段即可，同步引擎本身不用动。
-- **认证只做「SSH 独立 deploy key」与「匿名 http(s)」**：不支持带 passphrase 的私钥
-  （`BatchMode=yes` 下必然挂起，创建时直接拒绝并提示用无口令密钥）；https 用户名/令牌、
-  自建 CA、SSH 跳板机/非 22 之外的非标端口可在 URL 中表达但跳板配置不做、本地服务器
-  目录（运维域已有 SFTP/服务器能力，可复用其凭据体系）留 P1。
+- **认证覆盖「SSH 独立 deploy key」「匿名 http(s)」「HTTPS 个人访问令牌」三态**：
+  不支持带 passphrase 的私钥（`BatchMode=yes` 下必然挂起，创建时直接拒绝并提示用无口令
+  密钥）；不支持 OAuth 刷新令牌（PAT 过期后由用户手工更换）、自建 CA 证书的双向 TLS、
+  SSH 跳板机（非标端口可在 URL 中表达，跳板配置不做）、本地服务器目录（运维域已有
+  SFTP/服务器能力，可复用其凭据体系）——这些留后续批次。
 - **TOFU 不是强身份认证**：它挡住「记录指纹之后」的中间人，挡不住首次连接即被劫持；
   安全要求高的环境后续提供「接入时粘贴指纹」模式（数据列已具备，只差表单）。
 - **不做 LFS、不做子模块递归、不解析 svn:externals 类形态**；大文件靠浅克隆 + LFS

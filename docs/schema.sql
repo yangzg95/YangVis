@@ -145,10 +145,12 @@ CREATE TABLE IF NOT EXISTS kb_repo (
   owner_id         BIGINT       NOT NULL COMMENT 'sys_user.id',
   type_id          BIGINT       NOT NULL COMMENT 'knowledge_type.id，仓库↔知识类型 1:1',
   name             VARCHAR(128) NOT NULL,
-  auth_type        VARCHAR(16)  NOT NULL DEFAULT 'ssh_key' COMMENT 'ssh_key | none（匿名 http(s)）',
+  auth_type        VARCHAR(16)  NOT NULL DEFAULT 'ssh_key' COMMENT 'ssh_key | none（匿名 http(s)）| http_token（HTTPS PAT）',
   remote_url       VARCHAR(512) NOT NULL COMMENT '不允许内嵌凭据；展示可能脱敏',
   branch           VARCHAR(255) NULL COMMENT 'NULL = 跟随远端默认分支',
   private_key_enc  VARBINARY(8192) NULL COMMENT 'deploy key 私钥的 Fernet 密文，任何接口都不回传明文',
+  http_token_enc   VARBINARY(2048) NULL COMMENT 'HTTPS 个人访问令牌的 Fernet 密文，任何接口都不回传明文',
+  http_username    VARCHAR(128) NULL COMMENT '令牌配套用户名；NULL = 缺省 x-access-token',
   public_key       TEXT         NULL COMMENT '生成的 ed25519 公钥行，供用户登记到 Git 平台',
   known_hosts      TEXT         NULL COMMENT 'TOFU 记录的 known_hosts 片段，之后逐次比对',
   host_fingerprint VARCHAR(255) NULL COMMENT '主机公钥 SHA256 指纹，仅展示',
@@ -714,6 +716,11 @@ CREATE TABLE IF NOT EXISTS workflow_evaluation (
 --   ADD COLUMN tools_snapshot JSON NULL COMMENT '最近一次测试发现的工具 [{name,description,input_schema}]';
 --
 -- 知识库接入代码仓库（kb_repo 为新表由 create_all 自动创建，DDL 见上文）：
+-- HTTPS 个人访问令牌认证（migrate_schema() 自动补）：
+-- ALTER TABLE kb_repo
+--   ADD COLUMN http_token_enc BLOB          NULL COMMENT 'HTTPS PAT 的 Fernet 密文',
+--   ADD COLUMN http_username  VARCHAR(128)  NULL COMMENT '令牌配套用户名';
+--
 -- ALTER TABLE kb_document
 --   MODIFY COLUMN filename VARCHAR(512) NOT NULL,
 --   ADD COLUMN source    VARCHAR(16) NOT NULL DEFAULT 'upload' COMMENT 'upload | repo',

@@ -300,6 +300,75 @@ def test_ssh_command_pins_host_key_and_quotes_paths(tmp_path):
     assert f'UserKnownHostsFile="{known.as_posix()}"' in first
 
 
+def test_validate_http_token_rejects_blank_and_control_chars():
+    assert repo_sync.validate_http_token("  tok ") == "tok"
+    for bad in (None, "", "   ", "tok\n", "tok\rcurl x", "a\tb"):
+        with pytest.raises(RepoError):
+            repo_sync.validate_http_token(bad)
+    assert repo_sync.normalize_http_username(None) is None
+    assert repo_sync.normalize_http_username("   ") is None
+    assert repo_sync.normalize_http_username(" ci-bot ") == "ci-bot"
+    with pytest.raises(RepoError):
+        repo_sync.normalize_http_username("bot\n")
+
+
+def test_http_credential_file_and_env_keep_token_out_of_argv(tmp_path):
+    target = parse_git_url("https://gitlab.internal:8443/group/repo.git")
+    cred = tmp_path / "http_cred"
+    repo_sync._write_http_credentials(cred, target, "ci-bot", "s3cret")
+    text = cred.read_text(encoding="utf-8")
+    # git credential-store 只认一行 URL 形态；显式端口的冒号百分号编码。
+    assert text == "https://ci-bot:s3cret@gitlab.internal%3a8443\n"
+
+    # 用户名缺省退化；默认端口不出现，特殊字符全部百分号编码（含 @ : / + =）。
+    cred2 = tmp_path / "http_cred2"
+    target2 = parse_git_url("https://github.com/org/repo.git")
+    repo_sync._write_http_credentials(cred2, target2, None, "ab+/=CD.@ef")
+    assert cred2.read_text() == (
+        f"https://{repo_sync.DEFAULT_HTTP_USERNAME}:ab%2B%2F%3DCD.%40ef@github.com\n"
+    )
+
+    env = repo_sync._git_env(cwd_home=tmp_path, http_credentials=cred2)
+    # argv 里永远没有令牌：只有指向 0600 文件的路径；system/global 配置已指空，
+    # 这是唯一的 credential helper。
+    assert env["GIT_CONFIG_COUNT"] == "1"
+    assert env["GIT_CONFIG_KEY_0"] == "credential.helper"
+    assert env["GIT_CONFIG_VALUE_0"] == f"store --file={cred2.as_posix()}"
+    assert all("s3cret" not in v and "ghp_x" not in v for v in env.values())
+
+
+@requires_git
+def test_git_credential_helper_serves_token_from_store_file(tmp_path):
+    """真正跑一次 git credential fill：store 文件经 GIT_CONFIG_* 被消费。"""
+    target = parse_git_url("https://gitee.test/group/repo.git")
+    cred = tmp_path / "http_cred"
+    repo_sync._write_http_credentials(cred, target, "luke", "gitee-token")
+    env = repo_sync._git_env(cwd_home=tmp_path, http_credentials=cred)
+
+    filled = subprocess.run(
+        ["git", "credential", "fill"],
+        input=b"protocol=https\nhost=gitee.test\n\n",
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        check=False,
+    )
+    out = filled.stdout.decode()
+    assert "username=luke" in out
+    assert "password=gitee-token" in out
+
+    # 不匹配的主机拿不到凭据（防止一份令牌被发给错误主机）。
+    miss = subprocess.run(
+        ["git", "credential", "fill"],
+        input=b"protocol=https\nhost=evil.example\n\n",
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        check=False,
+    )
+    assert "password=" not in miss.stdout.decode()
+
+
 # ---- 代码切片：行号必须可信 --------------------------------------------------
 
 
@@ -662,6 +731,8 @@ def _create_repo(
     *,
     auth="none",
     key=None,
+    token=None,
+    username=None,
     globs=None,
     name="demo",
 ):
@@ -675,6 +746,8 @@ def _create_repo(
         remote_url="https://local.test/demo.git",
         auth_type=auth,
         private_key=key,
+        http_token=token,
+        http_username=username,
         name=name,
         exclude_globs=globs,
     )
@@ -849,6 +922,115 @@ def test_probe_remote_against_local_repo(monkeypatch, db, data_dir, tmp_path):
     assert known_hosts == "" and fingerprint == ""
 
 
+@requires_git
+def test_probe_remote_with_http_token_uses_credential_store(
+    monkeypatch, db, data_dir, tmp_path
+):
+    remote = _make_remote(tmp_path)
+    monkeypatch.setattr(repo_sync, "parse_git_url", lambda raw: _local_target(remote))
+
+    seen: dict = {}
+    original_run = repo_sync._run
+
+    async def spying_run(args, *, cwd=None, env=None, timeout=60.0):
+        if args[:2] == ["git", "ls-remote"]:
+            # 临时 credential 文件在探测期间存在，结束即随临时目录销毁。
+            store = env["GIT_CONFIG_VALUE_0"].removeprefix("store --file=")
+            seen["cred_during_probe"] = Path(store).read_text(encoding="utf-8")
+        return await original_run(args, cwd=cwd, env=env, timeout=timeout)
+
+    monkeypatch.setattr(repo_sync, "_run", spying_run)
+    branch, sha, host, known_hosts, fingerprint = asyncio.run(
+        repo_sync.probe_remote(
+            "http://local.test/demo.git",
+            http_token=" probe-tok ",
+            http_username="ci",
+        )
+    )
+    assert branch == "main" and len(sha) == 40 and host == "local.test"
+    assert known_hosts == "" and fingerprint == ""  # http(s) 没有主机指纹
+    # 一行 URL 形态：令牌经 strip 后落盘，绝不进 argv；文件只在探测期间存在。
+    assert seen["cred_during_probe"] == "http://ci:probe-tok@local.test\n"
+
+    # SSH 地址给令牌直接拒绝，不会去碰远端。
+    monkeypatch.setattr(
+        repo_sync, "parse_git_url", lambda raw: _local_target(remote, ssh=True)
+    )
+    with pytest.raises(RepoError):
+        asyncio.run(
+            repo_sync.probe_remote("ssh://local.test/demo.git", http_token="t")
+        )
+
+
+@requires_git
+def test_sync_with_http_token_auth_against_local_repo(
+    monkeypatch,
+    maker,
+    db,
+    repo_svc,
+    project,
+    embedding_model,
+    embeddings,
+    vs,
+    data_dir,
+    tmp_path,
+):
+    """令牌认证同步真跑一遍：credential helper 配置不能影响本地克隆，凭据文件收尾删除。"""
+    remote = _make_remote(tmp_path)
+    repo = _create_repo(
+        monkeypatch,
+        repo_svc,
+        project,
+        remote,
+        auth="http_token",
+        token="sync-tok",
+        username="robot",
+    )
+    assert asyncio.run(repo_sync.run_repo_sync(OWNER, repo.id)) is True
+    db.refresh(repo)
+    assert repo.status == RepoStatus.READY
+    root = repo_sync.repo_root(OWNER, repo.id)
+    assert not (root / "http_cred").exists()
+    with maker() as verify:
+        docs = KnowledgeService(verify, OWNER).repo_doc_index(repo.id)
+    assert set(docs) == {"a.py", "pkg/b.py"}
+
+
+def test_sync_error_path_deletes_http_credentials(
+    monkeypatch, db, repo_svc, project, embedding_model, data_dir, tmp_path
+):
+    repo = _create_repo(
+        monkeypatch,
+        repo_svc,
+        project,
+        tmp_path / "nonexistent-origin",
+        auth="http_token",
+        token="tok",
+    )
+    seen: dict = {}
+
+    async def fake_run(args, *, cwd=None, env=None, timeout=60.0):
+        store = env.get("GIT_CONFIG_VALUE_0", "")
+        if store.startswith("store --file="):
+            cred = Path(store.split("=", 1)[1])
+            seen["cred_exists"] = cred.exists()
+            seen["content"] = cred.read_text(encoding="utf-8")
+        return 1, b"", b"simulated clone failure"
+
+    monkeypatch.setattr(repo_sync, "_run", fake_run)
+    with pytest.raises(RepoSyncError):
+        asyncio.run(sync_repository(OWNER, repo.id))
+
+    db.refresh(repo)
+    assert repo.status == RepoStatus.ERROR
+    assert "simulated clone failure" in (repo.error_msg or "")
+    assert seen["cred_exists"] is True
+    assert seen["content"] == (
+        f"http://{repo_sync.DEFAULT_HTTP_USERNAME}:tok@local.test\n"
+    )
+    assert not repo_sync.repo_root(OWNER, repo.id).joinpath("http_cred").exists()
+
+
 def test_reset_stale_and_gc_orphan_dirs(db, project, data_dir):
     r1 = _repo_row(db, project, name="卡住的", status=RepoStatus.SYNCING)
     r2 = _repo_row(db, project, name="就绪的", status=RepoStatus.READY)
@@ -940,6 +1122,138 @@ def test_update_validates_auth_protocol_coherence(db, repo_svc, project):
     # 普通改名没问题。
     updated = repo_svc.update(repo.id, RepoUpdate(name="新名字"))
     assert updated.name == "新名字"
+
+
+def test_create_with_http_token_encrypts_and_never_echoes(db, repo_svc, project):
+    from app.crypto import decrypt
+
+    repo = repo_svc.create(
+        RepoCreate(
+            project_id=project.id,
+            remote_url="https://gitee.test/org/demo.git",
+            auth_type="http_token",
+            http_token="  gitee-token  ",
+            http_username="luke",
+        )
+    )
+    # 令牌去空白后 Fernet 落库；用户名是普通列。
+    assert repo.http_token_enc is not None
+    assert decrypt(repo.http_token_enc) == "gitee-token"
+    assert repo.http_username == "luke"
+    assert repo.private_key_enc is None
+
+    item = repo_svc.to_item(repo)
+    assert item["auth_type"] == "http_token"
+    assert item["has_credential"] is True
+    serialized = repr(item)
+    assert "gitee-token" not in serialized
+    assert "http_token" not in item and "http_token_enc" not in item
+
+    # 用户名可缺省。
+    other = repo_svc.create(
+        RepoCreate(
+            project_id=project.id,
+            remote_url="https://gitlab.test/org/demo2.git",
+            auth_type="http_token",
+            http_token="glpat-x",
+        )
+    )
+    assert other.http_username is None
+    assert repo_svc.to_item(other)["has_credential"] is True
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        # 选了令牌认证却没给令牌
+        {"remote_url": "https://x.test/d.git", "auth_type": "http_token"},
+        # 匿名方式却带了令牌
+        {
+            "remote_url": "https://x.test/d.git",
+            "auth_type": "none",
+            "http_token": "t",
+        },
+        # SSH 地址配令牌
+        {
+            "remote_url": "git@x.test:d.git",
+            "auth_type": "http_token",
+            "http_token": "t",
+        },
+        # http(s) 地址配 SSH 私钥
+        {
+            "remote_url": "https://x.test/d.git",
+            "auth_type": "http_token",
+            "http_token": "t",
+            "private_key": "k",
+        },
+        # 令牌含换行（credential-store 行格式注入）
+        {
+            "remote_url": "https://x.test/d.git",
+            "auth_type": "http_token",
+            "http_token": "t\npassword=evil",
+        },
+    ],
+)
+def test_create_rejects_invalid_token_combinations(db, repo_svc, project, kwargs):
+    with pytest.raises(RepoError):
+        repo_svc.create(RepoCreate(project_id=project.id, **kwargs))
+    db.rollback()
+
+
+def test_update_token_lifecycle_replace_switch_and_clear(db, repo_svc, project):
+    repo = repo_svc.create(
+        RepoCreate(
+            project_id=project.id,
+            remote_url="https://x.test/org/d.git",
+            auth_type="none",
+        )
+    )
+
+    # 只切认证方式不给令牌：自洽校验拒绝，不能存出同步必炸的行。
+    with pytest.raises(RepoError):
+        repo_svc.update(repo.id, RepoUpdate(auth_type="http_token"))
+    db.rollback()
+
+    # 令牌与认证方式一起给：切过去。
+    repo_svc.update(
+        repo.id,
+        RepoUpdate(auth_type="http_token", http_token="tok-1", http_username="ci"),
+    )
+    db.refresh(repo)
+    from app.crypto import decrypt
+
+    assert repo.auth_type == "http_token" and repo.http_username == "ci"
+    assert decrypt(repo.http_token_enc) == "tok-1"
+
+    # 令牌缺省（None）=不变，只改用户名。
+    repo_svc.update(repo.id, RepoUpdate(http_username="robot"))
+    db.refresh(repo)
+    assert repo.http_username == "robot"
+    assert decrypt(repo.http_token_enc) == "tok-1"
+
+    # 非空令牌=整体替换。
+    repo_svc.update(repo.id, RepoUpdate(http_token="tok-2"))
+    db.refresh(repo)
+    assert decrypt(repo.http_token_enc) == "tok-2"
+
+    # 切回匿名：令牌与用户名都必须清空。
+    repo_svc.update(repo.id, RepoUpdate(auth_type="none"))
+    db.refresh(repo)
+    assert repo.auth_type == "none"
+    assert repo.http_token_enc is None and repo.http_username is None
+
+    # SSH 仓库拒绝接收令牌。
+    ssh_repo = repo_svc.create(
+        RepoCreate(
+            project_id=project.id,
+            remote_url="git@x.test:o/s.git",
+            auth_type="ssh_key",
+            private_key=repo_sync.generate_keypair_sync()[0],
+        )
+    )
+    with pytest.raises(RepoError):
+        repo_svc.update(ssh_repo.id, RepoUpdate(http_token="t"))
+    db.rollback()
 
 
 def test_owner_isolation_is_404(db, repo_svc, project):
@@ -1061,7 +1375,19 @@ def test_api_test_connection_returns_branch_and_sha(client, db, monkeypatch):
     test_client, _queued = client
     _ready_project(db)
 
-    async def fake_probe(remote_url, *, private_key, branch=None, known_hosts_text=None):
+    seen: dict = {}
+
+    async def fake_probe(
+        remote_url,
+        *,
+        private_key=None,
+        branch=None,
+        known_hosts_text=None,
+        http_token=None,
+        http_username=None,
+    ):
+        seen["token"] = http_token
+        seen["username"] = http_username
         return "main", "a" * 40, "local.test", "known-line", "SHA256:abc"
 
     monkeypatch.setattr(knowledge_router, "probe_remote", fake_probe)
@@ -1077,6 +1403,59 @@ def test_api_test_connection_returns_branch_and_sha(client, db, monkeypatch):
         "host_fingerprint": "SHA256:abc",
         "known_hosts": "known-line",
     }
+
+    # 令牌探测：http_token/http_username 原样透传到传输层。
+    token_body = test_client.post(
+        "/api/knowledge/test-connection",
+        json={
+            "remote_url": "https://local.test/org/demo.git",
+            "http_token": "pat-x",
+            "http_username": "ci",
+        },
+    ).json()
+    assert token_body["code"] == 0
+    assert seen["token"] == "pat-x" and seen["username"] == "ci"
+
+
+def test_api_create_http_token_repo_never_echoes_token(client, db):
+    test_client, queued = client
+    project = _ready_project(db)
+
+    created = test_client.post(
+        "/api/knowledge/repos",
+        json={
+            "project_id": project.id,
+            "remote_url": "https://gitee.test/org/demo.git",
+            "auth_type": "http_token",
+            "http_token": "gitee-pat",
+            "http_username": "luke",
+            "name": "demo",
+        },
+    ).json()
+    assert created["code"] == 0, created
+    item = created["data"]
+    assert item["auth_type"] == "http_token" and item["has_credential"] is True
+    # 任何位置都不回传令牌或用户名（用户名也不进列表 schema）。
+    assert "gitee-pat" not in repr(item)
+    assert "http_token" not in item
+
+    listed = test_client.get(f"/api/knowledge/repos?project_id={project.id}").json()
+    row = listed["data"]["items"][0]
+    assert "gitee-pat" not in repr(row)
+    assert row["has_credential"] is True
+
+    # 缺令牌的 http_token 创建是业务拒绝，且不排队同步。
+    queued_before = len(queued)
+    bad = test_client.post(
+        "/api/knowledge/repos",
+        json={
+            "project_id": project.id,
+            "remote_url": "https://gitee.test/org/demo2.git",
+            "auth_type": "http_token",
+        },
+    ).json()
+    assert bad["code"] == -1 and bad["data"] is None
+    assert len(queued) == queued_before
 
 
 def test_api_unknown_project_is_404(client, db):

@@ -401,7 +401,8 @@ class KbRepo(Base):
     type_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
 
     name: Mapped[str] = mapped_column(String(128), nullable=False)
-    # ssh_key（每仓库独立 deploy key）| none（匿名 http(s)）。
+    # ssh_key（每仓库独立 deploy key）| http_token（http(s) + 个人访问令牌）
+    # | none（匿名 http(s)）。
     auth_type: Mapped[str] = mapped_column(String(16), nullable=False, default="ssh_key")
     # 规范化后的地址，永不包含凭据。
     remote_url: Mapped[str] = mapped_column(String(512), nullable=False)
@@ -409,6 +410,12 @@ class KbRepo(Base):
 
     # OpenSSH PEM 私钥的 Fernet 密文；任何 API 都不回读。
     private_key_enc: Mapped[bytes | None] = mapped_column(LargeBinary(8192), nullable=True)
+    # http_token 认证的个人访问令牌（Fernet 密文）；传输时经 git credential
+    # store 文件注入，不进 URL、argv 与日志，任何 API 都不回读。
+    http_token_enc: Mapped[bytes | None] = mapped_column(LargeBinary(2048), nullable=True)
+    # 令牌配套用户名：多数平台任意非空即可（默认 x-access-token），Gitee 等
+    # 个别平台要求真实用户名，故允许用户显式给。不是秘密。
+    http_username: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # 公钥不是秘密，详情页可随时查看/复制（供用户去 Git 服务登记 deploy key）。
     public_key: Mapped[str | None] = mapped_column(Text, nullable=True)
 

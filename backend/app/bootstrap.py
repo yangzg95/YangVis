@@ -174,6 +174,19 @@ def migrate_schema() -> None:
                     )
                 logger.info("widened kb_document.filename to VARCHAR(512)")
 
+    # kb_repo 首版由 create_all 建；P1 的 http(s) 令牌认证补两列。
+    kb_repo_columns = column_names("kb_repo")
+    if kb_repo_columns:
+        for column, ddl in (
+            ("http_token_enc", "ADD COLUMN http_token_enc BLOB NULL"),
+            ("http_username", "ADD COLUMN http_username VARCHAR(128) NULL"),
+        ):
+            if column in kb_repo_columns:
+                continue
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE kb_repo {ddl}"))
+            logger.info("added kb_repo.%s", column)
+
     kb_chunk_columns = column_names("kb_chunk")
     if kb_chunk_columns:
         for column, ddl in (
