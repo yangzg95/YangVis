@@ -328,10 +328,13 @@
               >
               <template #bodyCell="{ column, record }">
                 <template v-if="column.key === 'name'">
-                  <span
-                    :class="{ 'repo-file-path': record.source === 'repo' }"
-                    :title="record.source === 'repo' ? record.name : undefined"
-                  >{{ record.name }}</span>
+                  <a
+                    v-if="record.source === 'repo'"
+                    class="repo-file-path repo-file-link"
+                    :title="record.name"
+                    @click="openPreview(record.id)"
+                  >{{ record.name }}</a>
+                  <span v-else>{{ record.name }}</span>
                 </template>
 
                 <template v-else-if="column.key === 'size'">
@@ -485,7 +488,13 @@
                 <template #title>
                   <a-tag>[{{ index + 1 }}]</a-tag>
                   <a-tag v-if="item.source === 'repo'" color="geekblue">代码</a-tag>
-                  <span :class="{ 'repo-file-path': item.source === 'repo' }">
+                  <a
+                    v-if="item.source === 'repo'"
+                    class="repo-file-path repo-file-link"
+                    :title="`查看 ${item.filename} 原文（第 ${item.line_start ?? 1} 行）`"
+                    @click="openPreview(item.doc_id, item.line_start ?? 1)"
+                  >{{ hitLocation(item) }}</a>
+                  <span v-else :class="{ 'repo-file-path': item.source === 'repo' }">
                     {{ hitLocation(item) }}
                   </span>
                   <span v-if="item.symbol" class="muted"> · {{ item.symbol }}</span>
@@ -501,6 +510,36 @@
           </template>
         </a-list>
       </div>
+    </a-modal>
+
+    <!-- 仓库源文件只读预览：带行号，不做任何编辑/下载入口。 -->
+    <a-modal
+      v-model:open="previewOpen"
+      :title="preview?.name ?? '源文件预览'"
+      :footer="null"
+      width="920px"
+      class="source-preview-modal"
+      :destroy-on-close="true"
+    >
+      <a-spin :spinning="previewLoading">
+        <div v-if="preview" class="src-meta">
+          <a-tag color="geekblue">代码</a-tag>
+          <a-tag v-if="preview.language">{{ preview.language }}</a-tag>
+          <span class="muted">{{ preview.line_count }} 行 · {{ fmtSize(preview.size) }} · 只读</span>
+        </div>
+        <div v-if="preview" class="src-view">
+          <div
+            v-for="(line, i) in previewLines"
+            :id="`src-line-${i + 1}`"
+            :key="i"
+            class="src-line"
+            :class="{ 'src-line--hit': previewAnchor === i + 1 }"
+          >
+            <span class="src-gutter">{{ i + 1 }}</span>
+            <code class="src-code">{{ line === '' ? ' ' : line }}</code>
+          </div>
+        </div>
+      </a-spin>
     </a-modal>
 
     <!-- 接入 / 编辑仓库。remote_url 不可改（改地址等于换仓库，请移除后重新接入）。 -->
@@ -653,7 +692,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { message, Modal, type UploadProps } from 'ant-design-vue'
 import {
   BranchesOutlined,
@@ -673,6 +712,7 @@ import {
   repoApi,
   settingsApi,
   SUPPORTED_UPLOAD_EXTENSIONS,
+  type DocumentContent,
   type DocumentStatus,
   type IndexState,
   type KbProject,
@@ -1660,6 +1700,46 @@ function hitLocation(hit: SearchHit) {
     : `${hit.filename}:${hit.line_start}`
 }
 
+// ---- 仓库源文件只读预览（带行号） ----
+const previewOpen = ref(false)
+const previewLoading = ref(false)
+const preview = ref<DocumentContent | null>(null)
+// 检索命中跳转过来时高亮的行号
+const previewAnchor = ref<number | null>(null)
+
+/**
+ * 与后端 Python splitlines 的行数口径保持一致：去掉唯一一个末尾换行
+ * 产生的空串（"a\n" 是 1 行而不是 2 行），中间的空行保留。
+ */
+function toSourceLines(content: string): string[] {
+  if (!content) return []
+  const lines = content.split(/\r\n|\r|\n/)
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+  return lines
+}
+const previewLines = computed(() => (preview.value ? toSourceLines(preview.value.content) : []))
+
+async function scrollPreviewTo(line: number) {
+  await nextTick()
+  document.getElementById(`src-line-${line}`)?.scrollIntoView({ block: 'center' })
+}
+
+async function openPreview(docId: number, anchorLine: number | null = null) {
+  previewOpen.value = true
+  previewLoading.value = true
+  preview.value = null
+  previewAnchor.value = anchorLine
+  try {
+    preview.value = await knowledgeApi.documentContent(docId)
+    if (anchorLine != null) await scrollPreviewTo(anchorLine)
+  } catch (err) {
+    message.error(errorText(err, '读取源文件失败'))
+    previewOpen.value = false
+  } finally {
+    previewLoading.value = false
+  }
+}
+
 async function copyText(text: string) {
   try {
     await navigator.clipboard.writeText(text)
@@ -1822,6 +1902,58 @@ onUnmounted(stopPolling)
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: var(--fs-xs);
   word-break: break-all;
+}
+.repo-file-link {
+  cursor: pointer;
+}
+.repo-file-link:hover {
+  color: #1677ff;
+  text-decoration: underline;
+}
+.src-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.src-view {
+  max-height: 60vh;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.02);
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--fs-xs);
+  line-height: 1.7;
+}
+.src-line {
+  display: flex;
+}
+.src-line:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+.src-line--hit,
+.src-line--hit:hover {
+  background: rgba(250, 219, 20, 0.28);
+}
+.src-gutter {
+  flex: none;
+  width: 56px;
+  padding-right: 10px;
+  text-align: right;
+  color: rgba(128, 128, 128, 0.85);
+  user-select: none;
+  position: sticky;
+  left: 0;
+  background: inherit;
+}
+.src-code {
+  flex: 1;
+  padding-right: 12px;
+  white-space: pre;
+  color: inherit;
+  background: transparent;
+  font-family: inherit;
 }
 .repo-key-actions {
   display: flex;

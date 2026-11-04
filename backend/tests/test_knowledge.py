@@ -1380,6 +1380,35 @@ def test_api_reindex_single_document(client, db, queued):
     assert client.post("/api/knowledge/documents/9999/reindex").status_code == 404
 
 
+def test_api_document_content_preview_returns_full_text_and_line_count(client, db):
+    _, item, _ = _ready_project(db)
+    source = "def a():\n    return 1\n\ndef b():\n    return 2\n"
+    doc = _document(
+        db,
+        type_id=item.id,
+        filename="src/app.py",
+        content=source,
+        status=DocumentStatus.READY.value,
+    )
+    # 仓库文件的源码预览：source/language 要随全文一起带回前端。
+    doc.source = "repo"
+    doc.language = "py"
+    db.commit()
+
+    data = client.get(f"/api/knowledge/documents/{doc.id}/content").json()["data"]
+    assert data["content"] == source
+    assert data["line_count"] == 5  # 末尾换行不多算一行
+    assert data["source"] == "repo"
+    assert data["language"] == "py"
+    assert data["status"] == DocumentStatus.READY.value
+
+
+def test_api_document_content_preview_is_owner_scoped_404(client, db):
+    assert client.get("/api/knowledge/documents/9999/content").status_code == 404
+    theirs = _document(db, owner_id=OTHER)
+    assert client.get(f"/api/knowledge/documents/{theirs.id}/content").status_code == 404
+
+
 def test_api_batch_reindex_skips_rows_that_are_not_ours(client, db, queued):
     _, item, _ = _ready_project(db)
     mine_a = _document(db, type_id=item.id)

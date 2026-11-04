@@ -50,6 +50,19 @@ export interface KnowledgeDocument {
   updated_at: string
 }
 
+/** 只读全文预览（仓库源文件带行号的源码视图）。 */
+export interface DocumentContent {
+  id: number
+  name: string
+  source: 'upload' | 'repo' | string
+  language?: string | null
+  size: number
+  content: string
+  /** 后端算好的行数，前端直接用。 */
+  line_count: number
+  status: DocumentStatus
+}
+
 export interface IndexState {
   status: 'uninitialized' | 'indexing' | 'ready' | 'rebuilding' | 'error'
   collection_name: string | null
@@ -226,6 +239,9 @@ export const knowledgeApi = {
       method: 'POST',
       skipErrorToast: true,
     }),
+  /** 只读全文预览；仓库源文件的带行号源码视图走这里。 */
+  documentContent: (id: number) =>
+    request<DocumentContent>({ url: `/knowledge/documents/${id}/content` }),
   batchDeleteDocuments: (ids: number[]) =>
     request<{ requested: number; done: number }>({
       url: '/knowledge/documents/batch-delete',

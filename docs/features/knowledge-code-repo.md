@@ -1,6 +1,6 @@
 # 知识库 · 代码仓库接入（设计方案）
 
-> 状态：P0 已实施（2026-11）。本文是在现有知识库（见 [knowledge-base.md](knowledge-base.md)）上增加「代码仓库」
+> 状态：P0 已实施（2026-11），P1 已交付「仓库源文件带行号只读预览」。本文是在现有知识库（见 [knowledge-base.md](knowledge-base.md)）上增加「代码仓库」
 > 这一内容来源的设计，不改写既有链路。目标是让对话智能体可以基于某个 Git 仓库的真实源码回答
 > 「这个功能在哪实现的」「这段逻辑什么意思」「改这里会影响谁」一类问题，并且引用能落到
 > `文件路径:行号`。
@@ -346,7 +346,8 @@ P0 用「语言族规则 + 行扫描」，覆盖代码问答里最要紧的结�
 | POST | `/repos/{id}/retrust` | 主机指纹变更后的人工确认：重新 accept-new 探测并覆盖 `known_hosts_line`；记录操作者日志 |
 | DELETE | `/repos/{id}` | 删类型/文档/向量/仓库行，best-effort rmtree 整个 `{repo_id}/`（含密钥文件） |
 
-仓库文件不新增文档端点：列表、单篇重新索引、全量重建、检索预览全部复用既有接口，文档
+仓库文件只新增一个只读端点 `GET /documents/{id}/content`（全文 + `line_count`，
+P1 源文件预览用）；列表、单篇重新索引、全量重建、检索预览全部复用既有接口，文档
 视图里以 `source`/仓库名区分。批量删除接口对 `source='repo'` 的 id 跳过并在 `done`
 口径里体现（仓库文件只能通过移除仓库或同步删除回收）。
 
@@ -370,13 +371,15 @@ P0 用「语言族规则 + 行扫描」，覆盖代码问答里最要紧的结�
   - 轮询：`hasRunningJobs` 增加「当前项目存在 syncing 仓库」，复用现有 pollLoop；同步中
     同时刷仓库信息与文档表格。
   - 检索预览命中：标题渲染 `path:lineStart-lineEnd · symbol`，正文按语言做等宽/基础高亮
-    （P0 只等宽字体，不引高亮库）。
+    （P0 只等宽字体，不引高亮库）；标题本身是链接，点开带行号的原文预览并滚动高亮命中行。
+  - 源文件预览（P1）：文档表格里 `source='repo'` 的文件名渲染为链接，弹窗等宽展示全文，
+    左侧行号 gutter（sticky，横向滚动不遮行号），头部显示语言/行数/体积/只读，无编辑下载入口。
 - 对话引用卡（`MessageBubble.vue`）：代码来源显示路径 + 行号区间 + 「代码」标签 +
   符号名，等宽字体；无行号的老分片退化为文件名。
 - `api/knowledge.ts` 增加 `repoApi` 与 `RepoItem / RepoStatus / RepoSyncResult /
   RepoKeypair / RepoTestConnectionResult / RepoCreatePayload / RepoUpdatePayload` 类型；
   `SearchHit`、`KnowledgeDocument` 增补可选字段；`api/chat.ts` 的 `Citation` 同样增补；
-  `DocumentStatus` 不变。
+  P1 增加 `DocumentContent` 与 `knowledgeApi.documentContent`；`DocumentStatus` 不变。
 
 ## 9. 配置
 
@@ -460,5 +463,8 @@ scp-like 解析问题），clone/fetch/ls-tree/rev-parse 全部跑真实 git 二
 - **不做 LFS、不做子模块递归、不解析 svn:externals 类形态**；大文件靠浅克隆 + LFS
   跳过 + 文件上限三层兜底，clone 体积没有硬上限（Git 协议不支持先问大小），仅靠超时与
   同步后工作区体积告警。
-- 仓库文件当前不能被单独删除或在 UI 查看全文；「点开读原文件」（带行号的只读预览）列入
-  P1，数据早已在 `kb_document.content`，只差接口与展示。
+- 仓库文件不能被单独删除（只能随仓库移除或 glob 规则变化在同步时对账删除）。「点开读原文件」
+  已实施（2026-11，P1）：`GET /knowledge/documents/{id}/content` 返回只读全文与后端算好的
+  `line_count`（不加向量模型闸门，读库不花 embedding 调用）；文档表格里仓库文件名与检索预览
+  的代码命中位置都是链接，弹窗以行号 gutter 等宽渲染，检索命中跳转会滚动并高亮对应行。
+  仍然不提供下载/编辑入口。

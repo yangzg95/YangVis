@@ -156,6 +156,23 @@ class KnowledgeDocument(BaseModel):
     updated_at: datetime
 
 
+class DocumentContent(BaseModel):
+    """文档/仓库源文件的只读全文预览。仓库文件路径 + 行号预览用的就是它。"""
+
+    model_config = _ALLOW_MODEL_PREFIX
+
+    id: int
+    name: str
+    source: str = "upload"
+    language: Optional[str] = None
+    size: int = 0
+    # 抽取出的全文（仓库文件即原始源码）；前端自己拆行渲染行号。
+    content: str
+    # 行数由后端算好，前端不用为了渲染行号再数一遍大字符串。
+    line_count: int = 0
+    status: str
+
+
 class IndexState(BaseModel):
     """调用方的 Qdrant collection 状态。"""
 

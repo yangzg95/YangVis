@@ -28,6 +28,7 @@ from app.models.schemas import (
     CurrentUser,
     DocBatchPayload,
     DocBatchResult,
+    DocumentContent,
     IndexState,
     KbProject,
     KbProjectCreate,
@@ -355,6 +356,35 @@ async def upload_document(
         len(raw),
     )
     return APIResponse(data=KnowledgeService.to_document(doc))
+
+
+@router.get("/documents/{doc_id}/content", response_model=APIResponse[DocumentContent])
+def get_document_content(
+    doc_id: int,
+    service: KnowledgeService = Depends(get_service),
+) -> APIResponse[DocumentContent]:
+    """只读全文预览（仓库文件带行号的源码视图走这里）。
+
+    不加向量模型闸门：读的是 MySQL 里已抽取的文本，不花任何 embedding 调用。
+    """
+    try:
+        doc = service.get_document(doc_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    # 末尾换行不影响行数；空内容给 0 行。splitlines 对 "a\n" 给 1 行，符合直觉。
+    line_count = len(doc.content.splitlines()) if doc.content else 0
+    return APIResponse(
+        data=DocumentContent(
+            id=doc.id,
+            name=doc.filename,
+            source=doc.source,
+            language=doc.language,
+            size=doc.size,
+            content=doc.content,
+            line_count=line_count,
+            status=doc.status,
+        )
+    )
 
 
 @router.post("/documents/{doc_id}/reindex", response_model=APIResponse[KnowledgeDocument])
