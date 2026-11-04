@@ -66,6 +66,20 @@ def _retryable_failure(exc: Exception) -> bool:
     )
 
 
+_TIMEOUT_REPLY = "模型响应超时，本次回答没有保存；可以点击「重试」再答一次"
+
+
+def _failure_event(exc: Exception, prefix: str = "回答生成失败") -> dict:
+    """把未预期异常转成 error 帧。
+
+    超时单独给可操作的说法：这一问已经落库、回答没有落库，正好对上重试
+    接口的前提；再把原始异常文本埋在提示里只会让人以为是别的问题。
+    """
+    if _retryable_failure(exc):
+        return {"code": -1, "message": _TIMEOUT_REPLY, "retryable": True}
+    return {"code": -1, "message": f"{prefix}：{exc}", "retryable": False}
+
+
 def _display_filename(raw: str | None) -> str:
     """只保留文件名本身：展示用，绝不参与任何路径拼接。"""
     name = (raw or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
@@ -595,14 +609,7 @@ async def completions(
                 "chat completion failed for conversation %s",
                 getattr(conversation, "id", None),
             )
-            yield sse_event(
-                "error",
-                {
-                    "code": -1,
-                    "message": f"回答生成失败：{exc}",
-                    "retryable": _retryable_failure(exc),
-                },
-            )
+            yield sse_event("error", _failure_event(exc))
 
     return StreamingResponse(
         with_heartbeat(stream()),
@@ -693,14 +700,7 @@ async def retry_last_answer(
             yield sse_event("error", {"code": -1, "message": str(exc)})
         except Exception as exc:  # noqa: BLE001 - the stream must not just stop
             logger.exception("chat retry failed for conversation %s", conversation_id)
-            yield sse_event(
-                "error",
-                {
-                    "code": -1,
-                    "message": f"重试失败：{exc}",
-                    "retryable": _retryable_failure(exc),
-                },
-            )
+            yield sse_event("error", _failure_event(exc, prefix="重试失败"))
 
     return StreamingResponse(
         with_heartbeat(stream()),

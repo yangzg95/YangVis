@@ -94,6 +94,11 @@ class Settings(BaseSettings):
 
     # 调用用户自行配置的模型服务商时的出站请求设置。
     MODEL_HTTP_TIMEOUT: float = 30.0
+    # 流式对话单独放宽：这里的超时是「两个字节之间」的间隔上限（httpx read
+    # timeout），而推理模型憋思维链、长工具调用后重新起笔，都可能几十秒不吐
+    # 字；用连通性测试那档 30 秒会把正常的慢回答误判成超时。连通性测试与
+    # embeddings 仍走 MODEL_HTTP_TIMEOUT。
+    CHAT_MODEL_TIMEOUT: float = 180.0
 
     # AI 网关（对外统一密钥 → 多个上游厂商的 OpenAI 兼容转发）。
     #

@@ -1496,6 +1496,9 @@ class ChatService:
             config,
             temperature=resolve_temperature(config, agent.temperature),
             streaming=True,
+            # 流式回答用对话专用超时：推理停顿、工具回合间隙都会拉长「两个
+            # token 之间」的空档，30 秒那档留给连通性测试。
+            timeout=settings.CHAT_MODEL_TIMEOUT,
         )
         # tools 为空（没勾选、不检索、不挂运维箱）时 create_agent 不会调用
         # bind_tools，纯文本问答不再强制模型支持 function calling；一旦挂了

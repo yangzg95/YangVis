@@ -22,6 +22,8 @@ export interface Bubble {
   attachments?: ChatAttachment[]
   /** 这条提问的回答失败过，界面上给出重试入口。 */
   failed?: boolean
+  /** 失败原因（给用户看的一句短话）；缺省时界面只说「发送失败」。 */
+  failNote?: string
 }
 
 // ---- 助手气泡的交错切段 ------------------------------------------------------

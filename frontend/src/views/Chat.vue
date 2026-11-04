@@ -1044,7 +1044,7 @@ function settleSteps(bubble: Bubble) {
 function makeStreamHandlers(
   bubble: Bubble,
   streamActions: OpsAction[],
-  onFailed: (message: string) => void,
+  onFailed: (message: string, retryable: boolean) => void,
 ): StreamHandlers {
   // 第一个过程事件（思考 / 工具 / 正文 / 提议）到达就让气泡上线，不必再等
   // 第一个正文 token——思考与调工具本身就是要展示的内容。失败时在 onError
@@ -1117,7 +1117,7 @@ function makeStreamHandlers(
         void loadConversations()
       }
     },
-    onError: ({ message }) => {
+    onError: ({ message, retryable }) => {
       toast.error(message)
       settleSteps(bubble)
       // 只收到思考/工具过程、一个字正文都没吐、也没提议写命令：撤掉空气泡，
@@ -1126,7 +1126,7 @@ function makeStreamHandlers(
         const index = messages.value.indexOf(bubble)
         if (index >= 0) messages.value.splice(index, 1)
       }
-      onFailed(message)
+      onFailed(message, !!retryable)
     },
   }
 }
@@ -1952,10 +1952,12 @@ function send() {
           ...(mcp_server_ids ?? []).map((id) => `mcp:${id}`),
         ]
       },
-      ...makeStreamHandlers(bubble, streamActions, () => {
+      ...makeStreamHandlers(bubble, streamActions, (_message, retryable) => {
         // 提问还在、回答没落成：挂上「可重试」标记，别让用户重新打一遍。
-        // 工厂已弹过错误提示、撤掉了没有正文的空气泡。
+        // 工厂已弹过错误提示、撤掉了没有正文的空气泡。超时单独留一句话，
+        // 用户才知道是「等太久」而不是模型答错。
         userBubble.failed = true
+        userBubble.failNote = retryable ? '回答超时，本次回答未保存' : undefined
         finish()
       }),
     },
@@ -1982,6 +1984,7 @@ function retryMessage(msg: Bubble) {
   // 清掉这条提问之后的残文（失败时已生成的半截回答），重新挂流。
   messages.value.splice(idx + 1)
   msg.failed = false
+  msg.failNote = undefined
 
   streaming.value = true
   pendingText.value = ''
@@ -1994,10 +1997,11 @@ function retryMessage(msg: Bubble) {
 
   abort = chatApi.streamRetry(
     activeId.value,
-    makeStreamHandlers(bubble, streamActions, () => {
+    makeStreamHandlers(bubble, streamActions, (_message, retryable) => {
       // 又失败了：残文（含只有过程的空气泡）清掉，提问重新挂回「可重试」。
       messages.value.splice(idx + 1)
       msg.failed = true
+      msg.failNote = retryable ? '回答超时，本次回答未保存' : undefined
       finish()
     }),
   )

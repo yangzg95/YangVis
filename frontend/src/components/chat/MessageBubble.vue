@@ -82,7 +82,7 @@
       </div>
 
       <div v-if="msg.failed" class="send-failed">
-        发送失败
+        {{ msg.failNote || '发送失败' }}
         <a-button type="link" size="small" danger @click="emit('retry', msg)">
           重试
         </a-button>

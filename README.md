@@ -222,6 +222,7 @@ npm run dev                   # http://localhost:5173，/api 与网关的 /v1 �
 | `OPS_SFTP_OP_TIMEOUT` `OPS_SFTP_STALL_TIMEOUT` | 30 / 60 | 打开 SFTP 会话的等待上限、传输连续这么久没有新字节进出就判死（秒） |
 | `BAIDU_NETDISK_APP_KEY/SECRET_KEY/APP_NAME` | 空 | 任一为空则网盘功能整体隐藏 |
 | `MODEL_HTTP_TIMEOUT` | 30 | 调用户模型服务的出站超时 |
+| `CHAT_MODEL_TIMEOUT` | 180 | 流式对话的模型出站超时（量的是两个 token 之间的空档） |
 | `AI_GATEWAY_CONNECT_TIMEOUT` `AI_GATEWAY_READ_TIMEOUT` | 10 / 300 | 网关转发上游的连接/读取超时（秒） |
 | `AI_GATEWAY_LOG_PAYLOAD` `AI_GATEWAY_LOG_MAX_CHARS` | true / 8000 | 是否把请求响应正文写进审计日志、单条正文截断字符数 |
 | `AI_GATEWAY_MAX_ATTEMPTS` | 3 | 单次调用最多尝试几条上游通道 |

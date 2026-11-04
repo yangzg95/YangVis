@@ -1188,7 +1188,14 @@ def test_answer_mounts_no_tools_until_knowledge_or_selection_is_on(db, agent_env
 def test_answer_streams_at_the_agents_temperature(db, agent_env):
     conv = make_conversation(db)
     run_answer(db, conv, make_agent(db, temperature=75), agent_env, [token("答")])
-    assert agent_env["model_kwargs"] == [{"temperature": 0.75, "streaming": True}]
+    assert agent_env["model_kwargs"] == [
+        {
+            "temperature": 0.75,
+            "streaming": True,
+            # 流式对话用专用超时，不走连通性测试那档 30 秒。
+            "timeout": chat_module.settings.CHAT_MODEL_TIMEOUT,
+        }
+    ]
 
 
 def test_prompt_layers_persona_memories_summary_then_rules(db, agent_env):
