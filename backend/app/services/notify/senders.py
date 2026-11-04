@@ -9,6 +9,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
+import re
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -72,10 +74,23 @@ def build_payload(
     title: str,
     body: str,
     text: str,
+    secret: Optional[str] = None,
+    now: Optional[int] = None,
 ) -> dict[str, Any]:
-    """按渠道方言构造请求体。"""
+    """按渠道方言构造请求体。
+
+    飞书的签名校验是**请求体字段**（``timestamp`` 秒级 + ``sign``），不是 URL
+    参数；钉钉反过来，签名只能挂在 URL 上（见 :func:`signed_url`）。两家弄反的
+    后果不一样：钉钉挂 body 会被验签拒绝，飞书挂 URL 会把 hook 路径带脏
+    （``.../hook/abc&timestamp=…``）——飞书直接回 HTTP 404。
+    """
     if kind == "feishu":
-        return {"msg_type": "text", "content": {"text": text}}
+        payload: dict[str, Any] = {"msg_type": "text", "content": {"text": text}}
+        if secret:
+            ts = int(now if now is not None else time.time())
+            payload["timestamp"] = str(ts)
+            payload["sign"] = feishu_sign(ts, secret)
+        return payload
     if kind == "wecom":
         return {"msgtype": "text", "text": {"content": text}}
     if kind == "dingtalk":
@@ -90,19 +105,16 @@ def build_payload(
 
 
 def signed_url(kind: str, webhook_url: str, secret: Optional[str], *, now: Optional[int] = None) -> str:
-    """需要加签的渠道在 URL 上追加签名参数，其余原样返回。
+    """钉钉加签机器人：把毫秒时间戳与签名挂到 URL query，其余渠道原样返回。
 
-    飞书的加签是可选的（secret 为空就不加）；钉钉配了加签机器人就必须带。
+    钉钉自己的地址一定带 ``?access_token=``，但自建反代可能没有 query，这里按
+    URL 现状选 ``?`` 或 ``&``——拼错分隔符同样会得到一个 404。
     """
-    if not secret:
+    if kind != "dingtalk" or not secret:
         return webhook_url
-    if kind == "feishu":
-        ts = int(now if now is not None else time.time())
-        return f"{webhook_url}&timestamp={ts}&sign={feishu_sign(ts, secret)}"
-    if kind == "dingtalk":
-        ts_ms = int((now if now is not None else time.time()) * 1000)
-        return f"{webhook_url}&timestamp={ts_ms}&sign={dingtalk_sign(ts_ms, secret)}"
-    return webhook_url
+    ts_ms = int((now if now is not None else time.time()) * 1000)
+    sep = "&" if urllib.parse.urlparse(webhook_url).query else "?"
+    return f"{webhook_url}{sep}timestamp={ts_ms}&sign={dingtalk_sign(ts_ms, secret)}"
 
 
 # ---- 响应判定 -------------------------------------------------------------
@@ -132,6 +144,30 @@ def _check_response(kind: str, payload: dict[str, Any]) -> None:
     # generic：HTTP 2xx 即成功，不看正文。
 
 
+# 反代、网关与自建接收端的错误正文里常整段复述请求 URL（含 access_token /
+# key / sign），这些串会落进 notify_log.error 并在设置页回显，先抹掉值再截断。
+_CREDENTIAL_QUERY = re.compile(r"(?P<key>access_token|token|api_key|key|secret|sign)\s*=\s*[^\s&\"']+")
+
+# 正文片段的上限：够放下一条 JSON 错误，又不至于把 512 的列撑成一屏日志。
+_MAX_ERROR_BODY = 200
+
+
+def _http_error(resp: httpx.Response) -> str:
+    """HTTP 状态码 + 可读的正文片段（只认 JSON）。
+
+    非 JSON（HTML 错误页）一律丢弃：机器人侧的失败原因都在 JSON 里，而网关
+    的 HTML 往往把请求 URL 原样印出来，那种正文对排查没帮助、只有泄漏风险。
+    """
+    base = f"HTTP {resp.status_code}"
+    try:
+        data = resp.json()
+    except (ValueError, UnicodeDecodeError):
+        return base
+    text = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
+    text = " ".join(_CREDENTIAL_QUERY.sub(r"\g<key>=***", text).split())
+    return f"{base}：{text[:_MAX_ERROR_BODY]}" if text else base
+
+
 # ---- 发送 -------------------------------------------------------------------
 
 
@@ -152,9 +188,13 @@ async def send_to_channel(
     被限流，重试同样会被拒，白等十秒。渠道侧业务错误（errcode 非零）与
     响应不是 JSON 也都是终态。任何失败都压成 :class:`SendResult` 返回，
     调用方（dispatch）只负责把结果落进 ``notify_log``。
+
+    ``secret`` 同时喂给两条加签路径：钉钉进 URL，飞书进请求体。
     """
     url = signed_url(kind, webhook_url, secret)
-    payload = build_payload(kind, event=event, title=title, body=body, text=text)
+    payload = build_payload(
+        kind, event=event, title=title, body=body, text=text, secret=secret
+    )
     started = time.monotonic()
 
     last_error: Optional[str] = None
@@ -163,10 +203,10 @@ async def send_to_channel(
             resp = await client.post(url, json=payload)
             elapsed = int((time.monotonic() - started) * 1000)
             if resp.status_code >= 500:
-                last_error = f"HTTP {resp.status_code}"
+                last_error = _http_error(resp)
                 continue
             if resp.status_code >= 400:
-                return SendResult(ok=False, error=f"HTTP {resp.status_code}", elapsed_ms=elapsed)
+                return SendResult(ok=False, error=_http_error(resp), elapsed_ms=elapsed)
             # generic 是自建接收端，常见返回纯文本（"ok"），不按 JSON 解析。
             if kind != "generic":
                 _check_response(kind, resp.json())
