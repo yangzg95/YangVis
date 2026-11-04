@@ -90,11 +90,24 @@
 
       <div v-if="msg.citations.length" class="citations">
         <div class="citations-title">
-          来源
-          <span class="citations-count">{{ msg.citations.length }}</span>
+          <span class="citations-label">
+            来源
+            <span class="citations-count">{{ msg.citations.length }}</span>
+          </span>
+          <!-- 来源几十条时整片铺开会把正文挤出视野，默认只留前几条。 -->
+          <button
+            v-if="collapsible"
+            type="button"
+            class="citations-toggle"
+            @click="sourcesExpanded = !sourcesExpanded"
+          >
+            {{ sourcesExpanded ? '收起' : `展开全部 ${msg.citations.length} 条` }}
+            <UpOutlined v-if="sourcesExpanded" />
+            <DownOutlined v-else />
+          </button>
         </div>
         <a-tooltip
-          v-for="c in msg.citations"
+          v-for="c in visibleCitations"
           :key="c.chunk_id"
           placement="topLeft"
           overlay-class-name="citation-tip"
@@ -128,7 +141,8 @@
 import MermaidCard from '@/components/MermaidCard.vue'
 import ConfirmCard from '@/components/ConfirmCard.vue'
 import ThinkingTrace from '@/components/ThinkingTrace.vue'
-import { CopyOutlined, FileOutlined } from '@ant-design/icons-vue'
+import { CopyOutlined, DownOutlined, FileOutlined, UpOutlined } from '@ant-design/icons-vue'
+import { computed, ref } from 'vue'
 import type { OpsAction } from '@/api'
 import { actionsOf, assistantSections, sectionParts, type Bubble } from '@/utils/chatSections'
 
@@ -170,6 +184,17 @@ function onReject(action: OpsAction) {
 function onSavePart(index: number, source: string) {
   emit('save', { msg: props.msg, index, source })
 }
+
+/** 折叠时保留几条来源：再多就把正文挤出视野了。 */
+const COLLAPSED_LIMIT = 5
+
+const sourcesExpanded = ref(false)
+const collapsible = computed(() => props.msg.citations.length > COLLAPSED_LIMIT)
+const visibleCitations = computed(() =>
+  collapsible.value && !sourcesExpanded.value
+    ? props.msg.citations.slice(0, COLLAPSED_LIMIT)
+    : props.msg.citations,
+)
 
 // 代码分片（仓库来源）：来源渲染为 path:行号区间，符号挂在后面；
 // 老分片没有行号，退化为纯文件名，与上传文档的引用卡长得一样。
@@ -307,6 +332,31 @@ function citationLocation(c: Bubble['citations'][number]): string {
   font-size: var(--fs-xs);
   color: var(--text-3);
   margin-bottom: 4px;
+}
+.citations-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+/* 展开/收起：贴着标题行右端，用最低调的形态，不抢来源本身的注意力。 */
+.citations-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  padding: 0 4px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.citations-toggle:hover {
+  background: var(--hover-neutral);
+  color: var(--signal-text);
 }
 .citations-count {
   padding: 0 6px;
