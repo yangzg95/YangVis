@@ -18,6 +18,8 @@ from typing import Any, Optional
 
 import httpx
 
+from app.timeutil import beijing_now
+
 # 机器人 webhook 的响应都是即答的小 JSON，10 秒足够覆盖跨地域的抖动。
 TIMEOUT = httpx.Timeout(10.0)
 
@@ -95,12 +97,13 @@ def build_payload(
         return {"msgtype": "text", "text": {"content": text}}
     if kind == "dingtalk":
         return {"msgtype": "text", "text": {"content": text}}
-    # generic：结构化字段，给自建接收端解析用。
+    # generic：结构化字段，给自建接收端解析用。sent_at 带 +08:00 偏移——对端
+    # 无法假设我们容器的时区，无偏移的墙上时间只会让它猜。
     return {
         "event": event,
         "title": title,
         "body": body,
-        "sent_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "sent_at": beijing_now().isoformat(timespec="seconds"),
     }
 
 

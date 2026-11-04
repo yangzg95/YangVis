@@ -155,8 +155,7 @@ class NotifyChannelService:
         except DecryptionError as exc:
             return SendResult(ok=False, error=str(exc))
 
-        now = datetime.now()
-        text = render_text("测试消息", "渠道连通测试：收到这条消息说明配置正确。", now)
+        text = render_text("测试消息", "渠道连通测试：收到这条消息说明配置正确。")
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             return await send_to_channel(
                 client,

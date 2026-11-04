@@ -33,6 +33,7 @@ from app.services.notify.dispatch import (
 from app.services.notify import dispatch as dispatch_module
 from app.services.notify.events import normalize_events
 from app.services.notify.senders import SendResult
+from app.timeutil import BEIJING_TZ
 
 OWNER = 1
 OTHER = 2
@@ -220,6 +221,17 @@ def test_render_text_shape():
     now = datetime(2026, 11, 3, 14, 22, 31)
     text = render_text("工作流失败：x #1", "步骤超时", now)
     assert text == "【yangvis】工作流失败：x #1\n步骤超时\n时间：2026-11-03 14:22:31"
+
+
+def test_render_text_time_comes_from_beijing_now(monkeypatch):
+    # 默认值必须走 beijing_now 而不是 datetime.now：app 容器没配 TZ 时后者是
+    # UTC，群里收到的消息时间比北京时间早 8 小时（真机回报过）。
+    monkeypatch.setattr(
+        dispatch_module,
+        "beijing_now",
+        lambda: datetime(2026, 11, 4, 16, 28, 9, tzinfo=BEIJING_TZ),
+    )
+    assert render_text("测试消息", "正文") == "【yangvis】测试消息\n正文\n时间：2026-11-04 16:28:09"
 
 
 # ---- 事件词表 ---------------------------------------------------------------

@@ -26,11 +26,16 @@ RUN npm run build
 # C 扩展装不上就静默降级成纯 Python 路径。3.12 与 pyproject 的 >=3.12,<3.14 一致。
 FROM docker.m.daocloud.io/library/python:3.12-slim AS backend
 
+# TZ 放在镜像层而不是 compose：容器默认 UTC 时，Python 侧 datetime.now() 写进
+# DATETIME 列会比 MySQL NOW() 生成的 created_at 早 8 小时，界面上就是「一次比
+# 它自己晚 8 小时才被创建的运行」。基础镜像已带 tzdata（zoneinfo 里查得到
+# Asia/Shanghai），这里只指一下，不需要 apt 装包。
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    TZ=Asia/Shanghai
 
 WORKDIR /app
 

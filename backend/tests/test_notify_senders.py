@@ -102,7 +102,9 @@ def test_build_payload_generic_is_structured():
     assert payload["event"] == "workflow.failed"
     assert payload["title"] == "t"
     assert payload["body"] == "b"
-    assert "sent_at" in payload
+    # sent_at 带 +08:00 偏移：自建接收端猜不到我们容器用什么时区跑的。
+    assert payload["sent_at"].endswith("+08:00")
+    assert "T" in payload["sent_at"]
     # generic 不吃 text，混进去反而误导自建接收端。
     assert "text" not in payload and "content" not in payload
     # 自建接收端没有约定的加签算法，密钥不该顺着 body 漏出去。

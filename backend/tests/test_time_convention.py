@@ -5,8 +5,9 @@
 落 +08 的墙上时间）才会露馅——界面上出现「创建时间 15:02、开始时间 07:02」这种
 比它自己晚 8 小时才被创建的运行。所以这里不看行为，直接扫源码，把写法钉住。
 
-:func:`app.timeutil.db_now` 是唯一的入口；例外只有 token 有效期那几处，它们比的
-是绝对时刻，从不和 ``created_at`` 摆在一起显示。
+:func:`app.timeutil.db_now` 是写库这一类里唯一的入口。两种时间不归它管：token
+有效期比的是绝对时刻（下面白名单里那几个文件），发给系统外面的文本走
+:func:`app.timeutil.beijing_now`——读者在 +08，跑代码的容器不一定。
 """
 from __future__ import annotations
 
@@ -55,3 +56,18 @@ def test_db_now_is_naive_local():
     assert isinstance(moment, datetime)
     assert moment.tzinfo is None, "写库的时间戳必须 naive，DATETIME 列存不下偏移量"
     assert moment.year == datetime.now().year
+
+
+def test_beijing_now_is_a_real_instant_not_a_label():
+    """群消息与自建接收端用它：偏移恒为 +08，且确实是那一刻的北京时间。
+
+    第二条断言防的是 ``datetime.now().replace(tzinfo=BEIJING_TZ)`` 这种写法——
+    它只是给进程本地时间贴了个 +08 标签，容器在 UTC 时发出去的消息照旧早 8 小时。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app.timeutil import beijing_now
+
+    moment = beijing_now()
+    assert moment.utcoffset() == timedelta(hours=8)
+    assert abs((moment - datetime.now(timezone.utc)).total_seconds()) < 5

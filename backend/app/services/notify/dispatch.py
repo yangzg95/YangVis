@@ -29,6 +29,7 @@ from app import database as app_db
 from app.crypto import decrypt
 from app.models.entities import NotifyChannel, NotifyLog
 from app.services.notify.senders import TIMEOUT, send_to_channel
+from app.timeutil import beijing_now
 
 logger = logging.getLogger("yangvis.notify")
 
@@ -40,13 +41,18 @@ STATUS_SENT = "sent"
 STATUS_FAILED = "failed"
 
 
-def render_text(title: str, body: str, now: datetime) -> str:
+def render_text(title: str, body: str, now: Optional[datetime] = None) -> str:
     """群消息的纯文本形态：text 类机器人只吃这一个字段。
 
     公开给 service.py 的连通测试复用——测试消息和正式事件必须是同一种
     形态，否则「测试通过、正式收不到」时没法对比排查。
+
+    时间由这里决定而不是由调用方传：这条文本的读者在 +08，而跑 dispatch 的
+    容器跟着自己的 ``TZ`` 走（部署侧没配就是 UTC），群里的时间戳会整整早 8 小时。
+    ``now`` 只给单测留一个确定性的注入口。
     """
-    return f"【yangvis】{title}\n{body}\n时间：{now.strftime('%Y-%m-%d %H:%M:%S')}"
+    moment = now if now is not None else beijing_now()
+    return f"【yangvis】{title}\n{body}\n时间：{moment.strftime('%Y-%m-%d %H:%M:%S')}"
 
 
 async def dispatch(owner_id: int, event: str, *, title: str, body: str = "") -> None:
@@ -61,8 +67,7 @@ async def dispatch(owner_id: int, event: str, *, title: str, body: str = "") -> 
         channels = await asyncio.to_thread(_subscribed_channels, owner_id, event)
         if not channels:
             return
-        now = datetime.now()
-        text = render_text(title, body, now)
+        text = render_text(title, body)
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             for channel in channels:
                 result = await send_to_channel(
