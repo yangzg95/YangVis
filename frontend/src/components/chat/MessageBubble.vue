@@ -89,20 +89,35 @@
       </div>
 
       <div v-if="msg.citations.length" class="citations">
-        <div class="citations-title">来源</div>
+        <div class="citations-title">
+          来源
+          <span class="citations-count">{{ msg.citations.length }}</span>
+        </div>
         <a-tooltip
           v-for="c in msg.citations"
           :key="c.chunk_id"
-          :title="c.excerpt"
-          placement="top"
+          placement="topLeft"
+          overlay-class-name="citation-tip"
         >
-          <a-tag class="citation" :class="{ 'citation--code': isCodeCitation(c) }">
-            [{{ c.index }}]
+          <template #title>
+            <div class="citation-tip-path">{{ citationLocation(c) }}</div>
+            <div
+              v-if="c.excerpt"
+              class="citation-tip-body"
+              :class="{ 'citation-tip-body--code': isCodeCitation(c) }"
+            >{{ c.excerpt }}</div>
+          </template>
+          <div class="citation" :class="{ 'citation--code': isCodeCitation(c) }">
+            <span class="citation-index">[{{ c.index }}]</span>
             <a-tag v-if="isCodeCitation(c)" color="geekblue" class="citation-kind">代码</a-tag>
-            {{ citationLocation(c) }}
-            <span v-if="c.symbol" class="citation-symbol"> · {{ c.symbol }}</span>
-            <span class="score">{{ c.score.toFixed(2) }}</span>
-          </a-tag>
+            <span class="citation-path">
+              <!-- 三个 span 之间不能留空白：flex 容器里的换行会变成一个空格项，
+                   截断后路径里会多出一截空档。 -->
+              <span v-if="citationDir(c)" class="citation-dir">{{ citationDir(c) }}</span><span class="citation-file" :class="{ 'citation-file--nested': citationDir(c) }">{{ citationBase(c) }}</span><span v-if="citationRange(c)" class="citation-line">{{ citationRange(c) }}</span>
+            </span>
+            <span v-if="c.symbol" class="citation-symbol">{{ c.symbol }}</span>
+            <span class="citation-score">{{ c.score.toFixed(2) }}</span>
+          </div>
         </a-tooltip>
       </div>
     </div>
@@ -162,12 +177,27 @@ function isCodeCitation(c: Bubble['citations'][number]): boolean {
   return c.source === 'repo' || c.line_start != null
 }
 
-function citationLocation(c: Bubble['citations'][number]): string {
-  if (c.line_start == null) return c.filename
-  const range = c.line_end && c.line_end !== c.line_start
+// 路径拆成目录/文件名：行内只留文件名，目录吃剩余宽度、超长从尾部截断。
+function citationDir(c: Bubble['citations'][number]): string {
+  const cut = c.filename.lastIndexOf('/')
+  return cut < 0 ? '' : c.filename.slice(0, cut)
+}
+
+function citationBase(c: Bubble['citations'][number]): string {
+  const cut = c.filename.lastIndexOf('/')
+  return cut < 0 ? c.filename : c.filename.slice(cut + 1)
+}
+
+function citationRange(c: Bubble['citations'][number]): string {
+  if (c.line_start == null) return ''
+  return c.line_end && c.line_end !== c.line_start
     ? `:${c.line_start}-${c.line_end}`
     : `:${c.line_start}`
-  return `${c.filename}${range}`
+}
+
+function citationLocation(c: Bubble['citations'][number]): string {
+  const dir = citationDir(c)
+  return `${dir ? `${dir}/` : ''}${citationBase(c)}${citationRange(c)}`
 }
 </script>
 
@@ -271,30 +301,127 @@ function citationLocation(c: Bubble['citations'][number]): string {
   border-top: 1px dashed var(--hairline);
 }
 .citations-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: var(--fs-xs);
   color: var(--text-3);
-  margin-bottom: 6px;
-}
-.citation {
   margin-bottom: 4px;
-  cursor: help;
 }
-/* 代码来源：等宽路径方便核对，内层标签与文字基线对齐。 */
-.citation--code {
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+.citations-count {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+/* 一条来源压成一行：索引 / 类型 / 路径 / 符号 / 相关度。长路径在这里换行
+   会把十几条来源摊成一大片、行高参差，扫读时对不上号——所以只截断不换行。 */
+.citation {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 -6px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  cursor: help;
+  transition: background-color 0.15s;
+}
+.citation:hover {
+  background: var(--hover-neutral);
+}
+.citation-index {
+  flex: none;
+  min-width: 22px;
+  color: var(--text-3);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* 代码来源：等宽路径方便核对；上传文档仍走正文字体。 */
+.citation--code .citation-path,
+.citation--code .citation-symbol {
+  font-family: var(--font-mono);
 }
 .citation-kind {
-  margin: 0 2px 0 4px;
+  flex: none;
+  margin: 0;
   padding: 0 4px;
   font-size: var(--fs-xs);
-  line-height: 1.4;
+  line-height: 16px;
+}
+.citation-path {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+/* 目录先占满剩余宽度、超出从尾部省略；文件名与行号始终完整可见。 */
+.citation-dir {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-3);
+}
+.citation-file {
+  flex: none;
+  color: var(--text-1);
+}
+/* 目录被截断时末尾的省略号会盖掉分隔斜杠，斜杠挂在文件名前面才不会丢。 */
+.citation-file--nested::before {
+  content: '/';
+  color: var(--text-3);
+}
+.citation-line {
+  flex: none;
+  color: var(--text-3);
 }
 .citation-symbol {
+  flex: 0 1 auto;
+  max-width: 32%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-2);
 }
-.score {
+.citation-symbol::before {
+  content: '· ';
   color: var(--text-3);
-  margin-left: 4px;
+}
+.citation-score {
+  flex: none;
+  margin-left: auto;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+/* 悬停浮层是 teleport 到 body 的，scoped 选择器够不到，只能全局定义：
+   固定最大宽度并保留原文换行，避免代码分片糊成一整段盖住下面的来源行。 */
+:global(.ant-tooltip.citation-tip) {
+  max-width: 440px;
+}
+:global(.ant-tooltip.citation-tip .ant-tooltip-inner) {
+  padding: 8px 10px;
+}
+:global(.citation-tip-path) {
+  margin-bottom: 4px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  word-break: break-all;
+  opacity: 0.7;
+}
+:global(.citation-tip-body) {
+  max-height: 240px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--fs-xs);
+  line-height: 1.65;
+}
+:global(.citation-tip-body--code) {
+  font-family: var(--font-mono);
 }
 /* 发送失败的提问下方给重试入口（气泡内，右对齐跟随用户消息）。 */
 .send-failed {
