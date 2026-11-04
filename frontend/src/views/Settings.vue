@@ -198,13 +198,13 @@
 
       <!-- ================= 消息通知 ================= -->
       <a-tab-pane key="notify" tab="消息通知">
-        <a-alert type="info" show-icon class="gate-alert">
-          <template #message>通知走群机器人 Webhook</template>
-          <template #description>
-            工作流跑失败、AI 提议的运维命令待确认或已过期时，按订阅关系推一条消息。发送是旁路：
-            失败只留下发送记录，不影响任务本身。正文只带标题、原因和命令首词，不含 SQL 与密钥全文。
-          </template>
-        </a-alert>
+<!--        <a-alert type="info" show-icon class="gate-alert">-->
+<!--          <template #message>通知走群机器人 Webhook</template>-->
+<!--          <template #description>-->
+<!--            工作流跑失败、AI 提议的运维命令待确认或已过期时，按订阅关系推一条消息。发送是旁路：-->
+<!--            失败只留下发送记录，不影响任务本身。正文只带标题、原因和命令首词，不含 SQL 与密钥全文。-->
+<!--          </template>-->
+<!--        </a-alert>-->
 
         <div class="toolbar toolbar--between toolbar--snug">
           <span class="hint">一个渠道＝一个群机器人，订阅哪些事件按渠道各配。</span>
@@ -279,7 +279,7 @@
         </a-table>
 
         <div class="toolbar toolbar--between toolbar--snug notify-logs-head">
-          <span class="hint">最近发送记录（保留 7 天）。「为什么没收到」先来这里看有没有发出去。</span>
+          <span class="hint">最近发送记录（保留 7 天）。</span>
           <a-button
             size="small"
             :loading="notifyLogLoading"
