@@ -283,10 +283,20 @@ class KbDocument(Base):
     scope: Mapped[str] = mapped_column(String(16), nullable=False, default="private")
 
     type_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 512 是给代码仓库里的深包路径留的：Java 包路径 + 长类名经常超过 255。
+    filename: Mapped[str] = mapped_column(String(512), nullable=False)
     mime: Mapped[str | None] = mapped_column(String(128), nullable=True)
     size: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     content: Mapped[str] = mapped_column(_LONG_TEXT, nullable=False)
+
+    # upload（上传文档）| repo（代码仓库同步的源文件）。老行由迁移 DEFAULT 归类。
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="upload")
+    # 仓库文件非空；上传文档恒 NULL。
+    repo_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    # Git blob SHA（40 位 sha1；列留 64 兼容将来 sha256 仓库），增量同步的对账依据。
+    blob_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 按扩展名归一的语言标识（py/ts/java…），代码切片与展示用。
+    language: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     # pending（待处理）| indexing（索引中）| ready（就绪）| error（出错）
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
@@ -300,7 +310,10 @@ class KbDocument(Base):
         DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
-    __table_args__ = (Index("idx_doc_owner_type", "owner_id", "type_id"),)
+    __table_args__ = (
+        Index("idx_doc_owner_type", "owner_id", "type_id"),
+        Index("idx_doc_owner_repo", "owner_id", "repo_id"),
+    )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<KbDocument id={self.id} owner={self.owner_id} status={self.status!r}>"
@@ -321,6 +334,12 @@ class KbChunk(Base):
     # Qdrant point id（UUID 字符串），存下来是为了能单独从向量库里删除某个
     # chunk，不需要重新扫描整个 collection。
     point_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # 代码分片的源码定位（1-based，含端点）；散文分片恒为 NULL。
+    line_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    line_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 所属符号，如 KnowledgeService.index_document；散文分片恒 NULL。
+    symbol: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
@@ -364,6 +383,62 @@ class KbIndexState(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<KbIndexState owner={self.owner_id} status={self.status!r}>"
+
+
+class KbRepo(Base):
+    """接入知识库的一个 Git 仓库，与一个知识类型 1:1 绑定。
+
+    同步就是把远端某个 commit 下的受跟踪源码文件物化成一批 ``KbDocument``
+    （``source='repo'``），之后的切片、embedding、检索全部走文档的既有链路。
+    SSH deploy 私钥以 Fernet 密文存储，主机公钥按 TOFU 钉死在本行。
+    """
+
+    __tablename__ = "kb_repo"
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    # 1:1：删类型即删仓库；一个类型不允许混放上传文档与仓库文件。
+    type_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
+
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    # ssh_key（每仓库独立 deploy key）| none（匿名 http(s)）。
+    auth_type: Mapped[str] = mapped_column(String(16), nullable=False, default="ssh_key")
+    # 规范化后的地址，永不包含凭据。
+    remote_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # OpenSSH PEM 私钥的 Fernet 密文；任何 API 都不回读。
+    private_key_enc: Mapped[bytes | None] = mapped_column(LargeBinary(8192), nullable=True)
+    # 公钥不是秘密，详情页可随时查看/复制（供用户去 Git 服务登记 deploy key）。
+    public_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # TOFU：known_hosts 格式的一行（可能多行，rsa/ed25519 各一），与给人看的
+    # SHA256 指纹；指纹变化时同步失败，必须经 retrust 显式更新。
+    known_hosts: Mapped[str | None] = mapped_column(Text, nullable=True)
+    host_fingerprint: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # 用户自定义排除 glob，换行分隔；与内置默认排除取并集。
+    exclude_globs: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # pending | syncing | ready | error
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    error_msg: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    head_commit: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # {added, changed, removed, skipped, indexed_chunks, duration_ms, commit?}
+    last_sync_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (Index("idx_repo_owner", "owner_id"),)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<KbRepo id={self.id} owner={self.owner_id} name={self.name!r}>"
 
 
 class ChatConversation(Base):

@@ -42,6 +42,10 @@ export interface KnowledgeDocument {
   status: DocumentStatus
   error_msg?: string | null
   chunk_count: number
+  /** upload（上传文档）| repo（仓库同步的源文件，不可单删/替换）。 */
+  source: 'upload' | 'repo' | string
+  repo_id?: number | null
+  language?: string | null
   created_at: string
   updated_at: string
 }
@@ -65,12 +69,97 @@ export interface SearchHit {
   seq: number
   score: number
   content: string
+  // 代码分片才有：来源、仓库、语言、行号区间、符号。散文分片缺省。
+  source: 'upload' | 'repo' | string
+  repo_id?: number | null
+  language?: string | null
+  line_start?: number | null
+  line_end?: number | null
+  symbol?: string | null
 }
 
 export interface RebuildResult {
   started: boolean
   message: string
   doc_count: number
+}
+
+// ---- 代码仓库 --------------------------------------------------------------
+
+export type RepoAuthType = 'ssh_key' | 'none'
+export type RepoStatus = 'pending' | 'syncing' | 'ready' | 'error'
+
+export interface RepoSyncResult {
+  added: number
+  changed: number
+  removed: number
+  skipped: number
+  indexed_chunks: number
+  duration_ms: number
+  commit?: string | null
+}
+
+export interface RepoItem {
+  id: number
+  type_id: number
+  project_id: number
+  name: string
+  auth_type: RepoAuthType | string
+  remote_url: string
+  branch?: string | null
+  has_credential: boolean
+  /** 仅接入后首次详情/列表里随仓库带出一次的公钥，便于补登记到代码平台。 */
+  public_key?: string | null
+  host_fingerprint?: string | null
+  exclude_globs?: string | null
+  status: RepoStatus | string
+  error_msg?: string | null
+  head_commit?: string | null
+  last_sync_at?: string | null
+  last_sync_result?: RepoSyncResult | null
+  created_at: string
+  updated_at: string
+}
+
+export interface RepoKeypair {
+  public_key: string
+  private_key: string
+}
+
+export interface RepoTestConnectionResult {
+  default_branch?: string | null
+  head_sha: string
+  host: string
+  host_fingerprint: string
+  /** TOFU 记录，创建仓库时原样回传，前端不要解析也不要展示全文。 */
+  known_hosts: string
+}
+
+export interface RepoSyncResponse {
+  started: boolean
+  message: string
+  already_running: boolean
+}
+
+export interface RepoCreatePayload {
+  project_id: number
+  remote_url: string
+  branch?: string | null
+  auth_type?: RepoAuthType | string
+  private_key?: string | null
+  known_hosts?: string | null
+  host_fingerprint?: string | null
+  name?: string | null
+  exclude_globs?: string | null
+}
+
+export interface RepoUpdatePayload {
+  name?: string
+  branch?: string | null
+  exclude_globs?: string | null
+  /** 缺省=不变；显式空串配合 auth_type='none' 清空私钥。 */
+  private_key?: string
+  auth_type?: RepoAuthType | string
 }
 
 /** 保持可读性而不用引入解析依赖；和 chunking.py 一致。 */
@@ -175,4 +264,60 @@ export const knowledgeApi = {
       timeout: 60000,
       skipErrorToast: true,
     }),
+}
+
+/**
+ * 代码仓库接口单独成组：仓库与知识类型 1:1，文档由同步任务物化，不经过上传/单删。
+ * 业务失败（地址不合法、指纹冲突等）后端统一用 code=-1 + message 返回，
+ * 所以写操作都开 skipErrorToast，由调用方把 message 落到表单内联错误。
+ */
+export const repoApi = {
+  generateKeypair: () =>
+    request<RepoKeypair>({ url: '/knowledge/repos/keypair', method: 'POST' }),
+  testConnection: (payload: {
+    remote_url: string
+    branch?: string | null
+    private_key?: string | null
+  }) =>
+    request<RepoTestConnectionResult>({
+      url: '/knowledge/test-connection',
+      method: 'POST',
+      data: payload,
+      timeout: 60000,
+      skipErrorToast: true,
+    }),
+  list: (projectId: number) =>
+    request<{ items: RepoItem[]; total: number }>({
+      url: '/knowledge/repos',
+      params: { project_id: projectId },
+    }),
+  create: (payload: RepoCreatePayload) =>
+    request<RepoItem>({
+      url: '/knowledge/repos',
+      method: 'POST',
+      data: payload,
+      skipErrorToast: true,
+    }),
+  update: (repoId: number, payload: RepoUpdatePayload) =>
+    request<RepoItem>({
+      url: `/knowledge/repos/${repoId}`,
+      method: 'PUT',
+      data: payload,
+      skipErrorToast: true,
+    }),
+  sync: (repoId: number) =>
+    request<RepoSyncResponse>({
+      url: `/knowledge/repos/${repoId}/sync`,
+      method: 'POST',
+      skipErrorToast: true,
+    }),
+  retrust: (repoId: number) =>
+    request<RepoItem>({
+      url: `/knowledge/repos/${repoId}/retrust`,
+      method: 'POST',
+      timeout: 60000,
+      skipErrorToast: true,
+    }),
+  remove: (repoId: number) =>
+    request<null>({ url: `/knowledge/repos/${repoId}`, method: 'DELETE' }),
 }

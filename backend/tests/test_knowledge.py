@@ -786,6 +786,14 @@ def test_index_document_writes_chunks_then_vectors(svc, db, vs, monkeypatch):
         "seq",
         "filename",
         "type_id",
+        # 代码定位字段对所有 point 都写入（散文分片值为 None），仅展示用、
+        # 不参与过滤，所以老 point 缺这些键也不影响检索。
+        "source",
+        "repo_id",
+        "language",
+        "line_start",
+        "line_end",
+        "symbol",
     }
     assert len(upserted["point_ids"]) == count
 
@@ -870,12 +878,15 @@ def test_index_document_stops_when_provider_changes_shape(svc, db, vs, monkeypat
 
 
 def test_replace_chunks_replaces_previous_row_set(svc, db):
+    # 每个 entry 是 (text, line_start, line_end, symbol)：散文文档后三项为 None。
+    entries = [("A", None, None, None), ("B", 10, 14, "f"), ("C", None, None, None)]
     doc = _document(db)
-    first = svc.replace_chunks(doc, ["A", "B", "C"])
+    first = svc.replace_chunks(doc, entries)
     assert [chunk.seq for chunk in first] == [0, 1, 2]
     assert all(chunk.point_id for chunk in first)
+    assert (first[1].line_start, first[1].line_end, first[1].symbol) == (10, 14, "f")
 
-    second = svc.replace_chunks(doc, ["X"])
+    second = svc.replace_chunks(doc, [("X", None, None, None)])
     assert db.query(KbChunk).filter(KbChunk.doc_id == doc.id).count() == 1
     assert second[0].point_id not in {chunk.point_id for chunk in first}
 

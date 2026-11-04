@@ -146,11 +146,24 @@ _OPS_RULES = """
 """.strip()
 
 
+def _hit_source_label(hit: object) -> str:
+    """来源行：代码分片定位到 ``路径:行号（符号）``，散文退化为文件名。"""
+    filename = hit.filename
+    line_start = getattr(hit, "line_start", None)
+    if line_start:
+        line_end = getattr(hit, "line_end", None)
+        location = f":{line_start}" if not line_end or line_end == line_start else f":{line_start}-{line_end}"
+        symbol = getattr(hit, "symbol", None)
+        suffix = f"（{symbol}）" if symbol else ""
+        return f"{filename}{location}{suffix}"
+    return filename
+
+
 def _format_hits(numbered: Sequence[Tuple[int, object]]) -> str:
     """把检索到的 chunk 渲染成带编号的段落，好让模型能引用。"""
     blocks = []
     for index, hit in numbered:
-        blocks.append(f"[{index}] 来源：{hit.filename}\n{hit.content}")
+        blocks.append(f"[{index}] 来源：{_hit_source_label(hit)}\n{hit.content}")
     return "\n\n".join(blocks)
 
 
@@ -288,6 +301,10 @@ class _CitationRegistry:
                     filename=hit.filename,
                     score=hit.score,
                     excerpt=hit.content[:200],
+                    source=getattr(hit, "source", "upload") or "upload",
+                    line_start=getattr(hit, "line_start", None),
+                    line_end=getattr(hit, "line_end", None),
+                    symbol=getattr(hit, "symbol", None),
                 )
                 self._by_chunk[hit.chunk_id] = known
                 self._order.append(hit.chunk_id)

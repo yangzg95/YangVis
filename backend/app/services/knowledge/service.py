@@ -26,6 +26,7 @@ from app.models.entities import (
     KbDocument,
     KbIndexState,
     KbProject,
+    KbRepo,
     KnowledgeType,
     ModelConfig,
 )
@@ -110,6 +111,10 @@ class KnowledgeService:
     @property
     def collection(self) -> str:
         return self._collection
+
+    def doc_lock(self, doc_id: int) -> "asyncio.AbstractAsyncContextManager":
+        """单篇文档的索引互斥锁；仓库同步逐文件索引时复用同一把。"""
+        return _doc_index_lock(self._owner_id, doc_id)
 
     # -- embedding 配置 ----------------------------------------------------
 
@@ -320,6 +325,13 @@ class KnowledgeService:
                 KbDocument.owner_id == self._owner_id, KbDocument.type_id == type_id
             )
         )
+        # 1:1 绑定的仓库台账随类型一起消失。工作区目录由启动 GC 与显式删仓库
+        # 两条路径收尸，这里不碰文件系统（service 不知道 BackgroundTasks）。
+        self._db.execute(
+            delete(KbRepo).where(
+                KbRepo.owner_id == self._owner_id, KbRepo.type_id == type_id
+            )
+        )
         self._db.delete(item)
         self._db.commit()
         self._refresh_counts()
@@ -349,6 +361,9 @@ class KnowledgeService:
                 KbDocument.status,
                 KbDocument.error_msg,
                 KbDocument.chunk_count,
+                KbDocument.source,
+                KbDocument.repo_id,
+                KbDocument.language,
                 KbDocument.created_at,
                 KbDocument.updated_at,
             )
@@ -432,9 +447,77 @@ class KnowledgeService:
             status=DocumentStatus(doc.status),
             error_msg=doc.error_msg,
             chunk_count=doc.chunk_count,
+            source=doc.source or "upload",
+            repo_id=doc.repo_id,
+            language=doc.language,
             created_at=doc.created_at,
             updated_at=doc.updated_at,
         )
+
+    # -- 仓库文档（source='repo'）------------------------------------------
+
+    def repo_doc_index(
+        self, repo_id: int
+    ) -> Dict[str, Tuple[KbDocument, Optional[str]]]:
+        """一个仓库当前的 {相对路径: (文档行, blob_sha)}，供同步对账。"""
+        rows = self._db.scalars(
+            select(KbDocument).where(
+                KbDocument.owner_id == self._owner_id,
+                KbDocument.repo_id == repo_id,
+            )
+        ).all()
+        return {row.filename: (row, row.blob_hash) for row in rows}
+
+    def create_repo_document(
+        self,
+        *,
+        type_id: int,
+        repo_id: int,
+        rel_path: str,
+        content: str,
+        size: int,
+        blob_hash: str,
+        language: str,
+    ) -> KbDocument:
+        doc = KbDocument(
+            owner_id=self._owner_id,
+            scope="private",
+            type_id=type_id,
+            source="repo",
+            repo_id=repo_id,
+            filename=rel_path,
+            mime=None,
+            size=size,
+            content=content,
+            blob_hash=blob_hash,
+            language=language,
+            status=DocumentStatus.PENDING.value,
+        )
+        self._db.add(doc)
+        self._db.commit()
+        self._db.refresh(doc)
+        return doc
+
+    def update_repo_document(
+        self,
+        doc: KbDocument,
+        *,
+        content: str,
+        size: int,
+        blob_hash: str,
+        language: str,
+    ) -> KbDocument:
+        """blob 变化后的原地更新：换正文并回到 pending，由调用方重新索引。"""
+        doc.content = content
+        doc.size = size
+        doc.blob_hash = blob_hash
+        doc.language = language
+        doc.status = DocumentStatus.PENDING.value
+        doc.error_msg = None
+        doc.chunk_count = 0
+        self._db.commit()
+        self._db.refresh(doc)
+        return doc
 
     # -- 索引状态 -----------------------------------------------------------
 
@@ -538,8 +621,14 @@ class KnowledgeService:
 
     # -- 索引构建 -----------------------------------------------------------
 
-    def replace_chunks(self, doc: KbDocument, texts: Sequence[str]) -> List[KbChunk]:
-        """把一篇文档的 chunk 记录整体换成新的一批。"""
+    def replace_chunks(
+        self, doc: KbDocument, entries: Sequence[tuple]
+    ) -> List[KbChunk]:
+        """把一篇文档的 chunk 记录整体换成新的一批。
+
+        每个 entry 是 ``(text, line_start, line_end, symbol)``：散文文档后三项
+        为 None；代码分片带源码定位。
+        """
         self._db.execute(
             delete(KbChunk).where(KbChunk.owner_id == self._owner_id, KbChunk.doc_id == doc.id)
         )
@@ -550,9 +639,12 @@ class KnowledgeService:
                 seq=seq,
                 content=text,
                 char_count=len(text),
+                line_start=line_start,
+                line_end=line_end,
+                symbol=symbol,
                 point_id=vectorstore.new_point_id(),
             )
-            for seq, text in enumerate(texts)
+            for seq, (text, line_start, line_end, symbol) in enumerate(entries)
         ]
         self._db.add_all(chunks)
         self._db.commit()
@@ -585,12 +677,24 @@ class KnowledgeService:
 
         self.set_document_status(doc, DocumentStatus.INDEXING)
 
-        texts = split_text(doc.content)
-        if not texts:
+        # 代码走结构感知切片（带行号/符号/情报头），其余走散文切分。
+        if doc.source == "repo":
+            from app.services.knowledge import code_chunk
+
+            parsed = code_chunk.split_code(
+                doc.content, doc.language or "", doc.filename
+            )
+            entries = [
+                (item.content, item.line_start, item.line_end, item.symbol)
+                for item in parsed
+            ]
+        else:
+            entries = [(text, None, None, None) for text in split_text(doc.content)]
+        if not entries:
             self.set_document_status(doc, DocumentStatus.READY, chunk_count=0)
             return 0
 
-        chunks = self.replace_chunks(doc, texts)
+        chunks = self.replace_chunks(doc, entries)
 
         # 写新向量之前，先把上一轮残留的向量清掉：point id 是重新生成的，
         # 旧的那份不删就会一直留在那儿。
@@ -625,6 +729,14 @@ class KnowledgeService:
                         "seq": chunk.seq,
                         "filename": doc.filename,
                         "type_id": doc.type_id,
+                        # 新增字段只用于命中后展示，不参与 must 过滤（老 point
+                        # # 没有这些键，拿它们过滤会把旧分片静默漏掉）。
+                        "source": doc.source,
+                        "repo_id": doc.repo_id,
+                        "language": doc.language,
+                        "line_start": chunk.line_start,
+                        "line_end": chunk.line_end,
+                        "symbol": chunk.symbol,
                     }
                     for chunk in batch
                 ],
@@ -775,6 +887,25 @@ class KnowledgeService:
                 )
             ).all()
         }
+        # 代码定位需要文档行的 source/repo_id/language；行号/符号在 chunk 行上。
+        doc_ids = {chunk.doc_id for chunk in rows.values()}
+        doc_rows = {
+            doc.id: doc
+            for doc in self._db.scalars(
+                select(KbDocument)
+                .options(
+                    load_only(
+                        KbDocument.id,
+                        KbDocument.source,
+                        KbDocument.repo_id,
+                        KbDocument.language,
+                    )
+                )
+                .where(
+                    KbDocument.owner_id == self._owner_id, KbDocument.id.in_(doc_ids)
+                )
+            ).all()
+        }
 
         hits: List[SearchHit] = []
         for point in points:
@@ -784,6 +915,7 @@ class KnowledgeService:
                 # 这条向量比它对应的记录活得还久（查询过程中文档被删了）。
                 logger.debug("skipping an orphan vector (chunk %s)", payload.get("chunk_id"))
                 continue
+            doc = doc_rows.get(chunk.doc_id)
             hits.append(
                 SearchHit(
                     chunk_id=chunk.id,
@@ -792,6 +924,17 @@ class KnowledgeService:
                     seq=chunk.seq,
                     score=float(point.score),
                     content=chunk.content,
+                    source=(doc.source if doc else "")
+                    or str(payload.get("source", "upload")),
+                    # 新 point 的 payload 里也有这两键，但 MySQL 才是事实来源；
+                    # 老 point 缺键时退回 payload 兜底。
+                    repo_id=(doc.repo_id if doc is not None else None)
+                    or payload.get("repo_id"),
+                    language=(doc.language if doc is not None else None)
+                    or payload.get("language"),
+                    line_start=chunk.line_start,
+                    line_end=chunk.line_end,
+                    symbol=chunk.symbol,
                 )
             )
         return hits

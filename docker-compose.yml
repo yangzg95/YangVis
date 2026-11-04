@@ -36,6 +36,9 @@ services:
       # 幻灯片配图等用户上传的图片。镜像里的 /app 是构建产物，重建即覆盖，
       # 用户资产必须挂在卷上才留得住。
       - uploads_data:/app/uploads
+      # 知识库「代码仓库」的裸克隆工作目录（KB_REPO_DATA_DIR 默认 data/repos）。
+      # 独立成卷：重建容器不触发全量重克隆，且未变文件仍然零嵌入调用。
+      - repos_data:/app/data/repos
     depends_on:
       mysql:
         condition: service_healthy
@@ -94,6 +97,7 @@ volumes:
   mysql_data:
   qdrant_data:
   uploads_data:
+  repos_data:
 
 networks:
   yangvis-net:

@@ -12,6 +12,10 @@ from app.models.entities import KbProject, KnowledgeType, SysUser
 from app.security import hash_password
 from app.services.agents import seed_builtin_agents
 from app.services.knowledge import reset_stale_indexing
+from app.services.knowledge.repo_sync import (
+    gc_orphan_repo_dirs,
+    reset_stale_repo_syncs,
+)
 from app.services.notify import dispatch as notify_dispatch
 from app.services.tools import validate_registry as validate_local_tool_registry
 from app.services.ops.actions import reset_stale_ops_actions
@@ -142,6 +146,46 @@ def migrate_schema() -> None:
                 )
             )
         logger.info("added knowledge_type.project_id")
+
+    # 知识库代码仓库：kb_document/kb_chunk 加列（kb_repo 由 create_all 建）。
+    kb_doc_columns = column_names("kb_document")
+    if kb_doc_columns:
+        for column, ddl in (
+            ("source", "ADD COLUMN source VARCHAR(16) NOT NULL DEFAULT 'upload'"),
+            ("repo_id", "ADD COLUMN repo_id BIGINT NULL"),
+            ("blob_hash", "ADD COLUMN blob_hash VARCHAR(64) NULL"),
+            ("language", "ADD COLUMN language VARCHAR(32) NULL"),
+        ):
+            if column in kb_doc_columns:
+                continue
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE kb_document {ddl}"))
+            logger.info("added kb_document.%s", column)
+        # 深包路径的源码文件名经常超过 255；SQLite 不强制长度，只需 MySQL 放宽。
+        if engine.dialect.name == "mysql":
+            filename_col = next(
+                (col for col in columns_of("kb_document") if col["name"] == "filename"),
+                None,
+            )
+            if filename_col is not None and getattr(filename_col["type"], "length", 0) < 512:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text("ALTER TABLE kb_document MODIFY filename VARCHAR(512) NOT NULL")
+                    )
+                logger.info("widened kb_document.filename to VARCHAR(512)")
+
+    kb_chunk_columns = column_names("kb_chunk")
+    if kb_chunk_columns:
+        for column, ddl in (
+            ("line_start", "ADD COLUMN line_start INT NULL"),
+            ("line_end", "ADD COLUMN line_end INT NULL"),
+            ("symbol", "ADD COLUMN symbol VARCHAR(255) NULL"),
+        ):
+            if column in kb_chunk_columns:
+                continue
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE kb_chunk {ddl}"))
+            logger.info("added kb_chunk.%s", column)
 
     conversation_columns = column_names("chat_conversation")
     if conversation_columns:
@@ -459,11 +503,16 @@ def reset_stale_jobs() -> None:
     """
     with SessionLocal() as db:
         reset_stale_indexing(db)
+        # 仓库同步任务与文档索引同一个单 worker 口径，重启同样需要把卡在
+        # syncing 的仓库行收成可重试的 error。
+        reset_stale_repo_syncs(db)
         # 进程重启同样会丢下「等用户确认」的运维写命令——发起它们的 SSE 流
         # 已经断了，统一物化为 expired。
         reset_stale_ops_actions(db)
         # 工作流跑在请求进程里，重启会把它连同正在执行的步骤一起丢掉。
         reset_stale_runs(db)
+        # 删类型/项目路径只删了台账行，本地 clone 目录在这里统一收尸。
+        gc_orphan_repo_dirs(db)
 
 
 def prune_workflow_runs() -> None:

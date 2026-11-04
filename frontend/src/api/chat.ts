@@ -42,6 +42,11 @@ export interface Citation {
   filename: string
   score: number
   excerpt: string
+  // 代码分片才有的定位信息；散文来源缺省。
+  source?: 'upload' | 'repo' | string
+  line_start?: number | null
+  line_end?: number | null
+  symbol?: string | null
 }
 
 /** 挂在一条提问上的附件。图片有预览地址，文档只留文件名与大小。 */

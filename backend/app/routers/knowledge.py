@@ -38,11 +38,28 @@ from app.models.schemas import (
     KnowledgeTypeUpdate,
     ListResponse,
     RebuildResult,
+    RepoCreate,
+    RepoItem,
+    RepoKeypair,
+    RepoSyncResponse,
+    RepoTestConnectionRequest,
+    RepoTestConnectionResult,
+    RepoUpdate,
     SearchRequest,
     SearchResponse,
 )
 from app.services.chunking import UnsupportedFileType, extract_text
 from app.services.knowledge import KnowledgeService, index_document_task
+from app.services.knowledge.repo_sync import (
+    RepoError,
+    RepoService,
+    RepoSyncError,
+    generate_keypair_sync,
+    is_sync_running,
+    probe_remote,
+    repo_sync_task,
+    rmtree_repo_dir,
+)
 from app.services.uploads import (
     content_length_exceeds,
     oversize_message,
@@ -62,6 +79,13 @@ def get_service(
 ) -> KnowledgeService:
     """Bind the service to the caller so handlers never see a bare session."""
     return KnowledgeService(db, user.user_id)
+
+
+def get_repo_service(
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> RepoService:
+    return RepoService(db, user.user_id)
 
 
 def require_embedding_ready(
@@ -278,6 +302,7 @@ async def upload_document(
     file: UploadFile = File(...),
     name: Optional[str] = Form(default=None),
     service: KnowledgeService = Depends(require_embedding_ready),
+    repo_service: RepoService = Depends(get_repo_service),
 ) -> APIResponse[KnowledgeDocument]:
     """Store a document and queue it for indexing.
 
@@ -289,6 +314,11 @@ async def upload_document(
         service.get_type(type_id)
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    # 仓库类型里的文件只由同步物化进来；手动上传的文档下次同步既不会删除也不会
+    # 更新，混在一起会让「类型内容 = 某次提交的快照」这个不变量破掉。
+    if repo_service.get_by_type(type_id) is not None:
+        return APIResponse(code=-1, message="代码仓库类型不能手动上传文档，请通过同步更新")
 
     # 先按 Content-Length 提前拒绝，再有界读取——read() 不设上限，会把
     # 整个上传体物化进内存。
@@ -353,9 +383,13 @@ def delete_document(
     service: KnowledgeService = Depends(get_service),
 ) -> APIResponse[None]:
     try:
-        service.delete_document(doc_id)
+        doc = service.get_document(doc_id)
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    # 仓库文件只能通过同步（远端删除）或移除仓库回收，单删会被下次同步拉回来。
+    if doc.source == "repo":
+        return APIResponse(code=-1, message="仓库文件不能单独删除，请通过同步或移除仓库操作")
+    service.delete_document(doc_id)
     background.add_task(_purge_vectors, service.collection, service.owner_id, doc_id)
     return APIResponse(data=None, message="deleted")
 
@@ -374,9 +408,13 @@ def batch_delete_documents(
     done = 0
     for doc_id in payload.ids:
         try:
-            service.delete_document(doc_id)
+            doc = service.get_document(doc_id)
         except LookupError:
             continue
+        if doc.source == "repo":
+            # 仓库文件跳过，和单删同一个口径。
+            continue
+        service.delete_document(doc_id)
         done += 1
         background.add_task(_purge_vectors, service.collection, service.owner_id, doc_id)
     return APIResponse(
@@ -480,3 +518,183 @@ async def search(
         score_threshold=payload.score_threshold,
     )
     return APIResponse(data=SearchResponse(hits=hits, total=len(hits)))
+
+
+# ---- Code repositories ------------------------------------------------------
+
+
+@router.post("/repos/keypair", response_model=APIResponse[RepoKeypair])
+async def generate_repo_keypair(
+    _gate: KnowledgeService = Depends(require_embedding_ready),
+) -> APIResponse[RepoKeypair]:
+    """临时生成一对 ed25519 deploy key。不入库，私钥只出现这一次。"""
+    private_pem, public_line = await asyncio.to_thread(generate_keypair_sync)
+    return APIResponse(data=RepoKeypair(public_key=public_line, private_key=private_pem))
+
+
+@router.post(
+    "/test-connection", response_model=APIResponse[RepoTestConnectionResult]
+)
+async def test_repo_connection(
+    payload: RepoTestConnectionRequest,
+    _gate: KnowledgeService = Depends(require_embedding_ready),
+) -> APIResponse[RepoTestConnectionResult]:
+    """探测远端：默认分支、HEAD、（SSH 时）首次记录的主机指纹。"""
+    try:
+        default_branch, head_sha, host, known_hosts, fingerprint = await probe_remote(
+            payload.remote_url,
+            private_key=payload.private_key,
+            branch=payload.branch,
+        )
+    except (RepoError, RepoSyncError) as exc:
+        return APIResponse(code=-1, message=str(exc))
+    return APIResponse(
+        data=RepoTestConnectionResult(
+            default_branch=default_branch,
+            head_sha=head_sha,
+            host=host,
+            host_fingerprint=fingerprint,
+            known_hosts=known_hosts,
+        )
+    )
+
+
+@router.get("/repos", response_model=APIResponse[ListResponse[RepoItem]])
+def list_repos(
+    project_id: int = Query(..., ge=1),
+    service: RepoService = Depends(get_repo_service),
+) -> APIResponse[ListResponse[RepoItem]]:
+    try:
+        service.knowledge.get_project(project_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    repos = service.list_for_project(project_id)
+    items = [RepoItem(**service.to_item(repo)) for repo in repos]
+    return APIResponse(data=ListResponse(items=items, total=len(items)))
+
+
+@router.post("/repos", response_model=APIResponse[RepoItem])
+def create_repo(
+    payload: RepoCreate,
+    background: BackgroundTasks,
+    service: RepoService = Depends(get_repo_service),
+    _gate: KnowledgeService = Depends(require_embedding_ready),
+) -> APIResponse[RepoItem]:
+    """建同名知识类型 + 仓库行，并排队首次同步。"""
+    try:
+        repo = service.create(payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RepoError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    background.add_task(repo_sync_task, service.knowledge.owner_id, repo.id)
+    logger.info(
+        "owner %s connected repo %s (%s), initial sync queued",
+        service.knowledge.owner_id,
+        repo.id,
+        repo.remote_url,
+    )
+    return APIResponse(data=RepoItem(**service.to_item(repo)))
+
+
+@router.get("/repos/{repo_id}", response_model=APIResponse[RepoItem])
+def get_repo(
+    repo_id: int,
+    service: RepoService = Depends(get_repo_service),
+) -> APIResponse[RepoItem]:
+    try:
+        repo = service.get(repo_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return APIResponse(data=RepoItem(**service.to_item(repo)))
+
+
+@router.put("/repos/{repo_id}", response_model=APIResponse[RepoItem])
+def update_repo(
+    repo_id: int,
+    payload: RepoUpdate,
+    service: RepoService = Depends(get_repo_service),
+) -> APIResponse[RepoItem]:
+    try:
+        repo = service.update(repo_id, payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RepoError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    return APIResponse(data=RepoItem(**service.to_item(repo)))
+
+
+@router.post("/repos/{repo_id}/sync", response_model=APIResponse[RepoSyncResponse])
+def sync_repo(
+    repo_id: int,
+    background: BackgroundTasks,
+    service: RepoService = Depends(get_repo_service),
+    _gate: KnowledgeService = Depends(require_embedding_ready),
+) -> APIResponse[RepoSyncResponse]:
+    """排队一次增量同步；已经在跑时不排队（避免重试刷出一串任务）。"""
+    try:
+        repo = service.get(repo_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    if is_sync_running(repo_id):
+        return APIResponse(
+            data=RepoSyncResponse(
+                started=False, already_running=True, message="该仓库正在同步中"
+            )
+        )
+    background.add_task(repo_sync_task, service.knowledge.owner_id, repo.id)
+    return APIResponse(
+        data=RepoSyncResponse(started=True, message="已开始同步")
+    )
+
+
+@router.post("/repos/{repo_id}/retrust", response_model=APIResponse[RepoItem])
+async def retrust_repo(
+    repo_id: int,
+    service: RepoService = Depends(get_repo_service),
+) -> APIResponse[RepoItem]:
+    """主机指纹变更后的人工确认：重新 accept-new 并覆盖记录。"""
+    from app.crypto import decrypt
+
+    try:
+        repo = service.get(repo_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    if repo.auth_type != "ssh_key" or not repo.private_key_enc:
+        return APIResponse(code=-1, message="该仓库没有配置 SSH 凭据")
+    try:
+        private_pem = decrypt(repo.private_key_enc)
+        _branch, _sha, _host, known_hosts, fingerprint = await probe_remote(
+            repo.remote_url, private_key=private_pem
+        )
+    except (RepoError, RepoSyncError) as exc:
+        return APIResponse(code=-1, message=str(exc))
+    if not known_hosts:
+        return APIResponse(code=-1, message="未能获取新的主机指纹")
+    service.retrust(repo, known_hosts, fingerprint)
+    logger.warning(
+        "owner %s re-trusted host key for repo %s: %s",
+        service.knowledge.owner_id,
+        repo.id,
+        fingerprint,
+    )
+    return APIResponse(data=RepoItem(**service.to_item(repo)))
+
+
+@router.delete("/repos/{repo_id}", response_model=APIResponse[None])
+def delete_repo(
+    repo_id: int,
+    background: BackgroundTasks,
+    service: RepoService = Depends(get_repo_service),
+) -> APIResponse[None]:
+    """删仓库 = 删其类型（文档/分片级联）+ 后台清向量与本地目录。"""
+    try:
+        db_repo_id, doc_ids = service.delete(repo_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    for doc_id in doc_ids:
+        background.add_task(
+            _purge_vectors, service.knowledge.collection, service.knowledge.owner_id, doc_id
+        )
+    background.add_task(rmtree_repo_dir, service.knowledge.owner_id, db_repo_id)
+    return APIResponse(data=None, message="deleted")

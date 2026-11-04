@@ -38,9 +38,10 @@ WORKDIR /app
 COPY backend/requirements.txt ./requirements.txt
 # Use a China mirror for apt as well; deb.debian.org is painfully slow from CN.
 # (tuna 403s on trixie pool files, so use USTC.)
+# git + openssh-client: 知识库「代码仓库」同步走本地 git 子进程，SSH 传输需要 ssh 二进制
 RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
  && apt-get update \
- && apt-get install -y --no-install-recommends curl \
+ && apt-get install -y --no-install-recommends curl git openssh-client ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && pip install --upgrade pip \
  && pip install -r requirements.txt
@@ -52,11 +53,13 @@ COPY backend/app ./app
 COPY --from=frontend-builder /web/dist /app/static
 
 # Create a non-root user and hand over the app dir.
-# /app/uploads must exist here: a named volume takes its ownership from this
-# path in the image, and if the path is missing the volume comes up root-owned
-# while the app runs as yangvis, so every image upload fails with EACCES.
+# /app/uploads and /app/data/repos must exist here: a named volume takes its
+# ownership from this path in the image, and if the path is missing the volume
+# comes up root-owned while the app runs as yangvis, so every upload / repo
+# clone fails with EACCES.
 RUN useradd --create-home --shell /bin/bash yangvis \
- && mkdir -p /app/uploads \
+ && mkdir -p /app/uploads /app/data/repos \
+ && chmod 0700 /app/data/repos \
  && chown -R yangvis:yangvis /app
 USER yangvis
 

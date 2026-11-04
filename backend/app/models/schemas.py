@@ -148,6 +148,10 @@ class KnowledgeDocument(BaseModel):
     status: DocumentStatus = DocumentStatus.PENDING
     error_msg: Optional[str] = None
     chunk_count: int = 0
+    # upload（上传文档）| repo（仓库同步的源文件）。老调用方不感知时默认 upload。
+    source: str = "upload"
+    repo_id: Optional[int] = None
+    language: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -190,6 +194,13 @@ class SearchHit(BaseModel):
     seq: int
     score: float
     content: str
+    # 代码分片才有：来源、仓库、语言、行号区间、符号。散文分片这些列恒为 None。
+    source: str = "upload"
+    repo_id: Optional[int] = None
+    language: Optional[str] = None
+    line_start: Optional[int] = None
+    line_end: Optional[int] = None
+    symbol: Optional[str] = None
 
 
 class SearchResponse(BaseModel):
@@ -216,6 +227,102 @@ class DocBatchResult(BaseModel):
 
     requested: int
     done: int
+
+
+# ---- 知识库 · 代码仓库 ----------------------------------------------------
+
+# 与 KbRepo.status 对齐的四态（pending 只在建行到首同步开始之间短暂出现）。
+REPO_AUTH_SSH = "ssh_key"
+REPO_AUTH_NONE = "none"
+
+
+class RepoKeypair(BaseModel):
+    """后端临时生成的一对 deploy key。不入库，私钥只随本次响应出现一次。"""
+
+    public_key: str
+    private_key: str
+
+
+class RepoTestConnectionRequest(BaseModel):
+    remote_url: str = Field(..., min_length=4, max_length=512)
+    branch: Optional[str] = Field(default=None, max_length=255)
+    # 可选私钥：给了就用它探测；匿名 http(s) 仓库不传。
+    private_key: Optional[str] = Field(default=None, max_length=8000)
+
+
+class RepoTestConnectionResult(BaseModel):
+    default_branch: Optional[str] = None
+    head_sha: str
+    host: str
+    # 首次见到并已写入临时 known_hosts 的主机指纹，接入时随仓库行一起落库。
+    host_fingerprint: str
+    known_hosts: str
+
+
+class RepoCreate(BaseModel):
+    project_id: int = Field(..., ge=1)
+    remote_url: str = Field(..., min_length=4, max_length=512)
+    branch: Optional[str] = Field(default=None, max_length=255)
+    auth_type: str = REPO_AUTH_SSH
+    # ssh_key 时必给（粘贴已有私钥，或 keypair 接口生成的那份）。
+    private_key: Optional[str] = Field(default=None, max_length=8000)
+    # 测试连接返回的 TOFU 记录；不给则首同步时现场 accept-new。
+    known_hosts: Optional[str] = None
+    host_fingerprint: Optional[str] = Field(default=None, max_length=255)
+    name: Optional[str] = Field(default=None, max_length=128)
+    exclude_globs: Optional[str] = Field(default=None, max_length=4000)
+
+
+class RepoUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=128)
+    branch: Optional[str] = Field(default=None, max_length=255)
+    exclude_globs: Optional[str] = Field(default=None, max_length=4000)
+    # 缺省=不变；显式空串配合 auth_type=none 清空私钥。
+    private_key: Optional[str] = Field(default=None, max_length=8000)
+    auth_type: Optional[str] = None
+
+
+class RepoSyncResult(BaseModel):
+    """一次同步的增删改计数，``last_sync_result`` 落库的就是它。"""
+
+    added: int = 0
+    changed: int = 0
+    removed: int = 0
+    skipped: int = 0
+    indexed_chunks: int = 0
+    duration_ms: int = 0
+    commit: Optional[str] = None
+
+
+class RepoItem(BaseModel):
+    id: int
+    type_id: int
+    project_id: int
+    name: str
+    auth_type: str
+    remote_url: str
+    branch: Optional[str] = None
+    has_credential: bool = False
+    public_key: Optional[str] = None
+    host_fingerprint: Optional[str] = None
+    exclude_globs: Optional[str] = None
+    status: str
+    error_msg: Optional[str] = None
+    head_commit: Optional[str] = None
+    last_sync_at: Optional[datetime] = None
+    last_sync_result: Optional[RepoSyncResult] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class RepoSyncResponse(BaseModel):
+    started: bool
+    message: str
+    # 锁占用（已经在同步）时为 True，前端据此静默而不是报错。
+    already_running: bool = False
 
 
 # ---- 对话 -------------------------------------------------------------------
@@ -270,6 +377,11 @@ class Citation(BaseModel):
     filename: str
     score: float
     excerpt: str = ""
+    # 代码分片才有的定位信息；散文来源缺省。
+    source: str = "upload"
+    line_start: Optional[int] = None
+    line_end: Optional[int] = None
+    symbol: Optional[str] = None
 
 
 class ChatAttachmentItem(BaseModel):

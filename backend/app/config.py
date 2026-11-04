@@ -43,6 +43,20 @@ class Settings(BaseSettings):
     # 基于弱相关的文本作答，比什么都不说更糟糕。
     KB_SCORE_THRESHOLD: float = 0.3
 
+    # 知识库 · 代码仓库同步。
+    # 本地浅克隆根目录：{owner_id}/{repo_id}/{work,id_key,known_hosts}。
+    # 里面会短暂出现解密后的私钥，按 0700 创建，不与静态目录共享。
+    KB_REPO_DATA_DIR: str = "data/repos"
+    # 单次同步收录的受跟踪文件数上限，超出的部分跳过并计入同步报告。
+    KB_REPO_MAX_FILES: int = 20000
+    # 单个源文件大小上限（字节），生成文件/数据文件靠它和超长行嗅探一起挡掉。
+    KB_REPO_MAX_FILE_BYTES: int = 300_000
+    # clone/fetch 一条子进程的超时；整次同步的总超时。
+    KB_REPO_CLONE_TIMEOUT: float = 300.0
+    KB_REPO_SYNC_TIMEOUT: float = 1800.0
+    # 可选主机后缀白名单（逗号分隔，空=不限），SSH 与 http(s) 同等生效。
+    KB_REPO_HOST_ALLOWLIST: str = ""
+
     # 对话附件：单条消息最多几个、单个文件多大、文档抽取后留多少字符。
     # 文本上限同时是 prompt 预算的闸门；回放时还会再按整轮总预算裁剪。
     CHAT_MAX_ATTACHMENTS: int = 6

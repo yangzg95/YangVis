@@ -96,8 +96,11 @@
           :title="c.excerpt"
           placement="top"
         >
-          <a-tag class="citation">
-            [{{ c.index }}] {{ c.filename }}
+          <a-tag class="citation" :class="{ 'citation--code': isCodeCitation(c) }">
+            [{{ c.index }}]
+            <a-tag v-if="isCodeCitation(c)" color="geekblue" class="citation-kind">代码</a-tag>
+            {{ citationLocation(c) }}
+            <span v-if="c.symbol" class="citation-symbol"> · {{ c.symbol }}</span>
             <span class="score">{{ c.score.toFixed(2) }}</span>
           </a-tag>
         </a-tooltip>
@@ -151,6 +154,20 @@ function onReject(action: OpsAction) {
 
 function onSavePart(index: number, source: string) {
   emit('save', { msg: props.msg, index, source })
+}
+
+// 代码分片（仓库来源）：来源渲染为 path:行号区间，符号挂在后面；
+// 老分片没有行号，退化为纯文件名，与上传文档的引用卡长得一样。
+function isCodeCitation(c: Bubble['citations'][number]): boolean {
+  return c.source === 'repo' || c.line_start != null
+}
+
+function citationLocation(c: Bubble['citations'][number]): string {
+  if (c.line_start == null) return c.filename
+  const range = c.line_end && c.line_end !== c.line_start
+    ? `:${c.line_start}-${c.line_end}`
+    : `:${c.line_start}`
+  return `${c.filename}${range}`
 }
 </script>
 
@@ -261,6 +278,19 @@ function onSavePart(index: number, source: string) {
 .citation {
   margin-bottom: 4px;
   cursor: help;
+}
+/* 代码来源：等宽路径方便核对，内层标签与文字基线对齐。 */
+.citation--code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+}
+.citation-kind {
+  margin: 0 2px 0 4px;
+  padding: 0 4px;
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
+.citation-symbol {
+  color: var(--text-2);
 }
 .score {
   color: var(--text-3);

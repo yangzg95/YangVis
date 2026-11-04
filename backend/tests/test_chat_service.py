@@ -791,6 +791,10 @@ def test_add_message_serializes_citations_and_leaves_the_column_null_without_the
             "filename": "a.md",
             "score": 0.5,
             "excerpt": "节选",
+            "source": "upload",
+            "line_start": None,
+            "line_end": None,
+            "symbol": None,
         }
     ]
     assert service.add_message(conv.id, ROLE_USER, "没有引用").citations is None

@@ -106,18 +106,23 @@ CREATE TABLE IF NOT EXISTS kb_document (
   owner_id      BIGINT       NOT NULL COMMENT 'sys_user.id',
   scope         VARCHAR(16)  NOT NULL DEFAULT 'private' COMMENT 'private | project，为组织级共享预留',
   type_id       BIGINT       NULL,
-  filename      VARCHAR(255) NOT NULL,
+  filename      VARCHAR(512) NOT NULL COMMENT '上传为文件名；仓库文件为相对路径，故加长到 512',
   mime          VARCHAR(128) NULL,
   size          BIGINT       NOT NULL DEFAULT 0,
   content       MEDIUMTEXT   NOT NULL COMMENT '提取后的纯文本，重建索引的数据源',
   status        VARCHAR(16)  NOT NULL DEFAULT 'pending' COMMENT 'pending | indexing | ready | error',
   error_msg     VARCHAR(512) NULL,
   chunk_count   INT          NOT NULL DEFAULT 0,
+  source        VARCHAR(16)  NOT NULL DEFAULT 'upload' COMMENT 'upload | repo',
+  repo_id       BIGINT       NULL COMMENT 'kb_repo.id；source=repo 时非空',
+  blob_hash     VARCHAR(64)  NULL COMMENT 'git blob SHA，仓库对账依据（不变则零嵌入调用）',
+  language      VARCHAR(32)  NULL COMMENT '代码分片器识别的语言族：python | brace | declarative',
   created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_owner (owner_id),
-  KEY idx_doc_owner_type (owner_id, type_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='上传的知识库文档';
+  KEY idx_doc_owner_type (owner_id, type_id),
+  KEY idx_doc_owner_repo (owner_id, repo_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='上传的知识库文档（含仓库同步物化出的代码文件）';
 
 CREATE TABLE IF NOT EXISTS kb_chunk (
   id            BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -127,10 +132,37 @@ CREATE TABLE IF NOT EXISTS kb_chunk (
   content       TEXT         NOT NULL,
   char_count    INT          NOT NULL DEFAULT 0,
   point_id      VARCHAR(64)  NULL COMMENT 'Qdrant point id',
+  line_start    INT          NULL COMMENT 'source=repo 时相对文件头的起始行（1 起），上传文档为 NULL',
+  line_end      INT          NULL COMMENT '结束行（含）',
+  symbol        VARCHAR(255) NULL COMMENT '所属函数/类/方法名，规则分片器给出',
   created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_owner (owner_id),
   KEY idx_chunk_owner_doc (owner_id, doc_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='文档分片，与 Qdrant 一一对应';
+
+CREATE TABLE IF NOT EXISTS kb_repo (
+  id               BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id         BIGINT       NOT NULL COMMENT 'sys_user.id',
+  type_id          BIGINT       NOT NULL COMMENT 'knowledge_type.id，仓库↔知识类型 1:1',
+  name             VARCHAR(128) NOT NULL,
+  auth_type        VARCHAR(16)  NOT NULL DEFAULT 'ssh_key' COMMENT 'ssh_key | none（匿名 http(s)）',
+  remote_url       VARCHAR(512) NOT NULL COMMENT '不允许内嵌凭据；展示可能脱敏',
+  branch           VARCHAR(255) NULL COMMENT 'NULL = 跟随远端默认分支',
+  private_key_enc  VARBINARY(8192) NULL COMMENT 'deploy key 私钥的 Fernet 密文，任何接口都不回传明文',
+  public_key       TEXT         NULL COMMENT '生成的 ed25519 公钥行，供用户登记到 Git 平台',
+  known_hosts      TEXT         NULL COMMENT 'TOFU 记录的 known_hosts 片段，之后逐次比对',
+  host_fingerprint VARCHAR(255) NULL COMMENT '主机公钥 SHA256 指纹，仅展示',
+  exclude_globs    TEXT         NULL COMMENT '用户追加的排除 glob，每行一个',
+  status           VARCHAR(16)  NOT NULL DEFAULT 'pending' COMMENT 'pending | syncing | ready | error',
+  error_msg        VARCHAR(512) NULL,
+  head_commit      VARCHAR(40)  NULL COMMENT '最近同步到的 commit SHA',
+  last_sync_at     DATETIME     NULL,
+  last_sync_result JSON         NULL COMMENT '{added,changed,removed,skipped,indexed_chunks,duration_ms,commit}',
+  created_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_repo_type (type_id),
+  KEY idx_repo_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='代码仓库：同步时把某次提交的跟踪文件物化进 kb_document';
 
 CREATE TABLE IF NOT EXISTS kb_index_state (
   owner_id        BIGINT       NOT NULL PRIMARY KEY COMMENT 'sys_user.id',
@@ -680,3 +712,17 @@ CREATE TABLE IF NOT EXISTS workflow_evaluation (
 -- MCP 连通测试的工具快照（migrate_schema() 自动补）：
 -- ALTER TABLE mcp_server
 --   ADD COLUMN tools_snapshot JSON NULL COMMENT '最近一次测试发现的工具 [{name,description,input_schema}]';
+--
+-- 知识库接入代码仓库（kb_repo 为新表由 create_all 自动创建，DDL 见上文）：
+-- ALTER TABLE kb_document
+--   MODIFY COLUMN filename VARCHAR(512) NOT NULL,
+--   ADD COLUMN source    VARCHAR(16) NOT NULL DEFAULT 'upload' COMMENT 'upload | repo',
+--   ADD COLUMN repo_id   BIGINT      NULL COMMENT 'kb_repo.id',
+--   ADD COLUMN blob_hash VARCHAR(64) NULL COMMENT 'git blob SHA，对账依据',
+--   ADD COLUMN language  VARCHAR(32) NULL COMMENT 'python | brace | declarative',
+--   ADD KEY idx_doc_owner_repo (owner_id, repo_id);
+--
+-- ALTER TABLE kb_chunk
+--   ADD COLUMN line_start INT          NULL COMMENT '代码文件起始行（1 起）',
+--   ADD COLUMN line_end   INT          NULL COMMENT '结束行（含）',
+--   ADD COLUMN symbol     VARCHAR(255) NULL COMMENT '函数/类/方法名';

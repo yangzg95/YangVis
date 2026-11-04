@@ -79,16 +79,27 @@
       <a-col :xs="24" :md="10" :lg="8">
         <a-card title="知识类型" size="small">
           <template #extra>
-            <a-tooltip :title="activeProjectId ? '' : '请先选择项目'">
-              <a-button
-                type="primary"
-                size="small"
-                :disabled="!activeProjectId"
-                @click="openCreateType"
-              >
-                <PlusOutlined /> 新建类型
-              </a-button>
-            </a-tooltip>
+            <a-space size="small">
+              <a-tooltip :title="repoButtonReason">
+                <a-button
+                  size="small"
+                  :disabled="!embeddingReady || !activeProjectId"
+                  @click="openCreateRepo"
+                >
+                  <BranchesOutlined /> 接入仓库
+                </a-button>
+              </a-tooltip>
+              <a-tooltip :title="activeProjectId ? '' : '请先选择项目'">
+                <a-button
+                  type="primary"
+                  size="small"
+                  :disabled="!activeProjectId"
+                  @click="openCreateType"
+                >
+                  <PlusOutlined /> 新建类型
+                </a-button>
+              </a-tooltip>
+            </a-space>
           </template>
           <!-- 首屏骨架占位；已有内容时刷新直接留旧列表。 -->
           <a-skeleton v-if="loadingTypes && !types.length" active :paragraph="{ rows: 4 }" />
@@ -97,9 +108,9 @@
             <a-empty v-else-if="!types.length" description="该项目下暂无知识类型" />
             <a-list
               v-else
-              :data-source="types"
+              :data-source="typeRows"
               size="small"
-              :pagination="types.length > 8 ? { pageSize: 8, size: 'small' } : false"
+              :pagination="typeRows.length > 8 ? { pageSize: 8, size: 'small' } : false"
             >
               <template #renderItem="{ item }">
                 <a-list-item
@@ -109,15 +120,29 @@
                   <a-list-item-meta>
                     <template #title>
                       <span>{{ item.name }}</span>
-                      <a-tag color="blue" style="margin-left: 8px">
+                      <a-tag v-if="item.repo" color="purple" style="margin-left: 8px">
+                        仓库
+                      </a-tag>
+                      <a-tag color="blue" style="margin-left: 4px">
                         {{ item.document_count }}
                       </a-tag>
                     </template>
                     <template #description>
-                      <span class="muted">{{ item.description || '—' }}</span>
+                      <span v-if="item.repo" class="muted repo-line">
+                        <BranchesOutlined />
+                        {{ repoBranchLabel(item.repo) }}
+                        <a-tag
+                          :color="repoStatusColor(item.repo.status)"
+                          style="margin-left: 4px"
+                        >
+                          {{ repoStatusText(item.repo.status) }}
+                        </a-tag>
+                      </span>
+                      <span v-else class="muted">{{ item.description || '—' }}</span>
                     </template>
                   </a-list-item-meta>
-                  <a-space>
+                  <!-- 仓库类型的编辑/移除收进右侧仓库信息条，避免两套删除口径。 -->
+                  <a-space v-if="!item.repo">
                     <a-button size="small" @click.stop="openEditType(item)">编辑</a-button>
                     <a-popconfirm
                       title="确认删除该知识类型？其下文档与索引也会被删除。"
@@ -140,39 +165,128 @@
               <a-button size="small" :disabled="!activeType" @click="refreshDocuments">
                 <ReloadOutlined /> 刷新
               </a-button>
-              <!-- 直接禁用，而不是让人点了再失败：一个收下文件、之后才
-                   报错的上传按钮是最糟糕的做法。 -->
-              <a-tooltip :title="uploadDisabledReason">
-                <a-upload
-                  :show-upload-list="false"
-                  :before-upload="handleBeforeUpload"
-                  :accept="acceptAttr"
-                  :disabled="!canUpload || uploading"
+              <template v-if="activeRepo">
+                <!-- 仓库类型内容只能来自同步：不放任何上传入口。 -->
+                <a-button
+                  size="small"
+                  type="primary"
+                  :disabled="!embeddingReady"
+                  :loading="repoSyncing"
+                  @click="onSyncRepo(activeRepo)"
                 >
-                  <a-button type="primary" :disabled="!canUpload || uploading">
-                    <UploadOutlined /> 上传文档
-                  </a-button>
-                </a-upload>
-              </a-tooltip>
-              <a-tooltip :title="uploadDisabledReason">
-                <!-- 单独一个 input：同一个文件选择器没办法既选文件又选目录，
-                     所以上传文件夹这种情况只能自己配一个。 -->
-                <a-upload
-                  :show-upload-list="false"
-                  :before-upload="handleBeforeFolder"
-                  directory
-                  multiple
-                  :disabled="!canUpload || uploading"
-                >
-                  <a-button :disabled="!canUpload || uploading" :loading="uploading">
-                    <FolderOpenOutlined /> 上传文件夹
-                  </a-button>
-                </a-upload>
-              </a-tooltip>
+                  <BranchesOutlined /> 立即同步
+                </a-button>
+              </template>
+              <template v-else>
+                <!-- 直接禁用，而不是让人点了再失败：一个收下文件、之后才
+                     报错的上传按钮是最糟糕的做法。 -->
+                <a-tooltip :title="uploadDisabledReason">
+                  <a-upload
+                    :show-upload-list="false"
+                    :before-upload="handleBeforeUpload"
+                    :accept="acceptAttr"
+                    :disabled="!canUpload || uploading"
+                  >
+                    <a-button type="primary" :disabled="!canUpload || uploading">
+                      <UploadOutlined /> 上传文档
+                    </a-button>
+                  </a-upload>
+                </a-tooltip>
+                <a-tooltip :title="uploadDisabledReason">
+                  <!-- 单独一个 input：同一个文件选择器没办法既选文件又选目录，
+                       所以上传文件夹这种情况只能自己配一个。 -->
+                  <a-upload
+                    :show-upload-list="false"
+                    :before-upload="handleBeforeFolder"
+                    directory
+                    multiple
+                    :disabled="!canUpload || uploading"
+                  >
+                    <a-button :disabled="!canUpload || uploading" :loading="uploading">
+                      <FolderOpenOutlined /> 上传文件夹
+                    </a-button>
+                  </a-upload>
+                </a-tooltip>
+              </template>
             </a-space>
           </template>
 
-          <div class="hint upload-hint">
+          <!-- 仓库信息条：仓库类型的「操作中枢」，同步状态/计数/指纹都在这里。 -->
+          <div v-if="activeRepo" class="repo-bar">
+            <div class="repo-bar-row">
+              <BranchesOutlined class="repo-branch-icon" />
+              <a-tooltip :title="activeRepo.remote_url">
+                <span class="repo-url">{{ activeRepo.remote_url }}</span>
+              </a-tooltip>
+              <a-tag :color="activeRepo.auth_type === 'ssh_key' ? 'cyan' : 'default'">
+                {{ activeRepo.auth_type === 'ssh_key' ? 'Deploy Key' : '匿名访问' }}
+              </a-tag>
+              <a-tag color="purple">{{ repoBranchLabel(activeRepo) }}</a-tag>
+              <a-tag :color="repoStatusColor(activeRepo.status)">
+                {{ repoStatusText(activeRepo.status) }}
+              </a-tag>
+              <a-tooltip v-if="activeRepo.host_fingerprint" :title="activeRepo.host_fingerprint">
+                <a-tag color="gold">指纹已记录</a-tag>
+              </a-tooltip>
+              <span class="repo-spacer" />
+              <a-space size="small">
+                <a-button size="small" @click="openEditRepo(activeRepo)">编辑</a-button>
+                <a-popconfirm
+                  title="移除仓库将删除其知识类型、全部仓库文件与向量，且不可恢复。确认继续？"
+                  ok-text="移除"
+                  cancel-text="取消"
+                  @confirm="onRemoveRepo(activeRepo)"
+                >
+                  <a-button size="small" danger>移除仓库</a-button>
+                </a-popconfirm>
+              </a-space>
+            </div>
+            <div class="repo-bar-row muted">
+              <template v-if="activeRepo.last_sync_result">
+                <span>
+                  上次同步
+                  <b class="repo-add">+{{ activeRepo.last_sync_result.added }}</b>
+                  / <b class="repo-change">~{{ activeRepo.last_sync_result.changed }}</b>
+                  / <b class="repo-remove">-{{ activeRepo.last_sync_result.removed }}</b>
+                  / 跳过 {{ activeRepo.last_sync_result.skipped }}
+                </span>
+                <span class="repo-dot">·</span>
+                <span>{{ activeRepo.last_sync_result.indexed_chunks }} 个分片</span>
+                <span class="repo-dot">·</span>
+                <span>耗时 {{ fmtElapsed(activeRepo.last_sync_result.duration_ms) }}</span>
+              </template>
+              <span v-else>尚未完成过同步</span>
+              <span class="repo-dot">·</span>
+              <span>{{ fmtDateTime(activeRepo.last_sync_at, '未同步') }}</span>
+              <span v-if="activeRepo.status === 'syncing'" class="repo-live">同步进行中…</span>
+            </div>
+            <a-alert
+              v-if="activeRepo.error_msg"
+              type="error"
+              show-icon
+              class="repo-error"
+              :message="activeRepo.error_msg"
+            >
+              <template v-if="isHostKeyError(activeRepo.error_msg)" #action>
+                <a-popconfirm
+                  title="将重新连接远端并覆盖记录新的主机指纹。请确认该变更来自你的 Git 服务器（例如服务器迁移），而不是网络劫持。确认更新？"
+                  ok-text="确认变更指纹"
+                  cancel-text="取消"
+                  @confirm="onRetrust(activeRepo)"
+                >
+                  <a-button size="small" danger :loading="retrustingId === activeRepo.id">
+                    确认变更指纹
+                  </a-button>
+                </a-popconfirm>
+              </template>
+            </a-alert>
+            <div class="hint repo-hint">
+              文件由仓库同步物化，不能上传或单独删除；可对单篇失败文件做「重新索引」。
+              排除规则在「编辑」中维护（如 {{ '**/test/**' }}）。
+            </div>
+          </div>
+
+          <div v-else class="hint upload-hint">
             仅支持 {{ acceptLabel }}，单个文件不超过 10 MB。上传后在后台切片与向量化，状态会自动刷新。
             上传文件夹会递归读取子目录，其余格式自动跳过。
             <span v-if="batch.total" class="batch-progress">
@@ -185,8 +299,9 @@
             <a-empty v-if="!activeType" description="请先选择一个知识类型" />
             <a-empty v-else-if="!documents.length" description="该类型下暂无文档" />
             <template v-else>
-              <!-- 批量操作条只在有勾选时占位，平时不占纵向空间。 -->
-              <div v-if="selectedDocIds.length" class="doc-batch-bar">
+              <!-- 批量操作条只在有勾选时占位，平时不占纵向空间。
+                   仓库类型不挂勾选列，自然也没有批量条（文件不能单删）。 -->
+              <div v-if="!isRepoType && selectedDocIds.length" class="doc-batch-bar">
                 <span>已选 {{ selectedDocIds.length }} 篇</span>
                 <a-button
                   size="small"
@@ -204,7 +319,7 @@
               <a-table
                 :data-source="documents"
                 :columns="docColumns"
-                :row-selection="docRowSelection"
+                :row-selection="isRepoType ? null : docRowSelection"
                 row-key="id"
                 size="small"
                 :pagination="docPagination"
@@ -212,7 +327,14 @@
                 @change="onDocPageChange"
               >
               <template #bodyCell="{ column, record }">
-                <template v-if="column.key === 'size'">
+                <template v-if="column.key === 'name'">
+                  <span
+                    :class="{ 'repo-file-path': record.source === 'repo' }"
+                    :title="record.source === 'repo' ? record.name : undefined"
+                  >{{ record.name }}</span>
+                </template>
+
+                <template v-else-if="column.key === 'size'">
                   {{ fmtSize(record.size) }}
                 </template>
 
@@ -238,7 +360,8 @@
                     >
                       重新索引
                     </a-button>
-                    <a-popconfirm title="确认删除该文档？" @confirm="onDeleteDoc(record.id)">
+                    <!-- 仓库文件不提供单篇删除：删了下次同步还会回来，回收只能走移除仓库。 -->
+                    <a-popconfirm v-if="record.source !== 'repo'" title="确认删除该文档？" @confirm="onDeleteDoc(record.id)">
                       <a-button size="small" danger :disabled="batchOperating">删除</a-button>
                     </a-popconfirm>
                   </a-space>
@@ -361,17 +484,170 @@
               <a-list-item-meta>
                 <template #title>
                   <a-tag>[{{ index + 1 }}]</a-tag>
-                  <span>{{ item.filename }}</span>
+                  <a-tag v-if="item.source === 'repo'" color="geekblue">代码</a-tag>
+                  <span :class="{ 'repo-file-path': item.source === 'repo' }">
+                    {{ hitLocation(item) }}
+                  </span>
+                  <span v-if="item.symbol" class="muted"> · {{ item.symbol }}</span>
                   <span class="muted"> · 第 {{ item.seq + 1 }} 片 · 相关度 {{ item.score.toFixed(3) }}</span>
                 </template>
                 <template #description>
-                  <div class="hit-content">{{ item.content }}</div>
+                  <div class="hit-content" :class="{ 'hit-content--code': item.source === 'repo' }">
+                    {{ item.content }}
+                  </div>
                 </template>
               </a-list-item-meta>
             </a-list-item>
           </template>
         </a-list>
       </div>
+    </a-modal>
+
+    <!-- 接入 / 编辑仓库。remote_url 不可改（改地址等于换仓库，请移除后重新接入）。 -->
+    <a-modal
+      v-model:open="repoModal.open"
+      :title="repoModal.editing ? `编辑仓库 · ${repoModal.form.name}` : '接入代码仓库'"
+      :confirm-loading="repoModal.submitting"
+      :ok-text="repoModal.editing ? '保存' : '接入并首次同步'"
+      cancel-text="取消"
+      width="660px"
+      :ok-button-props="{ disabled: repoModal.testing || repoModal.generating }"
+      @ok="submitRepo"
+    >
+      <a-form layout="vertical">
+        <a-form-item label="展示名称" :required="!repoModal.editing">
+          <a-input
+            v-model:value="repoModal.form.name"
+            :placeholder="repoModal.editing ? '' : '可选，默认取地址末段；将自动创建同名知识类型'"
+            :maxlength="128"
+          />
+        </a-form-item>
+
+        <a-form-item v-if="!repoModal.editing" label="Git 地址" required>
+          <a-input
+            v-model:value="repoModal.form.remote_url"
+            placeholder="git@host:group/repo.git、ssh://git@host:2222/group/repo.git，或内网匿名 http(s) 地址"
+            @change="invalidateProbe"
+          />
+        </a-form-item>
+        <a-form-item v-else label="Git 地址">
+          <a-input :value="repoModal.form.remote_url" disabled />
+        </a-form-item>
+
+        <a-form-item label="跟踪分支">
+          <a-input
+            v-model:value="repoModal.form.branch"
+            placeholder="留空：自动探测并跟随远端默认分支"
+            :maxlength="255"
+            allow-clear
+          />
+        </a-form-item>
+
+        <a-form-item v-if="!repoModal.editing" label="认证方式">
+          <a-radio-group
+            v-model:value="repoModal.form.auth_type"
+            button-style="solid"
+            @change="onAuthTypeChange"
+          >
+            <a-radio-button value="ssh_key">SSH Deploy Key</a-radio-button>
+            <a-radio-button value="none">匿名 http(s)</a-radio-button>
+          </a-radio-group>
+        </a-form-item>
+
+        <template v-if="repoModal.form.auth_type === 'ssh_key'">
+          <a-form-item
+            v-if="!repoModal.editing"
+            label="Deploy 私钥"
+            :required="!repoModal.editing"
+            extra='OpenSSH 格式的 ed25519 无口令私钥（-----BEGIN OPENSSH PRIVATE KEY-----）。私钥加密存储，之后任何接口都无法回读。'
+          >
+            <div class="repo-key-actions">
+              <a-button size="small" :loading="repoModal.generating" @click="generateKeypair">
+                <KeyOutlined /> 生成新密钥对
+              </a-button>
+              <a-checkbox v-model:checked="repoModal.showPrivate">显示私钥</a-checkbox>
+            </div>
+            <a-textarea
+              v-model:value="repoModal.form.private_key"
+              class="repo-key-input"
+              :class="{ 'repo-key-hidden': !repoModal.showPrivate }"
+              :rows="5"
+              spellcheck="false"
+              placeholder="粘贴现有私钥，或点上方按钮生成一对新的"
+              @change="invalidateProbe"
+            />
+          </a-form-item>
+          <a-form-item
+            v-else
+            label="更换 Deploy 私钥"
+            extra="留空表示保持原私钥不变；粘贴新私钥（ed25519，无口令）则整体替换。"
+          >
+            <a-textarea
+              v-model:value="repoModal.form.private_key"
+              class="repo-key-input"
+              :class="{ 'repo-key-hidden': !repoModal.showPrivate }"
+              :rows="3"
+              spellcheck="false"
+              placeholder="留空不更换"
+            />
+            <div class="repo-key-actions">
+              <a-checkbox v-model:checked="repoModal.showPrivate">显示私钥</a-checkbox>
+            </div>
+          </a-form-item>
+
+          <!-- 公钥不是秘密：生成时即时展示，已接入仓库也可随时回来复制。 -->
+          <a-form-item v-if="editingPublicKey" :label="repoModal.editing ? '当前公钥' : '公钥（登记到 Git 服务的 Deploy Keys）'">
+            <a-textarea :value="editingPublicKey" :rows="3" readonly class="repo-public-key" />
+            <a-button size="small" style="margin-top: 4px" @click="copyText(editingPublicKey)">
+              <CopyOutlined /> 复制公钥
+            </a-button>
+          </a-form-item>
+        </template>
+
+        <a-form-item
+          v-if="!repoModal.editing"
+          label="连接探测"
+          extra="建议先测试：后端会对远端做一次只读探测，并首次记录主机指纹（TOFU）；跳过也可以，首次同步时现场记录。"
+        >
+          <a-space>
+            <a-button :loading="repoModal.testing" @click="testConnection">测试连接</a-button>
+            <span v-if="repoModal.probe" class="repo-probe-ok">
+              已连接 {{ repoModal.probe.host }} ·
+              {{ repoModal.probe.default_branch || '默认分支' }}@{{ shortSha(repoModal.probe.head_sha) }}
+              <a-tag v-if="repoModal.probe.host_fingerprint" color="gold" style="margin-left: 6px">
+                指纹 {{ repoModal.probe.host_fingerprint.slice(0, 23) }}…
+              </a-tag>
+            </span>
+          </a-space>
+          <div v-if="repoModal.probeError" class="repo-form-error">{{ repoModal.probeError }}</div>
+        </a-form-item>
+
+        <a-form-item
+          label="排除规则"
+          extra="每行一条 glob，与内置排除（node_modules、dist、build、锁文件、*.min.js 等）取并集。"
+        >
+          <a-textarea
+            v-model:value="repoModal.form.exclude_globs"
+            :rows="3"
+            spellcheck="false"
+            :placeholder="GLOBS_PLACEHOLDER"
+          />
+        </a-form-item>
+      </a-form>
+
+      <a-alert
+        v-if="repoModal.submitError"
+        type="error"
+        show-icon
+        :message="repoModal.submitError"
+        style="margin-bottom: 10px"
+      />
+      <a-alert
+        v-if="!repoModal.editing"
+        type="info"
+        show-icon
+        message="提交后立即在后台开始首次同步：受跟踪的源码文件会被切片并调用向量模型，产生费用。"
+      />
     </a-modal>
   </div>
 </template>
@@ -380,17 +656,21 @@
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { message, Modal, type UploadProps } from 'ant-design-vue'
 import {
+  BranchesOutlined,
+  CopyOutlined,
   FolderOpenOutlined,
+  KeyOutlined,
   PlusOutlined,
   ReloadOutlined,
   UploadOutlined,
 } from '@ant-design/icons-vue'
 import { useRouter } from 'vue-router'
 import { errorText } from '@/utils/errors'
-import { fmtSize } from '@/utils/format'
+import { fmtDateTime, fmtElapsed, fmtSize } from '@/utils/format'
 import { createPollLoop } from '@/utils/polling'
 import {
   knowledgeApi,
+  repoApi,
   settingsApi,
   SUPPORTED_UPLOAD_EXTENSIONS,
   type DocumentStatus,
@@ -398,6 +678,8 @@ import {
   type KbProject,
   type KnowledgeDocument,
   type KnowledgeType,
+  type RepoItem,
+  type RepoTestConnectionResult,
   type SearchHit,
 } from '@/api'
 
@@ -455,7 +737,7 @@ const indexState = ref<IndexState>({
 })
 
 const docColumns = [
-  { title: '名称', dataIndex: 'name', ellipsis: true },
+  { title: '名称', key: 'name', dataIndex: 'name', ellipsis: true },
   { title: '大小', key: 'size', dataIndex: 'size', width: 100 },
   { title: '状态', key: 'status', dataIndex: 'status', width: 130 },
   { title: '上传时间', dataIndex: 'created_at', width: 180 },
@@ -473,6 +755,75 @@ const projectOptions = computed(() =>
 const activeType = computed(
   () => types.value.find((t) => t.id === activeTypeId.value) || null,
 )
+
+// ---- 代码仓库 --------------------------------------------------------------
+// 仓库与知识类型 1:1；列表跟着项目走，type_id 是两边的对位键。
+const repos = ref<RepoItem[]>([])
+
+const repoByType = computed(() => new Map(repos.value.map((r) => [r.type_id, r])))
+
+/** 给类型列表用：类型 + 它背后的仓库（没有就是普通上传类型）。 */
+const typeRows = computed(() =>
+  types.value.map((t) => ({ ...t, repo: repoByType.value.get(t.id) ?? null })),
+)
+
+const activeRepo = computed(() =>
+  activeTypeId.value ? repoByType.value.get(activeTypeId.value) ?? null : null,
+)
+const isRepoType = computed(() => activeRepo.value !== null)
+const repoSyncing = computed(() => {
+  const s = activeRepo.value?.status
+  return s === 'syncing' || s === 'pending'
+})
+const retrustingId = ref<number | null>(null)
+
+const REPO_STATUS_META: Record<string, { label: string; color: string }> = {
+  pending: { label: '待同步', color: 'default' },
+  syncing: { label: '同步中', color: 'processing' },
+  ready: { label: '就绪', color: 'success' },
+  error: { label: '失败', color: 'error' },
+}
+function repoStatusText(status: string) {
+  return REPO_STATUS_META[status]?.label ?? status
+}
+function repoStatusColor(status: string) {
+  return REPO_STATUS_META[status]?.color ?? 'default'
+}
+function shortSha(sha?: string | null) {
+  return sha ? sha.slice(0, 8) : ''
+}
+function repoBranchLabel(repo: RepoItem) {
+  const branch = repo.branch || '默认分支'
+  return repo.head_commit ? `${branch}@${shortSha(repo.head_commit)}` : branch
+}
+/** ssh 严格比对失败时 stderr 的固定措辞；据此给出「确认变更指纹」入口。 */
+function isHostKeyError(msg?: string | null) {
+  return !!msg && /Host key verification failed|REMOTE HOST IDENTIFICATION|主机指纹/i.test(msg)
+}
+
+const repoButtonReason = computed(() => {
+  if (!embeddingReady.value) return '请先在「设置」中配置并测试通过一个向量模型'
+  if (!activeProjectId.value) return '请先选择项目'
+  return ''
+})
+
+let reposLoadSeq = 0
+async function loadRepos() {
+  const projectId = activeProjectId.value
+  if (!projectId) {
+    repos.value = []
+    return
+  }
+  const seq = ++reposLoadSeq
+  try {
+    const data = await repoApi.list(projectId)
+    // 切项目的竞态守卫，口径与 loadTypes 相同。
+    if (seq !== reposLoadSeq || projectId !== activeProjectId.value) return
+    repos.value = data.items
+  } catch {
+    /* 拦截器已经提示过了 */
+  }
+}
 
 const canUpload = computed(() => embeddingReady.value && activeType.value !== null)
 
@@ -494,6 +845,14 @@ const indexStatusColor = computed(
 const hasRunningJobs = computed(() =>
   documents.value.some((d) => d.status === 'pending' || d.status === 'indexing'),
 )
+
+/** 当前项目里有仓库正在同步（克隆阶段可能还没产生文档行，所以要单独算一路）。 */
+const hasRunningRepos = computed(() =>
+  repos.value.some((r) => r.status === 'pending' || r.status === 'syncing'),
+)
+
+/** 轮询总闸：文档任务或仓库同步，任一在跑就继续 2.5 s 轮询，全落定即停。 */
+const hasBackgroundWork = computed(() => hasRunningJobs.value || hasRunningRepos.value)
 
 // ---- 加载 ------------------------------------------------------------------
 
@@ -534,6 +893,7 @@ async function loadTypes() {
   if (!projectId) {
     // 这个接口必须带项目；没有项目也就没什么可列的。
     types.value = []
+    repos.value = []
     activeTypeId.value = null
     documents.value = []
     docPage.value = 1
@@ -542,7 +902,8 @@ async function loadTypes() {
   }
   loadingTypes.value = true
   try {
-    const data = await knowledgeApi.listTypes(projectId)
+    // 仓库列表与类型同属一个项目，并行拉回少一轮等待。
+    const [data] = await Promise.all([knowledgeApi.listTypes(projectId), loadRepos()])
     // 等响应期间换了项目就整包丢弃，别把旧项目的类型灌进来。
     if (projectId !== activeProjectId.value) return
     types.value = data.items
@@ -567,6 +928,7 @@ function selectProject(id: number) {
   // 类型是挂在单个项目下面的，所以旧项目里选中的东西一个都不能留。
   activeTypeId.value = null
   documents.value = []
+  repos.value = []
   docPage.value = 1
   docTotal.value = 0
   void loadTypes()
@@ -689,12 +1051,18 @@ function onBatchDelete() {
 // 全部落定之后立刻停下来——没有任务时连定时器都不挂，不空转。keep-alive 下
 // 切去别的标签页（deactivated）也要停表，回来时先补一轮再决定要不要继续。
 // 失败自动退避、页面隐藏暂停（详见 utils/polling.ts）。
-const pollLoop = createPollLoop(pollOnce, { shouldContinue: () => hasRunningJobs.value })
+const pollLoop = createPollLoop(pollOnce, { shouldContinue: () => hasBackgroundWork.value })
 
 async function pollOnce() {
-  if (!activeTypeId.value || !hasRunningJobs.value) return
-  await loadDocuments(activeTypeId.value, { silent: true })
-  if (!hasRunningJobs.value) {
+  // 仓库同步（尤其克隆阶段）先刷仓库状态；文档任务刷文档表。
+  if (hasRunningRepos.value) await loadRepos()
+  if (
+    activeTypeId.value &&
+    (hasRunningJobs.value || (isRepoType.value && repoSyncing.value))
+  ) {
+    await loadDocuments(activeTypeId.value, { silent: true })
+  }
+  if (!hasBackgroundWork.value) {
     await Promise.all([loadIndexState(), loadTypes()])
   }
 }
@@ -703,13 +1071,13 @@ function stopPolling() {
   pollLoop.stop()
 }
 
-/** 有后台任务才挂表；hasRunningJobs 翻边时由 watch 调进来，落定即停。 */
+/** 有后台任务才挂表；任一条件翻边时由 watch 调进来，落定即停。 */
 function syncPolling() {
-  if (hasRunningJobs.value) pollLoop.start()
+  if (hasBackgroundWork.value) pollLoop.start()
   else pollLoop.stop()
 }
 
-watch(hasRunningJobs, syncPolling)
+watch([hasRunningJobs, hasRunningRepos], syncPolling)
 
 // ---- 项目 ------------------------------------------------------------------
 
@@ -1039,6 +1407,282 @@ async function runSearch() {
   }
 }
 
+// ---- 代码仓库：接入/编辑/同步/指纹 -------------------------------------------
+
+const GLOBS_PLACEHOLDER = '**/test/**\n**/*.generated.*'
+
+const repoModal = reactive({
+  open: false,
+  editing: false,
+  repoId: 0,
+  submitting: false,
+  testing: false,
+  generating: false,
+  showPrivate: false,
+  form: {
+    name: '',
+    remote_url: '',
+    branch: '',
+    auth_type: 'ssh_key' as 'ssh_key' | 'none',
+    private_key: '',
+    exclude_globs: '',
+  },
+  // 弹窗里即时生成的公钥（私钥只存在 form.private_key，提交后再也读不回来）。
+  generatedPublicKey: '',
+  // 测试连接成功后暂存的探测结果，提交时原样回传做首次指纹记录。
+  probe: null as RepoTestConnectionResult | null,
+  probeError: '',
+  submitError: '',
+})
+
+/** 编辑中仓库已登记的公钥；生成新密钥对后改显新公钥。 */
+const editingRepo = ref<RepoItem | null>(null)
+const editingPublicKey = computed(() => {
+  if (repoModal.form.auth_type !== 'ssh_key') return ''
+  return repoModal.generatedPublicKey || editingRepo.value?.public_key || ''
+})
+
+function resetRepoModal() {
+  repoModal.editing = false
+  repoModal.repoId = 0
+  repoModal.submitting = false
+  repoModal.testing = false
+  repoModal.generating = false
+  repoModal.showPrivate = false
+  repoModal.form = {
+    name: '',
+    remote_url: '',
+    branch: '',
+    auth_type: 'ssh_key',
+    private_key: '',
+    exclude_globs: '',
+  }
+  repoModal.generatedPublicKey = ''
+  repoModal.probe = null
+  repoModal.probeError = ''
+  repoModal.submitError = ''
+  editingRepo.value = null
+}
+
+function openCreateRepo() {
+  if (!embeddingReady.value || !activeProjectId.value) return
+  resetRepoModal()
+  repoModal.open = true
+}
+
+function openEditRepo(repo: RepoItem) {
+  resetRepoModal()
+  repoModal.editing = true
+  repoModal.repoId = repo.id
+  editingRepo.value = repo
+  repoModal.form = {
+    name: repo.name,
+    remote_url: repo.remote_url,
+    branch: repo.branch || '',
+    auth_type: (repo.auth_type as 'ssh_key' | 'none') || 'ssh_key',
+    private_key: '',
+    exclude_globs: repo.exclude_globs || '',
+  }
+  repoModal.open = true
+}
+
+/** 地址或私钥一变，上次探测拿到的 known_hosts 就作废，不能再随提交回传。 */
+function invalidateProbe() {
+  repoModal.probe = null
+  repoModal.probeError = ''
+}
+
+function onAuthTypeChange() {
+  invalidateProbe()
+  repoModal.generatedPublicKey = ''
+  if (repoModal.form.auth_type === 'none') {
+    repoModal.form.private_key = ''
+  }
+}
+
+async function generateKeypair() {
+  repoModal.generating = true
+  try {
+    const kp = await repoApi.generateKeypair()
+    repoModal.form.private_key = kp.private_key
+    repoModal.generatedPublicKey = kp.public_key
+    // 新私钥和旧探测结果肯定不配套。
+    invalidateProbe()
+  } catch (err) {
+    message.error(errorText(err, '生成密钥对失败'))
+  } finally {
+    repoModal.generating = false
+  }
+}
+
+async function testConnection() {
+  const url = repoModal.form.remote_url.trim()
+  if (!url) {
+    message.warning('请先填写 Git 地址')
+    return
+  }
+  repoModal.testing = true
+  repoModal.probeError = ''
+  repoModal.probe = null
+  try {
+    const result = await repoApi.testConnection({
+      remote_url: url,
+      branch: repoModal.form.branch.trim() || null,
+      private_key:
+        repoModal.form.auth_type === 'ssh_key'
+          ? repoModal.form.private_key.trim() || null
+          : null,
+    })
+    repoModal.probe = result
+    if (!repoModal.form.branch.trim() && result.default_branch) {
+      repoModal.form.branch = result.default_branch
+    }
+  } catch (err) {
+    repoModal.probeError = errorText(err, '连接失败')
+  } finally {
+    repoModal.testing = false
+  }
+}
+
+async function submitRepo() {
+  const form = repoModal.form
+  repoModal.submitError = ''
+
+  if (!repoModal.editing) {
+    const url = form.remote_url.trim()
+    if (url.length < 4) {
+      repoModal.submitError = '请填写 Git 地址'
+      return
+    }
+    if (form.auth_type === 'ssh_key' && !form.private_key.trim()) {
+      repoModal.submitError = 'SSH 仓库需要 deploy 私钥：粘贴现有私钥或生成新密钥对'
+      return
+    }
+    if (!activeProjectId.value) {
+      repoModal.submitError = '请先选择项目'
+      return
+    }
+    repoModal.submitting = true
+    try {
+      const created = await repoApi.create({
+        project_id: activeProjectId.value,
+        remote_url: url,
+        branch: form.branch.trim() || null,
+        auth_type: form.auth_type,
+        private_key: form.auth_type === 'ssh_key' ? form.private_key.trim() : null,
+        known_hosts: repoModal.probe?.known_hosts || null,
+        host_fingerprint: repoModal.probe?.host_fingerprint || null,
+        name: form.name.trim() || null,
+        exclude_globs: form.exclude_globs.trim() || null,
+      })
+      message.success('仓库已接入，首次同步已在后台开始')
+      repoModal.open = false
+      // loadTypes 自己会默认选第一个类型；这里随后显式切到新仓库的类型，
+      // 让用户立刻看到仓库信息条与同步进度。
+      await loadTypes()
+      selectType(created.type_id)
+      syncPolling()
+    } catch (err) {
+      // 地址不合法、私钥读不出、重名等业务拒绝：留在弹窗里就地改。
+      repoModal.submitError = errorText(err, '接入失败')
+    } finally {
+      repoModal.submitting = false
+    }
+    return
+  }
+
+  // 编辑：只传可改字段。私钥留空=不变；分支空串=回到远端默认分支。
+  repoModal.submitting = true
+  try {
+    await repoApi.update(repoModal.repoId, {
+      name: form.name.trim(),
+      branch: form.branch.trim(),
+      exclude_globs: form.exclude_globs.trim(),
+      ...(form.private_key.trim() ? { private_key: form.private_key.trim() } : {}),
+    })
+    message.success('已保存；下次同步生效')
+    repoModal.open = false
+    await loadRepos()
+  } catch (err) {
+    repoModal.submitError = errorText(err, '保存失败')
+  } finally {
+    repoModal.submitting = false
+  }
+}
+
+async function onSyncRepo(repo: RepoItem) {
+  try {
+    const res = await repoApi.sync(repo.id)
+    if (res.already_running) message.info(res.message)
+    else message.success(res.message)
+    await loadRepos()
+    syncPolling()
+  } catch (err) {
+    message.error(errorText(err, '同步失败'))
+  }
+}
+
+async function onRetrust(repo: RepoItem) {
+  retrustingId.value = repo.id
+  try {
+    await repoApi.retrust(repo.id)
+    message.success('主机指纹已更新，已重新开始同步')
+    // retrust 只换钉子；真正恢复还得再跑一次同步，顺手排上。
+    await repoApi.sync(repo.id)
+    await loadRepos()
+    syncPolling()
+  } catch (err) {
+    message.error(errorText(err, '更新指纹失败'))
+  } finally {
+    retrustingId.value = null
+  }
+}
+
+async function onRemoveRepo(repo: RepoItem) {
+  try {
+    await repoApi.remove(repo.id)
+    message.success('仓库已移除')
+    if (activeTypeId.value === repo.type_id) {
+      activeTypeId.value = null
+      documents.value = []
+    }
+    await Promise.all([loadTypes(), loadIndexState()])
+  } catch (err) {
+    message.error(errorText(err, '移除失败'))
+  }
+}
+
+/** 检索预览命中代码分片时：path:起-止；散文分片退化为文件名。 */
+function hitLocation(hit: SearchHit) {
+  if (hit.line_start == null) return hit.filename
+  return hit.line_end && hit.line_end !== hit.line_start
+    ? `${hit.filename}:${hit.line_start}-${hit.line_end}`
+    : `${hit.filename}:${hit.line_start}`
+}
+
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    message.success('已复制')
+  } catch {
+    // 非安全上下文（http 内网地址）下 clipboard API 可能不可用，退回隐藏文本域。
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    try {
+      document.execCommand('copy')
+      message.success('已复制')
+    } catch {
+      message.error('复制失败，请手动选择复制')
+    } finally {
+      document.body.removeChild(ta)
+    }
+  }
+}
+
 // ---- 辅助函数 --------------------------------------------------------------
 
 function goToSettings() {
@@ -1109,5 +1753,103 @@ onUnmounted(stopPolling)
   color: var(--text-2);
   font-size: var(--fs-xs);
   line-height: 1.7;
+}
+.hit-content--code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+/* ---- 代码仓库 ---------------------------------------------------------- */
+.repo-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.repo-bar {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--tool-radius);
+  background: var(--paper);
+}
+.repo-bar-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: var(--fs-sm);
+}
+.repo-bar-row + .repo-bar-row {
+  margin-top: 6px;
+}
+.repo-branch-icon {
+  color: var(--signal-text);
+}
+.repo-url {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--fs-xs);
+}
+.repo-spacer {
+  flex: 1;
+}
+.repo-add {
+  color: var(--success, #52a852);
+}
+.repo-change {
+  color: var(--signal-text);
+}
+.repo-remove {
+  color: var(--danger);
+}
+.repo-dot {
+  margin: 0 2px;
+}
+.repo-live {
+  margin-left: 4px;
+  color: var(--signal-text);
+}
+.repo-error {
+  margin-top: 8px;
+}
+.repo-hint {
+  margin: 8px 0 0;
+}
+.repo-file-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--fs-xs);
+  word-break: break-all;
+}
+.repo-key-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+/* 私钥默认打码：webkit-text-security 把每个字符替成圆点，比自己换密码框
+   更适合多行 PEM；勾选「显示私钥」后移除该类即恢复明文。 */
+.repo-key-hidden :deep(textarea) {
+  -webkit-text-security: disc;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.repo-key-input :deep(textarea),
+.repo-public-key :deep(textarea) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+.repo-public-key {
+  margin-bottom: 0;
+}
+.repo-probe-ok {
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+}
+.repo-form-error {
+  margin-top: 6px;
+  font-size: var(--fs-xs);
+  color: var(--danger);
 }
 </style>
