@@ -128,8 +128,36 @@ DEFAULT_EXCLUDE_GLOBS = (
 )
 
 
+# 跳过原因码：落进同步报告的稳定标识（不随中文措辞变化），前端按码映射展示文案。
+SKIP_EXCLUDED = "excluded"  # 命中内置/用户排除规则
+SKIP_UNSUPPORTED_EXT = "unsupported_ext"  # 不在源码扩展名白名单
+SKIP_EMPTY = "empty"  # 零字节空文件
+SKIP_BINARY = "binary"  # NUL 嗅探判定的二进制
+SKIP_TOO_LARGE = "too_large"  # 超过单文件字节上限
+SKIP_LONG_LINE = "long_line"  # 单行超长，疑似压缩/生成文件
+SKIP_BLANK = "blank"  # 解码后纯空白
+
+# 原因码 → 给人看的中文标签；repo_sync 里的同步级原因合并进同一张表。
+SKIP_REASON_LABELS: Dict[str, str] = {
+    SKIP_EXCLUDED: "命中排除规则",
+    SKIP_UNSUPPORTED_EXT: "非受支持的源码扩展名",
+    SKIP_EMPTY: "空文件",
+    SKIP_BINARY: "疑似二进制文件",
+    SKIP_TOO_LARGE: "超过单文件大小上限",
+    SKIP_LONG_LINE: "超长行（疑似压缩/生成文件）",
+    SKIP_BLANK: "纯空白文件",
+}
+
+
 class SourceSkip(ValueError):
-    """这个源文件不该被收录（扩展名、二进制、体积、超长行等）。"""
+    """这个源文件不该被收录（扩展名、二进制、体积、超长行等）。
+
+    带稳定的 :attr:`reason` 原因码，``str(exc)`` 仍是可直接展示的中文说明。
+    """
+
+    def __init__(self, reason: str, message: Optional[str] = None):
+        self.reason = reason
+        super().__init__(message or SKIP_REASON_LABELS.get(reason, reason))
 
 
 @dataclass(frozen=True)
@@ -214,28 +242,30 @@ def inspect_source(
     """
     normalized = rel_path.replace("\\", "/")
     if is_excluded(normalized, user_globs):
-        raise SourceSkip("命中排除规则")
+        raise SourceSkip(SKIP_EXCLUDED)
 
     language = detect_language(normalized)
     if language is None:
-        raise SourceSkip("非受支持的源码扩展名")
+        raise SourceSkip(SKIP_UNSUPPORTED_EXT)
 
     if not raw:
-        raise SourceSkip("空文件")
+        raise SourceSkip(SKIP_EMPTY)
     if b"\x00" in raw[:4096]:
         # NUL 嗅探：几乎没有哪种文本源码会包含 NUL 字节。
-        raise SourceSkip("疑似二进制文件")
+        raise SourceSkip(SKIP_BINARY)
     if len(raw) > max_file_bytes:
-        raise SourceSkip(f"超过单文件上限 {max_file_bytes} 字节")
+        raise SourceSkip(
+            SKIP_TOO_LARGE, f"超过单文件上限 {max_file_bytes} 字节"
+        )
 
     text = decode_source(raw)
     # 归一化换行，行号统计才与编辑器一致。
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     for line in text.split("\n"):
         if len(line) > MAX_SINGLE_LINE:
-            raise SourceSkip("存在超长行，疑似压缩或生成文件")
+            raise SourceSkip(SKIP_LONG_LINE)
     if not text.strip():
-        raise SourceSkip("纯空白文件")
+        raise SourceSkip(SKIP_BLANK)
     return language, text
 
 

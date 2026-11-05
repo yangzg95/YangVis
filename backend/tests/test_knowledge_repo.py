@@ -300,6 +300,78 @@ def test_ssh_command_pins_host_key_and_quotes_paths(tmp_path):
     assert f'UserKnownHostsFile="{known.as_posix()}"' in first
 
 
+def test_normalize_fingerprint_and_match_helper():
+    good = "SHA256:abcdefghijklmnopqrstuvwxyz0123456789+/"
+    assert repo_sync.normalize_fingerprint(f"  {good.lower()}\n") == good
+    for bad in ("", "   ", "MD5:xx", "SHA256:", "SHA256:short", "sha256:bad char!"):
+        with pytest.raises(RepoError):
+            repo_sync.normalize_fingerprint(bad)
+
+    # 命中放行；不匹配报错且把期望/实际都带进消息，方便用户核对。
+    repo_sync.assert_fingerprint_match("SHA256:aa", ["SHA256:aa", "SHA256:bb"])
+    with pytest.raises(RepoError) as exc:
+        repo_sync.assert_fingerprint_match("SHA256:zz", ["SHA256:aa"])
+    assert "SHA256:zz" in str(exc.value) and "SHA256:aa" in str(exc.value)
+    with pytest.raises(RepoError):
+        repo_sync.assert_fingerprint_match("SHA256:zz", [])
+
+
+def test_probe_remote_pinned_fingerprint_enforced(monkeypatch, data_dir):
+    """钉死指纹：匹配才放行，不匹配直接拒绝；http(s) 不接受指纹参数。"""
+    priv, _pub = repo_sync.generate_keypair_sync()
+    real_fp = "SHA256:abcdefghijklmnopqrstuvwxyz0123456789+/"
+    monkeypatch.setattr(
+        repo_sync, "parse_git_url", lambda raw: _local_target(Path("."), ssh=True)
+    )
+
+    async def fake_run(args, *, cwd=None, env=None, timeout=60.0):
+        if args[:2] == ["git", "ls-remote"]:
+            # 模拟 ssh accept-new 把主机 key 写进专用 known_hosts。
+            known = Path(
+                env["GIT_SSH_COMMAND"].split('UserKnownHostsFile="')[1].split('"')[0]
+            )
+            known.write_text("local.test ssh-ed25519 AAAA\n", encoding="utf-8")
+            return (
+                0,
+                b"ref: refs/heads/main\tHEAD\n" + b"1" * 40 + b"\tHEAD\n",
+                b"",
+            )
+        return 0, b"", b""
+
+    monkeypatch.setattr(repo_sync, "_run", fake_run)
+    monkeypatch.setattr(
+        repo_sync, "known_host_fingerprints", lambda text: [real_fp]
+    )
+
+    branch, sha, host, known_text, fingerprint = asyncio.run(
+        repo_sync.probe_remote(
+            "ssh://local.test/demo.git",
+            private_key=priv,
+            expected_fingerprint=real_fp.lower(),
+        )
+    )
+    assert branch == "main" and len(sha) == 40
+    assert fingerprint == real_fp and known_text
+
+    with pytest.raises(RepoError, match="主机指纹不匹配"):
+        asyncio.run(
+            repo_sync.probe_remote(
+                "ssh://local.test/demo.git",
+                private_key=priv,
+                expected_fingerprint="SHA256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            )
+        )
+
+    # http(s) 没有主机指纹概念：协议级拒绝，不会去碰远端。
+    monkeypatch.setattr(repo_sync, "parse_git_url", lambda raw: _local_target(Path(".")))
+    with pytest.raises(RepoError):
+        asyncio.run(
+            repo_sync.probe_remote(
+                "http://local.test/demo.git", expected_fingerprint=real_fp
+            )
+        )
+
+
 def test_validate_http_token_rejects_blank_and_control_chars():
     assert repo_sync.validate_http_token("  tok ") == "tok"
     for bad in (None, "", "   ", "tok\n", "tok\rcurl x", "a\tb"):
@@ -506,6 +578,26 @@ def test_inspect_source_gates():
         )
 
 
+def test_source_skip_carries_stable_reason():
+    """每个闸门都带稳定原因码，中文说明仍可直接展示。"""
+    cases = [
+        ("node_modules/x/a.js", b"y=2\n", 1000, (), code_chunk.SKIP_EXCLUDED),
+        ("logo.png", b"\x89PNG\n", 1000, (), code_chunk.SKIP_UNSUPPORTED_EXT),
+        ("notes.json", b"{}\n", 1000, (), code_chunk.SKIP_UNSUPPORTED_EXT),
+        ("empty.py", b"", 1000, (), code_chunk.SKIP_EMPTY),
+        ("bin.py", b"\x00\x01\x02\n", 1000, (), code_chunk.SKIP_BINARY),
+        ("big.py", b"x = 1\n", 4, (), code_chunk.SKIP_TOO_LARGE),
+        ("min.py", ("a" * 3000 + "\n").encode(), 10**6, (), code_chunk.SKIP_LONG_LINE),
+        ("blank.py", b"\n\n   \n", 1000, (), code_chunk.SKIP_BLANK),
+        ("gen/a.py", b"x=1\n", 1000, ("gen/*.py",), code_chunk.SKIP_EXCLUDED),
+    ]
+    for path, raw, limit, globs, reason in cases:
+        with pytest.raises(code_chunk.SourceSkip) as exc_info:
+            code_chunk.inspect_source(path, raw, max_file_bytes=limit, user_globs=globs)
+        assert exc_info.value.reason == reason, path
+        assert str(exc_info.value)  # 兜底中文说明不为空
+
+
 def test_decode_source_gb18030_fallback():
     raw = "# 中文注释\nx = 1\n".encode("gb18030")
     _lang, text = code_chunk.inspect_source("a.py", raw, max_file_bytes=1000)
@@ -653,6 +745,110 @@ def test_reconcile_skip_removes_doc_that_newly_matches_exclusion(
     )
     assert (third.added, third.removed) == (0, 0)
     assert third.skipped == 2
+
+
+def test_reconcile_skip_reasons_and_sample_cap(
+    svc, db, project, embedding_model, embeddings, vs, monkeypatch
+):
+    repo = _repo_row(db, project, globs="gen/*.py")
+    shas = {f"s{i}": f"{i:040d}" for i in range(10)}
+    files = {sha: b"x = 1\n" for sha in shas.values()}
+    files["binsha"] = b"\x00\x01\n"
+    entries = [
+        ("100644", shas["s0"], "node_modules/x.js"),  # 内置目录排除
+        ("100644", shas["s1"], "data.json"),  # 扩展名不在白名单
+        ("100644", "binsha", "bin.py"),  # NUL 二进制
+    ]
+    # 用户 glob 命中 6 个：验证样本每码最多留 5 条。
+    entries += [
+        ("100644", shas[f"s{i}"], f"gen/g{i}.py") for i in range(2, 8)
+    ]
+    result = _reconcile(monkeypatch, svc, repo, entries, files)
+
+    assert result.skipped == 9
+    assert result.skip_reasons == {
+        code_chunk.SKIP_EXCLUDED: 7,
+        code_chunk.SKIP_UNSUPPORTED_EXT: 1,
+        code_chunk.SKIP_BINARY: 1,
+    }
+    excluded_samples = result.skip_samples[code_chunk.SKIP_EXCLUDED]
+    assert len(excluded_samples) == repo_sync.SKIP_SAMPLE_LIMIT
+    assert excluded_samples[0] == "node_modules/x.js"
+    assert result.skip_samples[code_chunk.SKIP_BINARY] == ["bin.py"]
+    # 没有任何文档被建出来。
+    assert svc.repo_doc_index(repo.id) == {}
+
+
+def test_reconcile_max_files_reason_and_index_failure_reason(
+    svc, db, project, embedding_model, embeddings, vs, monkeypatch
+):
+    repo = _repo_row(db, project)
+    sha_a, sha_b = "a" * 40, "b" * 40
+    files = {sha_a: _PY_A.encode(), sha_b: _PY_B.encode()}
+
+    # 文件数上限 1：第二篇走 max_files 原因，不读 blob 也不花 embedding。
+    monkeypatch.setattr(repo_sync.settings, "KB_REPO_MAX_FILES", 1)
+    first = _reconcile(
+        monkeypatch,
+        svc,
+        repo,
+        [("100644", sha_a, "a.py"), ("100644", sha_b, "b.py")],
+        files,
+    )
+    assert first.added == 1
+    assert first.skip_reasons.get(repo_sync.SKIP_MAX_FILES) == 1
+    assert first.skip_samples[repo_sync.SKIP_MAX_FILES] == ["b.py"]
+
+    # 索引炸掉的单篇走 index_failed 原因。
+    monkeypatch.setattr(repo_sync.settings, "KB_REPO_MAX_FILES", 20000)
+
+    async def fail_documents(texts):
+        if any("b.py" in t for t in texts):
+            raise RuntimeError("provider down")
+        embeddings.doc_calls += 1
+        return [[0.1] * DIM for _ in texts]
+
+    embeddings.aembed_documents = fail_documents
+    second = _reconcile(
+        monkeypatch,
+        svc,
+        repo,
+        [("100644", sha_a, "a.py"), ("100644", sha_b, "b.py")],
+        files,
+    )
+    assert second.skip_reasons.get(repo_sync.SKIP_INDEX_FAILED) == 1
+    assert second.skip_samples[repo_sync.SKIP_INDEX_FAILED] == ["b.py"]
+
+
+def test_reconcile_records_structural_skips(
+    svc, db, project, embedding_model, embeddings, vs, monkeypatch
+):
+    """子模块/符号链接等结构性跳过经 structural 参数入账。"""
+    repo = _repo_row(db, project)
+    sha = "d" * 40
+
+    async def fake_reader(work_dir, env, blob_sha):
+        return {sha: _PY_A.encode()}[blob_sha]
+
+    monkeypatch.setattr(repo_sync, "_read_tree_file", fake_reader)
+    result = asyncio.run(
+        repo_sync._reconcile(
+            service=svc,
+            repo=repo,
+            work_dir=Path("."),
+            git_env={},
+            entries=[("100644", sha, "a.py")],
+            structural=[
+                (repo_sync.SKIP_SUBMODULE, "vendor/lib"),
+                (repo_sync.SKIP_SYMLINK, "link.py"),
+            ],
+            user_globs=(),
+            config=svc.require_embedding_config(),
+        )
+    )
+    assert result.added == 1
+    assert result.skip_reasons == {"submodule": 1, "symlink": 1}
+    assert result.skip_samples["submodule"] == ["vendor/lib"]
 
 
 def test_reconcile_one_file_failure_does_not_kill_sync(
@@ -996,6 +1192,68 @@ def test_sync_with_http_token_auth_against_local_repo(
     assert set(docs) == {"a.py", "pkg/b.py"}
 
 
+@requires_git
+def test_sync_structural_skips_and_worktree_size_report(
+    monkeypatch,
+    maker,
+    db,
+    repo_svc,
+    project,
+    embedding_model,
+    embeddings,
+    vs,
+    data_dir,
+    tmp_path,
+):
+    """符号链接/子模块计入跳过明细；工作区体积采集与阈值告警。"""
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _git(["init", "-q"], remote)
+    _git(["symbolic-ref", "HEAD", "refs/heads/main"], remote)
+    (remote / "a.py").write_text(_PY_A, encoding="utf-8")
+    _git(["add", "a.py"], remote)
+    _git(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"], remote)
+
+    # 不依赖真实符号链接/子模块命令：直接往 index 塞 120000 与 160000 条目，
+    # 生产侧只消费 ls-tree 给出的 mode，跨平台行为一致。
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    link_sha = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"],
+        cwd=str(remote),
+        input="a.py",
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    ).stdout.strip()
+    _git(["update-index", "--add", "--cacheinfo", f"120000,{link_sha},link.py"], remote)
+    _git(
+        ["update-index", "--add", "--cacheinfo", f"160000,{'b' * 40},vendor/lib"],
+        remote,
+    )
+    _git(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "struct"], remote)
+
+    repo = _create_repo(monkeypatch, repo_svc, project, remote)
+    assert asyncio.run(repo_sync.run_repo_sync(OWNER, repo.id)) is True
+    db.refresh(repo)
+    assert repo.status == RepoStatus.READY
+    result = repo.last_sync_result
+    assert result["skip_reasons"].get("symlink") == 1
+    assert result["skip_reasons"].get("submodule") == 1
+    assert result["skip_samples"]["symlink"] == ["link.py"]
+    assert result["skip_samples"]["submodule"] == ["vendor/lib"]
+    assert result["worktree_bytes"] > 0
+    assert result["worktree_warned"] is False
+
+    # 阈值压到 1 字节：unchanged 同步也照常采集体积并置告警位。
+    monkeypatch.setattr(repo_sync.settings, "KB_REPO_WORKTREE_WARN_BYTES", 1)
+    assert asyncio.run(repo_sync.run_repo_sync(OWNER, repo.id)) is True
+    db.refresh(repo)
+    warned = repo.last_sync_result
+    assert warned["worktree_bytes"] > 0 and warned["worktree_warned"] is True
+
+
 def test_sync_error_path_deletes_http_credentials(
     monkeypatch, db, repo_svc, project, embedding_model, data_dir, tmp_path
 ):
@@ -1102,6 +1360,44 @@ def test_create_rejects_protocol_auth_mismatch(db, repo_svc, project):
                 auth_type="none",
             )
         )
+
+
+def test_create_validates_fingerprint_known_hosts_pair(db, repo_svc, project):
+    import asyncssh
+    import base64
+    import hashlib
+
+    priv, _ = repo_sync.generate_keypair_sync()
+    host_key = asyncssh.generate_private_key("ssh-ed25519")
+    blob = host_key.export_public_key().decode().split()[1]
+    digest = hashlib.sha256(base64.b64decode(blob)).digest()
+    actual_fp = "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+    known = f"local.test ssh-ed25519 {blob}\n"
+
+    def make(**over):
+        fields = dict(
+            project_id=project.id,
+            remote_url="git@local.test:o/demo.git",
+            auth_type="ssh_key",
+            private_key=priv,
+        )
+        fields.update(over)
+        return RepoCreate(**fields)
+
+    # 只给指纹或只给 known_hosts：拒绝（正常流程两者同来自一次探测）。
+    with pytest.raises(RepoError):
+        repo_svc.create(make(host_fingerprint=actual_fp))
+    db.rollback()
+    with pytest.raises(RepoError):
+        repo_svc.create(make(known_hosts=known))
+    db.rollback()
+    # 成对但指纹与 host key 对不上：拒绝。
+    with pytest.raises(RepoError):
+        repo_svc.create(make(known_hosts=known, host_fingerprint="SHA256:" + "z" * 43))
+    db.rollback()
+    # 自洽的一对：落库。
+    repo = repo_svc.create(make(known_hosts=known, host_fingerprint=actual_fp))
+    assert repo.known_hosts == known and repo.host_fingerprint == actual_fp
 
 
 def test_update_validates_auth_protocol_coherence(db, repo_svc, project):
@@ -1385,9 +1681,11 @@ def test_api_test_connection_returns_branch_and_sha(client, db, monkeypatch):
         known_hosts_text=None,
         http_token=None,
         http_username=None,
+        expected_fingerprint=None,
     ):
         seen["token"] = http_token
         seen["username"] = http_username
+        seen["expected_fingerprint"] = expected_fingerprint
         return "main", "a" * 40, "local.test", "known-line", "SHA256:abc"
 
     monkeypatch.setattr(knowledge_router, "probe_remote", fake_probe)
@@ -1415,6 +1713,38 @@ def test_api_test_connection_returns_branch_and_sha(client, db, monkeypatch):
     ).json()
     assert token_body["code"] == 0
     assert seen["token"] == "pat-x" and seen["username"] == "ci"
+
+    # 钉死指纹：expected_fingerprint 原样透传到传输层。
+    pin_body = test_client.post(
+        "/api/knowledge/test-connection",
+        json={
+            "remote_url": "git@local.test:org/demo.git",
+            "private_key": "k",
+            "expected_fingerprint": "SHA256:abc",
+        },
+    ).json()
+    assert pin_body["code"] == 0
+    assert seen["expected_fingerprint"] == "SHA256:abc"
+
+
+def test_api_create_rejects_inconsistent_fingerprint_pair(client, db):
+    test_client, queued = client
+    project = _ready_project(db)
+    priv, _ = repo_sync.generate_keypair_sync()
+
+    queued_before = len(queued)
+    # 只带指纹不带 known_hosts：业务拒绝，且不排队同步。
+    bad = test_client.post(
+        "/api/knowledge/repos",
+        json={
+            "project_id": project.id,
+            "remote_url": "git@local.test:org/demo.git",
+            "private_key": priv,
+            "host_fingerprint": "SHA256:" + "z" * 43,
+        },
+    ).json()
+    assert bad["code"] == -1 and bad["data"] is None
+    assert len(queued) == queued_before
 
 
 def test_api_create_http_token_repo_never_echoes_token(client, db):

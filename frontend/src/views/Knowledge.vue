@@ -248,12 +248,47 @@
                   <b class="repo-add">+{{ activeRepo.last_sync_result.added }}</b>
                   / <b class="repo-change">~{{ activeRepo.last_sync_result.changed }}</b>
                   / <b class="repo-remove">-{{ activeRepo.last_sync_result.removed }}</b>
-                  / 跳过 {{ activeRepo.last_sync_result.skipped }}
+                  /
+                  <a-popover
+                    v-if="skipBreakdown(activeRepo.last_sync_result).length"
+                    trigger="click"
+                    placement="topLeft"
+                    title="跳过明细（原因 · 次数 · 样本路径）"
+                  >
+                    <template #content>
+                      <div class="skip-popover">
+                        <div
+                          v-for="row in skipBreakdown(activeRepo.last_sync_result)"
+                          :key="row.reason"
+                          class="skip-row"
+                        >
+                          <div class="skip-row-head">
+                            <span>{{ row.label }}</span>
+                            <b>{{ row.count }}</b>
+                          </div>
+                          <div
+                            v-for="p in row.samples"
+                            :key="p"
+                            class="skip-sample"
+                            :title="p"
+                          >{{ p }}</div>
+                        </div>
+                      </div>
+                    </template>
+                    <a class="skip-link">跳过 {{ activeRepo.last_sync_result.skipped }}</a>
+                  </a-popover>
+                  <span v-else>跳过 {{ activeRepo.last_sync_result.skipped }}</span>
                 </span>
                 <span class="repo-dot">·</span>
                 <span>{{ activeRepo.last_sync_result.indexed_chunks }} 个分片</span>
                 <span class="repo-dot">·</span>
                 <span>耗时 {{ fmtElapsed(activeRepo.last_sync_result.duration_ms) }}</span>
+                <a-tooltip
+                  v-if="activeRepo.last_sync_result.worktree_warned"
+                  :title="`本地工作区体积 ${fmtSize(activeRepo.last_sync_result.worktree_bytes || 0)}，超过告警阈值；请检查是否误纳入大目录并在排除规则中屏蔽`"
+                >
+                  <a-tag color="orange" class="repo-warn-tag">工作区体积偏大</a-tag>
+                </a-tooltip>
               </template>
               <span v-else>尚未完成过同步</span>
               <span class="repo-dot">·</span>
@@ -676,6 +711,24 @@
               <CopyOutlined /> 复制公钥
             </a-button>
           </a-form-item>
+
+          <!-- 接入时显式钉死指纹：把 TOFU 的首次信任换成先验证后记录。 -->
+          <a-collapse v-if="!repoModal.editing" ghost class="repo-advanced">
+            <a-collapse-panel key="pin-fingerprint" header="高级：钉死主机指纹（可选）">
+              <a-input
+                v-model:value="repoModal.form.expected_fingerprint"
+                placeholder="SHA256:...（留空则首次连接自动记录 TOFU）"
+                spellcheck="false"
+                :maxlength="255"
+                allow-clear
+                @change="invalidateProbe"
+              />
+              <div class="repo-form-hint">
+                从运维渠道取得服务器主机指纹（ssh-keygen -lf 公钥文件）。填写后「测试连接」会严格比对，
+                指纹不一致直接拒绝，防止首次连接即被劫持。
+              </div>
+            </a-collapse-panel>
+          </a-collapse>
         </template>
 
         <a-form-item
@@ -690,6 +743,13 @@
               {{ repoModal.probe.default_branch || '默认分支' }}@{{ shortSha(repoModal.probe.head_sha) }}
               <a-tag v-if="repoModal.probe.host_fingerprint" color="gold" style="margin-left: 6px">
                 指纹 {{ repoModal.probe.host_fingerprint.slice(0, 23) }}…
+              </a-tag>
+              <a-tag
+                v-if="repoModal.form.expected_fingerprint.trim() && repoModal.probe.host_fingerprint"
+                color="success"
+                style="margin-left: 6px"
+              >
+                指纹匹配
               </a-tag>
             </span>
           </a-space>
@@ -754,6 +814,7 @@ import {
   type KnowledgeDocument,
   type KnowledgeType,
   type RepoItem,
+  type RepoSyncResult,
   type RepoTestConnectionResult,
   type RepoUpdatePayload,
   type SearchHit,
@@ -1504,6 +1565,8 @@ const repoModal = reactive({
     http_token: '',
     http_username: '',
     exclude_globs: '',
+    // SSH 接入时可选的钉死指纹；编辑弹窗不提供（变更走 retrust 流程）。
+    expected_fingerprint: '',
   },
   // 弹窗里即时生成的公钥（私钥只存在 form.private_key，提交后再也读不回来）。
   generatedPublicKey: '',
@@ -1536,6 +1599,7 @@ function resetRepoModal() {
     http_token: '',
     http_username: '',
     exclude_globs: '',
+    expected_fingerprint: '',
   }
   repoModal.generatedPublicKey = ''
   repoModal.probe = null
@@ -1566,6 +1630,7 @@ function openEditRepo(repo: RepoItem) {
     http_token: '',
     http_username: '',
     exclude_globs: repo.exclude_globs || '',
+    expected_fingerprint: '',
   }
   repoModal.open = true
 }
@@ -1575,6 +1640,37 @@ function repoAuthMeta(auth: string) {
   if (auth === 'ssh_key') return { label: 'Deploy Key', color: 'cyan' }
   if (auth === 'http_token') return { label: 'HTTPS 令牌', color: 'geekblue' }
   return { label: '匿名访问', color: 'default' }
+}
+
+/** 跳过原因码 → 中文标签，与后端 code_chunk/repo_sync 的 SKIP_REASON_LABELS 各维护一份。 */
+const SKIP_REASON_LABELS: Record<string, string> = {
+  excluded: '命中排除规则',
+  unsupported_ext: '非受支持的源码扩展名',
+  empty: '空文件',
+  binary: '疑似二进制文件',
+  too_large: '超过单文件大小上限',
+  long_line: '超长行（疑似压缩/生成文件）',
+  blank: '纯空白文件',
+  path_too_long: '路径超过 512 字符',
+  max_files: '超出文件数上限',
+  index_failed: '索引失败',
+  symlink: '符号链接（不索引）',
+  submodule: 'Git 子模块（不递归索引）',
+  unsafe_path: '非法路径',
+}
+
+/** 同步报告里的跳过明细，按次数降序；老版本落库的结果没有 skip_reasons，返回空数组。 */
+function skipBreakdown(result?: RepoSyncResult | null) {
+  const reasons = result?.skip_reasons
+  if (!reasons) return []
+  return Object.entries(reasons)
+    .map(([reason, count]) => ({
+      reason,
+      label: SKIP_REASON_LABELS[reason] || reason,
+      count,
+      samples: result?.skip_samples?.[reason] || [],
+    }))
+    .sort((a, b) => b.count - a.count)
 }
 
 /** 弹窗里按当前地址推导协议：http(s) 才允许匿名/令牌，其余一律走 SSH。 */
@@ -1593,6 +1689,7 @@ function onAuthTypeChange() {
   repoModal.generatedPublicKey = ''
   if (repoModal.form.auth_type !== 'ssh_key') {
     repoModal.form.private_key = ''
+    repoModal.form.expected_fingerprint = ''
   }
   if (repoModal.form.auth_type !== 'http_token') {
     // 切走令牌认证时清掉明文，避免误带到后端。
@@ -1609,6 +1706,7 @@ function onRemoteUrlChange() {
     if (form.auth_type === 'ssh_key') {
       form.auth_type = 'none'
       form.private_key = ''
+      form.expected_fingerprint = ''
       repoModal.generatedPublicKey = ''
     }
   } else if (form.auth_type !== 'ssh_key') {
@@ -1653,6 +1751,11 @@ async function testConnection() {
         form.auth_type === 'http_token' ? form.http_token.trim() || null : null,
       http_username:
         form.auth_type === 'http_token' ? form.http_username.trim() || null : null,
+      // 仅 SSH 且填写了钉死指纹时参与严格校验；HTTP 协议带指纹会被后端直接拒绝。
+      expected_fingerprint:
+        form.auth_type === 'ssh_key'
+          ? form.expected_fingerprint.trim() || null
+          : null,
     })
     repoModal.probe = result
     if (!repoModal.form.branch.trim() && result.default_branch) {
@@ -1990,6 +2093,43 @@ onUnmounted(stopPolling)
 .repo-live {
   margin-left: 4px;
   color: var(--signal-text);
+}
+.skip-link {
+  cursor: pointer;
+  color: var(--signal-text);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.skip-popover {
+  max-width: 420px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.skip-row + .skip-row {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
+}
+.skip-row-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: var(--fs-sm);
+}
+.skip-sample {
+  margin-top: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--fs-xs);
+  color: var(--signal-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.repo-warn-tag {
+  margin-inline-start: 2px;
+}
+.repo-advanced {
+  margin-top: 8px;
 }
 .repo-error {
   margin-top: 8px;

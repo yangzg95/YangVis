@@ -269,6 +269,9 @@ class RepoTestConnectionRequest(BaseModel):
     # http_token 认证时的个人访问令牌（与可选用户名）；只用于本次探测，不入库。
     http_token: Optional[str] = Field(default=None, max_length=512)
     http_username: Optional[str] = Field(default=None, max_length=128)
+    # SSH 可选：用户自带的主机指纹（SHA256:...），探测到的主机 key 必须与它匹配，
+    # 不匹配直接拒绝——把 TOFU 的「首次信任」换成用户显式钉死。
+    expected_fingerprint: Optional[str] = Field(default=None, max_length=255)
 
 
 class RepoTestConnectionResult(BaseModel):
@@ -319,6 +322,13 @@ class RepoSyncResult(BaseModel):
     indexed_chunks: int = 0
     duration_ms: int = 0
     commit: Optional[str] = None
+    # 跳过明细：原因码 → 次数 / 样本路径（每码至多 5 条，路径截断 200 字）。
+    # 老版本落库的 JSON 没有这两个键，缺省空容器即可向前兼容。
+    skip_reasons: Dict[str, int] = Field(default_factory=dict)
+    skip_samples: Dict[str, List[str]] = Field(default_factory=dict)
+    # 同步后本地工作区的字节体积；超过 KB_REPO_WORKTREE_WARN_BYTES 时置告警位。
+    worktree_bytes: int = 0
+    worktree_warned: bool = False
 
 
 class RepoItem(BaseModel):

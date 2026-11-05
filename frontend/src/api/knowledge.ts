@@ -102,6 +102,23 @@ export interface RebuildResult {
 export type RepoAuthType = 'ssh_key' | 'none' | 'http_token'
 export type RepoStatus = 'pending' | 'syncing' | 'ready' | 'error'
 
+/** 跳过原因码（与后端 code_chunk/repo_sync 的常量一一对应）。 */
+export type RepoSkipReason =
+  | 'excluded'
+  | 'unsupported_ext'
+  | 'empty'
+  | 'binary'
+  | 'too_large'
+  | 'long_line'
+  | 'blank'
+  | 'path_too_long'
+  | 'max_files'
+  | 'index_failed'
+  | 'symlink'
+  | 'submodule'
+  | 'unsafe_path'
+  | string
+
 export interface RepoSyncResult {
   added: number
   changed: number
@@ -110,6 +127,13 @@ export interface RepoSyncResult {
   indexed_chunks: number
   duration_ms: number
   commit?: string | null
+  /** 原因码 → 次数；老版本落库的同步结果可能缺这两个键。 */
+  skip_reasons?: Record<string, number>
+  /** 原因码 → 样本路径（每码至多 5 条）。 */
+  skip_samples?: Record<string, string[]>
+  /** 同步后本地工作区体积（字节）与超阈值告警位。 */
+  worktree_bytes?: number
+  worktree_warned?: boolean
 }
 
 export interface RepoItem {
@@ -302,6 +326,8 @@ export const repoApi = {
     private_key?: string | null
     http_token?: string | null
     http_username?: string | null
+    /** SSH 可选：用户钉死的主机指纹 SHA256:...，不匹配后端直接拒绝。 */
+    expected_fingerprint?: string | null
   }) =>
     request<RepoTestConnectionResult>({
       url: '/knowledge/test-connection',

@@ -68,6 +68,39 @@ class RepoStatus:
     ERROR = "error"
 
 
+# 同步级跳过原因码（文件内容闸门的原因码在 code_chunk 里）。
+SKIP_PATH_TOO_LONG = "path_too_long"  # 仓库相对路径超过 512 字符
+SKIP_MAX_FILES = "max_files"  # 超出单次同步文件数上限
+SKIP_INDEX_FAILED = "index_failed"  # 单文件切片/embedding 失败
+SKIP_SYMLINK = "symlink"  # 符号链接 blob（mode 120000）
+SKIP_SUBMODULE = "submodule"  # gitlink 子模块（mode 160000）
+SKIP_UNSAFE_PATH = "unsafe_path"  # ls-tree 返回了越界路径（纵深防御）
+
+# 前端只认原因码，文案表在前后端各维护一份；这是后端兜底标签。
+SKIP_REASON_LABELS = {
+    **code_chunk.SKIP_REASON_LABELS,
+    SKIP_PATH_TOO_LONG: "路径超过 512 字符",
+    SKIP_MAX_FILES: "超出文件数上限",
+    SKIP_INDEX_FAILED: "索引失败",
+    SKIP_SYMLINK: "符号链接（不索引）",
+    SKIP_SUBMODULE: "Git 子模块（不递归索引）",
+    SKIP_UNSAFE_PATH: "非法路径",
+}
+
+# 每个原因在同步报告里最多保留多少条样本路径：够定位问题，又不把 JSON 撑大。
+SKIP_SAMPLE_LIMIT = 5
+SKIP_SAMPLE_PATH_MAX = 200
+
+
+def _record_skip(result: RepoSyncResult, reason: str, path: str) -> None:
+    """记一笔跳过：总计数 + 原因分桶 + 限量样本路径。"""
+    result.skipped += 1
+    result.skip_reasons[reason] = result.skip_reasons.get(reason, 0) + 1
+    samples = result.skip_samples.setdefault(reason, [])
+    if len(samples) < SKIP_SAMPLE_LIMIT:
+        samples.append(path[:SKIP_SAMPLE_PATH_MAX])
+
+
 # ---- 地址解析 ---------------------------------------------------------------
 
 
@@ -220,6 +253,29 @@ def known_host_fingerprints(known_hosts_text: str) -> List[str]:
                 )
                 break
     return fingerprints
+
+
+def normalize_fingerprint(raw: str) -> str:
+    """校验并归一化用户粘贴的 ``SHA256:...`` 指纹；不合法抛 :class:`RepoError`。"""
+    value = (raw or "").strip()
+    if not value.upper().startswith("SHA256:"):
+        raise RepoError("主机指纹格式应为 SHA256:...（可用 ssh-keygen -lf 取得）")
+    digest = value.split(":", 1)[1].strip()
+    # 标准 ssh 指纹是去 padding 的 base64（43 字符）；放宽到合法 base64 字符即可，
+    # 长度闸门只挡明显乱填。
+    if len(digest) < 20 or not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", digest):
+        raise RepoError("主机指纹内容无法识别，请粘贴完整的 SHA256: 指纹")
+    return "SHA256:" + digest
+
+
+def assert_fingerprint_match(expected: str, actual: Sequence[str]) -> None:
+    """探测到的主机指纹必须包含用户钉死的那把，否则按潜在劫持拒绝。"""
+    if expected not in actual:
+        seen = "、".join(actual) if actual else "远端未返回主机密钥"
+        raise RepoError(
+            f"主机指纹不匹配：期望 {expected}，实际 {seen}。"
+            "若确认这是服务器迁移后的新指纹，请清空指纹输入改用自动记录（TOFU）"
+        )
 
 
 # ---- 子进程 -----------------------------------------------------------------
@@ -398,6 +454,18 @@ def _force_rmtree(path: Path) -> None:
         logger.warning("failed to remove directory %s: %s", path, exc)
 
 
+def _directory_size(path: Path) -> int:
+    """目录总字节数（os.walk 默认不跟随符号链接）；单文件 stat 失败只跳过。"""
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(path):
+        for name in filenames:
+            try:
+                total += (Path(dirpath) / name).stat().st_size
+            except OSError:
+                continue
+    return total
+
+
 # ---- 目录布局 ----------------------------------------------------------------
 
 
@@ -456,14 +524,21 @@ async def probe_remote(
     known_hosts_text: Optional[str] = None,
     http_token: Optional[str] = None,
     http_username: Optional[str] = None,
+    expected_fingerprint: Optional[str] = None,
 ) -> Tuple[Optional[str], str, str, str, str]:
     """``git ls-remote`` 探测。
 
     返回 ``(默认分支, HEAD sha, host, known_hosts 文本, 指纹)``。SSH 首次用
     accept-new 把主机 key 收进临时 known_hosts；http(s) 后两项为空串。
     http(s) 给了令牌就写临时 credential-store 文件，随整个临时目录一起销毁。
+
+    ``expected_fingerprint``（SSH）：用户显式钉死的主机指纹，探测结果必须匹配，
+    不匹配直接 :class:`RepoError`——把 TOFU 的首次信任换成先验证后记录。
     """
     target = parse_git_url(remote_url)
+    pinned = normalize_fingerprint(expected_fingerprint) if expected_fingerprint else None
+    if pinned and target.protocol in ("http", "https"):
+        raise RepoError("http(s) 协议没有主机指纹概念，指纹仅用于 SSH 地址")
     import tempfile
 
     Path(settings.KB_REPO_DATA_DIR).mkdir(parents=True, exist_ok=True)
@@ -522,7 +597,11 @@ async def probe_remote(
         fingerprint = ""
         if target.protocol == "ssh":
             known_text = known_path.read_text(encoding="utf-8") if known_path.exists() else ""
-            fingerprint = ", ".join(known_host_fingerprints(known_text))
+            actual = known_host_fingerprints(known_text)
+            if pinned:
+                # 显式钉死：不匹配就拒绝，绝不把意外主机的 key 带回调用方落库。
+                assert_fingerprint_match(pinned, actual)
+            fingerprint = ", ".join(actual)
         return default_branch, head_sha, target.host, known_text, fingerprint
 
 
@@ -625,6 +704,21 @@ class RepoService:
             canonical, public_line = validate_private_key_sync(payload.private_key)
             private_enc = encrypt(canonical)
             public_key = public_line
+            if payload.host_fingerprint or payload.known_hosts:
+                # 指纹与 known_hosts 必须成对且自洽（正常流程两者都来自同一次探测）：
+                # 防构造请求存出「钉了指纹却没有 host key」这类首同步必炸的行。
+                if not (payload.host_fingerprint and payload.known_hosts):
+                    raise RepoError(
+                        "主机指纹与 known_hosts 记录必须一起提供，请重新测试连接"
+                    )
+                actual = known_host_fingerprints(payload.known_hosts)
+                claimed = {
+                    piece.strip()
+                    for piece in payload.host_fingerprint.split(",")
+                    if piece.strip()
+                }
+                if not claimed or not claimed.issubset(set(actual)):
+                    raise RepoError("主机指纹与探测记录不一致，请重新测试连接")
         else:
             raise RepoError("SSH 地址必须使用 deploy key 认证")
 
@@ -961,7 +1055,7 @@ async def sync_repository(owner_id: int, repo_id: int) -> RepoSyncResult:
                             )
                         repo.branch = current_branch
 
-                entries = await _ls_tree(work_dir, env, head_sha)
+                entries, structural = await _ls_tree(work_dir, env, head_sha)
                 user_globs = code_chunk.parse_user_globs(repo.exclude_globs)
                 result = await _reconcile(
                     service=service,
@@ -969,10 +1063,22 @@ async def sync_repository(owner_id: int, repo_id: int) -> RepoSyncResult:
                     work_dir=work_dir,
                     git_env=env,
                     entries=entries,
+                    structural=structural,
                     user_globs=user_globs,
                     config=config,
                 )
                 result.commit = head_sha
+                result.worktree_bytes = await asyncio.to_thread(
+                    _directory_size, work_dir
+                )
+                if result.worktree_bytes > settings.KB_REPO_WORKTREE_WARN_BYTES:
+                    result.worktree_warned = True
+                    logger.warning(
+                        "repo %s worktree %s bytes exceeds warn threshold %s",
+                        repo_id,
+                        result.worktree_bytes,
+                        settings.KB_REPO_WORKTREE_WARN_BYTES,
+                    )
                 result.duration_ms = int((time.monotonic() - started) * 1000)
 
                 repo.head_commit = head_sha
@@ -1009,8 +1115,12 @@ async def sync_repository(owner_id: int, repo_id: int) -> RepoSyncResult:
 
 async def _ls_tree(
     work_dir: Path, env: dict, head_sha: str
-) -> List[Tuple[str, str, str]]:
-    """``ls-tree -r -z`` → [(mode, blob_sha, path)]；只留普通 blob。"""
+) -> Tuple[List[Tuple[str, str, str]], List[Tuple[str, str]]]:
+    """``ls-tree -r -z`` → (普通 blob 列表, 结构性跳过[(reason, path)])。
+
+    子模块（gitlink）、符号链接与越界路径不进候选，但要在同步报告里留痕，
+    否则用户只看到文件「凭空少了」。
+    """
     code, stdout, stderr = await _run(
         ["git", "-C", str(work_dir), "ls-tree", "-r", "-z", head_sha],
         env=env,
@@ -1019,6 +1129,7 @@ async def _ls_tree(
     if code != 0:
         raise _git_error(stderr, "读取仓库树失败")
     entries: List[Tuple[str, str, str]] = []
+    structural: List[Tuple[str, str]] = []
     for record in stdout.split(b"\x00"):
         if not record:
             continue
@@ -1027,16 +1138,19 @@ async def _ls_tree(
         if len(parts) != 3:
             continue
         mode, kind, sha = parts
-        if kind != "blob":
-            continue  # submodule(commit) 跳过
-        if mode == "120000":
-            continue  # 符号链接跳过
         path = path_bytes.decode("utf-8", errors="replace")
+        if kind != "blob":
+            structural.append((SKIP_SUBMODULE, path))  # gitlink 子模块
+            continue
+        if mode == "120000":
+            structural.append((SKIP_SYMLINK, path))  # 符号链接
+            continue
         if not _safe_rel_path(path):
             logger.warning("skipping suspicious path from ls-tree: %r", path)
+            structural.append((SKIP_UNSAFE_PATH, path))
             continue
         entries.append((mode, sha, path))
-    return entries
+    return entries, structural
 
 
 def _safe_rel_path(path: str) -> bool:
@@ -1066,9 +1180,13 @@ async def _reconcile(
     entries: Sequence[Tuple[str, str, str]],
     user_globs: Sequence[str],
     config,
+    structural: Sequence[Tuple[str, str]] = (),
 ) -> RepoSyncResult:
     """三路对账：added / changed / removed / unchanged（后者零 embedding）。"""
     result = RepoSyncResult()
+    # 子模块/符号链接等结构性跳过先入账：它们不在候选集里，不参与后面的对账。
+    for reason, path in structural:
+        _record_skip(result, reason, path)
 
     existing = service.repo_doc_index(repo.id)  # path -> (doc, blob_hash)
     incoming = {path: sha for _, sha, path in entries}
@@ -1090,7 +1208,7 @@ async def _reconcile(
     truncated = len(entries) > settings.KB_REPO_MAX_FILES
     for position, (_mode, sha, path) in enumerate(candidates):
         if position >= settings.KB_REPO_MAX_FILES:
-            result.skipped += 1
+            _record_skip(result, SKIP_MAX_FILES, path)
             continue
         prior = existing.get(path)
         if prior is not None and prior[1] == sha:
@@ -1098,7 +1216,7 @@ async def _reconcile(
 
         try:
             if len(path) > 512:
-                raise code_chunk.SourceSkip("路径超过 512 字符")
+                raise code_chunk.SourceSkip(SKIP_PATH_TOO_LONG, "路径超过 512 字符")
             raw = await _read_tree_file(work_dir, git_env, sha)
             language, text = code_chunk.inspect_source(
                 path,
@@ -1108,7 +1226,7 @@ async def _reconcile(
             )
         except code_chunk.SourceSkip as exc:
             logger.debug("repo %s skip %s: %s", repo.id, path, exc)
-            result.skipped += 1
+            _record_skip(result, exc.reason, path)
             # 旧版本里这文件曾被索引、新版本变成该跳过（生成文件等）：删掉旧账。
             if prior is not None:
                 doc_id = prior[0].id
@@ -1147,7 +1265,7 @@ async def _reconcile(
         except Exception as exc:  # noqa: BLE001 - 单文件失败落成该文件 error
             logger.warning("indexing repo file %s failed: %s", path, exc)
             service.set_document_status(doc, DocumentStatus.ERROR, error=str(exc))
-            result.skipped += 1
+            _record_skip(result, SKIP_INDEX_FAILED, path)
 
     if truncated:
         logger.warning(

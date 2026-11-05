@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     # clone/fetch 一条子进程的超时；整次同步的总超时。
     KB_REPO_CLONE_TIMEOUT: float = 300.0
     KB_REPO_SYNC_TIMEOUT: float = 1800.0
+    # 工作区体积告警阈值（字节）：同步后实测体积超过它就在同步报告里置告警位，
+    # 只提示不阻断（Git 协议无法在 clone 前询问体积）。默认 2 GB。
+    KB_REPO_WORKTREE_WARN_BYTES: int = 2 * 1024 * 1024 * 1024
     # 可选主机后缀白名单（逗号分隔，空=不限），SSH 与 http(s) 同等生效。
     KB_REPO_HOST_ALLOWLIST: str = ""
 

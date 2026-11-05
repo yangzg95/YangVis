@@ -1,6 +1,8 @@
 # 知识库 · 代码仓库接入（设计方案）
 
-> 状态：P0 已实施（2026-11），P1 已交付「仓库源文件带行号只读预览」与「HTTPS + 个人访问令牌认证」。本文是在现有知识库（见 [knowledge-base.md](knowledge-base.md)）上增加「代码仓库」
+> 状态：P0 已实施（2026-11），P1 已交付「仓库源文件带行号只读预览」与「HTTPS + 个人访问令牌认证」；
+> 可观测性批次已交付「跳过原因明细」「接入时钉死主机指纹」「工作区体积统计/告警」三项（零 DDL，
+> 数据搭 `last_sync_result` JSON 与既有指纹列）。本文是在现有知识库（见 [knowledge-base.md](knowledge-base.md)）上增加「代码仓库」
 > 这一内容来源的设计，不改写既有链路。目标是让对话智能体可以基于某个 Git 仓库的真实源码回答
 > 「这个功能在哪实现的」「这段逻辑什么意思」「改这里会影响谁」一类问题，并且引用能落到
 > `文件路径:行号`。
@@ -31,12 +33,13 @@ embedding 闸门、模型指纹、全量重建、引用编号与计费口径，�
   每个仓库一对独立 deploy key；http(s) 地址支持**匿名公开/内网只读**与**个人访问令牌
   （PAT）**两种认证。认证方式由地址协议决定：SSH 只能用 deploy key，http(s) 只能匿名或
   令牌，互斥组合在创建/更新时直接拒绝。
-- **同步仅手动触发**：接入时首同步 + 仓库信息条上的「立即同步」；定时轮询与 webhook 放 P1。
+- **同步仅手动触发**：接入时首同步 + 仓库信息条上的「立即同步」。**定时/轮询自动同步明确不做（产品决策，禁止实现）**；webhook 推送触发仅作远期可能项保留。
 - **仓库与知识类型 1:1 绑定**。
 - 切片器 P0 用语言族规则识别结构边界，tree-sitter AST 放 P1。
 
-非目标（P0 不做）：定时 / webhook 自动同步、多分支与 tag、AST 级切片、
-跨仓库联合检索的独立过滤维度、本地服务器目录作为来源。这些列入 §12 后续批次。
+非目标：**定时 / 轮询自动同步永久不做（产品决策，禁止提议与实现）**；webhook 推送触发、
+多分支与 tag、AST 级切片、跨仓库联合检索的独立过滤维度、本地服务器目录作为来源列入
+§12 后续批次。
 
 ## 2. 用户可见行为
 
@@ -59,12 +62,22 @@ embedding 闸门、模型指纹、全量重建、引用编号与计费口径，�
 - 接入前可用「测试连接」：后端对远端做一次 `git ls-remote`，返回默认分支与 HEAD 短 SHA；
   这是主机指纹的**首次记录时机**（TOFU，见下）。接入弹窗明确提示：会把仓库的受跟踪源码
   文件切片并调用向量模型，产生费用（与「上传文件夹」同一口径）。
-- **主机指纹 TOFU**：测试连接/首次同步时自动接受并记录主机 host key 到仓库行；之后每次
-  连接严格比对，指纹变化（重装系统、中间人）直接报「主机指纹不一致」，同步失败并在仓库
-  信息条给出「查看详情 / 确认变更新指纹」入口，不静默放行。
+- **主机指纹两种信任模式**：
+  - **TOFU（默认）**：测试连接/首次同步时自动接受并记录主机 host key 到仓库行；之后每次
+    连接严格比对，指纹变化（重装系统、中间人）直接报「主机指纹不一致」，同步失败并在仓库
+    信息条给出「查看详情 / 确认变更新指纹」入口，不静默放行。
+  - **钉死指纹（可选，仅创建时）**：接入弹窗「高级」折叠区可粘贴运维渠道取得的
+    `SHA256:...` 指纹；「测试连接」在 ls-remote 之后严格比对，不一致直接拒绝且**不回写
+    known_hosts**，把首次连接被劫持也挡在外面。留空即退回 TOFU。http(s) 没有主机指纹概念，
+    携带指纹会被直接拒绝；创建时若回传指纹/known_hosts，二者必须成对且声称的指纹确实在
+    known_hosts 集合内，拒绝后不排队首同步。
 - 接入后立即在后台执行首次同步，仓库类型顶部出现**仓库信息条**：URL、分支、HEAD 短 SHA、
   状态（同步中/就绪/失败）、文件数与分片数、上次同步时间、本次同步「新增 N / 修改 N /
-  删除 N / 跳过 N」，以及 **立即同步**、**编辑**、**移除仓库**。
+  删除 N / 跳过 N」，以及 **立即同步**、**编辑**、**移除仓库**。「跳过 N」在有明细时
+  渲染为可点击的虚线下划线，浮层按原因码列出中文标签、次数与至多 5 条样本路径（每码样本
+  路径截断到 200 字符）；老版本落库、没有明细的同步结果只显示纯数字。同步后工作区体积
+  超过 `KB_REPO_WORKTREE_WARN_BYTES`（默认 2 GB，只提示不阻断）时，信息条出现橙色
+  「工作区体积偏大」标签，悬浮展示实际体积与排查提示。
 - 同步中：文件以仓库相对路径出现在文档表格（如 `src/services/knowledge/service.py`），
   状态沿用 pending → indexing → ready / error 四态，页面沿用现有的「有任务时 2.5 s 轮询、
   落定即停」机制；单文件失败（超限、解码失败等）只记该文件 error 并计入「跳过」，不拖垮整次
@@ -142,7 +155,7 @@ kb_chunk(line_start, line_end, symbol) ── embedding ──▶ Qdrant（paylo
 | `error_msg` | VARCHAR(512) NULL | 同步失败原因（截断口径同文档） |
 | `head_commit` | VARCHAR(40) NULL | 上次同步到的 commit SHA |
 | `last_sync_at` | DATETIME NULL | |
-| `last_sync_result` | JSON NULL | `{added, changed, removed, skipped, indexed_chunks, duration_ms, commit?}` |
+| `last_sync_result` | JSON NULL | `{added, changed, removed, skipped, indexed_chunks, duration_ms, commit?, skip_reasons?, skip_samples?, worktree_bytes?, worktree_warned?}`；后四个键为可观测性批次增补，旧行缺键时读取端按缺省处理（空明细 / 0 / false），无需 DDL |
 | `created_at` / `updated_at` | DATETIME | 同站口径 |
 
 本地布局不入库，全部由 id 确定性推出（改配置迁移目录也不留脏路径）：
@@ -290,6 +303,15 @@ P0 用「语言族规则 + 行扫描」，覆盖代码问答里最要紧的结�
   仓库 `error_msg`，状态 error，**不自动覆盖**；前端识别 `Host key verification
   failed` / `REMOTE HOST IDENTIFICATION` 措辞给出「确认变更指纹」入口，用户确认后走
   `POST /repos/{id}/retrust` 重新探测并更新。
+- **钉死指纹（pinned fingerprint）**：探测接口可选入参 `expected_fingerprint`，
+  `normalize_fingerprint()` 先校验必须是 `SHA256:` 前缀 + 合法 base64 摘要（长度 ≥20），
+  不规范直接 `RepoError`；http(s) 目标携带指纹同样拒绝（该协议没有 host key 概念）。
+  SSH 探测在 ls-remote 成功、临时 known_hosts 落盘后，用 `known_host_fingerprints()`
+  解析出实际指纹集合做严格成员比对：不匹配则报错（文案同时给出期望与实际指纹，提示可
+  清空钉死值退回 TOFU），**意外主机的 known_hosts 不会返回给前端、更不会落库**。
+  `RepoService.create` 再做一层服务级校验：回传的 `host_fingerprint` 与 `known_hosts`
+  要么都不给（纯 TOFU 由首同步补记），要么成对且声称的指纹是 known_hosts 解析结果的
+  子集，防绕过探测直接构造请求。
 - 进程统一 `asyncio.create_subprocess_exec`（参数数组、不经 shell），环境白名单式构造
   （只透传 PATH/HOME/LANG 等必要变量 + 上面的 GIT_* 覆盖项），命令输出里出现私钥路径的
   行在落 error_msg 前脱敏。
@@ -368,6 +390,22 @@ https://<urlencode(username)>:<urlencode(token)>@<host>[%3a<port>]\n
 前端能看到的进度就是文件行的 pending/indexing/ready 变化与仓库信息条的「同步中」，
 不引入新的推送通道（没有 SSE，沿用轮询）。
 
+### 跳过明细与工作区体积
+
+- 所有跳过路径收敛到稳定原因码，`_record_skip(result, reason, path)` 统一记账：
+  文件级 7 码（`excluded / unsupported_ext / empty / binary / too_large / long_line /
+  blank`，由 `code_chunk.SourceSkip.reason` 携带）与同步级 6 码（`path_too_long /
+  max_files / index_failed / symlink / submodule / unsafe_path`）。符号链接、gitlink
+  子模块、越界路径在 `_ls_tree` 阶段就以结构化列表产出，再并入同一套记账，不再成为
+  「消失的文件」。
+- 报告里 `skip_reasons` 记每码次数，`skip_samples` 每码至多保留 5 条样本路径
+  （`SKIP_SAMPLE_LIMIT`，单条截断 200 字符），够定位问题又不把 JSON 撑大；`skipped`
+  总数口径不变，老前端不识别新键也不受影响。
+- 同步收尾后 `_directory_size(work_dir)` 以 `os.walk` 汇总工作区字节数（不跟随符号
+  链接，单文件权限错误忽略），写入 `worktree_bytes`；超过
+  `KB_REPO_WORKTREE_WARN_BYTES` 置 `worktree_warned=true` 并打 warning 日志，
+  **只提示不阻断**，阈值进配置项。
+
 ### 崩溃恢复与删除
 
 - 启动时新增 `reset_stale_repo_syncs(db)`，与 `reset_stale_indexing()` 同一点调用：
@@ -388,9 +426,9 @@ https://<urlencode(username)>:<urlencode(token)>@<host>[%3a<port>]\n
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/repos/keypair` | asyncssh 进程内生成一对 ed25519 deploy key，返回 `{public_key, private_key}`；**不落库**，仅供接入弹窗使用，私钥随创建请求提交后才加密存储 |
-| POST | `/test-connection` | `{remote_url, branch?, private_key?, http_token?, http_username?}` → SSH 写临时 known_hosts（首次 accept-new）、http(s) 写临时 credential-store，跑 `ls-remote`，返回默认分支、HEAD SHA、主机名与**首次见到的 host key 指纹**（http(s) 指纹为空）；私钥/令牌只用于本次探测；**有向量模型闸**（探测本身不需要，但入口统一） |
+| POST | `/test-connection` | `{remote_url, branch?, private_key?, http_token?, http_username?, expected_fingerprint?}` → SSH 写临时 known_hosts（首次 accept-new）、http(s) 写临时 credential-store，跑 `ls-remote`，返回默认分支、HEAD SHA、主机名与**首次见到的 host key 指纹**（http(s) 指纹为空）；`expected_fingerprint`（仅 SSH，`SHA256:` 形态）存在时严格比对实际指纹，不匹配直接业务报错且不回传 known_hosts；私钥/令牌只用于本次探测；**有向量模型闸**（探测本身不需要，但入口统一） |
 | GET | `/repos?project_id=` | 项目下仓库列表（含状态、HEAD、`has_credential`、host 指纹、last_sync_result） |
-| POST | `/repos` | `{project_id, remote_url, branch?, auth_type, private_key?, http_token?, http_username?, known_hosts?, host_fingerprint?, name?, exclude_globs?}`：按协议校验认证组合（SSH 只收私钥、http(s) 在 none/http_token 中二选一），asyncssh 导入私钥（拒绝带口令密钥）或 Fernet 加密令牌，建同名类型（重名加 `-2`）、建仓库行（连同 known_hosts 首记录）、排队首次同步；**有闸** |
+| POST | `/repos` | `{project_id, remote_url, branch?, auth_type, private_key?, http_token?, http_username?, known_hosts?, host_fingerprint?, name?, exclude_globs?}`：按协议校验认证组合（SSH 只收私钥、http(s) 在 none/http_token 中二选一），asyncssh 导入私钥（拒绝带口令密钥）或 Fernet 加密令牌，建同名类型（重名加 `-2`）、建仓库行（连同 known_hosts 首记录）、排队首次同步；**有闸**。指纹成对校验：`known_hosts` 与 `host_fingerprint` 要么都缺省（TOFU 留给首同步），要么同时给出且声称指纹必须包含在 known_hosts 解析出的指纹集合内，不一致直接拒绝且不排队 |
 | GET | `/repos/{id}` | 详情；404 口径同其余资源（不属本人 = 不存在）；另含可公开的 `ssh_public_key` |
 | PUT | `/repos/{id}` | 可改 `name / branch / exclude_globs / private_key / http_token / http_username / auth_type`（密钥与令牌缺省=不变；令牌显式空串=清除；匿名/令牌互改时后端同步清理另一套凭据）；改分支 → 下次同步重建工作区；URL 不可编辑 |
 | POST | `/repos/{id}/sync` | 增量同步；锁占用时返回 HTTP 200 + `{started:false, already_running:true}`（业务口径不排队，避免页面重试刷出一串任务） |
@@ -409,15 +447,22 @@ P1 源文件预览用）；列表、单篇重新索引、全量重建、检索�
   - 类型列表项：仓库类型加仓库图标/标签，描述行展示 `branch@shortsha` 与同步状态。
   - 选中仓库类型时，文档卡片上方渲染**仓库信息条**（URL、分支、SHA、状态、计数、上次
     同步结果的增删改跳），操作换成「立即同步 / 编辑 / 移除仓库」；上传与上传文件夹按钮
-    对仓库类型隐藏；文档表格的单篇操作只留「重新索引」。
+    对仓库类型隐藏；文档表格的单篇操作只留「重新索引」。「跳过 N」在报告含
+    `skip_reasons` 时变为 click popover 触发器，浮层按次数降序展示原因标签/次数/样本
+    路径（等宽截断、title 浮全文）；`worktree_warned` 时追加橙色「工作区体积偏大」标签，
+    tooltip 给出 `fmtSize` 后的实际体积与排除规则提示。
   - 接入弹窗：项目固定为当前项目；Git 地址、分支（占位「留空自动探测」）；认证单选项
     **由地址协议驱动**：SSH 地址只显示「Deploy Key」；http(s) 地址显示「匿名访问 /
     HTTPS 令牌」。SSH 下凭据二选一：粘贴私钥（多行 textarea，password 态）或「生成密钥
     对」（调 keypair 接口后展示公钥与复制按钮、提示去 Git 服务登记，私钥暂存在弹窗内存
     里随提交上传）；令牌下是 `a-input-password`（PAT，autocomplete=new-password，创建时
     必填）+ 可选用户名输入框（extra 说明缺省 `x-access-token`、Gitee 需真实用户名）。
-    改地址协议时自动切到合法认证并清掉另一套凭据输入；「测试连接」成功后回填默认分支，
-    SSH 还展示首次记录的主机指纹；排除规则；确认文案带费用提示。
+    改地址协议时自动切到合法认证并清掉另一套凭据输入（含钉死指纹，仅 SSH 保留）；
+    SSH 区块底部有「高级：钉死主机指纹（可选）」ghost 折叠面板，输入 `SHA256:...`
+    （maxlength 255，改动即作废上次探测）；「测试连接」成功后回填默认分支，
+    SSH 还展示首次记录的主机指纹，填写了钉死值并通过时多一枚绿色「指纹匹配」标签；
+    排除规则；确认文案带费用提示。钉死指纹只参与创建期探测，编辑弹窗不出现该面板，
+    指纹变更仍走 retrust 人工确认。
   - 编辑弹窗：地址只读；令牌框永远空白（不回读），留空=不更换，切「匿名访问」保存即
     清令牌；信息条认证标签三态：Deploy Key（青）/ HTTPS 令牌（蓝）/ 匿名访问（默认灰）。
   - 主机指纹变更：同步失败的错误条在识别到 `Host key verification failed` /
@@ -433,9 +478,12 @@ P1 源文件预览用）；列表、单篇重新索引、全量重建、检索�
 - 对话引用卡（`MessageBubble.vue`）：代码来源显示路径 + 行号区间 + 「代码」标签 +
   符号名，等宽字体；无行号的老分片退化为文件名。
 - `api/knowledge.ts` 增加 `repoApi`（`RepoAuthType = 'ssh_key' | 'none' | 'http_token'`）
-  与 `RepoItem / RepoStatus / RepoSyncResult /
+  与 `RepoItem / RepoStatus / RepoSyncResult / RepoSkipReason /
   RepoKeypair / RepoTestConnectionResult / RepoCreatePayload / RepoUpdatePayload` 类型
-  （后两者含 `http_token / http_username`，注释标明加密存储、不回读）；
+  （后两者含 `http_token / http_username`，注释标明加密存储、不回读）；`RepoSyncResult`
+  的 `skip_reasons / skip_samples / worktree_bytes / worktree_warned` 全部可选，
+  `testConnection` 入参含可选 `expected_fingerprint`；跳过原因码→中文标签表前后端
+  各维护一份，未知原因码降级为直接展示码本身；
   `SearchHit`、`KnowledgeDocument` 增补可选字段；`api/chat.ts` 的 `Citation` 同样增补；
   P1 增加 `DocumentContent` 与 `knowledgeApi.documentContent`；`DocumentStatus` 不变。
 
@@ -448,6 +496,7 @@ P1 源文件预览用）；列表、单篇重新索引、全量重建、检索�
 | `KB_REPO_MAX_FILE_BYTES` | 300000（约 300 KB） | 单源文件大小上限，超出跳过 |
 | `KB_REPO_CLONE_TIMEOUT` | 300 | 单次 clone/fetch 子进程超时（秒） |
 | `KB_REPO_SYNC_TIMEOUT` | 1800 | 整次同步上限（秒） |
+| `KB_REPO_WORKTREE_WARN_BYTES` | 2147483648（2 GB） | 同步后工作区体积告警阈值（字节），超过只在报告置 `worktree_warned=true` 并打 warning 日志，不阻断同步 |
 | `KB_REPO_HOST_ALLOWLIST` | 空（不限） | 可选主机后缀白名单，逗号分隔，对 SSH 与 http(s) 同等生效 |
 
 代码切片常量 `CODE_CHUNK_CHARS=1800`、`CODE_CHUNK_LINES=80`、块内重叠 10 行，
@@ -473,7 +522,7 @@ requirements 中（运维域在用），无新增 Python 依赖；docker-compose
 ## 11. 测试计划
 
 新建 `backend/tests/test_knowledge_repo.py`（service + HTTP 两层，全程不依赖真实 SSH
-服务端，59 例）：用临时目录里真实 `git init` 的非裸仓库（含多次 commit 模拟
+服务端，68 例）：用临时目录里真实 `git init` 的非裸仓库（含多次 commit 模拟
 added/changed/removed 与分支改名）模拟远端，monkeypatch `parse_git_url` 让它返回
 canonical 为该仓库本地 posix 路径的 `GitTarget`（绕开 file:// 禁令与 Windows 盘符的
 scp-like 解析问题），clone/fetch/ls-tree/rev-parse 全部跑真实 git 二进制；
@@ -486,8 +535,8 @@ scp-like 解析问题），clone/fetch/ls-tree/rev-parse 全部跑真实 git 二
 - **对账**：added/changed/removed/unchanged 四路的索引调用次数（unchanged 零 embedding）；
   rename 表现为删旧增新；blob sha 直接取自 ls-tree。
 - **同步任务**：首次 clone、fetch+reset 增量、URL/分支变更触发重 clone；单文件失败只标记
-  该文件且仓库最终 ready；全局异常落仓库 error；同仓库并发同步第二把拿 409；重启重置
-  syncing 行。
+  该文件且仓库最终 ready；全局异常落仓库 error；同仓库并发同步第二把返回 HTTP 200 +
+  `already_running=true`（业务口径，非 409）；重启重置 syncing 行。
 - **级联**：删仓库/类型/项目三条路径都删行、清向量、rmtree；只清本人数据，他人仓库 404。
 - **SSH 凭据与指纹**：私钥 Fernet 加密落库、任何详情接口只见 `has_credential` 与公钥；
   同步时密钥落盘 0600 且 finally 必删（成功/异常/超时三条路径各断言一次）；
@@ -510,6 +559,13 @@ scp-like 解析问题），clone/fetch/ls-tree/rev-parse 全部跑真实 git 二
   私钥不可读、非本人仓库 404），响应体任何位置不回传私钥。
 - **检索与引用**：代码命中带行号与符号、`_format_hits` 新渲染、行号缺失退化老格式、
   scope 解析仍只靠 type_id、老 point（无新 payload）不受影响。
+- **可观测性批次**：`SourceSkip` 携带稳定原因码；对账产出 `skip_reasons` 次数与每码
+  至多 5 条样本（截断 200 字符），覆盖排除/扩展名/二进制/max_files/单文件索引失败；
+  `_ls_tree` 的符号链接（mode 120000）、gitlink 子模块（160000）、越界路径进入结构性
+  跳过记账；真实 git 仓库 e2e 断言结构性跳过与 `worktree_bytes/worktree_warned`
+  （阈值 monkeypatch 到 1 字节验证告警位）。钉死指纹：`normalize_fingerprint` 与
+  匹配助手的合法/非法形态、`probe_remote` 严格比对（匹配放行、不匹配拒绝、http 拒绝）、
+  create 时指纹/known_hosts 成对校验、HTTP 层拒绝不一致配对且不排队首同步。
 
 ## 12. 已知边界与后续批次
 
@@ -519,18 +575,22 @@ scp-like 解析问题），clone/fetch/ls-tree/rev-parse 全部跑真实 git 二
   （那需要 commit 图谱索引，是另一种产品形态）；tag/多分支、PR diff 预览留 P1。
 - **切片器是规则级不是语法级**：宏、嵌套匿名函数、装饰器把一个顶层块变得很巨型时切分质量
   受限；P1 评估 tree-sitter（wheel 已基本无原生构建问题）替换边界识别，切片元数据结构不变。
-- **同步是手动触发**：P0 不做定时与 webhook；后台轮询/GitLab 推送事件触发列入 P1，届时
-  仓库表加 `sync_interval` / webhook 校验字段即可，同步引擎本身不用动。
+- **同步只有手动触发**：定时轮询 / 定时调度**明确不做（产品决策，禁止实现，勿再提议）**，
+  `kb_repo` 不允许加 `sync_interval` 一类字段；若将来做 GitLab/GitHub push webhook 触发，
+  仓库表加 webhook 校验字段即可，同步引擎本身不用动（webhook 仅是候选，未承诺）。
 - **认证覆盖「SSH 独立 deploy key」「匿名 http(s)」「HTTPS 个人访问令牌」三态**：
   不支持带 passphrase 的私钥（`BatchMode=yes` 下必然挂起，创建时直接拒绝并提示用无口令
   密钥）；不支持 OAuth 刷新令牌（PAT 过期后由用户手工更换）、自建 CA 证书的双向 TLS、
   SSH 跳板机（非标端口可在 URL 中表达，跳板配置不做）、本地服务器目录（运维域已有
   SFTP/服务器能力，可复用其凭据体系）——这些留后续批次。
-- **TOFU 不是强身份认证**：它挡住「记录指纹之后」的中间人，挡不住首次连接即被劫持；
-  安全要求高的环境后续提供「接入时粘贴指纹」模式（数据列已具备，只差表单）。
+- **TOFU 不是强身份认证，但首次劫持已有可选防线**：TOFU 挡住「记录指纹之后」的中间人，
+  挡不住首次连接即被劫持；「接入时粘贴指纹」模式已实施（2026-11，创建弹窗高级折叠区，
+  探测期严格比对、不匹配不回写 known_hosts），安全要求高的环境直接粘贴运维渠道取得的
+  `SHA256:` 指纹即可，留空仍走 TOFU。
 - **不做 LFS、不做子模块递归、不解析 svn:externals 类形态**；大文件靠浅克隆 + LFS
-  跳过 + 文件上限三层兜底，clone 体积没有硬上限（Git 协议不支持先问大小），仅靠超时与
-  同步后工作区体积告警。
+  跳过 + 文件上限三层兜底，clone 体积没有硬上限（Git 协议不支持先问大小），运行期靠
+  `KB_REPO_CLONE_TIMEOUT` 超时与同步后的工作区体积统计/告警
+  （`KB_REPO_WORKTREE_WARN_BYTES`，默认 2 GB，只提示不阻断）共同兜底。
 - 仓库文件不能被单独删除（只能随仓库移除或 glob 规则变化在同步时对账删除）。「点开读原文件」
   已实施（2026-11，P1）：`GET /knowledge/documents/{id}/content` 返回只读全文与后端算好的
   `line_count`（不加向量模型闸门，读库不花 embedding 调用）；文档表格里仓库文件名与检索预览
