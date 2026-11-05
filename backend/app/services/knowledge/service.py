@@ -990,7 +990,7 @@ def reset_stale_indexing(db: Session) -> int:
     )
     for doc in stale:
         doc.status = DocumentStatus.ERROR.value
-        doc.error_msg = "索引任务在服务重启时中断，请重新索引"
+        doc.error_msg = "索引任务因服务进程中断而中止，请重新索引"
     if stale:
         db.commit()
         logger.warning("reset %s document(s) stuck in indexing", len(stale))

@@ -109,7 +109,9 @@ def test_stale_runs_small_batch_sends_individually(dispatched):
     failed = dispatched.of("workflow.failed")
     assert len(failed) == 2
     assert failed[0]["title"] == "工作流运行失败：resume-batch #11"
-    assert "服务重启" in failed[0]["body"]
+    assert "服务进程中断" in failed[0]["body"]
+    # worker 到期回收并不重启服务，文案不许再出现「服务重启」。
+    assert "服务重启" not in failed[0]["body"]
 
 
 def test_stale_runs_large_batch_merges_into_summary(dispatched):
@@ -117,7 +119,9 @@ def test_stale_runs_large_batch_merges_into_summary(dispatched):
     notify_stale_runs_reset(rows)
     failed = dispatched.of("workflow.failed")
     assert len(failed) == 1
-    assert failed[0]["title"] == "服务重启：5 条运行被中断"
+    assert failed[0]["title"] == "5 条运行被中断"
+    assert "服务进程中断" in failed[0]["body"]
+    assert "服务重启" not in failed[0]["title"]
     # 摘要点名前 3 条，其余只报数量。
     assert "wf-1 #1" in failed[0]["body"] and "wf-3 #3" in failed[0]["body"]
     assert "wf-4 #4" not in failed[0]["body"]
@@ -192,7 +196,9 @@ def test_stale_ops_expired_merges_by_owner(dispatched):
     calls = dispatched.of("ops.expired")
     assert len(calls) == 2
     owner1 = next(c for c in calls if c["owner_id"] == 1)
-    assert "2 条待确认命令已过期" in owner1["title"]
+    assert owner1["title"] == "2 条待确认命令已过期"
+    assert "服务重启" not in owner1["title"] and "服务重启" not in owner1["body"]
+    assert "确认等待已超时" in owner1["body"]
     assert "#31（prod-db）" in owner1["body"] and "#32（prod-web）" in owner1["body"]
 
 

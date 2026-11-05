@@ -371,7 +371,7 @@ https://<urlencode(username)>:<urlencode(token)>@<host>[%3a<port>]\n
 ### 崩溃恢复与删除
 
 - 启动时新增 `reset_stale_repo_syncs(db)`，与 `reset_stale_indexing()` 同一点调用：
-  卡在 `syncing` 的仓库行转 `error`「同步任务在服务重启时中断，请重新同步」；卡在
+  卡在 `syncing` 的仓库行转 `error`「同步任务因服务进程中断而中止，请重新同步」；卡在
   `indexing` 的文件行沿用既有重置。blob 对账使得重跑天然幂等、可续跑。
 - `KnowledgeService.delete_type` / `delete_project` 在级联删文档之外按 `type_id`
   删 `kb_repo` 行，但**不碰文件系统**（service 层没有 BackgroundTasks，也不该直接做

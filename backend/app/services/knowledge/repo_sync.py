@@ -1205,7 +1205,7 @@ def reset_stale_repo_syncs(db: Session) -> int:
     stale = list(db.scalars(select(KbRepo).where(KbRepo.status == RepoStatus.SYNCING)).all())
     for repo in stale:
         repo.status = RepoStatus.ERROR
-        repo.error_msg = "同步任务在服务重启时中断，请重新同步"
+        repo.error_msg = "同步任务因服务进程中断而中止，请重新同步"
     if stale:
         db.commit()
         logger.warning("reset %s repo sync(s) stuck in syncing", len(stale))

@@ -47,8 +47,10 @@ logger = logging.getLogger("yangvis.workflows")
 # 运行记录的默认保留天数：比这更早、又不再是谁的当前状态的运行，启动时清掉。
 RUN_RETENTION_DAYS = 30
 
-# 上个进程遗留的运行统一写这个原因（见 ``reset_stale_runs``）。
-STALE_RUN_ERROR = "服务重启导致本次运行中断，请重新发起"
+# 上个进程遗留的运行统一写这个原因（见 ``reset_stale_runs``）。触发面不止
+# 容器/服务重启：gunicorn worker 到期回收（--max-requests）同样会跑 lifespan
+# 收尾，所以文案只说「服务进程中断」，不写「服务重启」。
+STALE_RUN_ERROR = "服务进程中断，本次运行未完成，请重新发起"
 
 
 def reset_stale_runs(db: Session) -> None:

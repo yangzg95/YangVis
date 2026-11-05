@@ -17,7 +17,7 @@ from app.services.notify.dispatch import dispatch
 
 logger = logging.getLogger("yangvis.notify")
 
-# 同一 owner 单次批量事件超过这个数就合并成一条摘要：重启收尾可能一把挂掉
+# 同一 owner 单次批量事件超过这个数就合并成一条摘要：进程中断收尾可能一把挂掉
 # 几十条运行，逐条推送等于自己给自己轰炸。
 _BULK_THRESHOLD = 3
 
@@ -90,7 +90,11 @@ def notify_workflow_finished(
 
 
 def notify_stale_runs_reset(rows: Sequence) -> None:
-    """重启收尾：把遗留 running 物化为 failed 后的批量通知。
+    """进程中断收尾：把遗留 running 物化为 failed 后的批量通知。
+
+    触发方既包括容器/服务重启，也包括 gunicorn worker 到期回收
+    （``--max-requests``）——新 worker 一样会跑 lifespan 收尾，所以文案
+    统一只说「服务进程中断」，不写「服务重启」。
 
     ``rows`` 是 WorkflowRun 行（或含 owner_id/id/workflow_slug 的任意对象），
     按 owner 分组；组内超过阈值合并成一条摘要。
@@ -106,7 +110,7 @@ def notify_stale_runs_reset(rows: Sequence) -> None:
                     run_id=run.id,
                     slug=run.workflow_slug,
                     status="failed",
-                    error="服务重启导致本次运行中断，请重新发起",
+                    error="服务进程中断，本次运行未完成，请重新发起",
                     elapsed_ms=None,
                 )
             continue
@@ -115,8 +119,8 @@ def notify_stale_runs_reset(rows: Sequence) -> None:
             dispatch(
                 owner_id,
                 "workflow.failed",
-                title=f"服务重启：{len(runs)} 条运行被中断",
-                body=f"涉及 {listed} 等 {len(runs)} 条运行，已统一标记为失败，请重新发起。",
+                title=f"{len(runs)} 条运行被中断",
+                body=f"服务进程中断，涉及 {listed} 等 {len(runs)} 条运行，已统一标记为失败，请重新发起。",
             )
         )
 
@@ -146,7 +150,10 @@ def notify_ops_proposed(
 
 
 def notify_stale_ops_expired(rows: Iterable) -> None:
-    """重启收尾：遗留 pending 审批物化为 expired 后的批量通知。
+    """进程中断收尾：遗留 pending 审批物化为 expired 后的批量通知。
+
+    与 :func:`notify_stale_runs_reset` 同一个触发面——worker 回收并不重启
+    服务，标题不写「服务重启」，只陈述过期事实。
 
     ``rows`` 含 owner_id/id/target_name/command 的行，按 owner 分组合并。
     """
@@ -160,7 +167,7 @@ def notify_stale_ops_expired(rows: Iterable) -> None:
             dispatch(
                 owner_id,
                 "ops.expired",
-                title=f"服务重启：{summary}待确认命令已过期",
-                body=f"涉及 {listed}。重启后原确认流已断，需要让 AI 重新发起。",
+                title=f"{summary}待确认命令已过期",
+                body=f"涉及 {listed}。确认等待已超时，原确认流已中断，请让 AI 重新发起。",
             )
         )

@@ -128,10 +128,10 @@ Gunicorn 的 worker 超时。上传端点只负责有界读取、抽取文本、
 ### 后台任务的失败必须看得见
 
 `index_document_task` 自开 session 运行（请求 session 早已关闭），业务拒绝和未知异常
-都落成文档行的 error 状态与截断 512 字的原因，绝不让任务无声死掉。服务重启会把正在
-跑的 BackgroundTask 一起带走，启动时 `reset_stale_indexing()` 把所有卡在 indexing 的
-文档标成 ERROR「索引任务在服务重启时中断，请重新索引」——把永不结束的转圈变成可重试
-的错误。
+都落成文档行的 error 状态与截断 512 字的原因，绝不让任务无声死掉。服务进程退出
+（重启或 gunicorn worker 到期回收）会把正在跑的 BackgroundTask 一起带走，启动时
+`reset_stale_indexing()` 把所有卡在 indexing 的文档标成 ERROR「索引任务因服务进程
+中断而中止，请重新索引」——把永不结束的转圈变成可重试的错误。
 
 ## 实现结构
 
