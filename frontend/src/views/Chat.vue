@@ -511,6 +511,7 @@ import {
   chatApi,
   knowledgeApi,
   mcpApi,
+  repoApi,
   resumeBuilderApi,
   settingsApi,
   toolsApi,
@@ -526,6 +527,7 @@ import {
   type McpServer,
   type ModelConfig,
   type OpsAction,
+  type RepoItem,
   type StreamHandlers,
   type TimelineEntry,
 } from '@/api'
@@ -595,6 +597,9 @@ const activeModelConfigId = ref<number | undefined>(undefined)
 const projects = ref<KbProject[]>([])
 const activeProjectId = ref<number | null>(null)
 const types = ref<KnowledgeType[]>([])
+// 项目下的代码仓库：与类型 1:1，选择器里按「代码仓库 / 知识类型」分组展示，
+// 选中后发出去的仍然是对位的 type_id，会话存储与后端检索链路都不用变。
+const repos = ref<RepoItem[]>([])
 const selectedTypeIds = ref<number[]>([])
 // 会话级可选工具目录：本地工具来自代码注册（只读目录），MCP 服务来自 /mcp 管理页。
 const localTools = ref<LocalTool[]>([])
@@ -1165,9 +1170,19 @@ const activeModelSupportsVision = computed(
 const projectOptions = computed(() =>
   projects.value.map((p) => ({ value: p.id, label: p.name })),
 )
-const typeOptions = computed(() =>
-  types.value.map((t) => ({ value: t.id, label: t.name })),
-)
+// 分组选项：仓库对位的类型收进「代码仓库」组，其余普通类型在「知识类型」组；
+// 值始终是 type_id，选中的仓库随既有 type_ids 通道落库与检索，不需要新字段。
+const typeOptions = computed(() => {
+  const repoTypeIds = new Set(repos.value.map((r) => r.type_id))
+  const groups: { label: string; options: { value: number; label: string }[] }[] = []
+  const repoOptions = repos.value.map((r) => ({ value: r.type_id, label: r.name }))
+  if (repoOptions.length) groups.push({ label: '代码仓库', options: repoOptions })
+  const plainOptions = types.value
+    .filter((t) => !repoTypeIds.has(t.id))
+    .map((t) => ({ value: t.id, label: t.name }))
+  if (plainOptions.length) groups.push({ label: '知识类型', options: plainOptions })
+  return groups
+})
 
 const canSend = computed(() => {
   if (!chatReady.value || streaming.value) return false
@@ -1240,18 +1255,26 @@ async function loadTypes() {
   const projectId = activeProjectId.value
   if (!projectId) {
     types.value = []
+    repos.value = []
     selectedTypeIds.value = []
     return
   }
   try {
-    const data = await knowledgeApi.listTypes(projectId)
+    // 类型与仓库一起加载：仓库是带对位 type_id 的特殊类型，选择器要分组展示。
+    // 仓库列表是增强项，失败不能拖垮类型选择器这个核心功能，单独吞掉错误。
+    const [data, repoResult] = await Promise.all([
+      knowledgeApi.listTypes(projectId),
+      repoApi.list(projectId).catch(() => null),
+    ])
     types.value = data.items
+    repos.value = repoResult?.items ?? []
     // 只保留当前项目下还存在的类型；来自别的项目的 id 会让检索范围变成空，
-    // 结果就是什么都查不到还不报错。
+    // 结果就是什么都查不到还不报错。仓库类型本身也是真实类型行，同一个集合即可覆盖。
     const alive = new Set(types.value.map((t) => t.id))
     selectedTypeIds.value = selectedTypeIds.value.filter((id) => alive.has(id))
   } catch {
     types.value = []
+    repos.value = []
   }
 }
 

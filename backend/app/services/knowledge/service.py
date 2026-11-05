@@ -825,6 +825,25 @@ class KnowledgeService:
         permitted = set(allowed)
         return [type_id for type_id in dict.fromkeys(type_ids) if type_id in permitted]
 
+    def _repo_type_ids(self, repo_ids: Sequence[int]) -> List[int]:
+        """把一组仓库 id 换算成对位的知识类型 id。
+
+        仓库与类型 1:1，过滤仍然只走 ``type_id``（payload 里的 ``repo_id``
+        不参与 must 过滤，老 point 没有这个键）。只认本人名下的仓库，
+        越权或不存在的 id 在这里静默消失，调用方拿到的永远是安全子集。
+        """
+        unique = list(dict.fromkeys(repo_ids))
+        if not unique:
+            return []
+        return list(
+            self._db.scalars(
+                select(KbRepo.type_id).where(
+                    KbRepo.owner_id == self._owner_id,
+                    KbRepo.id.in_(unique),
+                )
+            ).all()
+        )
+
     async def search(
         self,
         query: str,
@@ -832,20 +851,30 @@ class KnowledgeService:
         top_k: int = 8,
         project_id: Optional[int] = None,
         type_ids: Optional[Sequence[int]] = None,
+        repo_ids: Optional[Sequence[int]] = None,
         score_threshold: Optional[float] = None,
     ) -> List[SearchHit]:
-        """检索 chunk，限定在某个项目内，可以再进一步限定到它的部分类型。
+        """检索 chunk，限定在某个项目内，可以再进一步限定到它的部分类型/仓库。
 
         ``project_id`` 是在这里解析成一组 type id 的，而不是下推给 Qdrant，
         因为在项目这个概念出现之前建好的 chunk，payload 里没有
         ``project_id``。显式传入的 ``type_ids`` 会把这组范围再缩小一层，并
         且是与之取交集的，这样即便 SPA 传来一个过期的 id，也伸不到所选项目
-        之外去。
+        之外去。``repo_ids`` 走同一条交集链路：先换算成 1:1 对位的 type id，
+        绝不直接按 payload 的 repo_id 过滤。
         """
         config = self.require_embedding_config()
         self.assert_index_usable(config)
 
         scope = self._resolve_type_scope(project_id, type_ids)
+        if repo_ids is not None:
+            repo_scope = self._repo_type_ids(repo_ids)
+            if scope is None:
+                # 没有项目/类型约束时（owner 级全量检索），仓库选择本身就是范围。
+                scope = repo_scope
+            else:
+                repo_permitted = set(repo_scope)
+                scope = [type_id for type_id in scope if type_id in repo_permitted]
         if scope is not None and not scope:
             # 范围里什么都没有。拿一个空的 MatchAny 去搜会匹配到所有东西，
             # 那和要求的正好相反。

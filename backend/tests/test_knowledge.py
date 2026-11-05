@@ -32,6 +32,7 @@ from app.models.entities import (
     KbDocument,
     KbIndexState,
     KbProject,
+    KbRepo,
     KnowledgeType,
     ModelConfig,
 )
@@ -125,6 +126,27 @@ def _chunk(
     db.commit()
     db.refresh(chunk)
     return chunk
+
+
+def _repo(
+    db,
+    type_id: int,
+    *,
+    owner_id: int = OWNER,
+    name: str = "代码仓库",
+) -> KbRepo:
+    """检索测试只需要仓库↔类型的对位关系，凭据/指纹列全部留空。"""
+    item = KbRepo(
+        owner_id=owner_id,
+        type_id=type_id,
+        name=name,
+        auth_type="none",
+        remote_url=f"https://git.example.com/{owner_id}/{type_id}.git",
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
 
 
 def _embedding_model(
@@ -1108,6 +1130,88 @@ def test_search_deduplicates_explicit_type_ids(svc, db, vs, monkeypatch):
     assert vs.queries[0].type_ids == [item.id]
 
 
+def test_search_repo_ids_resolve_to_their_type_ids(svc, db, vs, monkeypatch):
+    _embedding_model(db)
+    project = _project(db, name="仓库检索项目")
+    first = _type(db, project.id, name="仓库一的类型")
+    second = _type(db, project.id, name="仓库二的类型")
+    repo_one = _repo(db, first.id, name="仓库一")
+    _repo(db, second.id, name="仓库二")
+    _stub_embeddings(monkeypatch)
+
+    # 只选仓库一：下推给向量库的仍然是 type_id 过滤，值是它对位的那个类型。
+    asyncio.run(svc.search("问题", project_id=project.id, repo_ids=[repo_one.id]))
+
+    assert vs.queries[0].type_ids == [first.id]
+
+
+def test_search_repo_ids_intersect_type_and_project_scope(svc, db, vs, monkeypatch):
+    _embedding_model(db)
+    project = _project(db, name="交集项目")
+    inside = _type(db, project.id, name="项目内仓库类型")
+    repo = _repo(db, inside.id, name="项目内仓库")
+    outside_project = _project(db, name="另一个项目")
+    outside_type = _type(db, outside_project.id, name="项目外仓库类型")
+    outside_repo = _repo(db, outside_type.id, name="项目外仓库")
+    _stub_embeddings(monkeypatch)
+
+    # 仓库范围与显式 type_ids、项目边界三者取交集，只剩 inside。
+    asyncio.run(
+        svc.search(
+            "问题",
+            project_id=project.id,
+            type_ids=[inside.id, outside_type.id],
+            repo_ids=[repo.id, outside_repo.id],
+        )
+    )
+    assert vs.queries[0].type_ids == [inside.id]
+
+    # 选的仓库全在项目外：解析为空就短路，绝不带空 MatchAny 打出站查询。
+    results = asyncio.run(
+        svc.search("问题", project_id=project.id, repo_ids=[outside_repo.id])
+    )
+    assert results == []
+    assert len(vs.queries) == 1
+
+
+def test_search_repo_ids_ignore_unknown_and_other_owner(svc, db, vs, monkeypatch):
+    _embedding_model(db)
+    project = _project(db, name="隔离项目")
+    own_type = _type(db, project.id, name="本人类型")
+    own_repo = _repo(db, own_type.id, name="本人仓库")
+    other_project = _project(db, owner_id=OTHER, name="他人项目")
+    other_type = _type(db, other_project.id, owner_id=OTHER, name="他人类型")
+    other_repo = _repo(db, other_type.id, owner_id=OTHER, name="他人仓库")
+    _stub_embeddings(monkeypatch)
+
+    # 不存在的 id 与他人仓库 id 都被 owner 过滤剔除，只剩本人仓库对位的类型。
+    asyncio.run(
+        svc.search("问题", repo_ids=[own_repo.id, other_repo.id, 99999])
+    )
+    assert vs.queries[0].type_ids == [own_type.id]
+
+    # 全是不可见的仓库：空范围短路，不打出站查询。
+    results = asyncio.run(svc.search("问题", repo_ids=[other_repo.id, 99999]))
+    assert results == []
+    assert len(vs.queries) == 1
+
+
+def test_search_repo_ids_deduplicated_and_empty_means_nothing(svc, db, vs, monkeypatch):
+    _embedding_model(db)
+    project = _project(db, name="仓库去重项目")
+    item = _type(db, project.id, name="唯一类型")
+    repo = _repo(db, item.id)
+    _stub_embeddings(monkeypatch)
+
+    asyncio.run(svc.search("问题", repo_ids=[repo.id, repo.id]))
+    assert vs.queries[0].type_ids == [item.id]
+
+    # 显式空数组 = 明确选了「什么都不搜」，与 None（不过滤）严格区分。
+    results = asyncio.run(svc.search("问题", repo_ids=[]))
+    assert results == []
+    assert len(vs.queries) == 1
+
+
 def test_search_threshold_defaults_to_settings_then_overrides(svc, db, vs, monkeypatch):
     _embedding_model(db)
     monkeypatch.setattr(kb.settings, "KB_SCORE_THRESHOLD", 0.42)
@@ -1244,6 +1348,25 @@ def test_api_search_endpoint_returns_hits(client, db, vs, monkeypatch):
     assert body["data"]["total"] == 1
     assert body["data"]["hits"][0]["content"] == "命中的正文"
     assert vs.queries[0].top_k == 3
+    assert vs.queries[0].type_ids == [item.id]
+
+
+def test_api_search_accepts_repo_ids(client, db, vs, monkeypatch):
+    project, item, _ = _ready_project(db)
+    repo = _repo(db, item.id, name="接口仓库")
+    doc = _document(db, type_id=item.id)
+    chunk = _chunk(db, doc, content="仓库里的正文")
+    _stub_embeddings(monkeypatch)
+    vs.points = [_point(chunk.id, 0.9, filename="a.py", type_id=item.id)]
+
+    body = client.post(
+        "/api/knowledge/search",
+        json={"query": "问题", "project_id": project.id, "repo_ids": [repo.id]},
+    ).json()
+
+    assert body["code"] == 0
+    assert body["data"]["total"] == 1
+    # 接口入参是仓库 id，下推向量库的仍是 1:1 对位的 type id。
     assert vs.queries[0].type_ids == [item.id]
 
 

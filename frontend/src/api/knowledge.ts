@@ -301,6 +301,8 @@ export const knowledgeApi = {
     top_k?: number
     project_id?: number
     type_ids?: number[]
+    /** 仓库维度过滤；服务端换算成 1:1 对位的 type_id 后与项目/类型范围取交集。 */
+    repo_ids?: number[] | null
     score_threshold?: number
   }) =>
     request<{ hits: SearchHit[]; total: number }>({

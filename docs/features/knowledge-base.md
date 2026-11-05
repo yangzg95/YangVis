@@ -191,7 +191,7 @@ Gunicorn 的 worker 超时。上传端点只负责有界读取、抽取文本、
 | POST | `/documents/batch-delete` `/documents/batch-reindex` | 批量（ids 1–500）；重建有闸，不存在的 id 跳过，返回 requested/done |
 | GET | `/index/state` | 索引状态含 `model_mismatch`；**故意不加闸**，前端靠它解释为什么其余功能不可用 |
 | POST | `/index/rebuild` | 全量重建（无文档时 `started=false`）；**有闸** |
-| POST | `/search` | 检索预览：`query`（1–2000）、`top_k`（1–50，默认 8）、`project_id`、`type_ids`、`score_threshold` |
+| POST | `/search` | 检索预览：`query`（1–2000）、`top_k`（1–50，默认 8）、`project_id`、`type_ids`、`repo_ids`（代码仓库维度，服务端换算成 1:1 对位 `type_id` 后与项目/类型范围取交集，详见 [knowledge-code-repo.md](knowledge-code-repo.md)）、`score_threshold` |
 
 「有没有可用向量模型」的另一处来源是 `GET /settings/models/status`（`embedding.ready`），
 知识库页挂载前先取它决定是否亮阻断条。业务错误码：4001 未配置可用向量模型、

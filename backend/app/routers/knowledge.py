@@ -545,6 +545,7 @@ async def search(
         top_k=payload.top_k,
         project_id=payload.project_id,
         type_ids=payload.type_ids,
+        repo_ids=payload.repo_ids,
         score_threshold=payload.score_threshold,
     )
     return APIResponse(data=SearchResponse(hits=hits, total=len(hits)))

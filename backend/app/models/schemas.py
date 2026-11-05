@@ -200,6 +200,10 @@ class SearchRequest(BaseModel):
     # 不传则搜索该项目下的所有类型。
     project_id: Optional[int] = None
     type_ids: Optional[List[int]] = None
+    # 仓库维度的独立过滤：仓库与类型 1:1，服务端把仓库 id 换算成对位 type_id
+    # 后仍走 type_id 过滤（不直接过滤 payload，避开老 point 缺字段的坑），
+    # 与项目/类型范围取交集；越权或不存在的仓库 id 静默剔除。
+    repo_ids: Optional[List[int]] = None
 
     score_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 

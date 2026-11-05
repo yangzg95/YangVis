@@ -504,6 +504,16 @@
       <div class="hint" style="margin-bottom: 12px">
         在「{{ activeProject?.name || '—' }}」范围内检索。这里返回的分片，就是对话时模型会读到的上下文。
       </div>
+      <a-select
+        v-if="searchRepoOptions.length"
+        v-model:value="searchModal.repoIds"
+        mode="multiple"
+        allow-clear
+        :max-tag-count="3"
+        style="margin-bottom: 12px; width: 100%"
+        placeholder="不选 = 项目内全部类型；勾选后只在这些代码仓库里检索"
+        :options="searchRepoOptions"
+      />
       <a-input-search
         v-model:value="searchModal.query"
         placeholder="输入一个问题，看看会命中哪些内容"
@@ -1516,12 +1526,19 @@ const searchModal = reactive({
   searched: false,
   query: '',
   hits: [] as SearchHit[],
+  // 仓库维度过滤；空数组 = 整个项目（与聊天侧「全部知识库」同口径）。
+  repoIds: [] as number[],
 })
+
+const searchRepoOptions = computed(() =>
+  repos.value.map((r) => ({ value: r.id, label: r.name })),
+)
 
 function openSearch() {
   searchModal.open = true
   searchModal.searched = false
   searchModal.hits = []
+  searchModal.repoIds = []
 }
 
 async function runSearch() {
@@ -1529,11 +1546,13 @@ async function runSearch() {
   if (!query || !activeProjectId.value) return
   searchModal.loading = true
   try {
-    // 限定在当前选中的项目范围内，这样预览结果和对话时看到的是一致的。
+    // 限定在当前选中的项目范围内，这样预览结果和对话时看到的是一致的；
+    // 勾选仓库时再由服务端把 repo_ids 换算成 1:1 对位的 type_id 取交集。
     const result = await knowledgeApi.search({
       query,
       top_k: 8,
       project_id: activeProjectId.value,
+      repo_ids: searchModal.repoIds.length ? [...searchModal.repoIds] : null,
     })
     searchModal.hits = result.hits
     searchModal.searched = true
