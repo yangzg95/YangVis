@@ -27,10 +27,10 @@ param(
     [string]$ImageName = "docker.cnb.cool/luke.yang/docker/yangvis:latest",
     [string]$ContainerName = "yangvis",
     [int]$Port = 18099,
-    # 容器内存硬限制（MB）。1G 小内存服务器建议 640-768，并配少量 worker。
-    [int]$MemoryMB = 768,
-    # gunicorn worker 数。langchain 较重，单个 worker 常驻 200MB+，1G 机器用 1-2。
-    [int]$Workers = 2,
+    # 容器内存硬限制（MB）。4G 服务器默认 1024，给 MySQL 和系统预留余量。
+    [int]$MemoryMB = 1024,
+    # 任务恢复和进程内状态按单 worker 设计，多 worker 会误清理其他 worker 的任务。
+    [int]$Workers = 1,
     [switch]$SkipBuild,
     # 只构建（可选推送），不启动容器。
     [switch]$BuildOnly,

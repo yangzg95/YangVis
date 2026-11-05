@@ -80,11 +80,12 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # worker and can take minutes on a large upload; the default 60s would have the
 # arbiter kill the worker mid-job. The same headroom is what the streaming chat
 # endpoint will need.
-# Worker count is configurable via GUNICORN_WORKERS: on a small (1GB) box
-# 4 langchain-laden workers will OOM, so scripts/docker-run.ps1 passes a lower value.
+# Keep one worker: lifespan startup/recycling performs global stale-job cleanup,
+# and jobs/terminal sessions live in worker memory. Raising GUNICORN_WORKERS
+# requires worker-aware ownership first; extra RAM alone is not enough.
 # sh -c + exec keeps gunicorn as PID 1 so SIGTERM still reaches it.
 CMD ["sh", "-c", "exec gunicorn app.main:app \
-     -w \"${GUNICORN_WORKERS:-4}\" \
+     -w \"${GUNICORN_WORKERS:-1}\" \
      -k uvicorn.workers.UvicornWorker \
      -b 0.0.0.0:18099 \
      --access-logfile - \
