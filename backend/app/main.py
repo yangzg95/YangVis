@@ -33,6 +33,7 @@ from app.routers import (
     agents,
     ai_gateway,
     ai_gateway_openai,
+    app_messages,
     auth,
     chat,
     dashboard,
@@ -223,6 +224,8 @@ app.include_router(resume_builder.router, prefix=API_PREFIX)
 app.include_router(interview.router, prefix=API_PREFIX)
 app.include_router(note.router, prefix=API_PREFIX)
 app.include_router(notify.router, prefix=API_PREFIX)
+# App 静态令牌端点：自带 /app/v1 前缀，仍挂在统一的 /api 之下。
+app.include_router(app_messages.router, prefix=API_PREFIX)
 app.include_router(slides.router, prefix=API_PREFIX)
 app.include_router(netdisk.router, prefix=API_PREFIX)
 app.include_router(mcp.router, prefix=API_PREFIX)
