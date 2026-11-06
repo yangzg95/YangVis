@@ -331,6 +331,40 @@ def test_migrate_schema_adds_notify_log_body_to_legacy_db(engine, monkeypatch):
     bootstrap.migrate_schema()
 
 
+def test_migrate_schema_adds_huawei_service_account_column(engine, monkeypatch):
+    """旧库（notify_huawei_config 还没有 service_account_enc）启动迁移补列。"""
+    from sqlalchemy import inspect, text
+
+    from app import bootstrap
+
+    monkeypatch.setattr(bootstrap, "engine", engine, raising=False)
+    monkeypatch.setattr(
+        bootstrap, "SessionLocal", sessionmaker(bind=engine, future=True)
+    )
+
+    # 重建为升级前的旧表形态：只有客户端凭证对两列，没有服务账号列。
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE notify_huawei_config"))
+        conn.execute(
+            text(
+                "CREATE TABLE notify_huawei_config ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id BIGINT NOT NULL, "
+                "app_id VARCHAR(32) NOT NULL, client_id_enc BLOB NOT NULL, "
+                "client_secret_enc BLOB NOT NULL, target_type VARCHAR(8) NOT NULL, "
+                "target VARCHAR(512) NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
+                "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+            )
+        )
+
+    bootstrap.migrate_schema()
+
+    columns = {c["name"] for c in inspect(engine).get_columns("notify_huawei_config")}
+    assert "service_account_enc" in columns
+
+    # 幂等：再跑一次不报错。
+    bootstrap.migrate_schema()
+
+
 def test_bootstrap_prune_notify_logs_step_cleans_expired(db):
     """启动步骤表指向的包装函数确实在清理（防步骤名/指向写错后静默失效）。"""
     from app.bootstrap import prune_notify_logs as bootstrap_step

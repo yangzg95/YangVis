@@ -10,7 +10,11 @@
 """
 from __future__ import annotations
 
+import json
+
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
@@ -23,6 +27,10 @@ from app.models.entities import NotifyChannel, NotifyHuaweiConfig
 from app.models.schemas import CurrentUser
 from app.routers import notify as notify_router
 from app.services.notify import service as service_module
+from app.services.notify.huawei import (
+    GRANT_CLIENT_CREDENTIALS,
+    GRANT_JWT_BEARER,
+)
 from app.services.notify.senders import SendResult
 
 OWNER = 1
@@ -31,6 +39,20 @@ OTHER = 2
 APP_ID = "119672293"
 CLIENT_ID = "oauth-client-id"
 CLIENT_SECRET = "oauth-client-secret"
+
+
+@pytest.fixture()
+def service_account_text() -> str:
+    """测试用 AGC 服务账号 JSON（现签私钥，非真实凭据）。"""
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    return json.dumps(
+        {"key_id": "kid-1", "sub_account": "sub-1", "private_key": pem}
+    )
 
 
 @pytest.fixture()
@@ -106,6 +128,9 @@ def test_create_huawei_channel_masks_credentials(env):
     assert item["has_client_secret"] is True
     assert item["client_id_error"] is None
     assert item["client_secret_error"] is None
+    # 默认走客户端凭证对，没有服务账号。
+    assert item["has_service_account"] is False
+    assert item["service_account_error"] is None
     # topic 名不敏感，明文回显。
     assert item["target_type"] == "topic"
     assert item["target"] == "yangvis"
@@ -143,6 +168,107 @@ def test_create_duplicate_name_rejected(env):
     )
     assert resp.json()["code"] == -1
     assert "同名" in resp.json()["message"]
+
+
+# -- 服务账号私钥（JWT bearer）---------------------------------------------------
+
+
+def test_create_with_service_account(env, service_account_text):
+    client, Session, _ = env
+    payload = _hw_payload(
+        client_id="",
+        client_secret="",
+        service_account=service_account_text,
+    )
+    resp = client.post("/api/notify/channels/huawei", json=payload)
+    assert resp.status_code == 200
+    item = resp.json()["data"]
+
+    # 视图只回「有没有」，JSON 原文（含 PEM 私钥）绝不进响应。
+    assert item["has_service_account"] is True
+    assert item["service_account_error"] is None
+    assert item["has_client_secret"] is False
+    assert item["client_id_masked"] == ""
+    assert "private_key" not in json.dumps(item, ensure_ascii=False)
+
+    with Session() as db:
+        cfg = db.scalar(select(NotifyHuaweiConfig))
+        # 库里落的是 Fernet 密文，可解密还原成原 JSON；客户端凭证列是空 bytes 占位。
+        assert cfg.service_account_enc
+        assert decrypt(cfg.service_account_enc) == service_account_text
+        assert service_account_text.encode() not in cfg.service_account_enc
+        assert cfg.client_id_enc == b"" and cfg.client_secret_enc == b""
+
+
+def test_create_without_any_credentials_rejected(env):
+    client, _, _ = env
+    resp = client.post(
+        "/api/notify/channels/huawei",
+        json=_hw_payload(client_id="", client_secret=""),
+    )
+    assert resp.json()["code"] == -1
+    assert "至少配置一种" in resp.json()["message"]
+
+
+def test_create_with_broken_service_account_rejected(env):
+    client, Session, _ = env
+    resp = client.post(
+        "/api/notify/channels/huawei",
+        json=_hw_payload(
+            client_id="", client_secret="", service_account="{not-json"
+        ),
+    )
+    assert resp.json()["code"] == -1
+    assert "JSON" in resp.json()["message"]
+    # 坏输入必须被挡在库外：一行配置都不该留下。
+    with Session() as db:
+        assert db.scalar(select(func.count()).select_from(NotifyHuaweiConfig)) == 0
+
+
+def test_update_replaces_service_account(env, service_account_text):
+    client, Session, _ = env
+    created = client.post("/api/notify/channels/huawei", json=_hw_payload()).json()["data"]
+    assert created["has_service_account"] is False
+
+    resp = client.put(
+        f"/api/notify/channels/{created['id']}/huawei",
+        json={"service_account": service_account_text},
+    )
+    assert resp.status_code == 200
+    item = resp.json()["data"]
+    assert item["has_service_account"] is True
+
+    with Session() as db:
+        cfg = db.scalar(
+            select(NotifyHuaweiConfig).where(
+                NotifyHuaweiConfig.channel_id == created["id"]
+            )
+        )
+        # 替换后两种凭据并存于行上（发送时优先服务账号），原客户端凭证保持不变。
+        assert decrypt(cfg.service_account_enc) == service_account_text
+        assert decrypt(cfg.client_id_enc) == CLIENT_ID
+
+
+def test_test_endpoint_uses_service_account_auth(
+    env, monkeypatch, service_account_text
+):
+    client, _, _ = env
+    created = client.post(
+        "/api/notify/channels/huawei",
+        json=_hw_payload(
+            client_id="",
+            client_secret="",
+            service_account=service_account_text,
+        ),
+    ).json()["data"]
+    calls = _stub_huawei(monkeypatch)
+
+    resp = client.post(f"/api/notify/channels/{created['id']}/test")
+    assert resp.json()["data"]["success"] is True
+    assert len(calls) == 1
+    auth = calls[0]["auth"]
+    assert auth.mode == GRANT_JWT_BEARER
+    assert auth.service_account["sub_account"] == "sub-1"
 
 
 # -- 详情端点 -----------------------------------------------------------------
@@ -298,11 +424,13 @@ def test_test_endpoint_routes_to_huawei_sender(env, monkeypatch):
     resp = client.post(f"/api/notify/channels/{created['id']}/test")
     assert resp.json()["data"]["success"] is True
 
-    # 发的是解密后的明文 OAuth 凭据，事件用保留字 test。
+    # 发的是 HuaweiAuth（client_credentials 模式），事件用保留字 test。
     assert len(calls) == 1
     assert calls[0]["app_id"] == APP_ID
-    assert calls[0]["client_id"] == CLIENT_ID
-    assert calls[0]["client_secret"] == CLIENT_SECRET
+    auth = calls[0]["auth"]
+    assert auth.mode == GRANT_CLIENT_CREDENTIALS
+    assert auth.client_id == CLIENT_ID
+    assert auth.client_secret == CLIENT_SECRET
     assert calls[0]["target"] == "yangvis"
     assert calls[0]["data"] == {"event": "test"}
 

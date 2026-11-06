@@ -673,8 +673,9 @@ CREATE TABLE IF NOT EXISTS notify_huawei_config (
   id                BIGINT PRIMARY KEY AUTO_INCREMENT,
   channel_id        BIGINT        NOT NULL COMMENT 'notify_channel.id 逻辑外键，service 层级联删除',
   app_id            VARCHAR(32)   NOT NULL COMMENT 'AGC 应用 app_id，非密钥，明文',
-  client_id_enc     VARBINARY(1024) NOT NULL COMMENT 'OAuth client_id 的 Fernet 密文',
-  client_secret_enc VARBINARY(1024) NOT NULL COMMENT 'OAuth client_secret 的 Fernet 密文',
+  client_id_enc     VARBINARY(1024) NOT NULL COMMENT 'OAuth client_id 的 Fernet 密文；JWT 模式存空 bytes 占位',
+  client_secret_enc VARBINARY(1024) NOT NULL COMMENT 'OAuth client_secret 的 Fernet 密文；JWT 模式存空 bytes 占位',
+  service_account_enc VARBINARY(8192) NULL COMMENT 'AGC 服务账号私钥 JSON 的 Fernet 密文（JWT bearer 授权），与客户端凭证对二选一',
   target_type       VARCHAR(8)    NOT NULL COMMENT 'topic | token',
   target            VARCHAR(512)  NOT NULL COMMENT '主题名或设备 push token（token 模式按凭据掩码回显）',
   created_at        DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -787,3 +788,8 @@ CREATE TABLE IF NOT EXISTS notify_huawei_config (
 -- 通知留痕补正文快照（migrate_schema() 启动时自动补，手工重复执行会因列已存在而报错）：
 -- ALTER TABLE notify_log
 --   ADD COLUMN body VARCHAR(1024) NULL COMMENT '通知正文快照，供移动 App 历史消息回放' AFTER title;
+--
+-- 华为渠道增加服务账号私钥凭据（与 client_id/client_secret 二选一，实测密文约 5KB）：
+-- ALTER TABLE notify_huawei_config
+--   ADD COLUMN service_account_enc VARBINARY(8192) NULL
+--   COMMENT 'AGC 服务账号私钥 JSON 的 Fernet 密文（JWT bearer 授权）' AFTER client_secret_enc;

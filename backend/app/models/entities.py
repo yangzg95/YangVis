@@ -1809,8 +1809,15 @@ class NotifyHuaweiConfig(Base):
 
     # AGC 应用 app_id（如 119672293），非密钥，明文。
     app_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    # 两种 OAuth 凭据二选一：client_credentials 对（NOT NULL，未配置存空 bytes），
+    # 或 AGC 服务账号私钥 JSON 的 Fernet 密文（JWT bearer 授权，见 services/notify/huawei.py）。
     client_id_enc: Mapped[bytes] = mapped_column(LargeBinary(1024), nullable=False)
     client_secret_enc: Mapped[bytes] = mapped_column(LargeBinary(1024), nullable=False)
+    # 整段服务账号 JSON 加密（实测明文 3.7KB，Fernet base64 膨胀后约 5KB），
+    # 给 8192 留足余量；解析只在发送时进行，列宽小于密文会在 MySQL 直接写失败。
+    service_account_enc: Mapped[bytes | None] = mapped_column(
+        LargeBinary(8192), nullable=True
+    )
 
     # topic | token（合法值见 schemas.HuaweiTargetType）。
     target_type: Mapped[str] = mapped_column(String(8), nullable=False)

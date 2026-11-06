@@ -2943,14 +2943,19 @@ class NotifyLogItem(BaseModel):
 class HuaweiChannelCreate(BaseModel):
     """新建一个华为 HMS Push 渠道。
 
-    与 webhook 渠道不同，这里没有 URL：凭据是 AGC 的 OAuth 客户端凭证，目标
-    是主题或设备 token。client_id / client_secret 落库为 Fernet 密文。
+    与 webhook 渠道不同，这里没有 URL：目标是主题或设备 token，OAuth 凭据
+    二选一——要么给 AGC 应用常规页的 client_id / client_secret 对，要么直接
+    粘贴 AGC 下发的服务账号私钥 JSON（走 JWT bearer 授权）。两种凭据都落
+    Fernet 密文，跨字段的「至少一种」校验放在 service 层抛业务错误。
     """
 
     name: str = Field(..., min_length=1, max_length=64)
     app_id: str = Field(..., min_length=1, max_length=32)
-    client_id: str = Field(..., min_length=1, max_length=256)
-    client_secret: str = Field(..., min_length=1, max_length=256)
+    # 与服务账号 JSON 二选一：走 JWT 模式时这两项留空，库里存空 bytes 占位。
+    client_id: str = Field(default="", max_length=256)
+    client_secret: str = Field(default="", max_length=256)
+    # 服务账号私钥文件的完整 JSON 文本（含 key_id/sub_account/private_key）。
+    service_account: Optional[str] = Field(default=None, max_length=8192)
     target_type: HuaweiTargetType
     target: str = Field(..., min_length=1, max_length=512)
     events: List[str] = Field(default_factory=list)
@@ -2962,12 +2967,14 @@ class HuaweiChannelUpdate(BaseModel):
 
     client_id / client_secret / target（token 模式）留空或回传掩码都表示
     「保持原样」，与 webhook 渠道的掩码语义一致，避免只改名就清掉凭据。
+    service_account 没有掩码形态：留空保持原样，粘贴新 JSON 即整体替换。
     """
 
     name: Optional[str] = Field(default=None, min_length=1, max_length=64)
     app_id: Optional[str] = Field(default=None, min_length=1, max_length=32)
     client_id: Optional[str] = Field(default=None, max_length=256)
     client_secret: Optional[str] = Field(default=None, max_length=256)
+    service_account: Optional[str] = Field(default=None, max_length=8192)
     target_type: Optional[HuaweiTargetType] = None
     target: Optional[str] = Field(default=None, max_length=512)
     events: Optional[List[str]] = None
@@ -2988,6 +2995,9 @@ class HuaweiChannelItem(BaseModel):
     has_client_secret: bool = False
     client_id_error: Optional[str] = None
     client_secret_error: Optional[str] = None
+    # 服务账号私钥 JSON 只回「有没有 / 解不解得开」，原文永不进响应。
+    has_service_account: bool = False
+    service_account_error: Optional[str] = None
     target_type: HuaweiTargetType
     # topic 名不敏感、明文返回；token 模式下 target 是设备推送令牌，回掩码。
     target: str

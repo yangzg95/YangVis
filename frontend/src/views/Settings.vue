@@ -474,7 +474,7 @@
               autocomplete="off"
             />
           </a-form-item>
-          <a-form-item label="Client ID" :required="!notifyModal.id">
+          <a-form-item label="Client ID">
             <a-input
               v-model:value="notifyModal.form.client_id"
               :maxlength="256"
@@ -487,9 +487,9 @@
               </template>
               <template v-else>当前：{{ notifyModal.hwMaskedClientId || '—' }}。凭据加密落库，页面只显示掩码。</template>
             </div>
-            <div v-else class="hint">加密落库，列表与详情只显示掩码。</div>
+            <div v-else class="hint">与下方服务账号 JSON 二选一；两者都填时优先用服务账号。加密落库，页面只显示掩码。</div>
           </a-form-item>
-          <a-form-item label="Client Secret" :required="!notifyModal.id">
+          <a-form-item label="Client Secret">
             <a-input-password
               v-model:value="notifyModal.form.client_secret"
               :maxlength="256"
@@ -505,7 +505,33 @@
                 已存的密钥在页面上删不掉，不用了这个渠道直接删除重建。
               </template>
             </div>
-            <div v-else class="hint">加密落库，接口只回「是否已配置」，不回显明文。</div>
+            <div v-else class="hint">与 Client ID 成对填写；加密落库，接口只回「是否已配置」，不回显明文。</div>
+          </a-form-item>
+          <a-form-item label="服务账号私钥 JSON">
+            <a-textarea
+              v-model:value="notifyModal.form.service_account"
+              :rows="5"
+              :maxlength="8192"
+              class="hw-sa-input"
+              :placeholder="
+                notifyModal.id
+                  ? '留空表示不修改已保存的服务账号 JSON'
+                  : '粘贴 AGC 下发的 *private.json 完整内容（含 key_id / sub_account / private_key）'
+              "
+            />
+            <div v-if="notifyModal.id" class="hint">
+              <template v-if="notifyModal.hwServiceAccountError">
+                <span class="key-error">已存的服务账号私钥无法解密，请重新粘贴完整 JSON</span>
+              </template>
+              <template v-else>
+                当前{{ notifyModal.hwHasServiceAccount ? '已配置服务账号私钥（JWT 授权）' : '未配置服务账号私钥' }}；
+                留空不改动，粘贴新 JSON 即整体替换。
+              </template>
+            </div>
+            <div v-else class="hint">
+              与 Client ID/Secret 二选一：粘贴 AGC「服务账号」下载的 private.json 完整内容，
+              后端用私钥本地签 RS256 JWT 换 token；加密落库，接口只回「是否已配置」。
+            </div>
           </a-form-item>
           <a-form-item label="推送目标" required>
             <a-radio-group v-model:value="notifyModal.form.target_type" class="hw-target-radio">
@@ -1078,6 +1104,8 @@ const emptyNotifyForm = () => ({
   app_id: '',
   client_id: '',
   client_secret: '',
+  // 服务账号 private.json 完整文本；编辑态留空＝保持已存的 JSON。
+  service_account: '',
   target_type: 'topic' as HuaweiTargetType,
   target: '',
 })
@@ -1098,6 +1126,9 @@ const notifyModal = reactive({
   hwHasSecret: false,
   hwClientIdError: null as string | null,
   hwClientSecretError: null as string | null,
+  // 服务账号私钥只回「有没有 / 解不解得开」，编辑框始终留空等用户粘贴替换。
+  hwHasServiceAccount: false,
+  hwServiceAccountError: null as string | null,
   hwInitial: null as null | {
     app_id: string
     target_type: HuaweiTargetType
@@ -1171,6 +1202,8 @@ function resetHwEditState() {
   notifyModal.hwHasSecret = false
   notifyModal.hwClientIdError = null
   notifyModal.hwClientSecretError = null
+  notifyModal.hwHasServiceAccount = false
+  notifyModal.hwServiceAccountError = null
   notifyModal.hwInitial = null
 }
 
@@ -1199,6 +1232,8 @@ async function openNotifyEdit(channel: NotifyChannelItem) {
     notifyModal.hwHasSecret = detail.has_client_secret
     notifyModal.hwClientIdError = detail.client_id_error ?? null
     notifyModal.hwClientSecretError = detail.client_secret_error ?? null
+    notifyModal.hwHasServiceAccount = detail.has_service_account
+    notifyModal.hwServiceAccountError = detail.service_account_error ?? null
     // topic 名不敏感、明文回填可直接编辑；设备 token 是掩码，输入框留空＝保持原样。
     const topicTarget = detail.target_type === 'topic' ? detail.target : ''
     notifyModal.hwInitial = {
@@ -1289,20 +1324,22 @@ async function submitHuaweiChannel(name: string) {
   const appId = form.app_id.trim()
   const clientId = form.client_id.trim()
   const clientSecret = form.client_secret.trim()
+  const serviceAccount = form.service_account.trim()
   const target = form.target.trim()
 
   if (!appId) {
     message.warning('请填写 App ID')
     return
   }
-  // 新建时四项凭据/目标缺一不可；编辑态留空＝保持已存值。
+  // 新建时两种 OAuth 凭据二选一；编辑态留空＝保持已存值。
   if (!isEdit) {
-    if (!clientId) {
-      message.warning('请填写 Client ID')
+    const hasPair = Boolean(clientId && clientSecret)
+    if (!hasPair && !serviceAccount) {
+      message.warning('Client ID/Secret 与服务账号私钥 JSON 至少填写一种')
       return
     }
-    if (!clientSecret) {
-      message.warning('请填写 Client Secret')
+    if ((clientId && !clientSecret) || (!clientId && clientSecret)) {
+      message.warning('Client ID 与 Client Secret 必须成对填写，或改用服务账号私钥 JSON')
       return
     }
     if (!target) {
@@ -1325,13 +1362,15 @@ async function submitHuaweiChannel(name: string) {
       const payload: HuaweiChannelCreatePayload = {
         name,
         app_id: appId,
-        client_id: clientId,
-        client_secret: clientSecret,
         target_type: form.target_type,
         target,
         events: form.events,
         enabled: form.enabled,
       }
+      // 为空的字段直接不传，后端按缺失处理，避免发出空串凭据。
+      if (clientId) payload.client_id = clientId
+      if (clientSecret) payload.client_secret = clientSecret
+      if (serviceAccount) payload.service_account = serviceAccount
       await notifyApi.createHuaweiChannel(payload)
       message.success('已创建，建议点「测试」确认手机能收到')
     } else {
@@ -1352,6 +1391,8 @@ async function submitHuaweiChannel(name: string) {
       if (target && target !== baselineTarget) payload.target = target
       if (clientId) payload.client_id = clientId
       if (clientSecret) payload.client_secret = clientSecret
+      // 服务账号 JSON 没有掩码形态：粘贴了内容就是整体替换，留空则保持已存值。
+      if (serviceAccount) payload.service_account = serviceAccount
 
       await notifyApi.updateHuaweiChannel(notifyModal.id, payload)
       message.success('已更新')
@@ -1494,6 +1535,12 @@ onMounted(load)
   flex-direction: column;
   gap: 4px;
   margin-bottom: 8px;
+}
+/* 服务账号 JSON 是整段粘贴的私钥文件，等宽字体便于发现换行/截断问题。 */
+.hw-sa-input textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
 }
 .notify-logs-head {
   margin-top: 20px;

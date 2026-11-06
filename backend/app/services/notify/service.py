@@ -31,9 +31,13 @@ from app.models.schemas import (
     NotifyChannelUpdate,
     NotifyKind,
 )
-from app.services.notify.dispatch import render_text
+from app.services.notify.dispatch import build_huawei_auth, render_text
 from app.services.notify.events import normalize_events
-from app.services.notify.huawei import TARGET_TOPIC, send_huawei_message
+from app.services.notify.huawei import (
+    TARGET_TOPIC,
+    parse_service_account,
+    send_huawei_message,
+)
 from app.services.notify.senders import TIMEOUT, SendResult, send_to_channel
 
 logger = logging.getLogger("yangvis.notify")
@@ -167,6 +171,26 @@ class NotifyChannelService:
 
     def create_huawei_channel(self, payload: HuaweiChannelCreate) -> NotifyChannel:
         """建华为渠道：NotifyChannel 占名（webhook 列存空 bytes 占位）+ 1:1 配置。"""
+        # 两种 OAuth 凭据二选一。服务账号 JSON 先过结构与 PEM 校验再落库，
+        # parse 抛的 ValueError 由路由翻译成业务错误 code=-1，坏输入不进库。
+        service_account_text = (payload.service_account or "").strip()
+        if service_account_text:
+            parse_service_account(service_account_text)
+            # 客户端凭证对的两列 NOT NULL，JWT 模式用空 bytes 占位（decrypt 得空串）。
+            client_id_enc = encrypt("")
+            client_secret_enc = encrypt("")
+            service_account_enc = encrypt(service_account_text)
+        else:
+            client_id = payload.client_id.strip()
+            client_secret = payload.client_secret.strip()
+            if not (client_id and client_secret):
+                raise ValueError(
+                    "client_id/client_secret 与服务账号私钥 JSON 至少配置一种"
+                )
+            client_id_enc = encrypt(client_id)
+            client_secret_enc = encrypt(client_secret)
+            service_account_enc = None
+
         channel = NotifyChannel(
             owner_id=self._owner_id,
             name=payload.name.strip(),
@@ -187,8 +211,9 @@ class NotifyChannelService:
                 NotifyHuaweiConfig(
                     channel_id=channel.id,
                     app_id=payload.app_id.strip(),
-                    client_id_enc=encrypt(payload.client_id.strip()),
-                    client_secret_enc=encrypt(payload.client_secret.strip()),
+                    client_id_enc=client_id_enc,
+                    client_secret_enc=client_secret_enc,
+                    service_account_enc=service_account_enc,
                     target_type=payload.target_type.value,
                     target=payload.target.strip(),
                 )
@@ -232,6 +257,12 @@ class NotifyChannelService:
         if payload.client_secret and not is_masked(payload.client_secret):
             cfg.client_secret_enc = encrypt(payload.client_secret.strip())
             credentials_changed = True
+        # 服务账号 JSON 没有掩码形态：留空保持原样，粘贴新内容（先校验）即整体替换。
+        service_account_text = (payload.service_account or "").strip()
+        if service_account_text:
+            parse_service_account(service_account_text)
+            cfg.service_account_enc = encrypt(service_account_text)
+            credentials_changed = True
         if payload.target_type is not None:
             cfg.target_type = payload.target_type.value
             credentials_changed = True
@@ -269,11 +300,24 @@ class NotifyChannelService:
         has_client_secret = True
         client_secret_error: Optional[str] = None
         try:
-            decrypt(cfg.client_secret_enc)
+            # 空 bytes（JWT 模式占位）解出来是空串，按「未配置客户端密钥」展示。
+            has_client_secret = bool(decrypt(cfg.client_secret_enc))
         except DecryptionError as exc:
             logger.warning("failed to decrypt huawei client_secret of channel %s", channel.id)
             has_client_secret = False
             client_secret_error = str(exc)
+
+        # 服务账号只回「有没有 / 解不解得开」，JSON 原文（含 PEM 私钥）永不进响应。
+        has_service_account = bool(cfg.service_account_enc)
+        service_account_error: Optional[str] = None
+        if cfg.service_account_enc:
+            try:
+                decrypt(cfg.service_account_enc)
+            except DecryptionError as exc:
+                logger.warning(
+                    "failed to decrypt huawei service_account of channel %s", channel.id
+                )
+                service_account_error = str(exc)
 
         # target 明文落库：topic 名不敏感可原样回；设备 token 能定向推送，回掩码。
         target = cfg.target if cfg.target_type == TARGET_TOPIC else mask(cfg.target)
@@ -287,6 +331,8 @@ class NotifyChannelService:
             has_client_secret=has_client_secret,
             client_id_error=client_id_error,
             client_secret_error=client_secret_error,
+            has_service_account=has_service_account,
+            service_account_error=service_account_error,
             target_type=HuaweiTargetType(cfg.target_type),
             target=target,
             events=list(channel.events or []),
@@ -332,24 +378,24 @@ class NotifyChannelService:
         """华为渠道的连通测试：真的发一条测试通知到配置的主题/设备。
 
         与 webhook 测试同一语义（端到端发一条），配置缺失或解密失败压成
-        失败结果，不抛异常。
+        失败结果，不抛异常。凭据构造与 dispatch 走同一个 ``build_huawei_auth``，
+        保证「测试通过、正式发不出」不可能由两条代码路径的差异引起。
         """
         try:
             cfg = self.get_huawei_config(channel)
-            client_id = decrypt(cfg.client_id_enc)
-            client_secret = decrypt(cfg.client_secret_enc)
-        except (LookupError, DecryptionError) as exc:
+            # DecryptionError 是 RuntimeError 子类；坏 JSON 是 ValueError 子类。
+            auth = build_huawei_auth(cfg)
+        except (LookupError, DecryptionError, ValueError) as exc:
             return SendResult(ok=False, error=str(exc))
 
-        if not (cfg.app_id and client_id and client_secret and cfg.target):
+        if not (cfg.app_id and cfg.target):
             return SendResult(ok=False, error="华为推送配置不完整")
 
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             return await send_huawei_message(
                 client,
                 app_id=cfg.app_id,
-                client_id=client_id,
-                client_secret=client_secret,
+                auth=auth,
                 target_type=cfg.target_type,
                 target=cfg.target,
                 title="测试消息",

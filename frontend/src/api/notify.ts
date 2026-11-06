@@ -60,6 +60,9 @@ export interface HuaweiChannelItem {
   has_client_secret: boolean
   client_id_error?: string | null
   client_secret_error?: string | null
+  /** 服务账号私钥 JSON 只回「有没有」，原文（含 PEM 私钥）永不进响应。 */
+  has_service_account: boolean
+  service_account_error?: string | null
   target_type: HuaweiTargetType
   /** topic 名明文返回；token 模式下是设备 Push Token 的掩码。 */
   target: string
@@ -75,8 +78,11 @@ export interface HuaweiChannelItem {
 export interface HuaweiChannelCreatePayload {
   name: string
   app_id: string
-  client_id: string
-  client_secret: string
+  /** 与 service_account 二选一：成对出现，走 client_credentials 授权。 */
+  client_id?: string
+  client_secret?: string
+  /** AGC 服务账号 private.json 完整文本，走 JWT bearer 授权；与客户端凭证对二选一。 */
+  service_account?: string
   target_type: HuaweiTargetType
   target: string
   events: string[]
@@ -89,6 +95,8 @@ export interface HuaweiChannelUpdatePayload {
   app_id?: string
   client_id?: string
   client_secret?: string
+  /** 没有掩码形态：留空保持原样，粘贴新 JSON 即整体替换。 */
+  service_account?: string
   target_type?: HuaweiTargetType
   target?: string
   events?: string[]

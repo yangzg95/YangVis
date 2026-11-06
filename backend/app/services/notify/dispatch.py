@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
@@ -28,7 +29,7 @@ from sqlalchemy import delete, select
 from app import database as app_db
 from app.crypto import decrypt
 from app.models.entities import NotifyChannel, NotifyHuaweiConfig, NotifyLog
-from app.services.notify.huawei import send_huawei_message
+from app.services.notify.huawei import HuaweiAuth, send_huawei_message
 from app.services.notify.senders import TIMEOUT, send_to_channel
 from app.timeutil import beijing_now
 
@@ -81,8 +82,7 @@ async def dispatch(owner_id: int, event: str, *, title: str, body: str = "") -> 
                     result = await send_huawei_message(
                         client,
                         app_id=hw["app_id"],
-                        client_id=hw["client_id"],
-                        client_secret=hw["client_secret"],
+                        auth=hw["auth"],
                         target_type=hw["target_type"],
                         target=hw["target"],
                         title=title,
@@ -173,6 +173,25 @@ def _subscribed_channels(owner_id: int, event: str) -> list[dict]:
     return rows
 
 
+def build_huawei_auth(cfg: NotifyHuaweiConfig) -> HuaweiAuth:
+    """从配置行构造发送凭据：优先服务账号 JWT，否则 client_credentials。
+
+    两种模式互斥地落在同一行上（服务账号列为 NULL 即走客户端凭证对）。
+    解密失败会抛 :class:`DecryptionError`、JSON 损坏抛 :class:`ValueError`，
+    由调用方按各自语义处理（dispatch 跳过、连通测试回失败结论）。
+    """
+    if cfg.service_account_enc:
+        # 整段 JSON 在保存时已过 parse_service_account 校验，这里只需解密还原。
+        service_account = json.loads(decrypt(cfg.service_account_enc))
+        return HuaweiAuth.service_account(service_account)
+
+    client_id = decrypt(cfg.client_id_enc)
+    client_secret = decrypt(cfg.client_secret_enc)
+    if not (client_id and client_secret):
+        raise ValueError("华为推送凭据不完整：client_id/client_secret 与服务账号 JSON 均未配置")
+    return HuaweiAuth.client_credentials(client_id, client_secret)
+
+
 def _load_huawei_target(db, channel: NotifyChannel) -> Optional[dict]:
     """解出一个华为渠道的发送参数；配置缺失/解密失败/字段不全时返回 None。
 
@@ -192,8 +211,7 @@ def _load_huawei_target(db, channel: NotifyChannel) -> Optional[dict]:
         )
         return None
     try:
-        client_id = decrypt(cfg.client_id_enc)
-        client_secret = decrypt(cfg.client_secret_enc)
+        auth = build_huawei_auth(cfg)
     except Exception:
         logger.warning(
             "notify huawei channel %s (%s) has undecryptable credentials; skipped",
@@ -201,7 +219,7 @@ def _load_huawei_target(db, channel: NotifyChannel) -> Optional[dict]:
             channel.name,
         )
         return None
-    if not (cfg.app_id and client_id and client_secret and cfg.target):
+    if not (cfg.app_id and cfg.target):
         logger.warning(
             "notify huawei channel %s (%s) has incomplete config; skipped",
             channel.id,
@@ -214,8 +232,7 @@ def _load_huawei_target(db, channel: NotifyChannel) -> Optional[dict]:
         "kind": KIND_HUAWEI,
         "huawei": {
             "app_id": cfg.app_id,
-            "client_id": client_id,
-            "client_secret": client_secret,
+            "auth": auth,
             "target_type": cfg.target_type,
             "target": cfg.target,
         },

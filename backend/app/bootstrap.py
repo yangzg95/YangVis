@@ -416,8 +416,7 @@ def migrate_schema() -> None:
             logger.info("added ai_call_log.%s", column)
 
     # notify_log 补正文快照：移动 App 的历史消息要回放通知正文。新库随
-    # create_all 已带此列，这里只给已存在的旧库补；notify_huawei_config 是
-    # 全新表，同样由 create_all 建立，不需要 ALTER。
+    # create_all 已带此列，这里只给已存在的旧库补。
     notify_log_columns = column_names("notify_log")
     if notify_log_columns and "body" not in notify_log_columns:
         with engine.begin() as conn:
@@ -425,6 +424,20 @@ def migrate_schema() -> None:
                 text("ALTER TABLE notify_log ADD COLUMN body VARCHAR(1024) NULL")
             )
         logger.info("added notify_log.body")
+
+    # notify_huawei_config 补服务账号私钥列：JWT bearer 授权模式的凭据。
+    # 表本身由 create_all 建立，但已部署的旧库没有这一列，需幂等 ALTER。
+    # VARBINARY(8192)：实测整段 JSON 明文 3.7KB，Fernet 密文膨胀到约 5KB。
+    huawei_columns = column_names("notify_huawei_config")
+    if huawei_columns and "service_account_enc" not in huawei_columns:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "ALTER TABLE notify_huawei_config "
+                    "ADD COLUMN service_account_enc VARBINARY(8192) NULL"
+                )
+            )
+        logger.info("added notify_huawei_config.service_account_enc")
 
     for table, retired in RETIRED_STATUS_COLUMNS.items():
         existing = column_names(table)
