@@ -2848,12 +2848,20 @@ class YapiSyncResult(BaseModel):
 
 
 class NotifyKind(str, Enum):
-    """Webhook 机器人的协议方言。"""
+    """通知渠道的协议方言。前四种是 webhook 机器人，huawei 走 HMS Push REST。"""
 
     FEISHU = "feishu"
     WECOM = "wecom"
     DINGTALK = "dingtalk"
     GENERIC = "generic"
+    HUAWEI = "huawei"
+
+
+class HuaweiTargetType(str, Enum):
+    """华为 HMS Push 的推送目标：按主题或按设备 token。"""
+
+    TOPIC = "topic"
+    TOKEN = "token"
 
 
 class NotifyEventInfo(BaseModel):
@@ -2925,7 +2933,81 @@ class NotifyLogItem(BaseModel):
     channel_name: str
     event: str
     title: str
+    body: Optional[str] = None
     status: str
     error: Optional[str] = None
     elapsed_ms: Optional[int] = None
+    created_at: datetime
+
+
+class HuaweiChannelCreate(BaseModel):
+    """新建一个华为 HMS Push 渠道。
+
+    与 webhook 渠道不同，这里没有 URL：凭据是 AGC 的 OAuth 客户端凭证，目标
+    是主题或设备 token。client_id / client_secret 落库为 Fernet 密文。
+    """
+
+    name: str = Field(..., min_length=1, max_length=64)
+    app_id: str = Field(..., min_length=1, max_length=32)
+    client_id: str = Field(..., min_length=1, max_length=256)
+    client_secret: str = Field(..., min_length=1, max_length=256)
+    target_type: HuaweiTargetType
+    target: str = Field(..., min_length=1, max_length=512)
+    events: List[str] = Field(default_factory=list)
+    enabled: bool = True
+
+
+class HuaweiChannelUpdate(BaseModel):
+    """修改华为渠道。
+
+    client_id / client_secret / target（token 模式）留空或回传掩码都表示
+    「保持原样」，与 webhook 渠道的掩码语义一致，避免只改名就清掉凭据。
+    """
+
+    name: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    app_id: Optional[str] = Field(default=None, min_length=1, max_length=32)
+    client_id: Optional[str] = Field(default=None, max_length=256)
+    client_secret: Optional[str] = Field(default=None, max_length=256)
+    target_type: Optional[HuaweiTargetType] = None
+    target: Optional[str] = Field(default=None, max_length=512)
+    events: Optional[List[str]] = None
+    enabled: Optional[bool] = None
+
+
+class HuaweiChannelItem(BaseModel):
+    """华为渠道的序列化视图。凭据与设备 token 只以掩码出现。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    kind: NotifyKind
+    app_id: str
+    # client_id 按凭据处理，只回掩码；client_secret 只回有没有。
+    client_id_masked: str = ""
+    has_client_secret: bool = False
+    client_id_error: Optional[str] = None
+    client_secret_error: Optional[str] = None
+    target_type: HuaweiTargetType
+    # topic 名不敏感、明文返回；token 模式下 target 是设备推送令牌，回掩码。
+    target: str
+    events: List[str] = Field(default_factory=list)
+    enabled: bool = True
+    last_test_at: Optional[datetime] = None
+    last_test_ok: Optional[bool] = None
+    last_test_error: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AppMessageItem(BaseModel):
+    """移动 App 历史消息里的一行：只含成功送达、可展示的字段。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    channel_name: str
+    event: str
+    title: str
+    body: Optional[str] = None
     created_at: datetime

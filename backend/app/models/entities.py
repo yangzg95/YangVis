@@ -1719,7 +1719,10 @@ class NotifyChannel(Base):
     owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(64), nullable=False)
 
-    # feishu | wecom | dingtalk | generic
+    # feishu | wecom | dingtalk | generic | huawei
+    # 前四种是 webhook 机器人（用 webhook_url_enc/secret_enc）；huawei 是 HMS
+    # Push 渠道，凭据在 1:1 的 notify_huawei_config 里，此表 webhook_url_enc 存
+    # 空 bytes 占位（列 NOT NULL，但空 bytes 不是 NULL）。
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
     webhook_url_enc: Mapped[bytes] = mapped_column(LargeBinary(2048), nullable=False)
     # 钉钉加签 / 飞书签名的密钥；非加签渠道为空。密文存储。
@@ -1764,6 +1767,9 @@ class NotifyLog(Base):
     # 事件 key（NotifyChannel.events 里同名合法值）。
     event: Mapped[str] = mapped_column(String(32), nullable=False)
     title: Mapped[str] = mapped_column(String(128), nullable=False)
+    # 通知正文快照。webhook 渠道以前只发不留，移动 App 的历史消息要靠它回放；
+    # 由 bootstrap.migrate_schema 对旧库补列，新库随 create_all 直接建。
+    body: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
     # sent | failed
     status: Mapped[str] = mapped_column(String(8), nullable=False)
@@ -1776,3 +1782,50 @@ class NotifyLog(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<NotifyLog id={self.id} event={self.event!r} status={self.status!r}>"
+
+
+class NotifyHuaweiConfig(Base):
+    """华为 HMS Push 渠道的专属配置，与 :class:`NotifyChannel` 一对一。
+
+    webhook 机器人的凭据是 URL + secret，华为渠道完全不同：AGC 应用的
+    ``app_id`` 加一对 OAuth ``client_id`` / ``client_secret``，再加推送目标
+    （主题或设备 token）。单独建表，而不是给 NotifyChannel 堆一列永为空的
+    华为字段，四个 webhook 方言就能保持原样。
+
+    client_id / client_secret 落 Fernet 密文（见 :mod:`app.crypto`），API 只回
+    掩码；app_id 不是密钥、明文存储。``target`` 在 token 模式下是设备推送令牌，
+    序列化时同样按掩码处理。新表随 ``create_all`` 建立，无需手写迁移。
+    """
+
+    __tablename__ = "notify_huawei_config"
+    __table_args__ = (
+        UniqueConstraint("channel_id", name="uk_notify_huawei_channel"),
+    )
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    # 逻辑外键 → notify_channel.id。全库不建物理外键（见各表 owner_id 的处理），
+    # 删除渠道时由 service 层连带删除本行。
+    channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    # AGC 应用 app_id（如 119672293），非密钥，明文。
+    app_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    client_id_enc: Mapped[bytes] = mapped_column(LargeBinary(1024), nullable=False)
+    client_secret_enc: Mapped[bytes] = mapped_column(LargeBinary(1024), nullable=False)
+
+    # topic | token（合法值见 schemas.HuaweiTargetType）。
+    target_type: Mapped[str] = mapped_column(String(8), nullable=False)
+    # topic 名（如 yangvis）或设备 push token。
+    target: Mapped[str] = mapped_column(String(512), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (
+            f"<NotifyHuaweiConfig channel_id={self.channel_id} "
+            f"target_type={self.target_type!r}>"
+        )

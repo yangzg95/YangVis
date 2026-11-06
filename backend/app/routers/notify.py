@@ -14,11 +14,15 @@ from app.deps import require_user
 from app.models.schemas import (
     APIResponse,
     CurrentUser,
+    HuaweiChannelCreate,
+    HuaweiChannelItem,
+    HuaweiChannelUpdate,
     ListResponse,
     NotifyChannelCreate,
     NotifyChannelItem,
     NotifyChannelUpdate,
     NotifyEventInfo,
+    NotifyKind,
     NotifyLogItem,
     TestResult,
 )
@@ -90,6 +94,58 @@ def delete_channel(
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return APIResponse(data=None, message="deleted")
+
+
+# -- 华为 HMS Push 渠道 -------------------------------------------------------
+#
+# 字段与 webhook 渠道完全不同（OAuth 凭据 + 主题/设备目标，没有 URL），单列
+# 一组端点；连通测试仍复用上面的 /channels/{id}/test，由 service 内部分流。
+
+
+@router.post("/channels/huawei", response_model=APIResponse[HuaweiChannelItem])
+def create_huawei_channel(
+    payload: HuaweiChannelCreate,
+    service: NotifyChannelService = Depends(get_service),
+) -> APIResponse[HuaweiChannelItem]:
+    try:
+        channel = service.create_huawei_channel(payload)
+    except ValueError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    cfg = service.get_huawei_config(channel)
+    return APIResponse(data=service.to_huawei_item(channel, cfg))
+
+
+@router.put("/channels/{channel_id}/huawei", response_model=APIResponse[HuaweiChannelItem])
+def update_huawei_channel(
+    channel_id: int,
+    payload: HuaweiChannelUpdate,
+    service: NotifyChannelService = Depends(get_service),
+) -> APIResponse[HuaweiChannelItem]:
+    try:
+        channel = service.update_huawei_channel(channel_id, payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    cfg = service.get_huawei_config(channel)
+    return APIResponse(data=service.to_huawei_item(channel, cfg))
+
+
+@router.get("/channels/{channel_id}/huawei", response_model=APIResponse[HuaweiChannelItem])
+def get_huawei_channel(
+    channel_id: int,
+    service: NotifyChannelService = Depends(get_service),
+) -> APIResponse[HuaweiChannelItem]:
+    try:
+        channel = service.get_channel(channel_id)
+        if channel.kind != NotifyKind.HUAWEI.value:
+            raise ValueError("该渠道不是华为推送渠道")
+        cfg = service.get_huawei_config(channel)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    return APIResponse(data=service.to_huawei_item(channel, cfg))
 
 
 @router.post("/channels/{channel_id}/test", response_model=APIResponse[TestResult])

@@ -27,11 +27,16 @@ from sqlalchemy import delete, select
 
 from app import database as app_db
 from app.crypto import decrypt
-from app.models.entities import NotifyChannel, NotifyLog
+from app.models.entities import NotifyChannel, NotifyHuaweiConfig, NotifyLog
+from app.services.notify.huawei import send_huawei_message
 from app.services.notify.senders import TIMEOUT, send_to_channel
 from app.timeutil import beijing_now
 
 logger = logging.getLogger("yangvis.notify")
+
+# 与 schemas.NotifyKind.HUAWEI 同步；dispatch 是低层模块，直接用字符串常量，
+# 避免为一个枚举值反向依赖 schema 层。
+KIND_HUAWEI = "huawei"
 
 # 与实体列宽对齐：title 128、log 表 error 512（senders 侧已截 512，这里再兜一道）。
 _MAX_TITLE = 128
@@ -70,16 +75,32 @@ async def dispatch(owner_id: int, event: str, *, title: str, body: str = "") -> 
         text = render_text(title, body)
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             for channel in channels:
-                result = await send_to_channel(
-                    client,
-                    kind=channel["kind"],
-                    webhook_url=channel["url"],
-                    secret=channel["secret"],
-                    event=event,
-                    title=title,
-                    body=body,
-                    text=text,
-                )
+                if channel["kind"] == KIND_HUAWEI:
+                    # HMS Push：OAuth + messages:send，与 webhook 机器人完全不同的协议。
+                    hw = channel["huawei"]
+                    result = await send_huawei_message(
+                        client,
+                        app_id=hw["app_id"],
+                        client_id=hw["client_id"],
+                        client_secret=hw["client_secret"],
+                        target_type=hw["target_type"],
+                        target=hw["target"],
+                        title=title,
+                        body=body,
+                        # 顺带把事件名放进透传 data，App 存活时可据此做前台刷新。
+                        data={"event": event},
+                    )
+                else:
+                    result = await send_to_channel(
+                        client,
+                        kind=channel["kind"],
+                        webhook_url=channel["url"],
+                        secret=channel["secret"],
+                        event=event,
+                        title=title,
+                        body=body,
+                        text=text,
+                    )
                 await asyncio.to_thread(
                     _write_log,
                     owner_id=owner_id,
@@ -87,6 +108,7 @@ async def dispatch(owner_id: int, event: str, *, title: str, body: str = "") -> 
                     channel_name=channel["name"],
                     event=event,
                     title=title,
+                    body=body,
                     status=STATUS_SENT if result.ok else STATUS_FAILED,
                     error=result.error,
                     elapsed_ms=result.elapsed_ms,
@@ -103,11 +125,13 @@ async def dispatch(owner_id: int, event: str, *, title: str, body: str = "") -> 
 
 
 def _subscribed_channels(owner_id: int, event: str) -> list[dict]:
-    """查启用且订阅了该事件的渠道，解出 URL / secret 的明文。
+    """查启用且订阅了该事件的渠道，解出各自所需的明文凭据。
 
-    解密失败（ENCRYPTION_KEY 换过）的渠道跳过并发 warning：一个渠道的密钥
-    失效不该拦住其他渠道的消息。返回纯数据而不是 ORM 对象——session 在本
-    函数结束时关闭，detached 对象交给事件循环用是隐患。
+    两类渠道走不同的数据形状：webhook 机器人解 URL / secret；华为渠道读
+    1:1 的 ``notify_huawei_config``。解密失败（ENCRYPTION_KEY 换过）或配置
+    缺失的渠道跳过并发 warning——一个渠道失效不该拦住其他渠道的消息。
+    返回纯数据而不是 ORM 对象：session 在本函数结束时关闭，把 detached
+    对象交给事件循环用是隐患。
     """
     rows: list[dict] = []
     with app_db.SessionLocal() as db:
@@ -119,6 +143,11 @@ def _subscribed_channels(owner_id: int, event: str) -> list[dict]:
         ).all()
         for channel in channels:
             if event not in (channel.events or []):
+                continue
+            if channel.kind == KIND_HUAWEI:
+                huawei = _load_huawei_target(db, channel)
+                if huawei is not None:
+                    rows.append(huawei)
                 continue
             try:
                 url = decrypt(channel.webhook_url_enc)
@@ -144,6 +173,55 @@ def _subscribed_channels(owner_id: int, event: str) -> list[dict]:
     return rows
 
 
+def _load_huawei_target(db, channel: NotifyChannel) -> Optional[dict]:
+    """解出一个华为渠道的发送参数；配置缺失/解密失败/字段不全时返回 None。
+
+    与 webhook 分支同样的「跳过不拦路」语义。明文凭据只在返回的纯字典里
+    短暂存在，随本次 dispatch 用完即弃。
+    """
+    cfg = db.scalar(
+        select(NotifyHuaweiConfig).where(
+            NotifyHuaweiConfig.channel_id == channel.id
+        )
+    )
+    if cfg is None:
+        logger.warning(
+            "notify huawei channel %s (%s) has no config row; skipped",
+            channel.id,
+            channel.name,
+        )
+        return None
+    try:
+        client_id = decrypt(cfg.client_id_enc)
+        client_secret = decrypt(cfg.client_secret_enc)
+    except Exception:
+        logger.warning(
+            "notify huawei channel %s (%s) has undecryptable credentials; skipped",
+            channel.id,
+            channel.name,
+        )
+        return None
+    if not (cfg.app_id and client_id and client_secret and cfg.target):
+        logger.warning(
+            "notify huawei channel %s (%s) has incomplete config; skipped",
+            channel.id,
+            channel.name,
+        )
+        return None
+    return {
+        "id": channel.id,
+        "name": channel.name,
+        "kind": KIND_HUAWEI,
+        "huawei": {
+            "app_id": cfg.app_id,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "target_type": cfg.target_type,
+            "target": cfg.target,
+        },
+    }
+
+
 def _write_log(
     *,
     owner_id: int,
@@ -151,6 +229,7 @@ def _write_log(
     channel_name: str,
     event: str,
     title: str,
+    body: str,
     status: str,
     error: Optional[str],
     elapsed_ms: Optional[int],
@@ -165,6 +244,8 @@ def _write_log(
                     channel_name=channel_name,
                     event=event,
                     title=title,
+                    # body 在 dispatch 入口已截到 1024，这里兜一道空值。
+                    body=body or None,
                     status=status,
                     error=error[:512] if error else None,
                     elapsed_ms=elapsed_ms,

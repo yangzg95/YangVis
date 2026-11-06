@@ -208,6 +208,14 @@ class Settings(BaseSettings):
     WEB_FETCH_TIMEOUT: float = 25.0
     WEB_FETCH_MAX_BYTES: int = 5 * 1024 * 1024
 
+    # 移动 App（yangvis-app）拉取历史通知的静态访问令牌。App 不走带验证码的
+    # 登录流，靠这个长期令牌做 Bearer 鉴权；留空 = /app 消息端点直接回 404，
+    # 不对外暴露功能存在。轮换只需改环境变量后重启，不涉及数据库。
+    NOTIFY_APP_TOKEN: str = ""
+    # App 拉取的归属范围：限定某个 owner 的通知。留空则返回全站记录——只适用
+    # 单用户自用部署；多用户务必显式指定，否则其他人的通知标题/正文会一并暴露。
+    NOTIFY_APP_OWNER_ID: int | None = None
+
     # 智能办公 · 幻灯片
     # 用户上传媒体的本地磁盘目录，留空则用 <backend>/uploads。Docker 部署必须
     # 把它挂成卷——镜像里的 /app 是构建产物，重建即丢。

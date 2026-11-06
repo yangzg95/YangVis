@@ -286,6 +286,51 @@ def test_prune_notify_logs_nothing_to_delete(db):
     assert prune_notify_logs(days=7) == 0
 
 
+def test_migrate_schema_adds_notify_log_body_to_legacy_db(engine, monkeypatch):
+    """旧库（notify_log 还没有 body 列）启动迁移：补列、保数据、可重复执行。"""
+    from sqlalchemy import inspect, text
+
+    from app import bootstrap
+
+    # bootstrap 用的是 import 时绑定的 engine / SessionLocal，须 patch 模块属性。
+    monkeypatch.setattr(bootstrap, "engine", engine, raising=False)
+    monkeypatch.setattr(
+        bootstrap, "SessionLocal", sessionmaker(bind=engine, future=True)
+    )
+
+    # 造出升级前的旧表：当前 schema 的 notify_log 带 body，整体重建为无 body 形态。
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE notify_log"))
+        conn.execute(
+            text(
+                "CREATE TABLE notify_log ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id BIGINT NOT NULL, "
+                "channel_id BIGINT NOT NULL, channel_name VARCHAR(64) NOT NULL, "
+                "event VARCHAR(32) NOT NULL, title VARCHAR(128) NOT NULL, "
+                "status VARCHAR(8) NOT NULL, error VARCHAR(512), elapsed_ms BIGINT, "
+                "created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO notify_log (owner_id, channel_id, channel_name, event, title, status) "
+                "VALUES (1, 1, '旧渠道', 'workflow.failed', '旧消息', 'sent')"
+            )
+        )
+
+    bootstrap.migrate_schema()
+
+    columns = {c["name"] for c in inspect(engine).get_columns("notify_log")}
+    assert "body" in columns
+    with engine.begin() as conn:
+        # 历史行保留，新列可空所以为 NULL。
+        title, body = conn.execute(text("SELECT title, body FROM notify_log")).one()
+        assert title == "旧消息" and body is None
+
+    # 幂等：列已存在时再跑一次必须是空操作而不是报错。
+    bootstrap.migrate_schema()
+
+
 def test_bootstrap_prune_notify_logs_step_cleans_expired(db):
     """启动步骤表指向的包装函数确实在清理（防步骤名/指向写错后静默失效）。"""
     from app.bootstrap import prune_notify_logs as bootstrap_step

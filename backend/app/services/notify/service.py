@@ -20,8 +20,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.crypto import DecryptionError, decrypt, encrypt, is_masked, mask
-from app.models.entities import NotifyChannel, NotifyLog
+from app.models.entities import NotifyChannel, NotifyHuaweiConfig, NotifyLog
 from app.models.schemas import (
+    HuaweiChannelCreate,
+    HuaweiChannelItem,
+    HuaweiChannelUpdate,
+    HuaweiTargetType,
     NotifyChannelCreate,
     NotifyChannelItem,
     NotifyChannelUpdate,
@@ -29,7 +33,8 @@ from app.models.schemas import (
 )
 from app.services.notify.dispatch import render_text
 from app.services.notify.events import normalize_events
-from app.services.notify.senders import TIMEOUT, send_to_channel
+from app.services.notify.huawei import TARGET_TOPIC, send_huawei_message
+from app.services.notify.senders import TIMEOUT, SendResult, send_to_channel
 
 logger = logging.getLogger("yangvis.notify")
 
@@ -135,9 +140,163 @@ class NotifyChannelService:
 
     def delete_channel(self, channel_id: int) -> None:
         channel = self.get_channel(channel_id)
+        # 华为渠道的 1:1 配置没有物理外键，需在这里显式连带删除，避免留孤儿行。
+        if channel.kind == NotifyKind.HUAWEI.value:
+            cfg = self._db.scalar(
+                select(NotifyHuaweiConfig).where(
+                    NotifyHuaweiConfig.channel_id == channel.id
+                )
+            )
+            if cfg is not None:
+                self._db.delete(cfg)
         self._db.delete(channel)
         self._db.commit()
         logger.info("owner %s deleted notify channel %s", self._owner_id, channel_id)
+
+    # -- 华为 HMS Push 渠道 ---------------------------------------------------
+
+    def get_huawei_config(self, channel: NotifyChannel) -> NotifyHuaweiConfig:
+        cfg = self._db.scalar(
+            select(NotifyHuaweiConfig).where(
+                NotifyHuaweiConfig.channel_id == channel.id
+            )
+        )
+        if cfg is None:
+            raise LookupError("华为推送配置缺失")
+        return cfg
+
+    def create_huawei_channel(self, payload: HuaweiChannelCreate) -> NotifyChannel:
+        """建华为渠道：NotifyChannel 占名（webhook 列存空 bytes 占位）+ 1:1 配置。"""
+        channel = NotifyChannel(
+            owner_id=self._owner_id,
+            name=payload.name.strip(),
+            kind=NotifyKind.HUAWEI.value,
+            # 该列 NOT NULL，但华为渠道没有 webhook；encrypt("") 返回空 bytes（非 NULL）。
+            webhook_url_enc=encrypt(""),
+            secret_enc=None,
+            events=normalize_events(payload.events),
+            enabled=payload.enabled,
+        )
+        # flush 就可能撞 uk_notify_owner_name（与 commit 一样抛 IntegrityError），
+        # 所以 add/flush/insert 全包进 try：重名要翻译成业务错误而不是 500。
+        try:
+            self._db.add(channel)
+            # flush 拿到 channel.id，才能写 1:1 配置的外键值。
+            self._db.flush()
+            self._db.add(
+                NotifyHuaweiConfig(
+                    channel_id=channel.id,
+                    app_id=payload.app_id.strip(),
+                    client_id_enc=encrypt(payload.client_id.strip()),
+                    client_secret_enc=encrypt(payload.client_secret.strip()),
+                    target_type=payload.target_type.value,
+                    target=payload.target.strip(),
+                )
+            )
+            self._db.commit()
+        except IntegrityError as exc:
+            self._db.rollback()
+            raise ValueError("同名渠道已存在") from exc
+        self._db.refresh(channel)
+        logger.info(
+            "owner %s created huawei notify channel %s (%s)",
+            self._owner_id,
+            channel.id,
+            channel.name,
+        )
+        return channel
+
+    def update_huawei_channel(
+        self, channel_id: int, payload: HuaweiChannelUpdate
+    ) -> NotifyChannel:
+        channel = self.get_channel(channel_id)
+        if channel.kind != NotifyKind.HUAWEI.value:
+            raise ValueError("该渠道不是华为推送渠道")
+        cfg = self.get_huawei_config(channel)
+
+        credentials_changed = False
+        if payload.name is not None:
+            channel.name = payload.name.strip()
+        if payload.events is not None:
+            channel.events = normalize_events(payload.events)
+        if payload.enabled is not None:
+            channel.enabled = payload.enabled
+
+        if payload.app_id is not None:
+            cfg.app_id = payload.app_id.strip()
+            credentials_changed = True
+        # 空串或掩码都表示「保持原样」，与 webhook 渠道同一套凭据语义。
+        if payload.client_id and not is_masked(payload.client_id):
+            cfg.client_id_enc = encrypt(payload.client_id.strip())
+            credentials_changed = True
+        if payload.client_secret and not is_masked(payload.client_secret):
+            cfg.client_secret_enc = encrypt(payload.client_secret.strip())
+            credentials_changed = True
+        if payload.target_type is not None:
+            cfg.target_type = payload.target_type.value
+            credentials_changed = True
+        if payload.target and not is_masked(payload.target):
+            cfg.target = payload.target.strip()
+            credentials_changed = True
+
+        if credentials_changed:
+            # 凭据/目标变了，之前的连通测试结论不再成立。
+            channel.last_test_ok = None
+            channel.last_test_error = None
+
+        try:
+            self._db.commit()
+        except IntegrityError as exc:
+            self._db.rollback()
+            raise ValueError("同名渠道已存在") from exc
+        self._db.refresh(channel)
+        logger.info("owner %s updated huawei notify channel %s", self._owner_id, channel.id)
+        return channel
+
+    @staticmethod
+    def to_huawei_item(
+        channel: NotifyChannel, cfg: NotifyHuaweiConfig
+    ) -> HuaweiChannelItem:
+        """华为渠道的掩码视图：client_id 回掩码，secret 只回有没有。"""
+        client_id_masked = ""
+        client_id_error: Optional[str] = None
+        try:
+            client_id_masked = mask(decrypt(cfg.client_id_enc))
+        except DecryptionError as exc:
+            logger.warning("failed to decrypt huawei client_id of channel %s", channel.id)
+            client_id_error = str(exc)
+
+        has_client_secret = True
+        client_secret_error: Optional[str] = None
+        try:
+            decrypt(cfg.client_secret_enc)
+        except DecryptionError as exc:
+            logger.warning("failed to decrypt huawei client_secret of channel %s", channel.id)
+            has_client_secret = False
+            client_secret_error = str(exc)
+
+        # target 明文落库：topic 名不敏感可原样回；设备 token 能定向推送，回掩码。
+        target = cfg.target if cfg.target_type == TARGET_TOPIC else mask(cfg.target)
+
+        return HuaweiChannelItem(
+            id=channel.id,
+            name=channel.name,
+            kind=NotifyKind.HUAWEI,
+            app_id=cfg.app_id,
+            client_id_masked=client_id_masked,
+            has_client_secret=has_client_secret,
+            client_id_error=client_id_error,
+            client_secret_error=client_secret_error,
+            target_type=HuaweiTargetType(cfg.target_type),
+            target=target,
+            events=list(channel.events or []),
+            enabled=channel.enabled,
+            last_test_at=channel.last_test_at,
+            last_test_ok=channel.last_test_ok,
+            last_test_error=channel.last_test_error,
+            created_at=channel.created_at,
+            updated_at=channel.updated_at,
+        )
 
     # -- 连通测试 -----------------------------------------------------------
 
@@ -147,7 +306,8 @@ class NotifyChannelService:
         解密失败在这里压成失败结果（而不是抛异常）：测试按钮的语义就是
         「告诉我现在通不通」，密钥解不开也是一种明确的不通。
         """
-        from app.services.notify.senders import SendResult
+        if channel.kind == NotifyKind.HUAWEI.value:
+            return await self._send_huawei_test(channel)
 
         try:
             url = decrypt(channel.webhook_url_enc)
@@ -166,6 +326,35 @@ class NotifyChannelService:
                 title="测试消息",
                 body="渠道连通测试：收到这条消息说明配置正确。",
                 text=text,
+            )
+
+    async def _send_huawei_test(self, channel: NotifyChannel) -> SendResult:
+        """华为渠道的连通测试：真的发一条测试通知到配置的主题/设备。
+
+        与 webhook 测试同一语义（端到端发一条），配置缺失或解密失败压成
+        失败结果，不抛异常。
+        """
+        try:
+            cfg = self.get_huawei_config(channel)
+            client_id = decrypt(cfg.client_id_enc)
+            client_secret = decrypt(cfg.client_secret_enc)
+        except (LookupError, DecryptionError) as exc:
+            return SendResult(ok=False, error=str(exc))
+
+        if not (cfg.app_id and client_id and client_secret and cfg.target):
+            return SendResult(ok=False, error="华为推送配置不完整")
+
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            return await send_huawei_message(
+                client,
+                app_id=cfg.app_id,
+                client_id=client_id,
+                client_secret=client_secret,
+                target_type=cfg.target_type,
+                target=cfg.target,
+                title="测试消息",
+                body="渠道连通测试：收到这条通知说明华为推送配置正确。",
+                data={"event": _TEST_EVENT},
             )
 
     def record_test(self, channel: NotifyChannel, *, ok: bool, error: Optional[str]) -> None:
