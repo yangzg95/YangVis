@@ -8,7 +8,10 @@ import type { TestResult } from './settings'
 
 // ---- 通知渠道 ----------------------------------------------------------------
 
-export type NotifyKind = 'feishu' | 'wecom' | 'dingtalk' | 'generic'
+export type NotifyKind = 'feishu' | 'wecom' | 'dingtalk' | 'generic' | 'huawei'
+
+/** 华为 HMS Push 的推送目标：主题广播或单设备定向。 */
+export type HuaweiTargetType = 'topic' | 'token'
 
 export interface NotifyEventInfo {
   key: string
@@ -47,6 +50,51 @@ export interface NotifyChannelPayload {
   enabled?: boolean
 }
 
+/** 华为渠道的序列化视图：client_id 是掩码，secret 只知道有没有。 */
+export interface HuaweiChannelItem {
+  id: number
+  name: string
+  kind: 'huawei'
+  app_id: string
+  client_id_masked: string
+  has_client_secret: boolean
+  client_id_error?: string | null
+  client_secret_error?: string | null
+  target_type: HuaweiTargetType
+  /** topic 名明文返回；token 模式下是设备 Push Token 的掩码。 */
+  target: string
+  events: string[]
+  enabled: boolean
+  last_test_at?: string | null
+  last_test_ok?: boolean | null
+  last_test_error?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface HuaweiChannelCreatePayload {
+  name: string
+  app_id: string
+  client_id: string
+  client_secret: string
+  target_type: HuaweiTargetType
+  target: string
+  events: string[]
+  enabled: boolean
+}
+
+/** 编辑华为渠道：所有字段可选；凭据/目标留空或回传掩码都表示保持原样。 */
+export interface HuaweiChannelUpdatePayload {
+  name?: string
+  app_id?: string
+  client_id?: string
+  client_secret?: string
+  target_type?: HuaweiTargetType
+  target?: string
+  events?: string[]
+  enabled?: boolean
+}
+
 export interface NotifyLogItem {
   id: number
   channel_id: number
@@ -76,6 +124,21 @@ export const notifyApi = {
       // 机器人所在群可能在外网，发送器最坏还要重试一次；全局 30 秒太紧。
       timeout: 60000,
       skipErrorToast: true,
+    }),
+  // ---- 华为 HMS Push 渠道（字段与 webhook 渠道完全不同，单列一组端点）----
+  createHuaweiChannel: (payload: HuaweiChannelCreatePayload) =>
+    request<HuaweiChannelItem>({ url: '/notify/channels/huawei', method: 'POST', data: payload }),
+  updateHuaweiChannel: (id: number, payload: HuaweiChannelUpdatePayload) =>
+    request<HuaweiChannelItem>({
+      url: `/notify/channels/${id}/huawei`,
+      method: 'PUT',
+      data: payload,
+    }),
+  // silent 用于列表加载时的后台补拉：个别渠道详情失败不该刷一串错误 toast。
+  getHuaweiChannel: (id: number, silent = false) =>
+    request<HuaweiChannelItem>({
+      url: `/notify/channels/${id}/huawei`,
+      skipErrorToast: silent,
     }),
   logs: (limit = 50) =>
     request<{ items: NotifyLogItem[]; total: number }>({ url: '/notify/logs', params: { limit } }),

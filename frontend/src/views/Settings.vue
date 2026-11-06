@@ -207,7 +207,7 @@
 <!--        </a-alert>-->
 
         <div class="toolbar toolbar--between toolbar--snug">
-          <span class="hint">一个渠道＝一个群机器人，订阅哪些事件按渠道各配。</span>
+          <span class="hint">一个渠道＝一个群机器人或一个华为推送应用，订阅哪些事件按渠道各配。</span>
           <a-button type="primary" @click="openNotifyCreate">
             <PlusOutlined /> 新增渠道
           </a-button>
@@ -228,11 +228,28 @@
             </template>
 
             <template v-else-if="column.key === 'webhook_url'">
-              <a-tooltip v-if="record.webhook_url_error" :title="record.webhook_url_error">
-                <span class="key-error">地址无法解密</span>
-              </a-tooltip>
-              <span v-else class="muted">{{ record.webhook_url || '—' }}</span>
-              <div v-if="record.secret_error" class="key-error">加签密钥无法解密</div>
+              <template v-if="record.kind === 'huawei'">
+                <span class="muted">{{ huaweiTargetText(record) }}</span>
+                <a-tooltip
+                  v-if="hwDetail(record.id)?.client_id_error"
+                  :title="hwDetail(record.id)?.client_id_error"
+                >
+                  <div class="key-error">Client ID 无法解密</div>
+                </a-tooltip>
+                <a-tooltip
+                  v-if="hwDetail(record.id)?.client_secret_error"
+                  :title="hwDetail(record.id)?.client_secret_error"
+                >
+                  <div class="key-error">Client Secret 无法解密</div>
+                </a-tooltip>
+              </template>
+              <template v-else>
+                <a-tooltip v-if="record.webhook_url_error" :title="record.webhook_url_error">
+                  <span class="key-error">地址无法解密</span>
+                </a-tooltip>
+                <span v-else class="muted">{{ record.webhook_url || '—' }}</span>
+                <div v-if="record.secret_error" class="key-error">加签密钥无法解密</div>
+              </template>
             </template>
 
             <template v-else-if="column.key === 'events'">
@@ -394,13 +411,22 @@
             placeholder="例如：运维值班群"
           />
         </a-form-item>
-        <a-form-item label="机器人类型" required>
-          <a-select v-model:value="notifyModal.form.kind" :options="KIND_OPTIONS" />
+        <a-form-item label="渠道类型" required>
+          <a-select
+            v-model:value="notifyModal.form.kind"
+            :options="KIND_OPTIONS"
+            :disabled="Boolean(notifyModal.id)"
+          />
           <div class="hint">
-            各家的文本消息格式不同，选错会发不出去或发出一条空消息；「自定义」发给自建接收端，正文是 JSON。
+            各家的文本消息格式不同，选错会发不出去或发出一条空消息；「自定义」发给自建接收端，正文是 JSON；
+            「华为推送」走 HMS Push Kit 直发手机，没有 Webhook 地址。类型保存后不可切换，要换请删除重建。
           </div>
         </a-form-item>
-        <a-form-item label="Webhook 地址" :required="!notifyModal.id || notifyModal.urlBroken">
+        <a-form-item
+          v-if="!isHuaweiForm"
+          label="Webhook 地址"
+          :required="!notifyModal.id || notifyModal.urlBroken"
+        >
           <a-input
             v-model:value="notifyModal.form.webhook_url"
             :placeholder="
@@ -422,7 +448,7 @@
             </template>
           </div>
         </a-form-item>
-        <a-form-item v-if="notifyNeedsSecret" label="加签密钥">
+        <a-form-item v-if="!isHuaweiForm && notifyNeedsSecret" label="加签密钥">
           <a-input-password
             v-model:value="notifyModal.form.secret"
             :placeholder="
@@ -437,6 +463,77 @@
             <template v-else>钉钉「加签」机器人必填；飞书只有开了「签名校验」才填；只配了关键词的机器人留空。</template>
           </div>
         </a-form-item>
+
+        <!-- 华为 HMS Push：OAuth 凭据 + 推送目标，与 webhook 字段完全不同 -->
+        <template v-if="isHuaweiForm">
+          <a-form-item label="App ID" required>
+            <a-input
+              v-model:value="notifyModal.form.app_id"
+              :maxlength="32"
+              placeholder="AGC 应用的 App ID，如 119672293"
+              autocomplete="off"
+            />
+          </a-form-item>
+          <a-form-item label="Client ID" :required="!notifyModal.id">
+            <a-input
+              v-model:value="notifyModal.form.client_id"
+              :maxlength="256"
+              :placeholder="notifyModal.id ? '留空表示不修改已保存的 Client ID' : 'AGC 后台应用的 OAuth Client ID'"
+              autocomplete="off"
+            />
+            <div v-if="notifyModal.id" class="hint">
+              <template v-if="notifyModal.hwClientIdError">
+                <span class="key-error">已存的 Client ID 无法解密，请重新填写</span>
+              </template>
+              <template v-else>当前：{{ notifyModal.hwMaskedClientId || '—' }}。凭据加密落库，页面只显示掩码。</template>
+            </div>
+            <div v-else class="hint">加密落库，列表与详情只显示掩码。</div>
+          </a-form-item>
+          <a-form-item label="Client Secret" :required="!notifyModal.id">
+            <a-input-password
+              v-model:value="notifyModal.form.client_secret"
+              :maxlength="256"
+              :placeholder="notifyModal.id ? '留空表示不修改已保存的 Client Secret' : 'AGC 后台的 OAuth Client Secret'"
+              autocomplete="new-password"
+            />
+            <div v-if="notifyModal.id" class="hint">
+              <template v-if="notifyModal.hwClientSecretError">
+                <span class="key-error">已存的 Client Secret 无法解密，请重新填写</span>
+              </template>
+              <template v-else>
+                留空表示不改动已保存的密钥（当前{{ notifyModal.hwHasSecret ? '已配置' : '未配置' }}）；
+                已存的密钥在页面上删不掉，不用了这个渠道直接删除重建。
+              </template>
+            </div>
+            <div v-else class="hint">加密落库，接口只回「是否已配置」，不回显明文。</div>
+          </a-form-item>
+          <a-form-item label="推送目标" required>
+            <a-radio-group v-model:value="notifyModal.form.target_type" class="hw-target-radio">
+              <a-radio value="topic">主题 Topic（App 订阅同名主题即可接收）</a-radio>
+              <a-radio value="token">设备 Token（定向单设备）</a-radio>
+            </a-radio-group>
+            <a-input
+              v-model:value="notifyModal.form.target"
+              :maxlength="512"
+              :placeholder="
+                notifyModal.form.target_type === 'topic'
+                  ? '主题名，如 yangvis'
+                  : '设备 Push Token，只推给指定设备'
+              "
+              autocomplete="off"
+            />
+            <div class="hint">
+              <template v-if="notifyModal.id && notifyModal.form.target_type === 'token'">
+                当前：{{ hwDetail(notifyModal.id)?.target || '—' }}（掩码）。留空表示不修改。
+              </template>
+              <template v-else-if="notifyModal.id && notifyModal.form.target_type === 'topic'">
+                主题名不敏感，可直接修改。
+              </template>
+              <template v-else>主题模式适合广播，所有订阅该主题的设备都会收到；设备 Token 模式只推一台。</template>
+            </div>
+          </a-form-item>
+        </template>
+
         <a-form-item label="订阅事件">
           <a-checkbox-group
             v-model:value="notifyModal.form.events"
@@ -560,6 +657,10 @@ import {
   netdiskApi,
   notifyApi,
   settingsApi,
+  type HuaweiChannelCreatePayload,
+  type HuaweiChannelItem,
+  type HuaweiChannelUpdatePayload,
+  type HuaweiTargetType,
   type MemoryItem,
   type ModelConfig,
   type ModelPurpose,
@@ -907,6 +1008,7 @@ const KIND_LABELS: Record<NotifyKind, string> = {
   wecom: '企业微信',
   dingtalk: '钉钉',
   generic: '自定义',
+  huawei: '华为推送',
 }
 const KIND_OPTIONS = (Object.keys(KIND_LABELS) as NotifyKind[]).map((kind) => ({
   value: kind,
@@ -928,7 +1030,8 @@ let notifyLoaded = false
 const notifyColumns = [
   { title: '名称', dataIndex: 'name', width: 150 },
   { title: '类型', key: 'kind', width: 100 },
-  { title: 'Webhook 地址', key: 'webhook_url', width: 240, ellipsis: true },
+  // webhook 渠道显示机器人地址，华为渠道显示推送目标（主题/设备掩码）。
+  { title: '地址 / 推送目标', key: 'webhook_url', width: 240, ellipsis: true },
   { title: '订阅事件', key: 'events' },
   { title: '启用', key: 'enabled', width: 70 },
   { title: '连通测试', key: 'test', width: 100 },
@@ -971,6 +1074,12 @@ const emptyNotifyForm = () => ({
   secret: '',
   events: [] as string[],
   enabled: true,
+  // 华为 HMS Push 渠道字段（kind=huawei 时启用，其余 kind 忽略）。
+  app_id: '',
+  client_id: '',
+  client_secret: '',
+  target_type: 'topic' as HuaweiTargetType,
+  target: '',
 })
 
 const notifyModal = reactive({
@@ -984,10 +1093,43 @@ const notifyModal = reactive({
   // 换过 ENCRYPTION_KEY 的渠道，掩码位置显示的是错误；这时地址必须重填，
   // 否则保存下来仍是一个解不开的渠道。
   urlBroken: false,
+  // 华为编辑态：掩码/错误回显，以及 diff 基线（避免未改字段也触发凭据重置）。
+  hwMaskedClientId: '',
+  hwHasSecret: false,
+  hwClientIdError: null as string | null,
+  hwClientSecretError: null as string | null,
+  hwInitial: null as null | {
+    app_id: string
+    target_type: HuaweiTargetType
+    target: string
+  },
 })
 
 const notifyNeedsSecret = computed(
   () => notifyModal.form.kind === 'dingtalk' || notifyModal.form.kind === 'feishu',
+)
+const isHuaweiForm = computed(() => notifyModal.form.kind === 'huawei')
+
+// 列表接口只回 webhook 形状；华为行的推送目标与凭据状态要按 id 补拉详情。
+const huaweiDetails = ref(new Map<number, HuaweiChannelItem>())
+
+function hwDetail(id: number): HuaweiChannelItem | undefined {
+  return huaweiDetails.value.get(id)
+}
+
+function huaweiTargetText(record: NotifyChannelItem): string {
+  const detail = huaweiDetails.value.get(record.id)
+  if (!detail) return '—'
+  // token 模式后端已掩码，可直接展示；topic 名不敏感，明文显示。
+  return detail.target_type === 'topic' ? `主题：${detail.target}` : `设备：${detail.target}`
+}
+
+// 切换推送目标类型后旧目标值不再适用（主题名 vs 设备 token），清空避免误提交。
+watch(
+  () => notifyModal.form.target_type,
+  (value, oldValue) => {
+    if (notifyModal.open && value !== oldValue) notifyModal.form.target = ''
+  },
 )
 
 async function loadNotify() {
@@ -997,6 +1139,16 @@ async function loadNotify() {
     notifyEvents.value = events.items
     notifyChannels.value = channels.items
     notifyLoaded = true
+    // 华为行的目标/掩码不在列表接口里，按行补拉；单个失败不影响整张表。
+    const hwRows = channels.items.filter((channel) => channel.kind === 'huawei')
+    const details = await Promise.all(
+      hwRows.map((channel) => notifyApi.getHuaweiChannel(channel.id, true).catch(() => null)),
+    )
+    huaweiDetails.value = new Map(
+      details
+        .filter((detail): detail is HuaweiChannelItem => detail !== null)
+        .map((detail) => [detail.id, detail]),
+    )
   } finally {
     notifyLoading.value = false
   }
@@ -1014,11 +1166,20 @@ async function loadNotifyLogs() {
   }
 }
 
+function resetHwEditState() {
+  notifyModal.hwMaskedClientId = ''
+  notifyModal.hwHasSecret = false
+  notifyModal.hwClientIdError = null
+  notifyModal.hwClientSecretError = null
+  notifyModal.hwInitial = null
+}
+
 function openNotifyCreate() {
   notifyModal.id = 0
   notifyModal.maskedUrl = ''
   notifyModal.hadSecret = false
   notifyModal.urlBroken = false
+  resetHwEditState()
   notifyModal.form = {
     ...emptyNotifyForm(),
     events: notifyEvents.value.filter((event) => event.default_on).map((event) => event.key),
@@ -1026,17 +1187,49 @@ function openNotifyCreate() {
   notifyModal.open = true
 }
 
-function openNotifyEdit(channel: NotifyChannelItem) {
+async function openNotifyEdit(channel: NotifyChannelItem) {
+  if (channel.kind === 'huawei') {
+    // 华为渠道的字段在独立端点：拉详情填表单，掩码只用于提示、不回填输入框。
+    const detail = await notifyApi.getHuaweiChannel(channel.id)
+    notifyModal.id = channel.id
+    notifyModal.maskedUrl = ''
+    notifyModal.hadSecret = false
+    notifyModal.urlBroken = false
+    notifyModal.hwMaskedClientId = detail.client_id_masked
+    notifyModal.hwHasSecret = detail.has_client_secret
+    notifyModal.hwClientIdError = detail.client_id_error ?? null
+    notifyModal.hwClientSecretError = detail.client_secret_error ?? null
+    // topic 名不敏感、明文回填可直接编辑；设备 token 是掩码，输入框留空＝保持原样。
+    const topicTarget = detail.target_type === 'topic' ? detail.target : ''
+    notifyModal.hwInitial = {
+      app_id: detail.app_id,
+      target_type: detail.target_type,
+      target: topicTarget,
+    }
+    notifyModal.form = {
+      ...emptyNotifyForm(),
+      kind: 'huawei',
+      name: detail.name,
+      events: [...detail.events],
+      enabled: detail.enabled,
+      app_id: detail.app_id,
+      target_type: detail.target_type,
+      target: topicTarget,
+    }
+    notifyModal.open = true
+    return
+  }
+
   notifyModal.id = channel.id
   notifyModal.maskedUrl = channel.webhook_url
   notifyModal.hadSecret = channel.has_secret
   notifyModal.urlBroken = Boolean(channel.webhook_url_error)
+  resetHwEditState()
   notifyModal.form = {
+    ...emptyNotifyForm(),
     name: channel.name,
     kind: channel.kind,
     // 与模型密钥同一处理：把掩码原样送回毫无意义，留空才是告诉后端保留已存的地址。
-    webhook_url: '',
-    secret: '',
     events: [...channel.events],
     enabled: channel.enabled,
   }
@@ -1045,12 +1238,17 @@ function openNotifyEdit(channel: NotifyChannelItem) {
 
 async function submitNotifyChannel() {
   const name = notifyModal.form.name.trim()
-  const url = notifyModal.form.webhook_url.trim()
-  const secret = notifyModal.form.secret.trim()
   if (!name) {
     message.warning('请填写渠道名称')
     return
   }
+  if (isHuaweiForm.value) {
+    await submitHuaweiChannel(name)
+    return
+  }
+
+  const url = notifyModal.form.webhook_url.trim()
+  const secret = notifyModal.form.secret.trim()
   if ((!notifyModal.id || notifyModal.urlBroken) && !url) {
     message.warning(
       notifyModal.urlBroken
@@ -1077,6 +1275,86 @@ async function submitNotifyChannel() {
     } else {
       await notifyApi.createChannel(payload)
       message.success('已创建，建议点「测试」确认群里能收到')
+    }
+    notifyModal.open = false
+    await loadNotify()
+  } finally {
+    notifyModal.loading = false
+  }
+}
+
+async function submitHuaweiChannel(name: string) {
+  const form = notifyModal.form
+  const isEdit = Boolean(notifyModal.id)
+  const appId = form.app_id.trim()
+  const clientId = form.client_id.trim()
+  const clientSecret = form.client_secret.trim()
+  const target = form.target.trim()
+
+  if (!appId) {
+    message.warning('请填写 App ID')
+    return
+  }
+  // 新建时四项凭据/目标缺一不可；编辑态留空＝保持已存值。
+  if (!isEdit) {
+    if (!clientId) {
+      message.warning('请填写 Client ID')
+      return
+    }
+    if (!clientSecret) {
+      message.warning('请填写 Client Secret')
+      return
+    }
+    if (!target) {
+      message.warning(form.target_type === 'topic' ? '请填写订阅主题名' : '请填写设备 Push Token')
+      return
+    }
+  } else if (
+    notifyModal.hwInitial &&
+    form.target_type !== notifyModal.hwInitial.target_type &&
+    !target
+  ) {
+    // 切换目标类型会清空旧目标（主题名与设备 token 不通用），不重填就保存会错配。
+    message.warning('切换推送目标类型后，请重新填写目标（主题名或设备 Token）')
+    return
+  }
+
+  notifyModal.loading = true
+  try {
+    if (!isEdit) {
+      const payload: HuaweiChannelCreatePayload = {
+        name,
+        app_id: appId,
+        client_id: clientId,
+        client_secret: clientSecret,
+        target_type: form.target_type,
+        target,
+        events: form.events,
+        enabled: form.enabled,
+      }
+      await notifyApi.createHuaweiChannel(payload)
+      message.success('已创建，建议点「测试」确认手机能收到')
+    } else {
+      // 只传变化的字段：app_id/target_type/target 未改就不传，否则后端会把
+      // 它们计为凭据变更，无谓地作废旧的连通测试结论。
+      const initial = notifyModal.hwInitial
+      const payload: HuaweiChannelUpdatePayload = {
+        name,
+        events: form.events,
+        enabled: form.enabled,
+      }
+      if (initial && appId !== initial.app_id) payload.app_id = appId
+      if (initial && form.target_type !== initial.target_type) {
+        payload.target_type = form.target_type
+      }
+      // topic 基线是明文（未改即相等，不传）；token 基线输入框留空，填了才是新值。
+      const baselineTarget = initial?.target_type === 'topic' ? initial.target : ''
+      if (target && target !== baselineTarget) payload.target = target
+      if (clientId) payload.client_id = clientId
+      if (clientSecret) payload.client_secret = clientSecret
+
+      await notifyApi.updateHuaweiChannel(notifyModal.id, payload)
+      message.success('已更新')
     }
     notifyModal.open = false
     await loadNotify()
@@ -1209,6 +1487,13 @@ onMounted(load)
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+/* 华为推送目标两个选项文案都长，横排会换行错位，竖排与输入框对齐。 */
+.hw-target-radio {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
 }
 .notify-logs-head {
   margin-top: 20px;
