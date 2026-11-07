@@ -23,6 +23,7 @@ from app.models.entities import (
     OpsServer,
     Resume,
     SlideDeck,
+    UserMemory,
     Workflow,
     WorkflowRun,
 )
@@ -103,6 +104,7 @@ class DashboardService:
             slide_count=owned_count(SlideDeck),
             interview_count=owned_count(InterviewRecord),
             note_count=owned_count(Note),
+            memory_count=owned_count(UserMemory),
             workflow_count=workflow_count,
             run_count_today=run_count_today,
             server_count=owned_count(OpsServer),

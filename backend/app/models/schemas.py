@@ -2746,6 +2746,7 @@ class DashboardSummary(BaseModel):
     slide_count: int = 0
     interview_count: int = 0
     note_count: int = 0
+    memory_count: int = 0
     workflow_count: int = 0
     # 调用方今天发起过的运行次数：工作流是「流水线定义」，光数条数说明不了有没有
     # 在用，配上当天的执行次数才看得出这是不是一条活着的链路。

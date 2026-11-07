@@ -26,6 +26,7 @@ from app.models.entities import (
     OpsServer,
     Resume,
     SlideDeck,
+    UserMemory,
     Workflow,
     WorkflowRun,
 )
@@ -63,6 +64,7 @@ def _mine(db, owner_id: int = OWNER) -> None:
             SlideDeck(owner_id=owner_id, title="s", source_text="x"),
             InterviewRecord(owner_id=owner_id, company="c", position="p"),
             Note(owner_id=owner_id, title="n"),
+            UserMemory(owner_id=owner_id, content="偏好简洁回答"),
             OpsServer(owner_id=owner_id, name=f"s{owner_id}", host="1.1.1.1", username="root"),
             OpsDatabase(owner_id=owner_id, name=f"d{owner_id}", host="1.1.1.1"),
             workflow,
@@ -93,6 +95,8 @@ def test_counts_are_scoped_to_owner(db):
     assert data.slide_count == 1
     assert data.interview_count == 1
     assert data.note_count == 1
+    # 长期记忆同样按 owner 隔离：两个 owner 各一条，自己只能数到自己的。
+    assert data.memory_count == 1
     assert data.server_count == 1
     assert data.database_count == 1
     # 会话按 owner 隔离；内置智能体（owner_id=0）对所有人可用，算进每个人的计数。
