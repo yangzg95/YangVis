@@ -10,7 +10,7 @@ Redis 连接展开的是逻辑库，库列表由 :mod:`app.services.ops.db_redis
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pymysql
 
@@ -76,17 +76,23 @@ async def list_schemas(item: OpsDatabase) -> List[DbSchemaItem]:
     return [DbSchemaItem(name=str(r[0]), kind="schema", object_count=int(r[1])) for r in rows]
 
 
-async def list_tables(item: OpsDatabase, schema: str) -> List[DbTableItem]:
-    """一个 schema 下的表与视图。"""
+async def list_tables(
+    item: OpsDatabase, schema: str, like: Optional[str] = None
+) -> List[DbTableItem]:
+    """一个 schema 下的表与视图；``like`` 是按表名子串的服务端过滤。
+
+    过滤放在服务端而不是前端：前端只能筛已下发的 ``_BROWSE_CAP`` 条，表多的库
+    筛完照样看不见目标表，那才是真正要解决的问题。
+    """
+    where, args = _tables_where(schema, like)
     sql = (
         "SELECT TABLE_NAME, TABLE_TYPE, ENGINE, TABLE_ROWS, TABLE_COMMENT "
-        "FROM information_schema.TABLES WHERE TABLE_SCHEMA=%s "
-        "ORDER BY TABLE_TYPE, TABLE_NAME"
+        f"FROM information_schema.TABLES {where} ORDER BY TABLE_TYPE, TABLE_NAME"
     )
     password = _password_of(item)
     try:
         _, rows, _, _ = await asyncio.to_thread(
-            _query_mysql, item, password, sql, _BROWSE_CAP, (schema,)
+            _query_mysql, item, password, sql, _BROWSE_CAP, args
         )
     except pymysql.Error as exc:
         raise OpsDbError(f"读取表列表失败：{exc}") from exc
@@ -100,6 +106,44 @@ async def list_tables(item: OpsDatabase, schema: str) -> List[DbTableItem]:
         )
         for r in rows
     ]
+
+
+async def count_tables(item: OpsDatabase, schema: str, like: Optional[str] = None) -> int:
+    """与 :func:`list_tables` 命中同一批表的数量，用来判断列表有没有被截掉。
+
+    不复用 ``_query_mysql`` 的 truncated：截断只说明「还有」，界面上要说的是
+    「一共多少、这里少列了多少」。
+    """
+    where, args = _tables_where(schema, like)
+    password = _password_of(item)
+    try:
+        _, rows, _, _ = await asyncio.to_thread(
+            _query_mysql, item, password,
+            f"SELECT COUNT(*) FROM information_schema.TABLES {where}", 1, args
+        )
+    except pymysql.Error as exc:
+        raise OpsDbError(f"统计表数量失败：{exc}") from exc
+    return int(rows[0][0]) if rows else 0
+
+
+def _tables_where(schema: str, like: Optional[str]) -> Tuple[str, Sequence[Any]]:
+    """表列表与计数共用的 WHERE + 参数。两处必须同源，否则 ``total`` 和 ``items``
+    会各说各话，前端的「少列了 N 张」就算错了。"""
+    pattern = _table_name_pattern(like)
+    where = "WHERE TABLE_SCHEMA=%s" + (" AND TABLE_NAME LIKE %s ESCAPE '!'" if pattern else "")
+    return where, ((schema, pattern) if pattern else (schema,))
+
+
+def _table_name_pattern(like: Optional[str]) -> Optional[str]:
+    """表名关键字 → LIKE 模式，``!`` 作转义符，与 SQL 里的 ``ESCAPE '!'`` 对应。
+
+    值本身走参数化，这里只处理通配符语义：用户敲的 ``%`` / ``_`` 当字面量看待；
+    转义符不依赖反斜杠，``NO_BACKSLASH_ESCAPES`` 下同样成立。
+    """
+    if not like:
+        return None
+    escaped = like.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+    return f"%{escaped}%"
 
 
 # 结构页签的三份元数据各自一条 SQL；单条端点与聚合端点共用，避免口径漂移。

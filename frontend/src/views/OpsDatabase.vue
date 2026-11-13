@@ -140,6 +140,7 @@
               :writable="tab.conn.writable"
               :schema="tab.schema"
               :initial-sql="tab.sql"
+              :session-key="tab.key"
               @ask-ai="onAskAi"
             />
           </a-tab-pane>
@@ -345,11 +346,90 @@
         <a-button :disabled="backup.running" @click="runBackup('download')">下载到本地</a-button>
       </a-space>
     </a-modal>
+
+    <!-- 还原备份 / 导入 SQL：一份 .sql 逐句跑在一条可写会话上，进度一帧一帧回来。 -->
+    <a-modal
+      v-model:open="restore.open"
+      :title="`还原到 ${restore.connName} · ${restore.schema}`"
+      :footer="null"
+      :width="560"
+      :mask-closable="false"
+    >
+      <a-form layout="vertical">
+        <a-form-item label="SQL 文件">
+          <a-space>
+            <a-button :disabled="restore.running" @click="restoreInput?.click()">选择文件</a-button>
+            <span v-if="restore.file" class="restore-file">
+              {{ restore.file.name }}（{{ fmtSize(restore.file.size) }}）
+            </span>
+            <span v-else class="restore-file">未选择</span>
+          </a-space>
+          <input
+            ref="restoreInput"
+            type="file"
+            accept=".sql,text/plain"
+            class="restore-file-input"
+            @change="onPickRestoreFile"
+          />
+        </a-form-item>
+        <a-form-item>
+          <a-checkbox v-model:checked="restore.stopOnError" :disabled="restore.running">
+            撞到第一个错误就停（默认逐句继续，出错的那句单独记）
+          </a-checkbox>
+        </a-form-item>
+      </a-form>
+
+      <p class="restore-hint">
+        逐句独立执行、成功的各自已落盘：中途停止或断开都不回滚，写进去的留在库里。
+        备份文件不含 DROP TABLE，同名表已存在时那句建表会失败而不是覆盖；
+        文件里的 USE 会把会话切到它点名的库，这里选的目标库只是起点。
+      </p>
+      <p v-if="!restore.allowed" class="restore-hint restore-warn">
+        这条连接没开「允许写入」，或当前账号没有运维写权限——还原会被直接拒掉。
+      </p>
+
+      <template v-if="restore.total">
+        <a-progress :percent="restorePercent" :status="restoreStatus" />
+        <p class="restore-counts">
+          成功 {{ restore.succeeded }} · 失败 {{ restore.failed }} · 跳过 {{ restore.skipped }}
+          <template v-if="restore.notRun"> · 未执行 {{ restore.notRun }}</template>
+          / 共 {{ restore.total }} 句
+          <template v-if="restore.elapsedMs"> · 用时 {{ fmtElapsed(restore.elapsedMs) }}</template>
+        </p>
+        <p v-if="restore.uses.length" class="restore-hint restore-warn">
+          这份脚本会切库到：{{ restore.uses.join('、') }}。
+        </p>
+        <p v-if="restore.stmtTimeout" class="restore-hint">
+          单句超时放宽到 {{ restore.stmtTimeout }} 秒，几十万行的多行 INSERT 才跑得完。
+        </p>
+        <div v-if="restore.errors.length" class="restore-errors">
+          <div v-for="err in restore.errors" :key="err.index" class="restore-error">
+            <span class="restore-error-where">第 {{ err.index }} 句</span>
+            <span class="restore-error-msg">{{ err.message }}</span>
+            <div class="restore-error-sql mono">{{ err.sql }}</div>
+          </div>
+        </div>
+      </template>
+      <p v-if="restore.note" class="restore-hint restore-warn">{{ restore.note }}</p>
+
+      <a-space>
+        <a-button
+          type="primary"
+          :loading="restore.running"
+          :disabled="!restore.file || !restore.allowed"
+          @click="runRestore"
+        >
+          {{ restore.finished ? '再还原一次' : '开始还原' }}
+        </a-button>
+        <a-button v-if="restore.running" @click="stopRestore">停止</a-button>
+        <a-button :disabled="restore.running" @click="restore.open = false">关闭</a-button>
+      </a-space>
+    </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Empty, Modal, message as toast } from 'ant-design-vue'
 import {
@@ -379,7 +459,14 @@ import RedisKeysTab from '@/components/ops/RedisKeysTab.vue'
 import { clampSize, readSize, saveSize, startDragResize } from '@/components/ops/resizer'
 import '@/components/ops/resizer.css'
 import type { TabRequest, TreeMenuEvent, TreeNode } from '@/components/ops/tabs'
+import {
+  dropWorkbenchSql,
+  loadWorkbenchState,
+  restoredQuerySeq,
+  saveWorkbenchState,
+} from '@/components/ops/workbenchSession'
 import { saveBlobResponse } from '@/utils/download'
+import { fmtElapsed, fmtSize } from '@/utils/format'
 import { storageKeys } from '@/utils/storage'
 import { useIsMobile } from '@/utils/useIsMobile'
 import {
@@ -389,6 +476,7 @@ import {
   type OpsDatabase,
   type OpsDatabasePayload,
 } from '@/api'
+import { streamRestore, type RestoreErrorItem } from '@/api/restore'
 import { useAuthStore } from '@/stores/auth'
 import { useThemeStore } from '@/stores/theme'
 
@@ -486,6 +574,8 @@ async function load() {
     if (selectedId.value && !res.items.some((item) => item.id === selectedId.value)) {
       selectedId.value = null
     }
+    // 连接列表到手，才有得认上次留下的页签（只认这一次）。
+    restoreSession()
   } finally {
     loading.value = false
   }
@@ -536,6 +626,70 @@ interface Tab {
 
 const tabs = ref<Tab[]>([])
 const activeTabKey = ref<string>()
+
+// 页签列表 + 激活项一变就落 sessionStorage：刷新、误关浏览器标签页回来，
+// 工作台还是原来那一摊。编辑器草稿由 DbQueryTab 自己按页签 key 记。
+watch(
+  [tabs, activeTabKey],
+  () => {
+    saveWorkbenchState({
+      tabs: tabs.value.map((tab) => ({
+        key: tab.key,
+        kind: tab.kind,
+        title: tab.title,
+        connId: tab.conn.id,
+        schema: tab.schema,
+        table: tab.table,
+        db: tab.db,
+        rkey: tab.rkey,
+      })),
+      activeKey: activeTabKey.value,
+    })
+  },
+  { deep: true },
+)
+
+/** 恢复只做一次：首次 load 之后跑，之后页签怎么变都以现场里的为准。 */
+let sessionRestored = false
+
+/**
+ * 把上次的页签摊回来。连接按 id 现认——认不到就是这一轮台账里已经没有它了，
+ * 那张页签没有落点，丢掉；其余照原顺序、原激活项恢复。
+ */
+function restoreSession(): void {
+  if (sessionRestored) return
+  sessionRestored = true
+  const state = loadWorkbenchState()
+  if (!state) return
+  const restored: Tab[] = []
+  for (const item of state.tabs) {
+    const conn = databases.value.find((row) => row.id === item.connId)
+    if (!conn || restored.some((tab) => tab.key === item.key)) continue
+    restored.push({
+      key: item.key,
+      kind: item.kind,
+      title: item.title,
+      conn,
+      schema: item.schema,
+      table: item.table,
+      db: item.db,
+      rkey: item.rkey,
+    })
+  }
+  if (!restored.length) {
+    // 页签全都找不到落点了（连接被删）：现场清掉，别留着下次再认一遍。
+    saveWorkbenchState({ tabs: [] })
+    return
+  }
+  tabs.value = restored
+  // 查询序号接在恢复出来的最大号后面，否则新建查询会撞已恢复页签的 key。
+  for (const [connId, seq] of Object.entries(restoredQuerySeq(state.tabs))) {
+    querySeq.set(Number(connId), seq)
+  }
+  activeTabKey.value = restored.some((tab) => tab.key === state.activeKey)
+    ? state.activeKey
+    : restored[0].key
+}
 
 // 切换激活页签时，把右侧 AI 问答的目标连接一起带过去：
 // 问 AI 的上下文应该是「正在看的这个页签」，而不是上次在树上点中的连接。
@@ -639,6 +793,7 @@ function removeTab(tabKey: string) {
   const index = tabs.value.findIndex((tab) => tab.key === tabKey)
   if (index === -1) return
   tabs.value.splice(index, 1)
+  dropWorkbenchSql(tabKey)
   if (activeTabKey.value === tabKey) {
     activeTabKey.value = tabs.value[Math.min(index, tabs.value.length - 1)]?.key
   }
@@ -663,11 +818,22 @@ function onTabEdit(key: unknown, action: string) {
   removeTab(tabKey)
 }
 
-function closeTabsOf(connId: number) {
-  tabs.value = tabs.value.filter((tab) => tab.conn.id !== connId)
-  if (!tabs.value.some((tab) => tab.key === activeTabKey.value)) {
-    activeTabKey.value = tabs.value[0]?.key
+/** 批量关页签：草稿跟着页签一起删，别在存储里留一份没人认领的 SQL。 */
+function closeTabsWhere(shouldClose: (tab: Tab) => boolean) {
+  const kept: Tab[] = []
+  for (const tab of tabs.value) {
+    if (shouldClose(tab)) dropWorkbenchSql(tab.key)
+    else kept.push(tab)
   }
+  if (kept.length === tabs.value.length) return
+  tabs.value = kept
+  if (!kept.some((tab) => tab.key === activeTabKey.value)) {
+    activeTabKey.value = kept[0]?.key
+  }
+}
+
+function closeTabsOf(connId: number) {
+  closeTabsWhere((tab) => tab.conn.id === connId)
 }
 
 /**
@@ -719,10 +885,7 @@ function confirmCloseDb(node: TreeNode) {
     cancelText: '取消',
     onOk: () => {
       treeRef.value?.collapse(node)
-      tabs.value = tabs.value.filter((tab) => !tabOfDatabase(tab, node))
-      if (!tabs.value.some((tab) => tab.key === activeTabKey.value)) {
-        activeTabKey.value = tabs.value[0]?.key
-      }
+      closeTabsWhere((tab) => tabOfDatabase(tab, node))
     },
   })
 }
@@ -768,6 +931,7 @@ const menuItems = computed<MenuItem[]>(() => {
         { key: 'new-query', label: '新建查询' },
         { key: 'open-erd', label: 'ER 图' },
         { key: 'backup', label: '一键备份' },
+        { key: 'restore', label: '还原备份…' },
         { key: 'refresh', label: '刷新' },
       ]
     case 'table':
@@ -852,6 +1016,9 @@ function onMenuClick(key: string) {
       break
     case 'backup':
       openBackup(conn, node.schema!)
+      break
+    case 'restore':
+      openRestore(conn, node.schema!, node)
       break
     case 'open-keys':
       openTab({ kind: 'redis-keys', conn, db: node.db ?? 0 })
@@ -962,6 +1129,170 @@ async function runBackup(target: 'netdisk' | 'download') {
     backup.running = false
   }
 }
+
+// ---- 还原备份 / 导入 SQL -------------------------------------------------------
+
+const restore = reactive({
+  open: false,
+  running: false,
+  finished: false,
+  connId: 0,
+  connName: '',
+  schema: '',
+  /** 台账写开关 × 账号运维写权限，两道都过才谈得上还原（服务端同样判一次）。 */
+  allowed: false,
+  stopOnError: false,
+  file: null as File | null,
+  total: 0,
+  done: 0,
+  succeeded: 0,
+  failed: 0,
+  skipped: 0,
+  notRun: 0,
+  elapsedMs: 0,
+  stmtTimeout: 0,
+  uses: [] as string[],
+  errors: [] as RestoreErrorItem[],
+  /** 停止、断开、连接被拒这类「为什么没跑完」的一句话。 */
+  note: '',
+})
+
+const restoreInput = ref<HTMLInputElement | null>(null)
+let restoreAbort: (() => void) | null = null
+// 树里被还原的那个库节点：跑完要刷新它，表清单大概率已经不是原来那份了。
+// 放在 reactive 外面——节点对象归树自己所有，不该被弹窗再包一层响应式。
+let restoreNode: TreeNode | null = null
+
+/** 进度按「处理过的句数」走：没跑完之前不封顶到 100，跑完才给满格。 */
+const restorePercent = computed(() =>
+  restore.total
+    ? restore.finished
+      ? 100
+      : Math.min(99, Math.floor((restore.done / restore.total) * 100))
+    : 0,
+)
+
+/** 跑完之前进度条一直是 active：半路停下（错误、停止、断线）用 exception，全绿才算 success。 */
+const restoreStatus = computed(() => {
+  if (!restore.finished) return 'active'
+  return restore.failed || restore.notRun || restore.note ? 'exception' : 'success'
+})
+
+function openRestore(conn: OpsDatabase, schema: string, node: TreeNode) {
+  restore.connId = conn.id
+  restore.connName = conn.name
+  restore.schema = schema
+  restore.allowed = Boolean(conn.writable && auth.canOpsWrite)
+  restore.stopOnError = false
+  restore.file = null
+  restoreNode = node
+  resetRestoreProgress()
+  restore.open = true
+}
+
+function resetRestoreProgress() {
+  restore.finished = false
+  restore.total = 0
+  restore.done = 0
+  restore.succeeded = 0
+  restore.failed = 0
+  restore.skipped = 0
+  restore.notRun = 0
+  restore.elapsedMs = 0
+  restore.stmtTimeout = 0
+  restore.uses = []
+  restore.errors = []
+  restore.note = ''
+}
+
+function onPickRestoreFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  restore.file = input.files?.[0] ?? null
+  resetRestoreProgress()
+  // 同一个文件重选一次也要能触发：input 的 value 不清掉就不算 change。
+  input.value = ''
+}
+
+function runRestore() {
+  if (restore.running || !restore.file) return
+  const { connId, schema, file, stopOnError } = restore
+  resetRestoreProgress()
+  restore.running = true
+  restoreAbort = streamRestore(
+    connId,
+    schema,
+    file,
+    {
+      onStart: (data) => {
+        restore.total = data.total
+        restore.uses = data.uses || []
+        restore.stmtTimeout = data.stmt_timeout_seconds
+      },
+      onProgress: (data) => {
+        restore.done = data.done
+        restore.succeeded = data.succeeded
+        restore.failed = data.failed
+        restore.skipped = data.skipped
+        restore.notRun = data.not_run
+        // 每帧带的是累积到现在的样本（服务端全局只留前 50 条），整份替换即可。
+        if (data.errors?.length) restore.errors = data.errors
+        if (data.stop_reason) restore.note = data.stop_reason
+      },
+      onDone: (data) => {
+        restore.done = data.done
+        restore.succeeded = data.succeeded
+        restore.failed = data.failed
+        restore.skipped = data.skipped
+        restore.notRun = data.not_run
+        restore.elapsedMs = data.elapsed_ms
+        restore.errors = data.errors || []
+        restore.note = data.stop_reason || ''
+        restore.running = false
+        restore.finished = true
+        restoreAbort = null
+        if (data.failed || data.not_run) {
+          toast.warning({
+            content: `还原结束：成功 ${data.succeeded} 句，失败 ${data.failed} 句，未执行 ${data.not_run} 句`,
+            duration: 8,
+          })
+        } else {
+          toast.success({ content: `还原完成：${data.succeeded} 句`, duration: 6 })
+        }
+        // 表清单大概率换了：刷新还原目标那个库节点。
+        if (restoreNode) treeRef.value?.refresh(restoreNode)
+      },
+      onError: (message) => {
+        restore.running = false
+        restore.finished = true
+        restore.note = message
+        restoreAbort = null
+        toast.error({ content: message, duration: 8 })
+      },
+    },
+    { stopOnError },
+  )
+}
+
+/**
+ * 「停止」只断这一条进度流。
+ *
+ * 服务端那边的会话随之断开，正在执行的那一批跑完当前语句后就不再继续；已经落盘的
+ * 语句不回滚——这是 autocommit 逐句执行的唯一诚实说法，界面必须照着说。
+ */
+function stopRestore() {
+  restoreAbort?.()
+  restoreAbort = null
+  restore.running = false
+  restore.finished = true
+  restore.note = '已停止收进度：正在执行的语句跑完之后不再继续，已经写入的不会回滚。'
+}
+
+// 关掉这个标签页（keep-alive 销毁）后弹窗连同状态一起没了，进度没地方放：
+// 断流，服务端那一侧照上面的口径继续跑完当前批。
+onBeforeUnmount(() => {
+  restoreAbort?.()
+  restoreAbort = null
+})
 
 // ---- 连接维护 -----------------------------------------------------------------
 
@@ -1265,6 +1596,70 @@ body.dragging-col .col-resizer::after {
   margin-left: 8px;
   font-size: var(--fs-xs);
   color: var(--text-3);
+}
+
+/* ---- 还原弹窗 ---- */
+.restore-file {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+/* 真的选文件的是那个隐藏 input，按钮只是替它挨一下点击。 */
+.restore-file-input {
+  display: none;
+}
+
+.restore-hint {
+  margin: -8px 0 12px;
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  color: var(--text-3);
+}
+
+.restore-warn {
+  color: var(--warning);
+}
+
+.restore-counts {
+  margin: 0 0 12px;
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+}
+
+/* 失败样本最多 50 条，全铺会把弹窗撑出屏幕：给一段自己的滚动区。 */
+.restore-errors {
+  max-height: 180px;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  overflow: auto;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: 6px;
+}
+
+.restore-error + .restore-error {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
+}
+
+.restore-error-where {
+  margin-right: 6px;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+.restore-error-msg {
+  font-size: var(--fs-xs);
+  color: var(--danger);
+}
+
+.restore-error-sql {
+  margin-top: 2px;
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+  word-break: break-all;
+  white-space: pre-wrap;
 }
 
 .tab-label {

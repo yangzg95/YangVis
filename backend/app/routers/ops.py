@@ -15,10 +15,22 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from collections import namedtuple
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -94,9 +106,12 @@ from app.services.ops import db_data as db_data
 from app.services.ops import db_design as db_design
 from app.services.ops import db_exec as db_exec
 from app.services.ops import db_redis as db_redis
+from app.services.ops import db_restore as db_restore
 from app.services.ops import db_schema as db_schema
 from app.services.ops import server as server_ops
 from app.services.ops import terminal as term_ops
+from app.services.uploads import content_length_exceeds, oversize_message, read_upload_limited
+from app.sse import SSE_HEADERS, sse_event, with_heartbeat
 
 logger = logging.getLogger("yangvis.ops")
 
@@ -528,15 +543,20 @@ async def list_database_schemas(
 async def list_database_tables(
     database_id: int,
     schema: str,
+    like: Optional[str] = Query(default=None, max_length=64, description="按表名子串过滤"),
     service: db_ops.OpsDatabaseService = Depends(get_database_service),
 ) -> APIResponse[ListResponse[DbTableItem]]:
+    """表列表。``total`` 是命中过滤条件的真实表数，可能大于 ``items``——
+    超过 ``_BROWSE_CAP`` 时前端据此说明「少列了 N 张」，而不是静默少列。"""
     row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
+    keyword = (like or "").strip() or None
     try:
-        items = await db_schema.list_tables(row, schema)
+        items = await db_schema.list_tables(row, schema, keyword)
+        total = await db_schema.count_tables(row, schema, keyword)
     except db_ops.OpsDbError as exc:
         raise _browse_error(exc) from exc
     _note_browse_success(service, row)
-    return APIResponse(data=ListResponse(items=items, total=len(items)))
+    return APIResponse(data=ListResponse(items=items, total=total))
 
 
 @router.get(
@@ -905,6 +925,141 @@ async def backup_database_to_netdisk(
             bytes=len(raw),
         ),
         message="备份已保存到百度网盘",
+    )
+
+
+# ---- 还原备份 / 导入 SQL 脚本 --------------------------------------------------
+
+
+def _restore_audit_command(schema: str, filename: str, statements: Optional[int] = None) -> str:
+    """审计文本：一句还原记一条，记的是「谁把哪份文件喂进了哪个库」。"""
+    label = f"[还原 {schema}] {filename[:80]}"
+    return f"{label} 共 {statements} 句" if statements is not None else label
+
+
+# 流式期间请求级 session 已经关掉（FastAPI ≥0.106 在响应体开始前退出依赖），
+# 台账对象随之 detached。审计只用得上这两个字段，因此传值而不是传 ORM。
+_AuditRef = namedtuple("_AuditRef", ["id", "name"])
+
+
+def _audit_restore(owner_id: int, target: _AuditRef, command: str, summary: Dict[str, Any]) -> None:
+    """还原跑完（或被断开）后补一条真实结果的审计。
+
+    单独开 session：进度流收尾时请求级那条已经没了。整份脚本不进审计——几万句
+    INSERT 会把审计表刷成备份文件本身，界面要看的是计数和头一条错误。
+    """
+    errors = summary.get("errors") or []
+    first_error = errors[0]["message"] if errors else None
+    message = (
+        f"成功 {summary['succeeded']} / 失败 {summary['failed']} / 跳过 {summary['skipped']}"
+        f" / 未执行 {summary['not_run']}（共 {summary['total']} 句）"
+    )
+    if summary["stopped"]:
+        message = f"{message}，{summary['stop_reason']}"
+    db = SessionLocal()
+    try:
+        _audit(
+            db, owner_id, target, f"{command} → {message}", "write",
+            summary["failed"] == 0 and not summary["stopped"],
+            first_error,
+        )
+    except Exception:  # noqa: BLE001 - 收尾审计写不进去，不该盖住已经发生的写入
+        logger.warning("restore audit failed for user %s", owner_id, exc_info=True)
+    finally:
+        db.close()
+
+
+async def _restore_frames(
+    session: db_restore.RestoreSession,
+    stop_on_error: bool,
+    owner_id: int,
+    target: _AuditRef,
+    command: str,
+) -> AsyncIterator[str]:
+    """还原进度 → SSE 帧，最后一帧是带整页摘要的 ``done``。
+
+    客户端断开时 ``GeneratorExit`` 落进 finally：会话在服务层那边关掉，已落盘的语句
+    留在库里（可写会话是 autocommit），这一条审计记的就是「断在这儿时跑到了哪」。
+    """
+    try:
+        async for event in db_restore.stream_restore(session, stop_on_error):
+            yield sse_event(event["type"], event)
+    finally:
+        _audit_restore(owner_id, target, command, session.summary())
+
+
+@router.post("/databases/{database_id}/schemas/{schema}/restore")
+async def restore_database_script(
+    database_id: int,
+    schema: str,
+    request: Request,
+    file: UploadFile = File(...),
+    stop_on_error: bool = Query(default=False, description="撞到第一个错误就停，默认逐句继续"),
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    """「还原备份 / 导入 SQL」：一份 .sql 逐句跑在一条可写会话上，进度以事件回传。
+
+    与一键备份是同一条路径的两个方向，因此同样流式——语义却反过来：那边文件是产物，
+    这边语句一落地就收不回（autocommit），所以界面只说「不再跑后面的」，不说回滚。
+    整份执行动辄几分钟，普通请求超时会把「服务端还在写」变成假失败，响应体因此是
+    ``start`` → ``progress``* → ``done`` 三段事件。
+
+    可预期错误（不是 MySQL、没有写权限、文件过大、不是 UTF-8 文本、拆不出语句、
+    连不上库）全在流开始之前判掉，那时还是正常的 JSON 信封。
+    """
+    service = db_ops.OpsDatabaseService(db, user.user_id)
+    row = _get_typed_database(database_id, DatabaseType.MYSQL, service)
+
+    # 闸门先查再收文件：只读账号不该为一个拿不到的结果等完整个上传。
+    if not (row.writable and user.can_ops_write):
+        command = _restore_audit_command(schema, file.filename or "unnamed")
+        _audit(db, user.user_id, row, command, "forbidden", False, "连接未开启写入或用户无写权限")
+        raise BusinessError(CODE_OPS_FORBIDDEN, "该连接未开启写入，或当前账号没有写权限")
+
+    limit = settings.OPS_RESTORE_MAX_BYTES
+    name = (file.filename or "unnamed").replace("\\", "/").rsplit("/", 1)[-1]
+    command = _restore_audit_command(schema, name)
+    if content_length_exceeds(request.headers.get("content-length"), limit):
+        _audit(db, user.user_id, row, command, "write", False, oversize_message(limit))
+        raise BusinessError(CODE_OPS_EXEC_FAILED, oversize_message(limit))
+
+    raw = await read_upload_limited(file, limit)
+    if raw is None:
+        _audit(db, user.user_id, row, command, "write", False, oversize_message(limit))
+        raise BusinessError(CODE_OPS_EXEC_FAILED, oversize_message(limit))
+
+    try:
+        # utf-8-sig：备份文件可能带 BOM，留着它拆语句会吃掉第一个关键字。
+        script = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        _audit(db, user.user_id, row, command, "write", False, "文件不是 UTF-8 文本")
+        raise BusinessError(
+            CODE_OPS_EXEC_FAILED,
+            f"这个文件不是 UTF-8 编码的文本（第 {exc.start + 1} 字节处），请先转码再还原",
+        ) from exc
+
+    try:
+        session = await db_restore.open_restore(
+            row, script, schema, allow_write=user.can_ops_write
+        )
+    except db_ops.OpsDbForbidden as exc:
+        _audit(db, user.user_id, row, command, "forbidden", False, str(exc))
+        raise BusinessError(CODE_OPS_FORBIDDEN, str(exc)) from exc
+    except db_ops.OpsDbError as exc:
+        _audit(db, user.user_id, row, command, "write", False, str(exc))
+        raise _browse_error(exc) from exc
+
+    _note_browse_success(service, row)
+    target = _AuditRef(id=row.id, name=row.name)
+    logger.info(
+        "restore started on database %s schema %s by user %s: %d statements from %s",
+        row.id, schema, user.user_id, session.total, name,
+    )
+    return StreamingResponse(
+        with_heartbeat(_restore_frames(session, stop_on_error, user.user_id, target, command)),
+        media_type="text/event-stream; charset=utf-8",
+        headers=SSE_HEADERS,
     )
 
 

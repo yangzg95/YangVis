@@ -1481,7 +1481,11 @@ class DbBatchStatement(BaseModel):
 
 
 class DbBatchResult(BaseModel):
-    """一段脚本的批量执行结果。单句出错不中断，逐句成败都在这里。"""
+    """一段脚本的批量执行结果。单句出错不中断，逐句成败都在这里。
+
+    ``row_limit`` / ``stmt_timeout_seconds`` 回显服务端这次真正生效的两道上限：
+    界面上「截断」「停止」这两句话要说得出数字，不能只说「见服务端配置」。
+    """
 
     statements: List[DbBatchStatement]
     total: int
@@ -1490,6 +1494,8 @@ class DbBatchResult(BaseModel):
     started_at: datetime
     finished_at: datetime
     elapsed_ms: int = 0
+    row_limit: int = 0
+    stmt_timeout_seconds: int = 0
 
 
 # ---- 数据库浏览（Navicat 式界面的数据源，全部只读） ---------------------------

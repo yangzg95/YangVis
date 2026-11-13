@@ -52,7 +52,8 @@
     <pre v-else class="text">{{ result.text ?? '(empty)' }}</pre>
     <div class="meta">
       {{ result.row_count }} 行 · {{ result.elapsed_ms }} ms
-      <span v-if="result.truncated"> · 结果已截断（上限见服务端配置）</span>
+      <!-- 截断要说清数字和出路：只写「见服务端配置」等于让用户自己猜这次拿到的是不是全量。 -->
+      <span v-if="result.truncated" class="truncated"> · {{ truncationNote }}</span>
     </div>
 
     <GridContextMenu
@@ -104,7 +105,22 @@ export interface ResultGridData {
 
 const props = defineProps<{
   result: ResultGridData
+  /** 服务端这次真正生效的每句行数上限；缺省时只能退回「已显示的行数」这一种说法。 */
+  rowLimit?: number
 }>()
+
+/**
+ * 截断说明：数字来自服务端回显的上限，拿不到时不编造，只说「至多这么多」。
+ * 出路也要给一句，否则用户只会反复按回车。
+ */
+const truncationNote = computed(() => {
+  const shown = props.result.row_count
+  const limit = props.rowLimit
+  const head = limit && limit >= shown
+    ? `已截断，服务端每句最多返回 ${limit} 行`
+    : `已截断，这里至多 ${shown} 行`
+  return `${head}，不是全部结果；要看全部用数据页的「导出全部行」，或在 SQL 里按主键分批翻`
+})
 
 const rows = computed(() => toRows(props.result))
 // toColumns 给初始宽，列头拖拽的覆盖值由 useColumnResize 叠上去；
@@ -326,5 +342,10 @@ function onMenuPick(key: string) {
   padding-top: 4px;
   color: var(--text-3);
   font-size: var(--fs-xs);
+}
+
+/* 截断是「看到的不是全部」，属于会被当成结论误用的信息，别跟着次要文字一起淡。 */
+.truncated {
+  color: var(--warning);
 }
 </style>

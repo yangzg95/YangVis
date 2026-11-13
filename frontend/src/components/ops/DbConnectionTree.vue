@@ -50,6 +50,25 @@
           </a-tag>
         </template>
 
+        <template v-else-if="dataRef.kind === 'filter'">
+          <FilterOutlined class="icon filter" />
+          <!-- 回车才生效：输入过程中不重拉表列表，也就不会把焦点从这个框上抢走。 -->
+          <input
+            v-model="dataRef.keyword"
+            class="filter-input"
+            :disabled="dataRef.loading"
+            placeholder="按表名过滤，回车生效"
+            @mousedown.stop
+            @click.stop
+            @contextmenu.prevent.stop
+            @keydown.enter="applyFilter(dataRef)"
+          />
+        </template>
+
+        <template v-else-if="dataRef.kind === 'note'">
+          <span class="label note-label">{{ dataRef.title }}</span>
+        </template>
+
         <template v-else>
           <DownOutlined class="icon more" />
           <span class="label more-label">{{ dataRef.title }}</span>
@@ -65,6 +84,7 @@ import {
   DatabaseOutlined,
   DownOutlined,
   EyeOutlined,
+  FilterOutlined,
   FolderOutlined,
   KeyOutlined,
   TableOutlined,
@@ -210,8 +230,14 @@ async function loadChildren(node: TreeNode): Promise<TreeNode[]> {
     return schemaNodes(conn, res.items)
   }
   if (node.kind === 'schema') {
-    const res = await opsApi.dbTables(conn.id, node.schema!)
-    return tableNodes(conn, node.schema!, res.items)
+    const res = await opsApi.dbTables(conn.id, node.schema!, node.keyword)
+    const children = tableNodes(conn, node.schema!, res.items)
+    // total 是命中条件的真实表数：比下发条数大就说明服务端截了，必须说破，
+    // 否则用户以为这个库只有这么多表。
+    if (children.length < res.total) {
+      children.push(noteNode(conn, node.schema!, truncationText(node.keyword, res.total, children.length)))
+    }
+    return [filterNode(conn, node), ...children]
   }
   if (node.kind === 'redisdb') {
     const res = await opsApi.redisKeys(conn.id, node.db ?? 0)
@@ -220,6 +246,40 @@ async function loadChildren(node: TreeNode): Promise<TreeNode[]> {
     return children
   }
   return []
+}
+
+/** 截断说明：过滤中给「继续缩小范围」，没过滤时给「用过滤框」。 */
+function truncationText(keyword: string | undefined, total: number, shown: number): string {
+  return keyword?.trim()
+    ? `命中 ${total} 张，只列出前 ${shown} 张，继续输入缩小范围`
+    : `本库共 ${total} 张表，只列出前 ${shown} 张，可用上方过滤框按表名找`
+}
+
+function filterNode(conn: OpsDatabase, schemaNode: TreeNode): TreeNode {
+  return {
+    // key 稳定：重拉表列表时同一个输入框被复用，不会重新挂载丢焦点。
+    key: `filter:${conn.id}:${schemaNode.schema}`,
+    title: '表名过滤',
+    kind: 'filter',
+    conn,
+    schema: schemaNode.schema,
+    parentKey: schemaNode.key,
+    keyword: schemaNode.keyword || '',
+    isLeaf: true,
+    style: tintOf(conn),
+  }
+}
+
+function noteNode(conn: OpsDatabase, schema: string, text: string): TreeNode {
+  return {
+    key: `note:${conn.id}:${schema}`,
+    title: text,
+    kind: 'note',
+    conn,
+    schema,
+    isLeaf: true,
+    style: tintOf(conn),
+  }
 }
 
 async function onLoadData(node: unknown) {
@@ -245,6 +305,29 @@ async function refresh(node: TreeNode) {
     indexChildren(treeData.value)
   } catch (err: any) {
     toast.error(err?.message || '刷新失败')
+  }
+}
+
+/**
+ * 表名过滤：关键字交给服务端 LIKE，而不是在前端筛已下发的那一千条——
+ * 表多的库里，前端过滤筛掉的正是用户要找的那张表。
+ */
+async function applyFilter(node: TreeNode) {
+  const parent = node.parentKey ? nodeIndex.get(node.parentKey) : undefined
+  if (!parent) return
+  parent.keyword = (node.keyword || '').trim()
+  node.loading = true
+  try {
+    parent.children = await loadChildren(parent)
+    nodeIndex.clear()
+    indexChildren(treeData.value)
+  } catch (err: any) {
+    toast.error(err?.message || '按表名过滤失败')
+  } finally {
+    // 失败时这一行的 loading 标记要撤掉，否则整棵树的节点索引重建后
+    // 拿到的是新对象，输入框会一直灰着。
+    const fresh = nodeIndex.get(node.key)
+    if (fresh) fresh.loading = false
   }
 }
 
@@ -360,6 +443,11 @@ function openNode(node: TreeNode) {
 
 function onSelect(_keys: unknown, info: { node: { dataRef: TreeNode } }) {
   const node = info.node.dataRef
+  // 辅助行不参与选中与双击：过滤框自己吃掉事件，说明行没有可开的东西。
+  if (node.kind === 'filter' || node.kind === 'note') {
+    selectedKeys.value = []
+    return
+  }
   if (node.kind === 'more') {
     selectedKeys.value = []
     loadMore(node)
@@ -375,6 +463,7 @@ function onSelect(_keys: unknown, info: { node: { dataRef: TreeNode } }) {
 
 function onRightClick(info: { event: MouseEvent; node: { dataRef: TreeNode } }) {
   const node = info.node.dataRef
+  if (node.kind === 'filter' || node.kind === 'note') return
   if (node.kind === 'conn' && node.conn) emit('select', node.conn)
   emit('menu', {
     x: info.event.clientX,
@@ -485,6 +574,34 @@ function onRightClick(info: { event: MouseEvent; node: { dataRef: TreeNode } }) 
   color: var(--signal-text);
 }
 
+.icon.filter {
+  color: var(--text-3);
+}
+
+/* 过滤框嵌在 schema 的第一行子节点里，跟着 24px 的行高走，别把树撑出刻度。 */
+.filter-input {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--tool-radius);
+  background: var(--surface);
+  color: var(--text-1);
+  font-size: var(--fs-xs);
+  font-family: inherit;
+  outline: none;
+}
+
+.filter-input:focus {
+  border-color: var(--signal-border);
+}
+
+.filter-input:disabled {
+  color: var(--text-3);
+  cursor: default;
+}
+
 .dot {
   width: 8px;
   height: 8px;
@@ -517,5 +634,12 @@ function onRightClick(info: { event: MouseEvent; node: { dataRef: TreeNode } }) 
 
 .more-label {
   color: var(--signal-text);
+}
+
+/* 说明行是「服务端截了列表」这件事的唯一出口，颜色要比次要文字重一档。 */
+.note-label {
+  color: var(--warning);
+  font-size: var(--fs-xs);
+  white-space: normal;
 }
 </style>

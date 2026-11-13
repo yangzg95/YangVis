@@ -11,13 +11,19 @@ ONLY` 里，解析被绕过时服务端自己拒绝写入。连接台账的权�
 
 - **连接树**：连接 → 库（带表数）→ 表/视图，逐级懒加载；连接节点有测试状态色点、
   可配展示色（树行与页签头一起染色，方便认出生产库）。双击表打开数据页签；
-  连接/库节点双击是打开/关闭，关闭要二次确认并连带关掉它的页签。
+  连接/库节点双击是打开/关闭，关闭要二次确认并连带关掉它的页签。库节点展开后第一行
+  是表名过滤框（服务端 `LIKE`，输入后按 Enter 生效），一次最多列 1000 张，列不满时
+  末尾一行说明「共 N 张 / 命中 N 张，只列出前 M 张」并提示继续输入缩小范围——不靠
+  前端在已截断的列表里挑。
 - **多页签工作台**：数据、结构、设计表、ER 图、查询各是一种页签，同一张表去重激活，
   查询页签按连接各自编号（`查询 1 @ 订单库`），可同时开多个。关查询页签时编辑器里
-  还有没执行/没收藏的 SQL 会先确认。
+  还有没执行/没收藏的 SQL 会先确认。页签列表、当前激活项和每个查询页签的编辑器草稿
+  记在 sessionStorage，刷新或误关浏览器标签页回来还是原来那一摊；换个人登录不会看到
+  上一个人的页签（现场只在这一轮浏览器标签页里活）。
 - **多页签查询**：CodeMirror 6 编辑器（MySQL 方言，关键字/表名/字段补全，补全元数据
   按库缓存），Enter 执行、Shift+Enter 换行；有选区只执行选中段；可一键美化 SQL
-  （可 Ctrl+Z 撤销）；「停止」只断开前端等待。工具栏有默认库选择器。
+  （可 Ctrl+Z 撤销）；「停止」只断开前端等待，按钮与停止后的提示都说明白服务端那条
+  还在跑、约多少秒由语句超时兜底收尾（秒数每次执行由后端回显）。工具栏有默认库选择器。
 - **Navicat 式批量执行**：整段脚本拆成多条语句在同一条会话里逐句跑，一句失败不中断。
   底部面板：每条有结果集的语句一个「结果 N」页签，外加「消息」（逐句 OK/报错/耗时，
   点行跳到对应结果页签）和「摘要」（总数/成功/失败/起止时间/总耗时）。单句成功直落
@@ -29,6 +35,8 @@ ONLY` 里，解析被绕过时服务端自己拒绝写入。连接台账的权�
 - **结果网格**：固定表头、列宽可拖（按查询签名持久化）、Null 占位、长内容展开弹窗、
   双击复制、右键复制整行 CSV/JSON。右键「保存数据为…」支持 CSV / JSON / Markdown /
   INSERT 四种格式；查询结果集导的是手上这份已截断的结果（没有可靠表名，不给 INSERT）。
+  被截断时底部那行说得出数字（「服务端每句最多返回 N 行」，N 来自批量接口回显的
+  `row_limit`）和出路：要全量走数据页的「导出全部行」，或在 SQL 里按主键分批翻。
 - **数据浏览**：分页（50/100/200/500）、列头排序（多列带序号）、一个 WHERE 条件栏
   （手输或右键「筛选 = 值」追加，回车生效），底部栏展示实际执行的 SELECT。
 - **行内改值与删除记录**：连接开了写开关且账号有写权限时，单击单元格直接行内编辑
@@ -46,6 +54,13 @@ ONLY` 里，解析被绕过时服务端自己拒绝写入。连接台账的权�
   缩放、下载 SVG；表太多时只画前 40 张并明确提示。
 - **一键备份**：库节点右键，可选「结构+数据 / 仅结构」、整库或勾选若干表，产物是一个
   `.sql`（建库切库 → 逐表 DDL → 分批多行 INSERT），可下载到本地或存百度网盘。
+- **还原备份 / 导入 SQL**：同一个库节点右键「还原备份…」，选一个 `.sql`（上限
+  `OPS_RESTORE_MAX_BYTES`）喂进**同一条可写会话**逐句执行，默认一句失败不中断其余，
+  可勾「撞到第一个错误就停」。进度是一段 SSE 流：首帧给总句数、单句超时和脚本里出现的
+  `USE`，之后每批（200 句）回一次计数（成功 / 失败 / 跳过 / 未执行 + 错误样本），末帧
+  带总耗时。弹窗里的「停止」只断这条进度流，文案直说服务端跑完当前语句才收手、已落盘
+  的不会回滚；跑完刷新树里那个库节点，表清单大概率换了。错误样本全局只留前 50 条——
+  一份连环错的文件可能有上万条，界面要的是「先告诉我错在哪」，句数在计数里。
 - 手机端整个工作台不挂载（编辑器与网格都是桌面交互），显示桌面端提示。
 
 ## 关键取舍
@@ -109,6 +124,24 @@ SQL 解析（`app/services/ops/safety.py` 的 `classify_sql`）只是第一道�
 AI 通道不享受写开关：即使连接可写，AI 发起的执行仍是只读判定加只读会话；它要落写操作
 只能走确认卡片，见 [ops-chat-confirm.md](ops-chat-confirm.md)。
 
+### 还原为什么是一段流，而且不回滚
+
+拆句要先看到整份文件（注释与字符串里的分号切不成流），所以上传有字节上限、且所有可预期
+错误——没有写通行证、文件过大、不是 UTF-8、连不上目标库——一律在流开始**之前**用统一
+信封回掉；界面因此不需要在一个已经跑起来的还原里判断「到底开始没有」。开始执行之后就是
+几十万句在一条会话上顺序落盘，几分钟很正常：普通请求会让浏览器先超时，那恰好是最坏的
+一种假失败（前端以为失败，库已经写进去一半），所以进度走 SSE——服务端每 15 秒一帧心跳、
+压缩中间件按 `Accept: text/event-stream` 放行、前端 120 秒收不到字节才掐断。
+
+不回滚是同一处语义的另一半：MySQL 的 DDL 不进事务，把整库还原包成一个大事务只会得到
+「要么全成，否则回滚几十万字节的 undo」。所以会话是 autocommit，逐句独立生效，界面上
+也照这个说。为此计数分成四个而不是「成功/失败」两个：**跳过**是脚本里的查询语句（不碰
+数据库）、**失败**含被安全网关拦下的语句（压根没送进去，但要单独说清）、**未执行**是熔断
+或停止之后一句没跑的——重跑时只有这部分是安全的，把三者混成一个数字就是骗用户。
+单句超时用 `OPS_RESTORE_TIMEOUT`（同时是这条会话的 socket 读写超时），否则一份几十万行
+的多行 INSERT 会「客户端先松手、服务端还在写」。还原连接不进连接池：它带着为长会话放宽的
+超时，回池会把这些参数带给后面的交互式查询。
+
 ## 实现结构
 
 | 位置 | 职责 |
@@ -116,15 +149,18 @@ AI 通道不享受写开关：即使连接可写，AI 发起的执行仍是只�
 | `backend/app/models/entities.py` | `OpsDatabase` 台账、`OpsSqlFavorite` 收藏、`OpsAudit` 审计（历史复用） |
 | `backend/app/services/ops/database.py` | 台账 CRUD（名称全局唯一、密码 Fernet 加解密、出参 `mask()`）、收藏 CRUD（通用/绑定连接）、`OpsDbError`/`OpsDbForbidden` |
 | `backend/app/services/ops/db_exec.py` | 连接原语 `_connect_mysql`（READ ONLY + 超时）、单句/批量执行、`execute`/`execute_batch`、连通性探测、`MAX_PAGE_SIZE=500` |
-| `backend/app/services/ops/db_schema.py` | 库/表/列/索引/外键/DDL/ER 图/补全元数据，全走 information_schema 参数化查询；`_quote_ident` 反引号转义 |
+| `backend/app/services/ops/db_schema.py` | 库/表/列/索引/外键/DDL/ER 图/补全元数据，全走 information_schema 参数化查询；表列表与计数共用 `_tables_where`（`like` 走 `LIKE ... ESCAPE '!'`，防两边条件跑偏）；`_quote_ident` 反引号转义 |
 | `backend/app/services/ops/db_data.py` | 数据浏览（COUNT+分页同连接）、四种格式分批流式导出、行内改值/删行的语句生成与执行 |
 | `backend/app/services/ops/db_design.py` | `table_def` 读现状、纯函数 `build_alter_preview` 做 diff、`apply_alter` 逐句网关+目标表校验执行 |
 | `backend/app/services/ops/db_backup.py` | 整库/选表备份的准备（逐表 DDL+行数核算）、`.sql` 文本流、网盘 bytes 归集 |
+| `backend/app/services/ops/db_restore.py` | 脚本还原：整份拆句 + 逐句定策（查询跳过、网关拒的记失败）、单条可写长会话上的分批执行与熔断、`start/progress/done` 进度事件 |
 | `backend/app/services/ops/safety.py` | `split_sql_script`、`classify_sql`/`classify_sql_writable`、`ensure_limit` |
 | `backend/app/routers/ops.py` | `/ops/databases*`、`/ops/sql-favorites*` 全部路由；双闸门判定、审计写入、流式响应 |
-| `frontend/src/views/OpsDatabase.vue` | 三栏外壳、连接台账弹窗、页签去重/编号/关闭确认、树右键菜单、一键备份弹窗 |
+| `frontend/src/views/OpsDatabase.vue` | 三栏外壳、连接台账弹窗、页签去重/编号/关闭确认、树右键菜单、一键备份弹窗、还原弹窗（选文件、四个计数、错误样本、停止）、现场存取（首次列表到手恢复一次，之后页签一变就写） |
+| `frontend/src/api/restore.ts` | 还原进度流：fetch + FormData 上传、SSE 读帧、120 秒无字节看门狗、返回中断函数 |
 | `frontend/src/components/ops/tabs.ts` | 树节点与 `TabRequest` 类型（key 里编码类型与坐标） |
-| `frontend/src/components/ops/DbConnectionTree.vue` | 懒加载连接树、双击开关、状态色点、整行染色 |
+| `frontend/src/components/ops/workbenchSession.ts` | 工作台现场的 sessionStorage 读写：页签描述符（conn 只存 id）、激活项、按页签 key 存的编辑器草稿 |
+| `frontend/src/components/ops/DbConnectionTree.vue` | 懒加载连接树、双击开关、状态色点、整行染色、库节点下的表名过滤行与「只列出前 M 张」说明行 |
 | `frontend/src/components/ops/DbQueryTab.vue` | 查询页：工具栏、编辑器调高、底部结果/消息/摘要面板、收藏、历史、询问 AI |
 | `frontend/src/components/ops/SqlEditor.vue` | CodeMirror 6 封装：MySQL 方言补全（Compartment 热更表结构）、Enter 执行/选区 |
 | `frontend/src/components/ops/DbResultGrid.vue` | 查询结果网格：量高、右键菜单（只读复制类）、结果集导出、CellViewer |
@@ -143,13 +179,14 @@ AI 通道不享受写开关：即使连接可写，AI 发起的执行仍是只�
 | `POST /databases/{id}/test` | `SELECT VERSION()` 探活，结果回写台账 |
 | `POST /databases/{id}/execute`、`/execute/batch` | 单句（MySQL/Redis 共用）与批量（仅 MySQL） |
 | `GET/POST/PUT/DELETE /sql-favorites[/{id}]` | 按用户隔离的收藏；列表 = 绑定连接 + 通用 |
-| `GET /databases/{id}/schemas`、`.../tables`、`.../tables/{t}/columns` | 连接树数据源 |
+| `GET /databases/{id}/schemas`、`.../tables?like=`、`.../tables/{t}/columns` | 连接树数据源（`like` 是表名子串，服务端转 `LIKE` 并转义 `%_!`；`total` 回的是命中总数，不是已列出条数） |
 | `.../tables/{t}/ddl`、`/indexes`、`/foreign-keys`、`/table-def` | 结构页与设计表初值 |
 | `GET .../schemas/{s}/erd`、`/completion` | ER 图数据、编辑器补全元数据 |
 | `GET .../tables/{t}/rows`、`/rows/export` | 数据浏览（JSON 数组传 filters/order_by）、全量流式导出 |
 | `PUT/DELETE .../tables/{t}/rows` | 行内改值 / 删除记录（body 带整行原值 key） |
 | `POST .../tables/{t}/table-def/preview`、`/apply` | 设计表 diff 预览与执行 |
 | `GET .../schemas/{s}/backup`、`POST .../backup/netdisk` | 备份下载流 / 存网盘 |
+| `POST .../schemas/{s}/restore` | 上传 `.sql` 逐句还原；响应是 `start/progress/done` 进度 SSE 流，`?stop_on_error=true` 撞错即停 |
 | `GET /audit?target_type=database&target_id=...` | 查询历史弹层的数据源 |
 
 ## 配置
@@ -160,6 +197,8 @@ AI 通道不享受写开关：即使连接可写，AI 发起的执行仍是只�
 | `OPS_EXPORT_MAX_ROWS` | 200000 | 全量导出行数上限，COUNT 后超限即拒，不开始流 |
 | `OPS_BACKUP_MAX_ROWS` | 1000000 | 备份累计行数上限，逐表计数时超限即拒；仅结构备份不受限 |
 | `OPS_BACKUP_MAX_BYTES` | 64MB | 存网盘的字节上限（网盘接口只收完整 bytes，超限传之前先拒） |
+| `OPS_RESTORE_MAX_BYTES` | 64MB | 还原脚本的字节上限：拆句要先读整份进内存，超限明确拒绝而不是跑到一半 OOM |
+| `OPS_RESTORE_TIMEOUT` | 300 | 还原会话的单句超时，同时是这条连接的 socket 读写超时（交互通道那 20 秒扛不住几十万行的多行 INSERT） |
 | `OPS_CMD_TIMEOUT` | 20 | 连接读写超时，同时作为 `MAX_EXECUTION_TIME`（毫秒） |
 | `OPS_SSH_TIMEOUT` | 15 | 建连超时（MySQL 与 SSH 通道共用） |
 | `OPS_OUTPUT_LIMIT` | 8192 | 标量文本截断长度，MySQL 结果集走行数上限不沾它（Redis 回复用） |
@@ -167,7 +206,8 @@ AI 通道不享受写开关：即使连接可写，AI 发起的执行仍是只�
 代码内常量（不读环境变量）：批量 `_BATCH_MAX_STATEMENTS=100`、消息预览 200 字、
 浏览页大小上限 `MAX_PAGE_SIZE=500`（导出批次同值）、手输 WHERE 上限 1024 字符、
 浏览类元数据上限 `_BROWSE_CAP=1000`、补全元数据 `_COMPLETION_CAP=20000`、
-ER 图 `_ERD_MAX_TABLES=40` / 每实体 12 列、备份 `TABLE_CAP=400` 张表。
+ER 图 `_ERD_MAX_TABLES=40` / 每实体 12 列、备份 `TABLE_CAP=400` 张表、还原每批
+`CHUNK_STATEMENTS=200` 句 / 连续失败 20 句熔断 / 错误样本上限 50 条。
 
 ## 已知边界
 
@@ -183,8 +223,25 @@ ER 图 `_ERD_MAX_TABLES=40` / 每实体 12 列、备份 `TABLE_CAP=400` 张表�
 - 设计表不防预览与执行之间的并发 DDL，不改外键、不支持生成列；非 BTREE 索引在表单里
   只展示不改（但会原样带回，避免被 diff 当成删除）。
 - 备份文件刻意不含 `DROP TABLE`，还原到已有同名表的库需先手工清表；视图只备份定义。
+- 还原是 autocommit 逐句执行：停止、断开、单句失败都不回滚已经写进去的。同一个文件重跑
+  第二次会撞上「表已存在」「主键重复」，除非脚本本身幂等。
+- 还原脚本同批量执行一样不支持 `DELIMITER` 与存储过程/触发器体；拆句不报错，未闭合的引号
+  会把它后面的内容全吃进同一句里，所以文件语法要自己保证。纯注释（剥完不剩一句）的文件
+  在开连接之前就拒掉，不会跑出一条「零句成功」。
+- 语句开头的注释不参与定策：`-- 建表\nCREATE ...` 仍按 `CREATE` 判，`-- 看一眼\nSELECT ...`
+  仍算查询跳过。定策看的是剥完注释的那份，送进数据库的是原文。
+- 被安全网关拦下的语句记在「失败」里而不是「跳过」：账户/实例级、`INTO OUTFILE`、
+  `SLEEP()` 这类压根没送进数据库，但一份脚本里有就说明它没被完整还原。
+- 客户端断开不等于服务端停手：那一批的当前语句跑完，剩下的随连接关闭一起失败、连续失败
+  打满 20 句自己收手；审计与进度记的是断开时刻的计数，剩下的句子归在「未执行」。
+- 脚本里的 `USE` 会带走会话默认库，弹窗选的库只是起点（首帧会把 `USE` 点名出来）。
 - 查询历史就是审计记录，能看多久取决于审计保留策略；收藏按用户隔离，台账连接全员共用
   （仅管理员可增删改）。
+- 表列表一次最多返回 1000 张（`_BROWSE_CAP`），树靠 `total` 说清还差多少、靠过滤框把
+  范围收窄，不再有静默少列；ER 图另有 40 张的上限。
+- 工作台现场只记页签、激活项和查询编辑器草稿：结果集、数据页的筛选/翻页、树的展开态
+  都不在恢复范围内（重开页签就是新的一次查询）。存 sessionStorage 意味着换浏览器标签
+  页从干净工作台开始，台账里删掉的连接，它残留的页签恢复时直接丢弃。
 
 ## 测试
 
@@ -206,5 +263,26 @@ ER 图 `_ERD_MAX_TABLES=40` / 每实体 12 列、备份 `TABLE_CAP=400` 张表�
   建库字符集、FOREIGN_KEY_CHECKS 开关、视图顺序、客户端断开收尾、close 幂等）、网盘字节
   上限与文件名时间戳；API 层覆盖 Redis 拒绝、网盘未启用/未绑定/超限/上传成败审计、下载
   流与 UTF-8 文件名、tables 参数畸形报错。
+- `backend/tests/test_ops_listing_limits.py`：批量结果回显 `row_limit` /
+  `stmt_timeout_seconds`（含整批被拒时也说得出超时）、消息里写清「已截断，上限 N」；
+  表列表的 `LIKE` 拼接与 `%_!` 转义、list 与 count 共用同一份 WHERE 和参数（防两边跑偏）、
+  `/tables` 接口的 `total` 用真实命中数而不是已返回条数、`like` 去空白与全空白当没填。
+- `backend/tests/test_ops_restore.py`：拆句与逐句定策（查询只跳过、网关拒的算失败、
+  带注释头的 `SELECT` 不会因注释被误判成可写、纯注释文件在开连接前就拒、Redis 连接与
+  缺任一写通行证直接拒且不退化成只读试跑、`USE` 收集给界面）、执行与计数（`start/progress/done`
+  顺序、语句按文件顺序执行、单句失败不中断、`stop_on_error` 与连续失败熔断后「未执行」
+  独立计数、错误样本上限、连接硬断只记当前句失败）、会话收尾（close 幂等、还原连接带着
+  放宽的超时且不回连接池、连不上库转成业务错误）。
+- `backend/tests/test_ops_restore_api.py`：路由层——Redis 连接 400、只读连接与无写权限
+  账号走 4101 且留下 `forbidden` 审计、超限（含伪造 `Content-Length`）与非 UTF-8 在流
+  开始之前用信封回、纯注释文件不产生流、正常路径的三帧 SSE 与计数、`stop_on_error` 透传、
+  开连接参数（可写 + 长超时 + 不入池）、成功与部分失败的审计文案「[还原 shop] xxx.sql」。
+- `frontend/src/api/restore.test.ts`：读帧与判定——跨块切开的半帧等下一批字节、心跳注释帧
+  忽略、流开始前的信封按失败、401 只走统一登录过期、没收到 `done` 就说「可能只跑了一半」
+  （干净收尾与流报错两条路都是）、点停止既不报错误也不报完成、看门狗掐断报「没有响应」、
+  请求带 `Accept: text/event-stream` 与 `stop_on_error`。
+- `frontend/src/components/ops/workbenchSession.test.ts`：现场存取往返、空页签即清理、
+  存储被改坏或字段缺失整条不认、查询序号水位线取每连接最大号（结尾不是数字的 key 跳过）、
+  草稿按页签各存一条且空草稿/关页签都删掉。
 - 目前**没有**针对行级写（`update_row`/`delete_row`）、收藏 CRUD、批量执行摘要口径的
   独立测试文件，这三块的安全前提分别由安全网关测试与设计表 apply 测试间接覆盖。

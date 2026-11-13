@@ -14,7 +14,8 @@ export type TabRequest =
 export interface TreeNode {
   key: string
   title: string
-  kind: 'conn' | 'schema' | 'redisdb' | 'table' | 'rkey' | 'more'
+  /** filter / note 是 schema 下的辅助行：表名过滤框与「少列了 N 张」的说明。 */
+  kind: 'conn' | 'schema' | 'redisdb' | 'table' | 'rkey' | 'more' | 'filter' | 'note'
   conn?: OpsDatabase
   schema?: string
   db?: number
@@ -25,6 +26,10 @@ export interface TreeNode {
   /** more 节点专用：下一页游标与父节点 key。 */
   cursor?: string
   parentKey?: string
+  /** filter 节点专用：已生效的表名关键字（服务端 LIKE），空串表示未过滤。 */
+  keyword?: string
+  /** filter 节点专用：正在按关键字重拉表列表。 */
+  loading?: boolean
   isLeaf?: boolean
   children?: TreeNode[]
   /** 透传给 .ant-tree-treenode 的行内样式：连接的展示色靠它染整行。 */

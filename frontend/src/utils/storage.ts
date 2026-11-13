@@ -21,4 +21,11 @@ export const storageKeys = {
   workflowCanvasCollapsed: 'noetix-workflow-canvas-collapsed',
   /** 外观模式：'dark' / 'light'。纯前端偏好，不进后端用户设置。 */
   themeMode: 'noetix-theme-mode',
+  /**
+   * 数据库工作台现场（sessionStorage，不是 localStorage）：开着的页签与当前激活项。
+   * 键名照样登记在这里，图的是全站一处看全，别混进 localStorage 那批。
+   */
+  opsWorkbenchState: 'noetix-ops-workbench-state',
+  /** 工作台查询页编辑器草稿，按页签 key 各存一条（同 sessionStorage）。 */
+  opsWorkbenchSql: 'noetix-ops-workbench-sql',
 } as const

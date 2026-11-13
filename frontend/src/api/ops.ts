@@ -151,6 +151,10 @@ export interface DbBatchResult {
   started_at: string
   finished_at: string
   elapsed_ms: number
+  /** 这次真正生效的每句结果集行数上限（服务端 OPS_SQL_ROW_LIMIT）。 */
+  row_limit: number
+  /** 服务端自己收尾一条语句的秒数（会话级 MAX_EXECUTION_TIME）。 */
+  stmt_timeout_seconds: number
 }
 
 export interface WsTicket {
@@ -328,9 +332,10 @@ export const opsApi = {
       timeout: 60000,
       skipErrorToast: true,
     }),
-  dbTables: (id: number, schema: string) =>
+  dbTables: (id: number, schema: string, like?: string) =>
     request<{ items: DbTableItem[]; total: number }>({
       url: `/ops/databases/${id}/schemas/${encodeURIComponent(schema)}/tables`,
+      params: like ? { like } : undefined,
       timeout: 60000,
       skipErrorToast: true,
     }),

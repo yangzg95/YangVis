@@ -28,7 +28,7 @@
           <CaretRightOutlined v-if="!running" /> {{ hasSelection ? '执行选中' : '执行' }}
         </a-button>
       </a-tooltip>
-      <a-tooltip title="停止执行（断开等待；服务端语句由超时配置兜底收尾）">
+      <a-tooltip :title="stopHint">
         <a-button size="small" danger :disabled="!running" @click="stopRun">
           <StopOutlined /> 停止
         </a-button>
@@ -219,7 +219,7 @@
           <template #tab>
             <a-tooltip :title="tab.stmt.sql">结果 {{ tab.stmt.index }}</a-tooltip>
           </template>
-          <DbResultGrid :result="tab.stmt" />
+          <DbResultGrid :result="tab.stmt" :row-limit="batch.row_limit" />
         </a-tab-pane>
 
         <a-tab-pane key="messages" tab="消息">
@@ -327,6 +327,7 @@ import DbResultGrid from './DbResultGrid.vue'
 import SqlEditor from './SqlEditor.vue'
 import { copyText } from './grid'
 import { clampSize, readSize, saveSize, startDragResize } from './resizer'
+import { loadWorkbenchSql, saveWorkbenchSql } from './workbenchSession'
 import { storageKeys } from '@/utils/storage'
 import { formatSql } from '@/utils/sqlFormat'
 import './resizer.css'
@@ -341,6 +342,11 @@ const props = defineProps<{
   schema?: string
   /** 预填进编辑器的 SQL（AI 问答里带过来的）。 */
   initialSql?: string
+  /**
+   * 工作台页签 key。传了它，编辑器里没执行完的 SQL 就跟着页签存进
+   * sessionStorage，刷新回来还在；整页问答页不传，草稿照旧不落盘。
+   */
+  sessionKey?: string
 }>()
 
 const emit = defineEmits<{
@@ -353,13 +359,23 @@ const SAMPLES: Record<DatabaseType, string[]> = {
   redis: ['INFO memory', 'DBSIZE', 'SCAN 0 COUNT 20'],
 }
 
-const sql = ref(props.initialSql ?? '')
+// 编辑器初值：AI 带进来的优先，其次接上这个页签上次写的草稿。
+const sql = ref(props.initialSql || (props.sessionKey ? loadWorkbenchSql(props.sessionKey) : ''))
 const running = ref(false)
 const batch = ref<DbBatchResult | null>(null)
 const error = ref('')
 
 // 底部 SQL 栏（Navicat 同款）：记最近一次送出去的完整命令，执行失败也保留展示。
 const executedSql = ref('')
+
+// 打字中途的状态不值得每个字符存一遍：页签草稿停手半秒再落盘。
+let sqlSaveTimer: ReturnType<typeof setTimeout> | null = null
+watch(sql, (text) => {
+  const key = props.sessionKey
+  if (!key) return
+  if (sqlSaveTimer) clearTimeout(sqlSaveTimer)
+  sqlSaveTimer = setTimeout(() => saveWorkbenchSql(key, text), 500)
+})
 
 async function copyExecutedSql() {
   if (await copyText(executedSql.value)) toast.success('SQL 已复制')
@@ -487,7 +503,11 @@ onMounted(async () => {
   window.addEventListener('resize', clampEditorHeight)
 })
 
-onBeforeUnmount(() => window.removeEventListener('resize', clampEditorHeight))
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', clampEditorHeight)
+  // 卸载前还挂着的那次草稿写入不用补：关页签时工作台已经把这条删了。
+  if (sqlSaveTimer) clearTimeout(sqlSaveTimer)
+})
 
 // ---- 选中单条执行 -------------------------------------------------------------------
 // 有选区就只执行选中的那一段；CodeMirror 通过 selection-change 事件同步状态，
@@ -548,10 +568,26 @@ function fmtTime(iso: string): string {
 }
 
 // ---- 执行 / 停止 --------------------------------------------------------------------
-// 客户端的「停止」只是断开等待；服务端的执行线程由 MAX_EXECUTION_TIME /
-// OPS_CMD_TIMEOUT 兜底收尾，后端不需要改动。
+// 「停止」断掉的只是前端这条等待：服务端的语句仍在执行，由会话级
+// MAX_EXECUTION_TIME 自己收尾，那个秒数每次执行由后端回显。
+// 界面不能把它说成「已中断」——用户会以为库上那条重查询已经停了。
 
 let abortCtl: AbortController | null = null
+
+/** 上次执行回显的服务端语句超时（秒）；还没跑过时退回不带数字的说法。 */
+const stmtTimeout = ref(0)
+
+const stopHint = computed(() =>
+  stmtTimeout.value
+    ? `停止等待结果。服务端这条仍在继续执行，约 ${stmtTimeout.value} 秒后由超时自动收尾`
+    : '停止等待结果；服务端这条不会立即中断，由会话超时兜底收尾',
+)
+
+const stoppedNote = computed(() =>
+  stmtTimeout.value
+    ? `已停止等待，但服务端这条仍在执行，最长约 ${stmtTimeout.value} 秒后自动结束（不是已经中断）`
+    : '已停止等待，但服务端这条仍在执行，会由会话超时自动结束（不是已经中断）',
+)
 
 function stopRun() {
   abortCtl?.abort()
@@ -573,6 +609,7 @@ async function run() {
       batch.value = await opsApi.executeBatch(
         props.connId, command, selectedSchema.value, { signal: abortCtl.signal },
       )
+      stmtTimeout.value = batch.value.stmt_timeout_seconds || 0
       activateBottom(batch.value)
     } else {
       const res = await opsApi.execute(props.connId, command, undefined, { signal: abortCtl.signal })
@@ -581,7 +618,7 @@ async function run() {
     }
   } catch (err: any) {
     if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') {
-      error.value = '已停止执行'
+      error.value = stoppedNote.value
     } else if (props.dbType === 'mysql') {
       // 批量端点抛错是连接级 / 整批级失败（单句失败在 batch.statements 里）。
       error.value = err?.message || '执行失败'
@@ -618,6 +655,7 @@ function activateBottom(result: DbBatchResult) {
 
 // ---- Redis 结果包成 batch-of-1 ------------------------------------------------------
 // 底部面板一条渲染路径覆盖两种连接，不需要 Redis 特判。
+// Redis 走单句端点，服务端不回显这两个上限，留 0 让文案退回不带数字的说法。
 
 function previewOf(command: string): string {
   const text = command.replace(/\s+/g, ' ').trim()
@@ -645,6 +683,8 @@ function wrapSingleOk(command: string, res: DbExecuteResult): DbBatchResult {
     started_at: now,
     finished_at: now,
     elapsed_ms: res.elapsed_ms,
+    row_limit: 0,
+    stmt_timeout_seconds: 0,
   }
 }
 
@@ -669,6 +709,8 @@ function wrapSingleError(command: string, message: string): DbBatchResult {
     started_at: now,
     finished_at: now,
     elapsed_ms: 0,
+    row_limit: 0,
+    stmt_timeout_seconds: 0,
   }
 }
 

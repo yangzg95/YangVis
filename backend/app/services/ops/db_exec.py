@@ -86,9 +86,11 @@ class _PooledConnection:
     """连接池借用句柄：``close()`` 归还而不是关闭真实连接。
 
     业务层原有代码一律 ``conn.close()``，这里保持同一语义，不用改任何调用点。
+    ``key=None`` 是「这次不外借」：还原脚本会执行文件里的 ``USE``，会话的默认库
+    中途就变了，还进池等于把别人的现场留给下一个借用者，所以它关的是真连接。
     """
 
-    def __init__(self, conn: pymysql.connections.Connection, key: tuple) -> None:
+    def __init__(self, conn: pymysql.connections.Connection, key: Optional[tuple]) -> None:
         self._conn = conn
         self._key = key
         self._returned = False
@@ -100,13 +102,21 @@ class _PooledConnection:
         if self._returned:
             return
         self._returned = True
+        if self._key is None:
+            self._conn.close()
+            return
         _give_back(self._key, self._conn)
 
 
 def _pool_key(
-    item: OpsDatabase, password: str, database: Optional[str], writable: bool
+    item: OpsDatabase,
+    password: str,
+    database: Optional[str],
+    writable: bool,
+    timeout_seconds: Optional[float] = None,
 ) -> tuple:
     # 密码进 key：台账改密码后不能继续拿旧凭据的会话。
+    # 语句超时同样进 key：它是会话级 SET，混用会让长会话被当成 20 秒的那批借用。
     return (
         item.host,
         item.port,
@@ -114,6 +124,7 @@ def _pool_key(
         database or item.db_name or "",
         writable,
         hash(password),
+        timeout_seconds,
     )
 
 
@@ -192,23 +203,33 @@ def _connect_mysql(
     password: str,
     database: Optional[str] = None,
     writable: bool = False,
+    *,
+    timeout_seconds: Optional[float] = None,
+    pool: bool = True,
 ) -> _PooledConnection:
     """建立（或复用）一条 MySQL 会话，默认带只读保证。
 
-    所有 MySQL 通道——控制台、元数据查询、数据浏览——都必须从这里出去。
+    所有 MySQL 通道——控制台、元数据查询、数据浏览、还原——都必须从这里出去。
     只读保证在 ``SET SESSION TRANSACTION READ ONLY`` 这一行上，而不是在
     SQL 解析上；``writable=True``（连接开了写开关的手敲控制台）跳过这行，
     并打开 autocommit——批量执行的语义是逐句独立，一句出错不影响其他句
     落盘，和 Navicat 的批量执行一致。
 
     ``database`` 是本次会话的默认库；缺省回落到台账里的 ``db_name``。
-    """
-    key = _pool_key(item, password, database, writable)
-    reused = _take_pooled(key)
-    if reused is not None:
-        return _PooledConnection(reused, key)
 
+    ``timeout_seconds`` 放宽的是这一条会话的两道时间：socket 读写超时与
+    ``MAX_EXECUTION_TIME``。还原一份备份里的一条多行 INSERT 可以远超交互通道
+    的 20 秒，按交互超时就会「客户端先放弃、服务端还在写」——那是最坏的一种
+    假失败。``pool=False`` 配它一起用：会话状态被脚本改过，不外借。
+    """
     settings = get_settings()
+    timeout = float(timeout_seconds or settings.OPS_CMD_TIMEOUT)
+    key = _pool_key(item, password, database, writable, timeout_seconds) if pool else None
+    if key is not None:
+        reused = _take_pooled(key)
+        if reused is not None:
+            return _PooledConnection(reused, key)
+
     try:
         conn = pymysql.connect(
             host=item.host,
@@ -217,8 +238,8 @@ def _connect_mysql(
             password=password,
             database=database or item.db_name or None,
             connect_timeout=int(settings.OPS_SSH_TIMEOUT),
-            read_timeout=int(settings.OPS_CMD_TIMEOUT),
-            write_timeout=int(settings.OPS_CMD_TIMEOUT),
+            read_timeout=int(timeout),
+            write_timeout=int(timeout),
             charset="utf8mb4",
             autocommit=writable,
         )
@@ -237,11 +258,11 @@ def _connect_mysql(
             if not writable:
                 cur.execute("SET SESSION TRANSACTION READ ONLY")
             try:
-                cur.execute("SET SESSION MAX_EXECUTION_TIME=%s", (int(settings.OPS_CMD_TIMEOUT * 1000),))
+                cur.execute("SET SESSION MAX_EXECUTION_TIME=%s", (int(timeout * 1000),))
             except pymysql.Error:
                 # MariaDB 用的是 max_statement_time（单位为秒），语法不同。
                 try:
-                    cur.execute("SET SESSION max_statement_time=%s", (settings.OPS_CMD_TIMEOUT,))
+                    cur.execute("SET SESSION max_statement_time=%s", (timeout,))
                 except pymysql.Error:
                     logger.debug("target does not support a statement timeout knob")
     except Exception:
@@ -431,6 +452,11 @@ async def execute_batch(
 
     started_at = db_now()
     started = time.perf_counter()
+    # 两道上限在会话与网关两侧都真正生效，回给界面只为把话说清楚：
+    # limit 是每句结果集的行数上限，stmt_timeout 是服务端自己收尾一条语句的秒数。
+    settings = get_settings()
+    limit = int(settings.OPS_SQL_ROW_LIMIT)
+    stmt_timeout = int(settings.OPS_CMD_TIMEOUT)
 
     # 先整体过一遍安全网关：被拒的语句不进数据库连接，直接落成 error 占位；
     # 放行的语句补上行数上限——连接里只会出现网关放行的 SQL，纵深防御更整齐。
@@ -453,7 +479,6 @@ async def execute_batch(
             )
 
     if allowed:
-        limit = get_settings().OPS_SQL_ROW_LIMIT
         capped = [ensure_limit(stmt, limit) for _, stmt in allowed]
         password = _password_of(item)
         try:
@@ -473,11 +498,17 @@ async def execute_batch(
                 )
             else:
                 done_text = f"执行完成，影响 {affected} 行"
+                # 截断的行数不是「这次查到了多少行」，消息里必须说破，
+                # 否则用户会把上限当成全量。
+                rows_text = (
+                    f"{len(rows)} 行（已截断，上限 {limit}）"
+                    if truncated else f"{len(rows)} 行"
+                )
                 results[i] = DbBatchStatement(
                     index=i + 1,
                     sql=_preview_sql(stmt),
                     status="ok",
-                    message=f"{len(rows)} 行" if columns else done_text,
+                    message=rows_text if columns else done_text,
                     elapsed_ms=elapsed,
                     columns=columns,
                     rows=[[_stringify(v) for v in row] for row in rows],
@@ -498,6 +529,8 @@ async def execute_batch(
             started_at=started_at,
             finished_at=finished_at,
             elapsed_ms=int((time.perf_counter() - started) * 1000),
+            row_limit=limit,
+            stmt_timeout_seconds=stmt_timeout,
         ),
         any_forbidden,
     )
