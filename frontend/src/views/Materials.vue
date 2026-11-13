@@ -2,13 +2,13 @@
   <div class="page-card">
     <div class="page-title">素材库</div>
 
-    <a-alert
-      type="info"
-      show-icon
-      class="intro-alert"
-      message="素材按账号存，不属于任何一条片子"
-      description="短视频工作台里每一镜最多挑 4 条素材。人物形象、片头 logo 这类反复要用的东西放这儿，换一条选题不用重传；删一条短视频不会带走这里的素材，反过来删一条素材会把引用它的镜头一起去掉。"
-    />
+<!--    <a-alert-->
+<!--      type="info"-->
+<!--      show-icon-->
+<!--      class="intro-alert"-->
+<!--      message="素材按账号存，不属于任何一条片子"-->
+<!--      description="短视频工作台里每一镜最多挑 4 条素材。人物形象、片头 logo 这类反复要用的东西放这儿，换一条选题不用重传；删一条短视频不会带走这里的素材，反过来删一条素材会把引用它的镜头一起去掉。"-->
+<!--    />-->
 
     <div class="toolbar toolbar--between">
       <a-space :size="8" wrap>

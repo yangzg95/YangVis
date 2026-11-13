@@ -101,7 +101,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # 媒体作业循环。它必须是常驻任务而不是请求级后台任务：一条视频在上游要排队几十
     # 秒到几分钟，而且拿到结果后还必须转存（上游链接 24 小时失效），BackgroundTasks
     # 那种「跟着一次调用活」的寿命撑不住，进程一重启就没人接着轮了。
-    media_jobs.start_loop()
+    if settings.MEDIA_JOB_LOOP_ENABLED:
+        media_jobs.start_loop()
+    else:
+        # 关掉之后这一台只是「不再认领」，界面照样能入队；作业留给还开着循环的那台跑。
+        logger.warning(
+            "media job loop disabled by MEDIA_JOB_LOOP_ENABLED=false: "
+            "this process will not claim any media job"
+        )
     logger.info("yangvis backend started on port %s", settings.PORT)
     try:
         yield

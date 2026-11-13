@@ -252,6 +252,11 @@ class Settings(BaseSettings):
     # 再密也不会更快，只会白烧请求数配额。
     MEDIA_POLL_INTERVAL: float = 5.0
     MEDIA_LOOP_IDLE: float = 2.0
+    # 本进程是否担当媒体作业的执行者。共享同一个库的多台机器只能有一个「是」：作业表
+    # 没有跨进程认领（``_IN_FLIGHT`` 只挡得住本进程），于是谁先扫到 queued 谁就去调
+    # 方舟，并把产物写进**自己**的磁盘——另一台按同一行 ``rel_path`` 只能 404，而同
+    # 一条作业被两边各跑一次就是同一次渲染扣两遍钱。开发机连着线上库时设成 false。
+    MEDIA_JOB_LOOP_ENABLED: bool = True
     # 单条作业的最长寿命。方舟的 execution_expires_after 默认 172800 秒（48 小时），
     # 超过这个时间还没拿到终态就本地判死，免得一条卡住的作业永久占着并发位子。
     MEDIA_JOB_STALE_SECONDS: int = 48 * 3600
