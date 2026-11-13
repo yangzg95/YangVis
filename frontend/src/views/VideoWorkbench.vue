@@ -10,7 +10,7 @@
           @change="dirtyProject = true"
         />
         <a-tag :color="statusColor(state)">{{ statusText(state) }}</a-tag>
-        <span class="muted">
+        <span class="muted wb-head-meta">
           {{ platformText(platform) }} · {{ shots.length }} 镜 · {{ totalDuration }} 秒
         </span>
         <span v-if="dirty" class="dirty-hint">未保存</span>
@@ -1438,7 +1438,19 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
 .wb-title-input {
   font-size: var(--fs-lg);
   font-weight: 600;
+  /* antd 的 Input 默认 width:100%，在弹性行里就按整行算基准：不压住它，标题会把
+     状态标签与「平台 · 镜数 · 秒数」挤到换行，右侧按钮每多一枚就更错一点。
+     这一行唯一该伸缩的是它，所以给它一个上限，让位留给后面那几个固定的东西。 */
+  flex: 1 1 auto;
+  width: auto;
   min-width: 160px;
+  max-width: 480px;
+}
+
+/* 状态标签、meta、未保存提示都是内容定长的：让它们按自身宽度站住，不参与收缩。 */
+.wb-head-main :is(.wb-head-meta, .dirty-hint) {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .dirty-hint {
