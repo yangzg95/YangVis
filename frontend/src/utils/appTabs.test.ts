@@ -78,4 +78,20 @@ describe('leafForPath', () => {
     expect(leafForPath('/workflows/compare/3/8/9', staticLeaves)).toBeUndefined()
     expect(leafForPath('/workflows/compare/', staticLeaves)).toBeUndefined()
   })
+
+  it('短视频工作台按项目 id 展开成动态标签', () => {
+    const leaf = leafForPath('/office/videos/7/workbench', staticLeaves)
+    expect(leaf).toEqual({
+      path: '/office/videos/7/workbench',
+      title: '短视频 #7',
+      icon: expect.anything(),
+    })
+    expect(leafForPath('/office/videos/8/workbench', [])?.title).toBe('短视频 #8')
+  })
+
+  it('短视频的非工作台路径与非法 id 不认', () => {
+    expect(leafForPath('/office/videos', staticLeaves)).toBeUndefined()
+    expect(leafForPath('/office/videos/abc/workbench', staticLeaves)).toBeUndefined()
+    expect(leafForPath('/office/videos/7/show', staticLeaves)).toBeUndefined()
+  })
 })

@@ -302,6 +302,58 @@ BUILTIN_WORKFLOWS: tuple[BuiltinWorkflow, ...] = (
         ),
         sort_order=75,
     ),
+    BuiltinWorkflow(
+        slug="video-script-generation",
+        name="短视频脚本生成",
+        description="「智能应用 · 短视频」从一句话想法产出创作卡与分镜脚本（不含画面渲染）",
+        inputs=(
+            BuiltinInput("idea", "想法"),
+            # 条件段落由调用方拼好再传进来：没填的那些就是空串。
+            BuiltinInput("platform_note", "平台与时长段落", required=False),
+            BuiltinInput("style_note", "风格段落", required=False),
+            BuiltinInput("requirement_note", "补充要求段落", required=False),
+            BuiltinInput("max_shots", "镜头数上限"),
+        ),
+        steps=(
+            BuiltinStep(
+                key="brief",
+                agent_slug="video-briefer",
+                prompt_tpl=(
+                    "{{platform_note}}{{style_note}}{{requirement_note}}"
+                    "想法：\n\"\"\"\n{{idea}}\n\"\"\"\n\n"
+                    "请先定这条短视频的创作卡：把「凭什么让人看完」说清楚，产出 JSON。"
+                ),
+                group_key="brief",
+                output_kind=OUTPUT_JSON,
+                output_keys=(
+                    "hook_type",
+                    "hook",
+                    "audience",
+                    "goal",
+                    "structure",
+                    "duration_s",
+                    "risk_notes",
+                ),
+                output_var="brief",
+                sort_order=10,
+            ),
+            BuiltinStep(
+                key="script",
+                agent_slug="video-storyboarder",
+                prompt_tpl=(
+                    "创作卡（钩子、结构、总时长按它执行，不要自己改）：\n"
+                    "{{brief}}\n\n"
+                    "把它切成能直接送去生成的镜头：最多 {{max_shots}} 镜，产出分镜 JSON。"
+                ),
+                group_key="script",
+                output_kind=OUTPUT_JSON,
+                output_keys=("title", "narration", "tags", "cover_prompt", "shots"),
+                output_var="script",
+                sort_order=20,
+            ),
+        ),
+        sort_order=80,
+    ),
 )
 
 

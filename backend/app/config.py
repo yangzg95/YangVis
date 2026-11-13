@@ -238,6 +238,47 @@ class Settings(BaseSettings):
     # 喂给模型的材料全文上限。幻灯片只要骨架，比简历留得少。
     SLIDE_MAX_SOURCE_CHARS: int = 16000
 
+    # 智能应用 · 短视频（火山方舟 Ark 图片 / 视频生成）
+    # 在途作业上限。方舟个人版账号级最大并发是 3，这里默认压到 2：留出 1 个位子
+    # 给控制台上手工发的一次重试，也避免一次「全片重渲」把配额吃满之后，同账号其
+    # 他请求只能在方舟那边排队到超时。真正兜底的是上游 429 —— 作业会退回 queued
+    # 下一轮再试，而不是失败。
+    # 图片同一档：那 3 个位子是账号级共享的，不是「视频 3 + 图片 3」。一期只渲首帧
+    # （视频那一档还没有入口），两类不会真的抢；等视频接上时要把它改成两类合起来的
+    # 一个总预算，而不是各数各的 2（那等于 4，超出账号上限还会一直撞 429）。
+    VIDEO_MAX_INFLIGHT: int = 2
+    IMAGE_MAX_INFLIGHT: int = 2
+    # 视频是异步任务，靠轮询取结果。间隔按「一条 5 秒 720p 大约半分钟出片」定的：
+    # 再密也不会更快，只会白烧请求数配额。
+    MEDIA_POLL_INTERVAL: float = 5.0
+    MEDIA_LOOP_IDLE: float = 2.0
+    # 单条作业的最长寿命。方舟的 execution_expires_after 默认 172800 秒（48 小时），
+    # 超过这个时间还没拿到终态就本地判死，免得一条卡住的作业永久占着并发位子。
+    MEDIA_JOB_STALE_SECONDS: int = 48 * 3600
+    MEDIA_HTTP_TIMEOUT: float = 60.0
+    MEDIA_DOWNLOAD_TIMEOUT: float = 180.0
+    # 转存上限。方舟侧的限制是图 <30MB、视频输入 <200MB，输出视频按 4K/30 秒也远
+    # 不到这个数；超出说明 URL 被换成了别的东西，直接判失败而不是往盘里灌。
+    MEDIA_IMAGE_MAX_BYTES: int = 30 * 1024 * 1024
+    MEDIA_VIDEO_MAX_BYTES: int = 200 * 1024 * 1024
+    # 首帧 / 参考图怎么交给方舟：``data_url`` 读本地文件转 base64 内联进请求体，
+    # ``public_url`` 拼 PUBLIC_MEDIA_BASE_URL 出公网地址。默认前者——uploads/ 目录
+    # 本来就不带鉴权，而且本地开发时它对手上的服务器根本不可达。
+    MEDIA_IMAGE_TRANSPORT: str = "data_url"
+    PUBLIC_MEDIA_BASE_URL: str = ""
+    # 一个项目的镜头数上限：既是内存闸门，也是成本闸门（一镜一个视频任务）。
+    VIDEO_MAX_SHOTS: int = 12
+    # 素材库：单条素材落盘前的大小闸门，与一个账号的条数上限。生产那台机器盘很紧，
+    # 而视频素材比图片更容易把一个目录撑满，所以宁可拒绝也别写半个文件。
+    MATERIAL_MAX_IMAGE_BYTES: int = 10 * 1024 * 1024
+    MATERIAL_MAX_VIDEO_BYTES: int = 50 * 1024 * 1024
+    MATERIAL_MAX_PER_OWNER: int = 200
+    # 单条提示词长度上限。方舟的硬限制是中文 500 字 / 英文 1000 词，模型给的
+    # 分镜提示词经常压线，超长在入队前截断并留痕，别让整个批量被一条 400 打断。
+    VIDEO_MAX_PROMPT_CHARS: int = 480
+    # 产物保留天数，与 workflow_run 的 30 天同一口径：视频比幻灯片更吃盘。
+    VIDEO_RETENTION_DAYS: int = 30
+
     @property
     def database_url(self) -> str:
         # 凭据做 percent-encode：密码里若包含 '@'、'/' 或 ':'，否则会被解析成

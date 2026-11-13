@@ -367,9 +367,13 @@ def test_seed_creates_builtin_workflows_and_steps(db):
         declared = {field["name"] for field in row.input_schema}
         steps = db.scalars(select(WorkflowStep).where(WorkflowStep.workflow_id == row.id)).all()
         assert steps
+        # 多步流程的下游引上游产物（{{brief}}），那些名字不在 input_schema 里；
+        # 能被渲染出来的集合是「声明的输入 + 本流程自己产出的 output_var」。
+        renderable = declared | {s.output_var for s in steps if s.output_var}
         for step in steps:
-            # 模板里用到的变量必须都声明过，否则运行时必然渲染失败。
-            assert _template_vars(step.prompt_tpl) <= declared
+            # 模板里用到的变量必须都取得到，否则运行时必然渲染失败。
+            roots = {name.split(".")[0] for name in _template_vars(step.prompt_tpl)}
+            assert roots <= renderable, (row.slug, step.key, roots - renderable)
 
 
 def test_seed_is_idempotent_and_refreshes_prompt(db):

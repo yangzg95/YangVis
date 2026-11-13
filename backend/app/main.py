@@ -40,6 +40,7 @@ from app.routers import (
     devtools,
     interview,
     knowledge,
+    materials,
     mcp,
     memory,
     netdisk,
@@ -53,8 +54,10 @@ from app.routers import (
     slides,
     tools,
     users,
+    videos,
     workflows,
 )
+from app.services.media import jobs as media_jobs
 
 logger = logging.getLogger("yangvis")
 
@@ -85,16 +88,26 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         ("prune_workflow_runs", prune_workflow_runs),
         # 通知发送留痕的清理：与上面两个没有顺序依赖，纯归类放最后。
         ("prune_notify_logs", prune_notify_logs),
+        # 媒体作业留痕清理：只删没产物的失败/取消/判死记录。带产物的成功作业不在这儿
+        # 动——那一行可能就是某个镜头现在的成片，按龄清文件要等界面上有「历史渲染挑
+        # 一版」才做得对。
+        ("prune_media_jobs", media_jobs.prune_jobs),
     ):
         try:
             step()
         except Exception:
             logger.error("startup step %s failed", step_name, exc_info=True)
             raise
+    # 媒体作业循环。它必须是常驻任务而不是请求级后台任务：一条视频在上游要排队几十
+    # 秒到几分钟，而且拿到结果后还必须转存（上游链接 24 小时失效），BackgroundTasks
+    # 那种「跟着一次调用活」的寿命撑不住，进程一重启就没人接着轮了。
+    media_jobs.start_loop()
     logger.info("yangvis backend started on port %s", settings.PORT)
     try:
         yield
     finally:
+        # 先停循环再收工：正在下载的作业由下个进程按库里的状态接着推。
+        await media_jobs.stop_loop()
         logger.info("yangvis backend shutting down")
 
 
@@ -227,6 +240,9 @@ app.include_router(notify.router, prefix=API_PREFIX)
 # App 静态令牌端点：自带 /app/v1 前缀，仍挂在统一的 /api 之下。
 app.include_router(app_messages.router, prefix=API_PREFIX)
 app.include_router(slides.router, prefix=API_PREFIX)
+app.include_router(videos.router, prefix=API_PREFIX)
+# 素材库紧跟短视频：库里这批素材目前只被镜头引用，注册顺序也就是它们的阅读顺序。
+app.include_router(materials.router, prefix=API_PREFIX)
 app.include_router(netdisk.router, prefix=API_PREFIX)
 app.include_router(mcp.router, prefix=API_PREFIX)
 app.include_router(tools.router, prefix=API_PREFIX)

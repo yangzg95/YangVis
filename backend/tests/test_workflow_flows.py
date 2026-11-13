@@ -1,4 +1,4 @@
-"""幻灯片、面试、求职助手三条功能链路走工作流引擎的集成测试。
+"""幻灯片、面试、求职助手、短视频四条功能链路走工作流引擎的集成测试。
 
 迁移的验收点始终是同一句话：模型调用由引擎执行，现场（渲染后的 prompt、原始
 输出、每步状态）落进 ``workflow_run`` / ``workflow_run_step``，而业务行上的进度
@@ -16,23 +16,34 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.bootstrap import RETIRED_STATUS_COLUMNS
+from app.config import get_settings
 from app.database import Base
-from app.models.entities import ModelConfig, WorkflowRun, WorkflowRunStep
+from app.models.entities import (
+    MaterialAsset,
+    ModelConfig,
+    VideoProject,
+    WorkflowRun,
+    WorkflowRunStep,
+)
 from app.models.schemas import (
     InterviewCreate,
     InterviewQuestionIn,
     ModelPurpose,
     ResumeToolkitCreate,
 )
+from app.services.materials import KIND_IMAGE
 from app.services.workflows import exec as workflow_exec
 from app.services.interview import InterviewService
 from app.services.resume import ResumeService
 from app.services.slides import SlideService
+from app.services.videos.service import VideoService
 from app.services.workflows.builtin import seed_builtin_workflows
-from app.services.workflows.runs import STALE_RUN_ERROR, reset_stale_runs
+from app.services.workflows.runs import STALE_RUN_ERROR, latest_run, reset_stale_runs
 from app.services.workflows import (
     RUN_FAILED,
     RUN_SUCCEEDED,
+    STEP_FAILED,
+    STEP_SKIPPED,
     STEP_SUCCEEDED,
     SUBJECT_ANALYZING,
     SUBJECT_ERROR,
@@ -40,9 +51,11 @@ from app.services.workflows import (
     SUBJECT_READY,
     SUBJECT_RESUME_TOOLKIT,
     SUBJECT_SLIDE_DECK,
+    SUBJECT_VIDEO_PROJECT,
 )
 
 OWNER = 1
+settings = get_settings()
 
 DECK_OUTPUT = (
     '```json\n{"theme":{"preset":"paper","ratio":"16x9","accent":"#123456"},'
@@ -106,7 +119,11 @@ def db(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def model_call(monkeypatch):
-    """把模型调用换成假的，并记下每次收到的 ``(agent_slug, prompt)``。"""
+    """把模型调用换成假的，并记下每次收到的 ``(agent_slug, prompt)``。
+
+    ``reply_for`` 给字典时按人设 slug 取回复：短视频那条流程两步问的是两个人设，
+    一份回复打到所有步骤那种写法对它没用。
+    """
     calls: list[tuple[str, str]] = []
 
     def stub(reply_for):
@@ -123,10 +140,12 @@ def model_call(monkeypatch):
             on_event=None,
         ):
             calls.append((agent_slug, user_prompt))
-            reply = reply_for() if callable(reply_for) else reply_for
+            reply = reply_for
+            if isinstance(reply, dict):
+                reply = reply.get(agent_slug, "")
             if isinstance(reply, Exception):
                 raise reply
-            return reply
+            return reply() if callable(reply) else reply
 
         monkeypatch.setattr(workflow_exec, "run_agent", fake_run_agent)
         return calls
@@ -472,3 +491,166 @@ def test_toolkit_task_marks_error_when_the_workflow_fails(db, model_call):
     done = service.to_toolkit_item(service.get_toolkit_task(task.id))
     assert done.status == SUBJECT_ERROR and "上游 502" in done.error_msg
     assert _run(db, "toolkit-salary-negotiation").status == RUN_FAILED
+
+
+# ---- 短视频 -----------------------------------------------------------------
+
+
+# 两步各答一份：创作卡七项与分镜五项都是步骤声明的输出契约，少一项都进不了下一步。
+# ``structure`` 是人设里那个数组，别写成字符串——类型对不上是后处理挂，不是模型挂。
+BRIEF_OUTPUT = (
+    '{"hook_type":"悬念","hook":"三步做完季度复盘","audience":"普通打工人",'
+    '"goal":"涨粉","structure":["问题","方案","结果"],"duration_s":30,'
+    '"risk_notes":"别写公司名"}'
+)
+SCRIPT_OUTPUT = (
+    '{"title":"季度复盘三步","narration":"整条口播文案",'
+    '"tags":["复盘","职场"],"cover_prompt":"竖屏封面一张",'
+    '"shots":[{"image_prompt":"第一镜画面","video_prompt":"镜头缓慢推近",'
+    '"duration_s":6,"scene":"工位","on_screen_text":"三步"},'
+    '{"image_prompt":"第二镜画面","duration_s":99}]}'
+)
+EMPTY_OUTPUT = '{"title":"空片","narration":"文案","tags":[],"cover_prompt":"封面","shots":[]}'
+
+
+def _project(db, **overrides) -> VideoProject:
+    fields = {
+        "title": "季度复盘三步",
+        "platform": "douyin",
+        "idea": "教普通打工人三步做出老板看得懂的季度复盘",
+        "duration_s": None,
+        "requirement": None,
+        "style": None,
+        "params": None,
+    }
+    fields.update(overrides)
+    return VideoService(db, OWNER).create_project(**fields)
+
+
+def _steps_of(db, run) -> dict:
+    """一条运行按步骤 key 取回现场；成功的那条才值得看步骤细节。"""
+    assert run.status == RUN_SUCCEEDED, f"运行没跑成功：{run.error_msg}"
+    return {
+        row.key: row
+        for row in db.scalars(
+            select(WorkflowRunStep)
+            .where(WorkflowRunStep.run_id == run.id)
+            .order_by(WorkflowRunStep.id)
+        ).all()
+    }
+
+
+def _latest(db, project_id: int):
+    db.expire_all()
+    return latest_run(db, OWNER, SUBJECT_VIDEO_PROJECT, project_id)
+
+
+def test_video_script_runs_both_steps_through_the_workflow(db, model_call):
+    """两步各留一份现场，前一步的产物按**对象**喂给后一步。"""
+    calls = model_call({"video-briefer": BRIEF_OUTPUT, "video-storyboarder": SCRIPT_OUTPUT})
+    service = VideoService(db, OWNER)
+    project = _project(db)
+
+    asyncio.run(service.run_script(project.id))
+    _read_after_engine_writes(db)
+
+    assert [slug for slug, _ in calls] == ["video-briefer", "video-storyboarder"]
+    steps = _steps_of(db, _latest(db, project.id))
+    assert list(steps) == ["brief", "script"]
+    assert steps["brief"].prompt == calls[0][1]
+    # 跨步传的是按契约筛过的对象，不是模型原文：下游 prompt 里应当看得见结构本身。
+    assert '"hook_type"' in steps["script"].prompt
+    assert '"structure"' in steps["script"].prompt
+    assert steps["script"].prompt == calls[1][1]
+
+    db.expire_all()
+    done = service.get_project(project.id)
+    assert done.brief["hook"] == "三步做完季度复盘"
+    assert done.brief["structure"] == ["问题", "方案", "结果"]
+    assert done.script == "整条口播文案"
+    assert done.publish["tags"] == ["复盘", "职场"]
+    shots = service.shots_of(project.id)
+    assert [row.image_prompt for row in shots] == ["第一镜画面", "第二镜画面"]
+    # 模型给 99 秒就得夹回渲染档的上限：那条镜头根本发不出去。
+    assert [row.duration_s for row in shots] == [6, 15]
+
+
+def test_video_script_prompt_only_says_what_was_filled_in(db, model_call):
+    """没填的段落整段不进 prompt：模板只管替换，拼装还是代码的事。"""
+    model_call({"video-briefer": BRIEF_OUTPUT, "video-storyboarder": SCRIPT_OUTPUT})
+    service = VideoService(db, OWNER)
+    project = _project(db, title="只有想法", duration_s=None, requirement=None, style=None)
+
+    asyncio.run(service.run_script(project.id))
+    _read_after_engine_writes(db)
+
+    steps = _steps_of(db, _latest(db, project.id))
+    assert "想法：" in steps["brief"].prompt
+    assert "发布平台：抖音" in steps["brief"].prompt
+    assert "用户的补充要求" not in steps["brief"].prompt, "空段落不该留在 prompt 里"
+    assert "全片风格" not in steps["brief"].prompt
+    assert "目标时长" not in steps["brief"].prompt
+    assert "可用参考图" not in steps["script"].prompt
+
+
+def test_video_script_never_sees_the_material_library(db, model_call):
+    """库是账号级的，模型没有依据替人挑素材：重新生成脚本时也不给素材清单。
+
+    旧的「项目参考图清单」会进分镜那一步的 prompt，模型于是能抄到 id；现在素材由
+    人在工作台上按镜头挑，所以库里明明有这条图，prompt 里也不该出现它。
+    """
+    model_call({"video-briefer": BRIEF_OUTPUT, "video-storyboarder": SCRIPT_OUTPUT})
+    service = VideoService(db, OWNER)
+    project = _project(db, requirement="只要前 3 秒")
+    # 直接落一行而不是走 store_material：这一步断言的是 prompt 里有什么，没有一处会读那个文件。
+    db.add(
+        MaterialAsset(
+            owner_id=OWNER, kind=KIND_IMAGE, name="主角形象.png", mime="image/png",
+            size=32, rel_path=f"materials/{OWNER}/0123456789abcdef.png",
+        )
+    )
+    db.commit()
+    asyncio.run(service.run_script(project.id))
+    # 重新生成才是「库里已经有素材」的那一刻：走 start_script 那次重新快照的输入。
+    service.start_script(project.id)
+    asyncio.run(service.run_script(project.id))
+    _read_after_engine_writes(db)
+
+    steps = _steps_of(db, _latest(db, project.id))
+    assert "可用参考图" not in steps["script"].prompt
+    assert "主角形象.png" not in steps["script"].prompt
+    # 重新生成用的是这一刻的输入：上一轮里那条补充要求还在。
+    assert "用户的补充要求：只要前 3 秒" in steps["brief"].prompt
+
+
+def test_video_script_skips_the_second_step_when_the_brief_is_broken(db, model_call):
+    """创作卡缺字段：流程停在这一步，后一步是「没跑到」而不是「跑挂了」。"""
+    calls = model_call({"video-briefer": '{"hook":"只给一个字段"}'})
+    service = VideoService(db, OWNER)
+    project = _project(db)
+
+    asyncio.run(service.run_script(project.id))
+    _read_after_engine_writes(db)
+
+    assert [slug for slug, _ in calls] == ["video-briefer"]
+    run = _latest(db, project.id)
+    assert run.status == RUN_FAILED and "缺少字段" in run.error_msg
+    assert {row.key: row.status for row in db.scalars(
+        select(WorkflowRunStep).where(WorkflowRunStep.run_id == run.id)
+    ).all()} == {"brief": STEP_FAILED, "script": STEP_SKIPPED}
+
+
+def test_video_script_without_any_shot_is_downgraded(db, model_call):
+    """两步都成功却一镜都没落下来：运行得跟着降级，不然界面就是「已完成」没有分镜。"""
+    model_call({"video-briefer": BRIEF_OUTPUT, "video-storyboarder": EMPTY_OUTPUT})
+    service = VideoService(db, OWNER)
+    project = _project(db)
+
+    asyncio.run(service.run_script(project.id))
+    _read_after_engine_writes(db)
+
+    run = _latest(db, project.id)
+    assert run.status == RUN_FAILED and "合法镜头" in run.error_msg
+    assert service.shots_of(project.id) == []
+    item = service.to_item(service.get_project(project.id))
+    assert item.status == SUBJECT_ERROR and "合法镜头" in item.error_msg

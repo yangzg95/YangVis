@@ -1133,6 +1133,230 @@ class SlideDeck(Base):
         return f"<SlideDeck id={self.id} owner={self.owner_id} title={self.title!r}>"
 
 
+class MaterialAsset(Base):
+    """素材库里的一条图片/视频素材，按账号归属，跨项目复用。
+
+    为什么单独一张表而不是继续塞在 ``video_project.assets`` 那个 JSON 数组里：
+    项目内的数组只能被本项目看见，人物形象、片头 logo 这类要反复用的素材每换
+    一个项目就得重传一次；而「谁在用这条素材」是跨行的反查（删素材要解掉引用
+    它的镜头），JSON 里做这个只能全表扫。
+
+    与 ``media_job`` 的产物同一存储取舍：文件在服务器本地磁盘，库里只存
+    ``rel_path``，URL 由 ``services/materials/store.py`` 现拼——拼不出就是文件没了。
+    """
+
+    __tablename__ = "material_asset"
+    __table_args__ = (Index("idx_material_owner_kind", "owner_id", "kind"),)
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    # image | video：取值见 services/materials 的 KIND_*，由文件头魔数判定，
+    # 不信任客户端报的 Content-Type。
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    mime: Mapped[str] = mapped_column(String(64), nullable=False)
+    size: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    rel_path: Mapped[str] = mapped_column(String(512), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<MaterialAsset id={self.id} owner={self.owner_id} kind={self.kind!r}>"
+
+
+class VideoProject(Base):
+    """一个短视频项目：想法 + 创作卡 + 口播稿 + 渲染参数快照。
+
+    与 :class:`SlideDeck` 同一取舍——这一行只存产物，不放 status。两阶段的进度
+    各有唯一事实源：脚本阶段在认领它的 ``workflow_run``（``subject_kind`` 为
+    ``video-project``），渲染阶段在各镜头指向的 ``media_job``。
+
+    ``brief`` / ``script`` 是模型产出、用户可改的文本；镜头单独成行
+    （:class:`VideoShot`）而不是塞进 JSON 数组，因为每一镜都要挂自己的作业、
+    自己的重做和自己的排序，JSON 里做这些会退化成整包读写。
+
+    ``params`` 是发起渲染时抄下来的参数（画幅、分辨率、时长、型号、水印）：
+    模型配置随时可改，一条跑了几分钟的作业要当场说得出自己是按哪一档出的。
+
+    封面也不在这一行上：它是 ``biz_type = video-project-cover`` 的那条作业，
+    产物路径从作业行读——存一份副本就会和作业漂移。
+    """
+
+    __tablename__ = "video_project"
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    title: Mapped[str] = mapped_column(String(128), nullable=False)
+    # douyin / kuaishou / other：只影响人设里的节奏与时长偏好，不写死任何平台规则。
+    platform: Mapped[str] = mapped_column(String(16), nullable=False, default="douyin")
+    # 用户给的那句话（想法、素材、卖点），是脚本流程的输入。
+    idea: Mapped[str] = mapped_column(_LONG_TEXT, nullable=False, default="")
+    # 用户对这条片子的补充要求（想强调什么、别出现什么）：重新生成脚本时还要按它跑，
+    # 所以它得存下来，不能只当一次的输入。
+    requirement: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # 创作卡：{hook, audience, structure, goal, duration_s, ...}，脚本步的产物。
+    brief: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # 完整口播/剧情文本（纯文本，供人通读和手改；分镜是它的切分）。
+    script: Mapped[str] = mapped_column(_LONG_TEXT, nullable=False, default="")
+    # {visual_style, persona, palette}——风格约束，逐镜提示词都要贴它。
+    style: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    params: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # 发布用：{title_candidates: [], tags: [], cover_prompt}
+    publish: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<VideoProject id={self.id} owner={self.owner_id} title={self.title!r}>"
+
+
+class VideoShot(Base):
+    """一个镜头：脚本切出来的画面/运动提示词，外加指向最近一次图与视频的指针。
+
+    ``image_prompt`` 与 ``video_prompt`` 分开写是这套流程的关键：前者喂文生图出
+    首帧（决定"长什么样"），后者只描述运动和镜头（决定"怎么动"）。把两件事塞进
+    一条提示词，出来的画面既不稳也不好复盘。
+
+    这一行**没有任何状态列**，也没有产物路径：``image_job_id`` / ``video_job_id``
+    指向最近一次 :class:`MediaJob`，状态和落盘路径都从那一行读。历史渲染不丢——
+    ``media_job`` 按 ``biz_type`` + ``biz_id`` 能列出这个镜头跑过的全部作业。
+    """
+
+    __tablename__ = "video_shot"
+    __table_args__ = (Index("idx_shot_project", "project_id", "sort_order"),)
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    # 冗余一份归属：作业入队、列表过滤都要按 owner 拦一道，不必处处先 join 项目。
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 在成片时间线上的位置（秒）：脚本步算出来，手改镜头时长时跟着重算。
+    start_s: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duration_s: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+
+    # 给人看的四行：画面、运镜、动作、台词/字幕。
+    scene: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    camera: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    action: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    dialogue: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # 屏幕字（花字/关键词），渲染时叠在预览上，也是导出 SRT 的来源。
+    on_screen_text: Mapped[str | None] = mapped_column(String(256), nullable=True)
+
+    image_prompt: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    video_prompt: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+
+    # t2v | first_frame | first_last_frame | reference（取值见 services/media 的
+    # MODE_VIDEO_GEN）。first_frame 需要一张首帧，reference 吃镜头引用的素材。
+    gen_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="first_frame")
+    # 本镜引用的素材 id 列表（material_asset.id 的字符串形式，最多 4 条）。图片类
+    # 素材会真的进模型当参考，视频类本期只记录引用——上游吃参考视频要公网地址，
+    # 而这一期的渲染只到首帧。
+    material_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+
+    image_job_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    video_job_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<VideoShot id={self.id} project={self.project_id} order={self.sort_order}>"
+
+
+class MediaJob(Base):
+    """一次媒体生成作业：上游异步任务的本地镜像，也是渲染进度的唯一事实源。
+
+    为什么单独一张表而不塞进 ``workflow_run_step``：方舟的视频任务要排队几十分钟
+    量级、有自己的外部 id、可以取消、可以按 id 重查，而且一个项目是**几十条并发**
+    的作业。运行那一层的模型是「一条运行 = 一个进程活到结束」，套不上。
+
+    ``submitted_at`` 是不是空表示「有没有提交给上游」——这个区分不能用
+    ``remote_task_id`` 做：图片接口压根没有任务 id，那一列对图片永远是空。进程重启
+    后，已提交未终态的作业按 ``remote_task_id`` 继续查（视频），图片那种同步调用则
+    重来一次。``reset_stale_runs`` 那套「重启即判死」在这里不适用——上游还在跑呢。
+
+    ``request`` 存的是这次作业**要发什么**的归一形状（提示词 + 参数 + 参考图指向哪个
+    本地文件），两种形状的注释在 ``services/media/jobs.py`` 顶部。base64 内联在发送
+    那一刻才拼出来、不进数据库，否则一张 2K 首帧图要在库里躺 5MB。渲染出来不对，
+    这一列就是说得出当时喂了什么的地方——与 ``workflow_run_step.prompt`` 同一个理由。
+    """
+
+    __tablename__ = "media_job"
+    __table_args__ = (
+        # 上游任务 id 全局唯一，重启后按它续轮询才不会撞车。MySQL 允许多个 NULL，
+        # 所以「尚未提交」的行不受这条约束影响。
+        UniqueConstraint("remote_task_id", name="uk_media_remote_task"),
+        Index("idx_media_claim", "status", "last_polled_at"),
+        Index("idx_media_biz", "biz_type", "biz_id"),
+    )
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    provider: Mapped[str] = mapped_column(String(32), nullable=False, default="ark")
+    # video | image（见 services/media 的 KIND_*）。
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    # 为哪个业务对象跑的：video-shot / video-project-cover，寻址方式与
+    # workflow_run.subject_* 一致（id 一律转字符串存）。
+    biz_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    biz_id: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # 用了哪份模型配置（历史留痕，删掉配置不回填空——与 workflow_run_step 同一取舍）。
+    model_config_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    model_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    remote_task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # queued | running | downloading | succeeded | failed | cancelled | expired
+    # 前六个与方舟的任务状态同名同义；downloading 是本地的（已拿到 URL 正在转存）。
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_msg: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    request: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # 最后一次查询到的原始响应，截断后存：排障时唯一能看到上游真说了什么的地方。
+    response: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # 产物**必须**转存到本地磁盘：方舟返回的 video_url 24 小时后失效，任务本身
+    # 7 天后就查不到了。rel_path 是相对 UPLOAD_MEDIA_DIR 的路径，url 给浏览器用。
+    rel_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    mime: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    elapsed_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<MediaJob id={self.id} kind={self.kind!r} status={self.status!r}>"
+
+
 class NetdiskAccount(Base):
     """一个用户绑定的百度网盘账号（一人一绑）。
 

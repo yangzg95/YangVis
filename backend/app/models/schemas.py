@@ -586,10 +586,17 @@ class LocalToolItem(BaseModel):
 # ---- 设置 / 模型配置 ------------------------------------------------
 
 class ModelPurpose(str, Enum):
-    """对话模型和 embedding 模型是分开独立配置的。"""
+    """对话、向量、图片、视频四类模型是分开独立配置的。
+
+    ``image`` / ``video`` 不是 OpenAI 兼容的对话接口，走的是方舟自己的媒体端点，
+    但凭证形状一模一样（base_url + model + api_key），所以复用同一张配置表，
+    由 ``services/media/ark.py`` 按用途挑客户端。
+    """
 
     CHAT = "chat"
     EMBEDDING = "embedding"
+    IMAGE = "image"
+    VIDEO = "video"
 
 
 class ReasoningMode(str, Enum):
@@ -699,6 +706,10 @@ class ReadinessStatus(BaseModel):
 
     chat: PurposeStatus = Field(default_factory=PurposeStatus)
     embedding: PurposeStatus = Field(default_factory=PurposeStatus)
+    # 短视频的两类生成模型：前端「办公 · 短视频」的准入门槛按这两个字段决定，
+    # 缺哪个就在对应按钮上提示去配置，而不是等提交任务时上游报 401。
+    image: PurposeStatus = Field(default_factory=PurposeStatus)
+    video: PurposeStatus = Field(default_factory=PurposeStatus)
     kb: KnowledgeStatus = Field(default_factory=KnowledgeStatus)
 
 
@@ -2750,6 +2761,7 @@ class DashboardSummary(BaseModel):
     conversation_count: int = 0
     resume_count: int = 0
     slide_count: int = 0
+    video_project_count: int = 0
     interview_count: int = 0
     note_count: int = 0
     memory_count: int = 0
@@ -3028,3 +3040,253 @@ class AppMessageItem(BaseModel):
     title: str
     body: Optional[str] = None
     created_at: datetime
+
+
+# ---- 智能应用 · 短视频 ------------------------------------------------------
+
+# 这三档白名单直接抄方舟的入参取值（词表在 ``services/media/__init__.py``）：
+# 界面上选出来的值要能原样进请求体，中间不翻译。
+VideoPlatform = Literal["douyin", "kuaishou", "other"]
+VideoGenMode = Literal["t2v", "first_frame", "first_last_frame", "reference"]
+VideoRatio = Literal["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]
+VideoResolution = Literal["480p", "720p", "1080p"]
+ImageSize = Literal["1K", "2K", "4K"]
+MediaJobKind = Literal["image", "video"]
+MediaJobStatus = Literal[
+    "queued", "running", "downloading", "succeeded", "failed", "cancelled", "expired"
+]
+
+
+class VideoParams(BaseModel):
+    """一个项目的渲染参数。发起作业时抄进 ``media_job.request``，之后改这里不影响在跑的作业。
+
+    ``generate_audio`` 默认**关**：方舟那一侧默认开，留着不动就会拿到一条模型自己
+    编的人声或背景乐，而这一期定的是「不做口播、只做字幕」。写在这里而不是靠上游
+    默认，是为了让「这条片子为什么没有声音」当场有据可查。
+
+    ``ratio`` 默认**显式 9:16** 而不是 ``adaptive``：出图那一档只带尺寸不带画幅，
+    ``adaptive`` 是「跟着首帧走」，首帧出成方图就整条跟着方。竖屏产品不能把方向
+    交给运气，横屏选题在渲染参数里切回去就是。
+    """
+
+    ratio: VideoRatio = "9:16"
+    resolution: VideoResolution = "720p"
+    fps: int = Field(default=24, ge=1, le=60)
+    watermark: bool = False
+    generate_audio: bool = False
+    image_size: ImageSize = "2K"
+
+
+class VideoStyle(BaseModel):
+    """全片风格约束：逐镜提示词都要贴它，改一处比改十几镜更能保持统一。"""
+
+    visual_style: str = Field(default="", max_length=256)
+    persona: str = Field(default="", max_length=128)
+    palette: str = Field(default="", max_length=128)
+
+
+class VideoBrief(BaseModel):
+    """创作卡：脚本流程第一步的产物，也就是「这条片子凭什么让人看完」。"""
+
+    hook_type: str = Field(default="", max_length=16)
+    hook: str = Field(default="", max_length=128)
+    audience: str = Field(default="", max_length=256)
+    goal: str = Field(default="", max_length=256)
+    structure: List[str] = Field(default_factory=list, max_length=8)
+    duration_s: int = Field(default=15, ge=5, le=60)
+    risk_notes: str = Field(default="", max_length=512)
+
+
+class VideoPublish(BaseModel):
+    """发布用的一包：标题候选、话题标签、封面描述。"""
+
+    title_candidates: List[str] = Field(default_factory=list, max_length=6)
+    tags: List[str] = Field(default_factory=list, max_length=8)
+    cover_prompt: str = Field(default="", max_length=512)
+
+
+# 素材的二分：一张图还是一段视频，由文件头魔数判出来，与方舟的入参取值无关。
+MaterialKind = Literal["image", "video"]
+
+
+class MaterialAssetOut(BaseModel):
+    """素材库里的一条图片/视频素材。
+
+    ``url`` 由 ``rel_path`` 现拼（不入库）：拼不出空串就说明文件已经不在盘上了，
+    这时候界面上给一张裂开的缩略图不如什么都不给。
+    """
+
+    id: int
+    kind: MaterialKind
+    name: str
+    mime: str = ""
+    size: int = 0
+    url: str = ""
+    created_at: Optional[datetime] = None
+
+
+class MaterialListOut(BaseModel):
+    """一屏素材 + 两个总量。
+
+    ``total`` 跟着筛选条件走，分页才数得对；``bytes_total`` 与 ``max_per_owner`` 是
+    全库口径，页面用它说「还能再放多少条」——用户真正会问的是这个，而不是「这次
+    筛出来的 8 条一共多大」。
+    """
+
+    items: List[MaterialAssetOut] = Field(default_factory=list)
+    total: int = 0
+    bytes_total: int = 0
+    max_per_owner: int = 0
+
+
+class MediaJobOut(BaseModel):
+    """一条媒体作业的对外形状。
+
+    ``url`` 是从 ``rel_path`` 拼出来的站内地址：上游那条 24 小时就失效，把它发给
+    浏览器等于给用户一个明天就打不开的作品。
+    """
+
+    id: int
+    kind: MediaJobKind
+    status: MediaJobStatus
+    model_name: str = ""
+    url: str = ""
+    mime: Optional[str] = None
+    file_size: Optional[int] = None
+    error_msg: Optional[str] = None
+    elapsed_ms: Optional[int] = None
+    created_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+
+class VideoShotOut(BaseModel):
+    """工作台里的一镜：两套提示词 + 最近一次首帧作业的现状。
+
+    这里只有 ``image_job``：一期只渲染首帧，``video_prompt`` 与 ``video_job_id``
+    先落在镜头行上攒着，等视频片段那一轮再开口——界面上摆一个永远为空的「视频」
+    格子，不如等它真的有内容。
+    """
+
+    id: int
+    sort_order: int = 0
+    start_s: int = 0
+    duration_s: int = 5
+    scene: str = ""
+    camera: str = ""
+    action: str = ""
+    dialogue: str = ""
+    on_screen_text: str = ""
+    image_prompt: str = ""
+    video_prompt: str = ""
+    gen_mode: VideoGenMode = "first_frame"
+    # 引用的素材库 id（字符串形式，元素最多 4 个）。
+    material_ids: List[str] = Field(default_factory=list)
+    image_job: Optional[MediaJobOut] = None
+
+
+class VideoShotIn(BaseModel):
+    """整批保存时的一行。``id`` 空是新建，不在列表里的现有镜头会被删掉——
+    与幻灯片整包保存同一语义，前端的增删改排序只需要发一份完整列表。
+
+    时长区间取各型号窗口的并集：2.0 系是 4-15、2.5 到 30，具体型号能到哪一档由
+    作业在上游校验，这里只挡明显荒谬的值。
+    """
+
+    id: Optional[int] = None
+    duration_s: int = Field(default=5, ge=2, le=30)
+    scene: str = Field(default="", max_length=512)
+    camera: str = Field(default="", max_length=256)
+    action: str = Field(default="", max_length=256)
+    dialogue: str = Field(default="", max_length=512)
+    on_screen_text: str = Field(default="", max_length=256)
+    image_prompt: str = Field(default="", max_length=1024)
+    video_prompt: str = Field(default="", max_length=1024)
+    gen_mode: VideoGenMode = "first_frame"
+    # 本镜引用的素材库 id，最多 4 条：方舟的 reference_image 到 4 张左右开始互相
+    # 干扰，再给只是让提示词说不清哪张是主体。
+    material_ids: List[str] = Field(default_factory=list, max_length=4)
+
+
+class VideoProjectItem(BaseModel):
+    """列表里的一行。``status`` 是脚本阶段的状态，从认领本项目的运行翻译过来。"""
+
+    id: int
+    title: str
+    platform: VideoPlatform = "douyin"
+    status: str = "analyzing"
+    error_msg: Optional[str] = None
+    shot_count: int = 0
+    duration_s: int = 0
+    cover_url: str = ""
+    created_at: datetime
+    updated_at: datetime
+
+
+class VideoProjectDetail(VideoProjectItem):
+    """工作台要的完整数据：创作卡 + 分镜 + 参数 + 每镜的作业现状。"""
+
+    idea: str = ""
+    requirement: str = ""
+    brief: VideoBrief = Field(default_factory=VideoBrief)
+    script: str = ""
+    style: VideoStyle = Field(default_factory=VideoStyle)
+    params: VideoParams = Field(default_factory=VideoParams)
+    publish: VideoPublish = Field(default_factory=VideoPublish)
+    shots: List[VideoShotOut] = Field(default_factory=list)
+
+
+class VideoProjectCreate(BaseModel):
+    """新建项目：一句话想法进来，创作卡与分镜由那条内置流程产出。"""
+
+    title: Optional[str] = Field(default=None, max_length=128)
+    platform: VideoPlatform = "douyin"
+    idea: str = Field(..., min_length=1, max_length=4000)
+    # 想直接指定成片时长就填这里；不填由策划师按选题定。
+    duration_s: Optional[int] = Field(default=None, ge=5, le=60)
+    requirement: Optional[str] = Field(default=None, max_length=512)
+    style: Optional[VideoStyle] = None
+    params: Optional[VideoParams] = None
+
+
+class VideoProjectUpdate(BaseModel):
+    """工作台的保存：给了才改，``None`` 保持原样。"""
+
+    title: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    platform: Optional[VideoPlatform] = None
+    idea: Optional[str] = Field(default=None, max_length=4000)
+    requirement: Optional[str] = Field(default=None, max_length=512)
+    brief: Optional[VideoBrief] = None
+    script: Optional[str] = Field(default=None, max_length=20000)
+    style: Optional[VideoStyle] = None
+    params: Optional[VideoParams] = None
+    publish: Optional[VideoPublish] = None
+
+
+class VideoShotsSave(BaseModel):
+    # 上限比 settings.VIDEO_MAX_SHOTS 宽：那条是「模型能产出多少镜」的闸门，
+    # 这里是「别把一次请求塞进几百行」的闸门，服务层再按前者裁。
+    shots: List[VideoShotIn] = Field(default_factory=list, max_length=60)
+
+
+class VideoRenderRequest(BaseModel):
+    """一次批量渲首帧：``shot_ids`` 空表示项目里全部镜头。
+
+    一期只有首帧这一档，所以这里不收「阶段」：视频片段那一轮接口自己长。
+    """
+
+    shot_ids: List[int] = Field(default_factory=list, max_length=60)
+
+
+class MediaCapacityItem(BaseModel):
+    """一类作业的并发现状：渲染前那屏「现在有几个在跑、还能塞几个」。"""
+
+    kind: MediaJobKind
+    inflight: int = 0
+    limit: int = 0
+
+
+class MediaCapacityOut(BaseModel):
+    jobs: List[MediaCapacityItem] = Field(default_factory=list)
+    # 参考图送进方舟的方式：data_url 时首帧必须落在服务器本地，换公网地址要配
+    # PUBLIC_MEDIA_BASE_URL，界面上得说清当前是哪一种。
+    image_transport: str = "data_url"

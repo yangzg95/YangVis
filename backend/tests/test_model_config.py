@@ -303,6 +303,30 @@ def test_create_strips_the_trailing_slash_off_the_base_url(db):
     ).base_url == "http://localhost:1/v1"
 
 
+@pytest.mark.parametrize(
+    "typed,expected",
+    [
+        # 控制台「复制接入地址」给的经常是能直接调通的完整 URL。接口路径那一段系统
+        # 自己会拼，留着它就变成 …/api/v3/images/generations/contents/generations/tasks，
+        # 上游只回一个看不出原因的 404。
+        (
+            "https://ark.cn-beijing.volces.com/api/v3/images/generations",
+            "https://ark.cn-beijing.volces.com/api/v3",
+        ),
+        (
+            "https://ark.cn-beijing.volces.com/api/v3/chat/completions/",
+            "https://ark.cn-beijing.volces.com/api/v3",
+        ),
+        # 忘了写协议：补上 https，别让人对着 InvalidURL 猜是哪一段错了。
+        ("ark.cn-beijing.volces.com/api/v3", "https://ark.cn-beijing.volces.com/api/v3"),
+        # 本地裸 HTTP 的服务照原样留着——协议只敢默认补 https，不敢反过来猜。
+        ("http://127.0.0.1:11434/v1", "http://127.0.0.1:11434/v1"),
+    ],
+)
+def test_the_base_url_is_normalized_when_it_is_saved(db, typed, expected):
+    assert svc(db).create(create_payload(base_url=typed)).base_url == expected
+
+
 def test_the_vision_flag_survives_create_and_to_item(db):
     """对话页只从 to_item 看得到这一列；漏掉它等于所有模型都被判成不收图。"""
     item = svc(db).to_item(svc(db).create(create_payload(supports_vision=True)))
@@ -441,6 +465,30 @@ def test_the_same_url_written_back_does_not_wipe_the_verified_state(db):
     assert updated.base_url == "http://localhost:1/v1"
     assert updated.last_test_ok is True
     assert updated.is_default is True
+
+
+def test_an_endpoint_path_in_the_url_is_cleaned_on_update(db):
+    """库里已经存坏的那一份（带接口路径）：原样回传也能被修好，且算一次改动。
+
+    「没改」在这里不成立——落库的地址确实变了，之前那次「测试通过」是对着另一个
+    URL 得到的，不能继续顶着默认位。
+    """
+    config = svc(db).create(create_payload(api_key=KEY))
+    config.base_url = "https://ark.cn-beijing.volces.com/api/v3/images/generations"
+    config.is_default = True
+    config.last_test_ok = True
+    db.commit()
+
+    updated = svc(db).update(
+        config.id,
+        ModelConfigUpdate(
+            base_url="https://ark.cn-beijing.volces.com/api/v3/images/generations"
+        ),
+    )
+
+    assert updated.base_url == "https://ark.cn-beijing.volces.com/api/v3"
+    assert updated.last_test_ok is False
+    assert updated.is_default is False
 
 
 def test_update_writes_back_only_the_fields_you_sent(db):

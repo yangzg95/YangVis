@@ -49,6 +49,7 @@ SUBJECT_RESUME_COMPARISON = "resume-comparison"
 SUBJECT_RESUME_TOOLKIT = "resume-toolkit"
 SUBJECT_SLIDE_DECK = "slide-deck"
 SUBJECT_INTERVIEW_QUESTION = "interview-question"
+SUBJECT_VIDEO_PROJECT = "video-project"
 
 # 业务行的状态词表：以前直接长在业务表上，现在由最近一次运行翻译出来。
 # 取值一个都没改——前端那几套 statusText 映射不用跟着动。

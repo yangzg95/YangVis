@@ -10,6 +10,7 @@ export interface DashboardSummary {
   conversation_count: number
   resume_count: number
   slide_count: number
+  video_project_count: number
   interview_count: number
   note_count: number
   workflow_count: number

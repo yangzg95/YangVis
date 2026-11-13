@@ -112,6 +112,7 @@ import {
   RobotOutlined,
   SolutionOutlined,
   UploadOutlined,
+  VideoCameraOutlined,
 } from '@ant-design/icons-vue'
 import {
   chatApi,
@@ -222,6 +223,14 @@ const modules = computed<HomeModule[]>(() => {
       icon: FundProjectionScreenOutlined,
       unit: '份幻灯片',
       value: s?.slide_count ?? null,
+    },
+    {
+      path: '/office/videos',
+      name: '短视频',
+      desc: '分镜脚本与首帧，一镜一段',
+      icon: VideoCameraOutlined,
+      unit: '条片子',
+      value: s?.video_project_count ?? null,
     },
     {
       path: '/ops/server',

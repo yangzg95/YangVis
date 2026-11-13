@@ -686,6 +686,110 @@ CREATE TABLE IF NOT EXISTS notify_huawei_config (
 
 
 -- ---------------------------------------------------------------------------
+-- 智能应用 · 短视频（想法 → 脚本/分镜 → 首帧图 → 视频片段，火山方舟 Ark）
+--
+-- 三张表按「谁记状态」切开：项目行与镜头行只存产物，进度一律不抄一份；
+-- 脚本阶段的状态在 workflow_run（subject_kind=video-project），渲染阶段的
+-- 状态与产物路径只在 media_job。理由见 app/services/media/__init__.py。
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- 智能应用 · 素材库（跨项目复用的图片/视频素材）
+--
+-- 与 video_project.assets 那个已经退役的 JSON 数组的区别只有一句话：库属于账号，
+-- 不属于某个项目。所以删一条短视频不会带走人物形象图，而「谁在引用这条素材」是
+-- 跨行反查（video_shot.material_ids），只能靠一张表来支撑。
+-- 文件在服务器本地磁盘的 materials/<owner_id>/ 下，库里只存 rel_path。
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS material_asset (
+  id         BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id   BIGINT       NOT NULL,
+  kind       VARCHAR(8)   NOT NULL COMMENT 'image | video，由文件头魔数判定，不信客户端报的 Content-Type',
+  name       VARCHAR(128) NOT NULL COMMENT '界面上看得出的名字，取自上传文件名；不参与任何路径拼接',
+  mime       VARCHAR(64)  NOT NULL,
+  size       BIGINT       NOT NULL DEFAULT 0 COMMENT '字节数，页面用它报全库占用',
+  rel_path   VARCHAR(512) NOT NULL COMMENT '相对 UPLOAD_MEDIA_DIR 的路径，URL 由它现拼（不入库，避免两份事实）',
+  created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_material_owner_kind (owner_id, kind)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='素材库条目；视频素材这一期只记录引用，参考视频进模型要公网可达的地址';
+
+CREATE TABLE IF NOT EXISTS video_project (
+  id               BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id         BIGINT       NOT NULL,
+  title            VARCHAR(128) NOT NULL COMMENT '工作标题，不是发布标题（后者在 publish 里）',
+  platform         VARCHAR(16)  NOT NULL DEFAULT 'douyin' COMMENT 'douyin | kuaishou | other，只影响人设里的节奏与时长偏好',
+  idea             MEDIUMTEXT   NOT NULL COMMENT '用户给的那句话（想法/素材/卖点），脚本流程的输入',
+  requirement      VARCHAR(512) NULL     COMMENT '补充要求：重新生成脚本时还要按它跑，所以存下来',
+  brief            JSON         NOT NULL COMMENT '创作卡：{hook, audience, structure, goal, duration_s}',
+  script           MEDIUMTEXT   NOT NULL COMMENT '完整口播/剧情纯文本，供人通读与手改；分镜是它的切分',
+  style            JSON         NOT NULL COMMENT '{visual_style, persona, palette}，逐镜提示词都要贴它',
+  params           JSON         NOT NULL COMMENT '渲染参数快照：{ratio, resolution, duration_s, watermark, fps...}，发起渲染时抄下，改模型配置不影响已入队的作业',
+  publish          JSON         NOT NULL COMMENT '{title_candidates, tags, cover_prompt}',
+  created_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='智能应用 · 短视频项目；脚本进度在 workflow_run（subject_kind=video-project），渲染进度在 media_job';
+
+CREATE TABLE IF NOT EXISTS video_shot (
+  id             BIGINT PRIMARY KEY AUTO_INCREMENT,
+  project_id     BIGINT       NOT NULL,
+  owner_id       BIGINT       NOT NULL COMMENT '冗余一份归属：入队与列表都要按 owner 拦一道，不必处处先 join 项目',
+  sort_order     INT          NOT NULL DEFAULT 0 COMMENT '镜头顺序，工作台可手改；不靠数组下标，重排与并发增删会漂移',
+  start_s        INT          NOT NULL DEFAULT 0 COMMENT '在成片时间线上的起点（秒），字幕时间轴按它算',
+  duration_s     INT          NOT NULL DEFAULT 5 COMMENT '本镜时长，受所选视频型号的 duration 区间约束',
+  scene          VARCHAR(512) NULL     COMMENT '画面：给人看的那一句「这是什么场景」',
+  camera         VARCHAR(256) NULL     COMMENT '运镜',
+  action         VARCHAR(256) NULL     COMMENT '主体动作',
+  dialogue       VARCHAR(512) NULL     COMMENT '台词/口播（本镜那一句，不是全文）',
+  on_screen_text VARCHAR(256) NULL     COMMENT '屏幕字（花字/关键词），预览叠显并作为 SRT 的来源',
+  image_prompt   VARCHAR(1024) NULL    COMMENT '喂文生图的首帧提示词：决定「长什么样」',
+  video_prompt   VARCHAR(1024) NULL    COMMENT '喂视频模型的运动提示词：只描述「怎么动」，两者分开是关键',
+  gen_mode       VARCHAR(24)  NOT NULL DEFAULT 'first_frame' COMMENT 't2v | first_frame | first_last_frame | reference（词表见 services/media）',
+  material_ids   JSON         NOT NULL COMMENT '本镜引用的 material_asset.id 列表（字符串形式，最多 4 条）；只有图片类素材进得了这一期的请求体',
+  image_job_id   BIGINT       NULL     COMMENT 'media_job.id，最近一次首帧作业；状态与产物路径都从那一行读',
+  video_job_id   BIGINT       NULL     COMMENT 'media_job.id，最近一次视频作业',
+  created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_shot_project (project_id, sort_order),
+  KEY idx_shot_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一个镜头：画面/运动两套提示词 + 指向最近一次图与视频作业的指针（本行无状态列、无产物列）';
+
+CREATE TABLE IF NOT EXISTS media_job (
+  id              BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id        BIGINT       NOT NULL,
+  provider        VARCHAR(32)  NOT NULL DEFAULT 'ark',
+  kind            VARCHAR(16)  NOT NULL COMMENT 'video | image',
+  biz_type        VARCHAR(32)  NOT NULL COMMENT 'video-shot | video-project-cover，形状与 workflow_run.subject_kind 一致',
+  biz_id          VARCHAR(64)  NOT NULL COMMENT '业务对象 id 转字符串存，与 subject_ref 同一约定',
+  model_config_id BIGINT       NULL     COMMENT '用的哪份配置（历史留痕，删配置不回填空）',
+  model_name      VARCHAR(128) NOT NULL COMMENT '当时的 Model ID 快照',
+  remote_task_id  VARCHAR(64)  NULL     COMMENT '上游任务 id；图片接口没有任务 id，那一类永远是 NULL',
+  status          VARCHAR(16)  NOT NULL DEFAULT 'queued' COMMENT 'queued|running|downloading|succeeded|failed|cancelled|expired，前六个与方舟 status 同名同义',
+  error_code      VARCHAR(64)  NULL     COMMENT '上游错误码或 Timeout/NoModelConfig 这类本地码',
+  error_msg       VARCHAR(512) NULL,
+  request         JSON         NOT NULL COMMENT '要发什么的归一形状（提示词+参数+参考图 rel_path）；base64 不进库',
+  response        JSON         NULL     COMMENT '最后一次查询到的原始响应（按字段截断），出错时唯一能看出上游说了什么',
+  rel_path        VARCHAR(512) NULL     COMMENT '转存后的本地产物相对路径；上游 URL 24 小时失效，所以这一列才是产物',
+  mime            VARCHAR(64)  NULL,
+  file_size       BIGINT       NULL,
+  usage           JSON         NULL     COMMENT '上游用量（token/张数），用量统计与成本核算按它',
+  attempts        INT          NOT NULL DEFAULT 0 COMMENT '只数可重试的失败（限流/5xx/网络/下载超时）',
+  submitted_at    DATETIME     NULL     COMMENT '是不是空 = 有没有提交给上游；这个区分不能用 remote_task_id 做（图片没有任务 id）',
+  last_polled_at  DATETIME     NULL,
+  finished_at     DATETIME     NULL,
+  elapsed_ms      BIGINT       NULL,
+  created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_media_remote_task (remote_task_id) COMMENT 'NULL 可重复，所以未提交的行不受影响',
+  KEY idx_media_claim (status, last_polled_at),
+  KEY idx_media_biz (biz_type, biz_id),
+  KEY idx_media_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一次媒体生成作业：上游异步任务的本地镜像，渲染进度的唯一事实源，由 lifespan 里的常驻循环推进';
+
+
+-- ---------------------------------------------------------------------------
 -- 升级已有库：新增「项目」维度
 --
 -- app/bootstrap.py 的 migrate_schema() 在启动时会自动执行等价操作（含回填），

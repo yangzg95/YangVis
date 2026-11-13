@@ -1,0 +1,813 @@
+"""智能应用 · 短视频：项目存取、脚本触发与首帧渲染入队。
+
+数据访问按单个用户隔离（与 :class:`ResumeService`、:class:`SlideService` 同一
+约定）：所有查询都经过 :meth:`VideoService._scope`，handler 不直接接触 session。
+
+**两阶段、两套事实源**——这是这个功能唯一需要记住的架构，也是它和幻灯片最不像的地方：
+
+* 脚本阶段（想法 → 创作卡 → 分镜）是几十秒量级的一次模型调用，走工作流引擎，
+  进度在认领本项目的那条 ``workflow_run`` 上，界面上的 ``status`` / ``error_msg``
+  由 :func:`subject_state` 从它翻译出来；
+* 渲染阶段（镜头 → 首帧图）是**分钟级的外部异步任务**，走 ``media_job``，状态与
+  产物路径都只在作业行上，由 :mod:`app.services.media.jobs` 的常驻循环推进。
+
+于是 ``video_project`` 和 ``video_shot`` 两行都没有状态列：镜头行只留一个指向
+最近一次作业的指针，封面连指针都不留（按 ``biz_type`` + ``biz_id`` 查最新那条
+成功的作业）。想加一列 status 的冲动在这里一定是错的——那就有第三份事实源要同步，
+而重启时它们必然给出三个答案。
+
+一期只渲染首帧，所以这里只有 ``render_frames`` / ``render_cover`` 两个入队口，没有
+视频片段那一档；镜头行上的 ``video_prompt`` 与 ``video_job_id`` 是脚本已经产出的
+内容，不是半成品接口。
+"""
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any, Dict, List, Optional, Sequence
+
+from sqlalchemy import Select, delete, func, select
+from sqlalchemy.orm import Session
+
+from app.config import get_settings
+from app.models.entities import (
+    MediaJob,
+    ModelConfig,
+    VideoProject,
+    VideoShot,
+    WorkflowRun,
+)
+from app.models.schemas import (
+    MediaCapacityItem,
+    MediaJobOut,
+    VideoBrief,
+    VideoParams,
+    VideoProjectDetail,
+    VideoProjectItem,
+    VideoPublish,
+    VideoShotOut,
+    VideoStyle,
+)
+from app.services.agent_run import model_error_text, require_chat_model
+from app.services.media import (
+    BIZ_VIDEO_COVER,
+    BIZ_VIDEO_SHOT,
+    JOB_ACTIVE_STATES,
+    JOB_FINAL_STATES,
+    JOB_SUCCEEDED,
+    KIND_IMAGE,
+    KIND_VIDEO,
+    MODE_FIRST_FRAME,
+    VIDEO_GEN_MODES,
+)
+from app.services.media import jobs as media_jobs
+from app.services.media import store
+from app.services.materials import KIND_IMAGE as MATERIAL_IMAGE
+from app.services.materials.service import MaterialService
+from app.services.videos.normalize import shots_from_model, text_of
+from app.services.workflows.builtin import finish_builtin_step, start_builtin
+from app.services.workflows.defs import WorkflowService
+from app.services.workflows.runs import (
+    fail_run,
+    latest_run,
+    latest_runs,
+    running_subjects,
+    subject_state,
+)
+from app.services.workflows import STEP_SUCCEEDED, SUBJECT_UPLOADED, SUBJECT_VIDEO_PROJECT
+
+logger = logging.getLogger("yangvis.videos")
+
+settings = get_settings()
+
+# 脚本那条内置流程，以及它两步的 key：产物分别落在这里的两个 JSON 列上。
+WORKFLOW_SCRIPT = "video-script-generation"
+STEP_BRIEF = "brief"
+STEP_SCRIPT = "script"
+
+# 镜头时长的落地区间，取自方舟 2.0 系的 duration 窗口。seedance 2.5 能到 30 秒，
+# 按低的那一档约束总不会错：模型多给了就裁，用户在工作台里手动加宽就行。
+SHOT_MIN_S = 4
+SHOT_MAX_S = 15
+
+# 平台只影响人设里的节奏与时长偏好，不写死任何平台规则；这里是给策划师的那句话。
+PLATFORM_LABELS = {
+    "douyin": "抖音（竖屏，前 3 秒定生死，节奏快）",
+    "kuaishou": "快手（竖屏，老铁式直给，人物要亲切）",
+    "other": "通用短视频（竖屏）",
+}
+
+
+def _clamp_prompt(text: str) -> str:
+    """提示词按方舟的字数限制截断。
+
+    在**写入时**截而不是发送时截：用户在工作台里看到的就该是实际喂给模型的那段，
+    不然改了半天看不见变化，而模型收到的一直是前 480 字。
+    """
+    limit = settings.VIDEO_MAX_PROMPT_CHARS
+    clean = (text or "").strip()
+    return clean if len(clean) <= limit else clean[:limit]
+
+
+def _style_note(style: Dict[str, Any]) -> str:
+    parts = [
+        f"{label}：{value}"
+        for label, value in (
+            ("画面风格", (style or {}).get("visual_style")),
+            ("人物设定", (style or {}).get("persona")),
+            ("色调", (style or {}).get("palette")),
+        )
+        if str(value or "").strip()
+    ]
+    return f"全片风格（每一镜的提示词都要贴住它）：{'；'.join(parts)}\n\n" if parts else ""
+
+
+def _script_inputs(project: VideoProject) -> Dict[str, str]:
+    """把一行项目整理成那条流程声明的输入变量。
+
+    「有风格才附风格」这类条件拼装留在代码里，模板只做替换（与幻灯片同一约定）；
+    目标时长并进平台那一段，因为它们合起来就是「这条片子要发在哪、多长」。
+
+    键名必须与流程声明的一字不差：多一个少一个都在 ``create_run`` 那里当场报错，
+    这是有意的——拼错的变量名静默消失，喂给模型的就是一段缺料的分镜。
+    """
+    brief = project.brief or {}
+    target = brief.get("duration_s") if isinstance(brief.get("duration_s"), int) else None
+    duration_note = f"\n成片目标时长：{target} 秒" if target else ""
+    return {
+        "idea": project.idea or "",
+        "platform_note": f"发布平台：{PLATFORM_LABELS.get(project.platform, project.platform)}"
+        f"{duration_note}\n\n",
+        "style_note": _style_note(project.style or {}),
+        "requirement_note": (
+            f"用户的补充要求：{project.requirement}\n\n" if project.requirement else ""
+        ),
+        "max_shots": str(settings.VIDEO_MAX_SHOTS),
+    }
+
+
+class VideoService:
+    """针对单个用户的短视频项目做存取、脚本触发与首帧入队。"""
+
+    def __init__(self, db: Session, owner_id: int) -> None:
+        self._db = db
+        self._owner_id = owner_id
+
+    @property
+    def owner_id(self) -> int:
+        return self._owner_id
+
+    def _scope(self, stmt: Select) -> Select:
+        return stmt.where(VideoProject.owner_id == self._owner_id)
+
+    def _materials(self) -> MaterialService:
+        """素材库那层的入口：引用的校验、渲染时读哪条素材的什么类型，都在它那里。
+
+        不复用同一个实例是故意的——``MaterialService`` 只是 ``(db, owner)`` 的一对绑定，
+        构造没有成本，而共享实例会让「谁改了这批 session」变得说不清。
+        """
+        return MaterialService(self._db, self._owner_id)
+
+    # -- 模型门槛 -------------------------------------------------------------
+
+    def require_chat_config(self) -> ModelConfig:
+        """脚本阶段的门槛：得先有一份验证过的默认对话模型（与简历、幻灯片同一约定）。"""
+        return require_chat_model(self._db, self._owner_id)
+
+    def require_image_config(self) -> ModelConfig:
+        """渲染阶段的门槛：媒体配置要求**已经通过探测**，理由见 :func:`resolve_media_config`。"""
+        return media_jobs.resolve_media_config(self._db, self._owner_id, KIND_IMAGE)
+
+    # -- 项目 -----------------------------------------------------------------
+
+    def list_projects(self) -> List[VideoProject]:
+        stmt = self._scope(select(VideoProject)).order_by(VideoProject.id.desc())
+        return list(self._db.scalars(stmt).all())
+
+    def get_project(self, project_id: int) -> VideoProject:
+        project = self._db.scalar(
+            self._scope(select(VideoProject).where(VideoProject.id == project_id))
+        )
+        if project is None:
+            raise LookupError("短视频项目不存在")
+        return project
+
+    def shots_of(self, project_id: int) -> List[VideoShot]:
+        return list(
+            self._db.scalars(
+                select(VideoShot)
+                .where(VideoShot.owner_id == self._owner_id, VideoShot.project_id == project_id)
+                .order_by(VideoShot.sort_order, VideoShot.id)
+            ).all()
+        )
+
+    def create_project(
+        self,
+        *,
+        title: Optional[str],
+        platform: str,
+        idea: str,
+        duration_s: Optional[int],
+        requirement: Optional[str],
+        style: Optional[Dict[str, Any]],
+        params: Optional[Dict[str, Any]],
+    ) -> VideoProject:
+        """落一行项目并为它建一条脚本运行。
+
+        ``title`` 留空时从想法里掐一段：列表页得说得出这是哪个片子，而用户在
+        只写了一句话想法的时候并不想再起一个名字。
+        """
+        clean_idea = (idea or "").strip()
+        if not clean_idea:
+            raise ValueError("请先写下这条短视频的想法")
+
+        project = VideoProject(
+            owner_id=self._owner_id,
+            title=(title or "").strip()[:128] or clean_idea[:24],
+            platform=platform,
+            idea=clean_idea,
+            requirement=(requirement or "").strip()[:512] or None,
+            brief=(
+                VideoBrief(duration_s=duration_s).model_dump() if duration_s else {}
+            ),
+            script="",
+            style=VideoStyle(**(style or {})).model_dump() if style else {},
+            params=VideoParams(**(params or {})).model_dump(),
+            publish={},
+        )
+        self._db.add(project)
+        self._db.commit()
+        self._db.refresh(project)
+        self._start_script_run(project)
+        logger.info(
+            "video project created: id=%s owner=%s title=%r idea_chars=%s duration=%s",
+            project.id,
+            self._owner_id,
+            project.title,
+            len(clean_idea),
+            duration_s,
+        )
+        return project
+
+    def update_project(self, project_id: int, **fields: Any) -> VideoProject:
+        """工作台的保存：``None`` 保持原样，给了的按 DTO 形状规范化后落库。"""
+        project = self.get_project(project_id)
+
+        if fields.get("title") is not None:
+            clean = str(fields["title"]).strip()
+            if not clean:
+                raise ValueError("项目标题不能为空")
+            project.title = clean[:128]
+        if fields.get("platform") is not None:
+            project.platform = str(fields["platform"])
+        if fields.get("idea") is not None:
+            clean_idea = str(fields["idea"]).strip()
+            if not clean_idea:
+                raise ValueError("想法不能为空")
+            project.idea = clean_idea
+        if fields.get("requirement") is not None:
+            project.requirement = str(fields["requirement"]).strip()[:512] or None
+        if fields.get("brief") is not None:
+            project.brief = VideoBrief(**fields["brief"]).model_dump()
+        if fields.get("script") is not None:
+            project.script = str(fields["script"])
+        if fields.get("style") is not None:
+            project.style = VideoStyle(**fields["style"]).model_dump()
+        if fields.get("params") is not None:
+            project.params = VideoParams(**fields["params"]).model_dump()
+        if fields.get("publish") is not None:
+            project.publish = VideoPublish(**fields["publish"]).model_dump()
+
+        self._db.commit()
+        self._db.refresh(project)
+        logger.info("video project saved: id=%s owner=%s", project_id, self._owner_id)
+        return project
+
+    def delete_project(self, project_id: int) -> int:
+        """删项目与镜头，把项目 id 交回调用方去清整棵产物目录。
+
+        两道闸门都是必须的：脚本在跑的时候删行，认领它的运行就指向一个不存在的
+        对象；作业在跑的时候删，循环下一轮就为一个已经消失的镜头白烧一次额度。
+        """
+        project = self.get_project(project_id)
+        if running_subjects(self._db, self._owner_id, SUBJECT_VIDEO_PROJECT, [project.id]):
+            raise ValueError("脚本正在生成中，请稍后再删")
+
+        # 作业按 (biz_type, biz_id) 寻址，biz_id 存的是字符串形态的业务 id；
+        # 在这儿先把这个项目名下的 id 收齐再比，不去做「整型列 vs 字符串列」的隐式转换。
+        biz_ids = [str(project.id)] + [str(row.id) for row in self.shots_of(project_id)]
+        active = int(
+            self._db.scalar(
+                # 「还没结束」= 不是终态，含本地排队的 queued：那种作业一次上游都没发，
+                # 删掉项目和镜头之后它照样会被循环捞起来渲染——为一个已经不存在的镜头
+                # 烧掉一次额度，而且产物落进一棵已经没有主人的目录里。
+                select(func.count(MediaJob.id)).where(
+                    MediaJob.owner_id == self._owner_id,
+                    MediaJob.biz_id.in_(biz_ids),
+                    MediaJob.status.notin_(tuple(JOB_FINAL_STATES)),
+                )
+            )
+            or 0
+        )
+        if active:
+            raise ValueError(f"还有 {active} 个渲染没有结束，请先到工作台取消再删")
+
+        self._db.execute(
+            delete(VideoShot).where(
+                VideoShot.owner_id == self._owner_id, VideoShot.project_id == project_id
+            )
+        )
+        self._db.delete(project)
+        self._db.commit()
+        logger.info(
+            "video project deleted: id=%s owner=%s title=%r",
+            project_id,
+            self._owner_id,
+            project.title,
+        )
+        return project_id
+
+    # -- 脚本阶段 -------------------------------------------------------------
+
+    def _start_script_run(self, project: VideoProject) -> WorkflowRun:
+        return start_builtin(
+            self._db,
+            self._owner_id,
+            WORKFLOW_SCRIPT,
+            _script_inputs(project),
+            subject=(SUBJECT_VIDEO_PROJECT, project.id),
+            subject_label=project.title,
+        )
+
+    def start_script(
+        self,
+        project_id: int,
+        *,
+        requirement: Optional[str] = None,
+        duration_s: Optional[int] = None,
+    ) -> VideoProject:
+        """重新发起一次脚本生成；给了 ``requirement`` 就顺手覆盖当时的补充要求。
+
+        覆盖而不是追加：这条流程每次都是整包重跑，留下一个「上次要求还挂着」的
+        状态会让用户看不出这次到底喂了什么。
+        """
+        project = self.get_project(project_id)
+        if running_subjects(self._db, self._owner_id, SUBJECT_VIDEO_PROJECT, [project.id]):
+            raise ValueError("该项目正在生成脚本，请勿重复触发")
+        if requirement is not None:
+            project.requirement = requirement.strip()[:512] or None
+        if duration_s:
+            merged = dict(project.brief or {})
+            merged["duration_s"] = duration_s
+            project.brief = merged
+        self._db.commit()
+        self._db.refresh(project)
+        self._start_script_run(project)
+        return project
+
+    async def run_script(self, project_id: int) -> None:
+        """后台任务体：跑发起时建好的那条运行，把两步产物落到项目与镜头行上。
+
+        失败去处分两层：流程本身跑挂了原因已经在运行行上；镜头一行都没落下来这类
+        **后处理**失败用 :func:`fail_run` 把已经成功的运行降级，否则界面上会出现
+        一个「已完成」却没有分镜的项目。
+        """
+        started = time.monotonic()
+        project = self.get_project(project_id)
+        run = latest_run(self._db, self._owner_id, SUBJECT_VIDEO_PROJECT, project.id)
+        if run is None:
+            logger.error("video project has no run to execute: id=%s", project_id)
+            return
+        logger.info(
+            "video script generation started: id=%s run=%s owner=%s title=%r",
+            project_id,
+            run.id,
+            self._owner_id,
+            project.title,
+        )
+        try:
+            step = await finish_builtin_step(
+                self._db, self._owner_id, run.id, step_key=STEP_SCRIPT
+            )
+            script = step.parsed or {}
+            shots = shots_from_model(script.get("shots"))
+            if not shots:
+                raise ValueError("模型没有产出任何合法镜头，请重新生成或换个说法")
+
+            merged = dict(project.brief or {})
+            merged.update(self._brief_of_run(run.id))
+            project.brief = merged
+            project.script = text_of(script.get("narration"), 20000)
+
+            publish = dict(project.publish or {})
+            title = text_of(script.get("title"), 128)
+            publish["title_candidates"] = [title] if title else []
+            publish["tags"] = [
+                text_of(tag, 32) for tag in list(script.get("tags") or [])[:8] if tag
+            ]
+            publish["cover_prompt"] = text_of(script.get("cover_prompt"), 512)
+            project.publish = publish
+
+            # 镜头整包替换：脚本重跑出来的是另一套分镜，逐镜对齐既没有依据，
+            # 也会让用户以为上一次的首帧还挂在新镜头上。
+            self.save_shots(project_id, shots)
+            logger.info(
+                "video script generation finished: id=%s shots=%s elapsed=%.1fs",
+                project_id,
+                len(shots),
+                time.monotonic() - started,
+            )
+        except Exception as exc:  # noqa: BLE001 - 失败写在运行上，不留到这里抛出
+            logger.warning(
+                "video script generation failed: id=%s elapsed=%.1fs error=%s",
+                project_id,
+                time.monotonic() - started,
+                exc,
+                exc_info=True,
+            )
+            fail_run(self._db, self._owner_id, run.id, model_error_text(exc))
+
+    def _brief_of_run(self, run_id: int) -> Dict[str, Any]:
+        """读策划那一步的产物。
+
+        只取这一层认识的那几个键（``VideoBrief`` 的字段）：模型多写的东西不进库，
+        否则下一次保存时它会以「用户改过的字段」的身份回来。
+        """
+        row = next(
+            (
+                item
+                for item in WorkflowService(self._db, self._owner_id).run_steps(run_id)
+                if item.key == STEP_BRIEF and item.status == STEP_SUCCEEDED
+            ),
+            None,
+        )
+        if row is None or not isinstance(row.parsed, dict):
+            return {}
+        return VideoBrief(**{
+            key: value
+            for key, value in row.parsed.items()
+            if key in VideoBrief.model_fields
+        }).model_dump()
+
+    # -- 镜头 -----------------------------------------------------------------
+
+    def save_shots(self, project_id: int, shots: List[Dict[str, Any]]) -> VideoProject:
+        """整批保存镜头：``id`` 命中就改，没有就建，不在列表里的删。
+
+        ``sort_order`` 与 ``start_s`` 都由这里的数组顺序重算——时间轴上的位置是
+        排队的结果，不是一个可以被前端独立维护的事实，两处各写一遍迟早对不上。
+        """
+        project = self.get_project(project_id)
+        if len(shots) > settings.VIDEO_MAX_SHOTS:
+            raise ValueError(f"一个项目最多 {settings.VIDEO_MAX_SHOTS} 个镜头")
+
+        # 素材引用先在写入侧对一遍库：别人的 id、已经删掉的 id、模型编出来的 id 一律
+        # 丢掉。留着它，报错要等到渲染那一刻才在「素材路径不合法」这种地方炸出来。
+        known_ids = set(
+            self._materials().materials_for(
+                [
+                    str(ref)
+                    for item in shots
+                    for ref in (item.get("material_ids") or [])
+                ]
+            )
+        )
+        existing = {row.id: row for row in self.shots_of(project_id)}
+        wanted: List[VideoShot] = []
+
+        for item in shots:
+            shot_id = item.get("id")
+            row = existing.get(int(shot_id)) if shot_id else None
+            if shot_id and row is None:
+                raise ValueError(f"镜头 {shot_id} 不属于这个项目")
+            if row is None:
+                row = VideoShot(project_id=project.id, owner_id=self._owner_id)
+                self._db.add(row)
+            row.duration_s = max(SHOT_MIN_S, min(SHOT_MAX_S, int(item.get("duration_s") or 5)))
+            row.scene = text_of(item.get("scene"), 512) or None
+            row.camera = text_of(item.get("camera"), 256) or None
+            row.action = text_of(item.get("action"), 256) or None
+            row.dialogue = text_of(item.get("dialogue"), 512) or None
+            row.on_screen_text = text_of(item.get("on_screen_text"), 256) or None
+            row.image_prompt = _clamp_prompt(str(item.get("image_prompt") or "")) or None
+            row.video_prompt = _clamp_prompt(str(item.get("video_prompt") or "")) or None
+            row.gen_mode = (
+                item.get("gen_mode")
+                if item.get("gen_mode") in VIDEO_GEN_MODES
+                else MODE_FIRST_FRAME
+            )
+            row.material_ids = [
+                str(ref) for ref in (item.get("material_ids") or []) if str(ref) in known_ids
+            ]
+            wanted.append(row)
+
+        # flush 之后新建行才有 id，这时才谈得上「哪些还活着」。
+        self._db.flush()
+        cursor = 0
+        for index, row in enumerate(wanted, start=1):
+            row.sort_order = index
+            row.start_s = cursor
+            cursor += row.duration_s
+        kept = {row.id for row in wanted}
+        for stale_id, row in existing.items():
+            if stale_id not in kept:
+                self._db.delete(row)
+        self._db.commit()
+        logger.info(
+            "video shots saved: project=%s owner=%s shots=%s duration=%ss",
+            project_id,
+            self._owner_id,
+            len(wanted),
+            cursor,
+        )
+        return project
+
+    # -- 渲染阶段 -------------------------------------------------------------
+
+    def render_frames(self, project_id: int, shot_ids: Sequence[int]) -> List[MediaJob]:
+        """给这些镜头各入队一条首帧作业；``shot_ids`` 空表示全部镜头。
+
+        整批里有一个镜头没写提示词就整条拒掉，而不是跳过它：用户在确认屏上看到
+        「这次生成 N 张」，回来只有 N-1 张，那比一次拒绝难查得多。
+        """
+        project = self.get_project(project_id)
+        config = self.require_image_config()
+        rows = self.shots_of(project_id)
+        wanted_ids = {int(item) for item in shot_ids or ()}
+        picked = [row for row in rows if not wanted_ids or row.id in wanted_ids]
+        if wanted_ids - {row.id for row in picked}:
+            raise ValueError("选中了不属于该项目的镜头")
+        if not picked:
+            raise ValueError("还没有镜头可以渲染，先生成脚本")
+        missing = [row.sort_order for row in picked if not (row.image_prompt or "").strip()]
+        if missing:
+            raise ValueError(
+                f"第 {'、'.join(str(num) for num in missing)} 镜还没有首帧提示词，先补上再渲染"
+            )
+
+        params = project.params or {}
+        materials = self._materials().materials_for(
+            [str(ref) for row in picked for ref in (row.material_ids or [])]
+        )
+        created: List[MediaJob] = []
+        for row in picked:
+            # 只有图片类素材进得了这一期的请求体：参考视频要公网可达的地址，而渲染
+            # 只到首帧，视频素材在镜头上是一条「已记录、暂未使用」的引用。
+            refs = [
+                materials[ref].rel_path
+                for ref in [str(item) for item in (row.material_ids or [])]
+                if ref in materials
+                and materials[ref].kind == MATERIAL_IMAGE
+                and materials[ref].rel_path
+            ]
+            job = media_jobs.enqueue(
+                self._db,
+                self._owner_id,
+                kind=KIND_IMAGE,
+                biz_type=BIZ_VIDEO_SHOT,
+                biz_id=row.id,
+                request={
+                    "project_id": project.id,
+                    "prompt": row.image_prompt,
+                    "size": str(params.get("image_size") or "2K"),
+                    "images": refs,
+                    "watermark": bool(params.get("watermark")),
+                },
+                config=config,
+            )
+            row.image_job_id = job.id
+            created.append(job)
+        self._db.commit()
+        logger.info(
+            "video frames enqueued: project=%s owner=%s jobs=%s materials=%s",
+            project.id,
+            self._owner_id,
+            len(created),
+            len(materials),
+        )
+        return created
+
+    def render_cover(self, project_id: int) -> MediaJob:
+        """单独出一条封面的图片作业。
+
+        封面无镜头行可挂，靠 ``biz_type=video-project-cover`` + 项目 id 寻址；
+        界面上要封面时查最新那条成功的，不在项目行上抄一份路径。
+        """
+        project = self.get_project(project_id)
+        config = self.require_image_config()
+        prompt = _clamp_prompt(
+            str((project.publish or {}).get("cover_prompt") or "")
+            or str((project.brief or {}).get("hook") or "")
+        )
+        if not prompt:
+            raise ValueError("还没有封面描述，先生成脚本或在工作台里补一句")
+        params = project.params or {}
+        return media_jobs.enqueue(
+            self._db,
+            self._owner_id,
+            kind=KIND_IMAGE,
+            biz_type=BIZ_VIDEO_COVER,
+            biz_id=project.id,
+            request={
+                "project_id": project.id,
+                "prompt": prompt,
+                "size": str(params.get("image_size") or "2K"),
+                "images": [],
+                "watermark": False,
+            },
+            config=config,
+        )
+
+    async def cancel_job(self, job_id: int) -> MediaJob:
+        return await media_jobs.cancel(self._db, self._owner_id, job_id)
+
+    def capacity(self) -> List[MediaCapacityItem]:
+        """这个账号现在各类作业占着几个位子、还能塞几个——渲染前那屏确认要用它。"""
+        occupied = {
+            str(kind): int(count)
+            for kind, count in self._db.execute(
+                select(MediaJob.kind, func.count(MediaJob.id))
+                .where(
+                    MediaJob.owner_id == self._owner_id,
+                    MediaJob.status.in_(tuple(JOB_ACTIVE_STATES)),
+                )
+                .group_by(MediaJob.kind)
+            ).all()
+        }
+        limits = {
+            KIND_IMAGE: settings.IMAGE_MAX_INFLIGHT,
+            KIND_VIDEO: settings.VIDEO_MAX_INFLIGHT,
+        }
+        return [
+            MediaCapacityItem(
+                kind=kind, inflight=occupied.get(kind, 0), limit=limits.get(kind, 0)
+            )
+            for kind in (KIND_IMAGE, KIND_VIDEO)
+        ]
+
+    # -- 序列化 ---------------------------------------------------------------
+
+    def _latest_jobs(self, job_ids: Sequence[Optional[int]]) -> Dict[int, MediaJob]:
+        return media_jobs.jobs_by_ids(
+            self._db, self._owner_id, [int(item) for item in job_ids if item]
+        )
+
+    def _cover_jobs(self, project_ids: Sequence[int]) -> Dict[str, MediaJob]:
+        """每个项目的最新一条成功封面作业。
+
+        按 id 正序扫一遍取最后一条，而不是在 SQL 里 ``max(id)`` 再回表：一次列表
+        也就几十条作业，多写一遍子查询换不到什么，而这里的形状要跟
+        :func:`latest_runs` 一样只查一次。
+        """
+        if not project_ids:
+            return {}
+        rows = self._db.scalars(
+            select(MediaJob)
+            .where(
+                MediaJob.owner_id == self._owner_id,
+                MediaJob.biz_type == BIZ_VIDEO_COVER,
+                MediaJob.biz_id.in_([str(item) for item in project_ids]),
+                MediaJob.status == JOB_SUCCEEDED,
+                MediaJob.rel_path.is_not(None),
+            )
+            .order_by(MediaJob.id)
+        ).all()
+        return {str(job.biz_id): job for job in rows}
+
+    def _shot_stats(self, project_ids: Sequence[int]) -> Dict[int, tuple[int, int]]:
+        """一次查询取回每个项目的镜头数与总时长，列表页不是每行查两次。"""
+        if not project_ids:
+            return {}
+        rows = self._db.execute(
+            select(VideoShot.project_id, func.count(VideoShot.id), func.sum(VideoShot.duration_s))
+            .where(VideoShot.owner_id == self._owner_id, VideoShot.project_id.in_(project_ids))
+            .group_by(VideoShot.project_id)
+        ).all()
+        return {int(pid): (int(count), int(total or 0)) for pid, count, total in rows}
+
+    def _item_of(
+        self,
+        project: VideoProject,
+        run: Optional[WorkflowRun],
+        stats: tuple[int, int],
+        cover: Optional[MediaJob],
+    ) -> VideoProjectItem:
+        # idle 用 uploaded：项目一创建就带着一条脚本运行，走到「没有运行又没有镜头」
+        # 的只剩运行记录被清掉那一种存量行。
+        status, error_msg = subject_state(
+            run, has_product=bool(stats[0]), idle=SUBJECT_UPLOADED
+        )
+        return VideoProjectItem(
+            id=project.id,
+            title=project.title,
+            platform=project.platform,
+            status=status,
+            error_msg=error_msg,
+            shot_count=stats[0],
+            duration_s=stats[1],
+            cover_url=store.resolve_url(cover.rel_path or "") if cover else "",
+            created_at=project.created_at,
+            updated_at=project.updated_at,
+        )
+
+    def to_item(self, project: VideoProject) -> VideoProjectItem:
+        return self._item_of(
+            project,
+            latest_run(self._db, self._owner_id, SUBJECT_VIDEO_PROJECT, project.id),
+            self._shot_stats([project.id]).get(project.id, (0, 0)),
+            self._cover_jobs([project.id]).get(str(project.id)),
+        )
+
+    def to_items(self, projects: List[VideoProject]) -> List[VideoProjectItem]:
+        ids = [project.id for project in projects]
+        runs = latest_runs(self._db, self._owner_id, SUBJECT_VIDEO_PROJECT, ids)
+        stats = self._shot_stats(ids)
+        covers = self._cover_jobs(ids)
+        return [
+            self._item_of(
+                project,
+                runs.get(str(project.id)),
+                stats.get(project.id, (0, 0)),
+                covers.get(str(project.id)),
+            )
+            for project in projects
+        ]
+
+    def to_detail(self, project: VideoProject) -> VideoProjectDetail:
+        rows = self.shots_of(project.id)
+        jobs = self._latest_jobs([row.image_job_id for row in rows])
+        cover = self._cover_jobs([project.id]).get(str(project.id))
+        base = self._item_of(
+            project,
+            latest_run(self._db, self._owner_id, SUBJECT_VIDEO_PROJECT, project.id),
+            (len(rows), sum(row.duration_s for row in rows)),
+            cover,
+        )
+        stored = {
+            key: value
+            for key, value in (project.brief or {}).items()
+            if key in VideoBrief.model_fields
+        }
+        style = {
+            key: value
+            for key, value in (project.style or {}).items()
+            if key in VideoStyle.model_fields
+        }
+        params = {
+            key: value
+            for key, value in (project.params or {}).items()
+            if key in VideoParams.model_fields
+        }
+        publish = {
+            key: value
+            for key, value in (project.publish or {}).items()
+            if key in VideoPublish.model_fields
+        }
+        return VideoProjectDetail(
+            **base.model_dump(),
+            idea=project.idea or "",
+            requirement=project.requirement or "",
+            brief=VideoBrief(**stored),
+            script=project.script or "",
+            style=VideoStyle(**style),
+            params=VideoParams(**params),
+            publish=VideoPublish(**publish),
+            shots=[
+                VideoShotOut(
+                    id=row.id,
+                    sort_order=row.sort_order,
+                    start_s=row.start_s,
+                    duration_s=row.duration_s,
+                    scene=row.scene or "",
+                    camera=row.camera or "",
+                    action=row.action or "",
+                    dialogue=row.dialogue or "",
+                    on_screen_text=row.on_screen_text or "",
+                    image_prompt=row.image_prompt or "",
+                    video_prompt=row.video_prompt or "",
+                    gen_mode=row.gen_mode,
+                    material_ids=[str(item) for item in (row.material_ids or [])],
+                    image_job=_job_out(jobs.get(row.image_job_id)) if row.image_job_id else None,
+                )
+                for row in rows
+            ],
+        )
+
+
+def _job_out(job: Optional[MediaJob]) -> Optional[MediaJobOut]:
+    """作业行的对外视图：产物只给本站地址，上游那条 24 小时链接不出门。"""
+    if job is None:
+        return None
+    return MediaJobOut(
+        id=job.id,
+        kind=job.kind,
+        status=job.status,
+        model_name=job.model_name,
+        url=store.resolve_url(job.rel_path or "") if job.rel_path else "",
+        mime=job.mime,
+        file_size=job.file_size,
+        error_msg=job.error_msg,
+        elapsed_ms=job.elapsed_ms,
+        created_at=job.created_at,
+        finished_at=job.finished_at,
+    )

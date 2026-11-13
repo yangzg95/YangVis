@@ -117,7 +117,8 @@ def migrate_schema() -> None:
     判断，回填也只会动那些仍然保留占位值的行。
 
     删列同样先看当前有没有这一列，所以重复执行是空操作；它是这里唯一的破坏性动作，
-    范围锁在 :data:`RETIRED_STATUS_COLUMNS` 那份清单上。
+    范围锁在 :data:`RETIRED_STATUS_COLUMNS` 那份清单与
+    :func:`_retire_project_assets` 里的两条旧参考图列上。
     """
     # 近二十张表要逐张确认列是否存在。每次 inspect(engine) 都会重新拉表名再拉列，
     # 启动时的元数据查询因此翻倍；同一次迁移内结构稳定（新增列都只查一次），
@@ -448,7 +449,36 @@ def migrate_schema() -> None:
                 conn.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
             logger.info("dropped retired column %s.%s", table, column)
 
+    _retire_project_assets(column_names)
+
     _backfill_default_projects()
+
+
+def _retire_project_assets(column_names) -> None:
+    """删掉「项目内参考图」留下的两列，并给镜头行补上素材引用列。
+
+    只改形状、不搬数据：存量项目里没有一条参考图，而旧 asset id 指向的正是那种
+    「跟着项目一起删」的文件——换算进素材库只会在工作台上留下点不开的引用。
+    ``video_shot`` 是已存在的老表，``create_all`` 看不见它的新列，所以在这儿补一次。
+
+    JSON 列不给 DB 默认值（MySQL 的 JSON 默认值要 8.0.13 以上的表达式默认值才写得出来），
+    存量行读到的是 NULL，服务层一律按「没引用任何素材」处理。
+    """
+    shot_cols = column_names("video_shot")
+    if shot_cols and "material_ids" not in shot_cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE video_shot ADD COLUMN material_ids JSON NULL"))
+        logger.info("added video_shot.material_ids")
+    if shot_cols and "ref_asset_ids" in shot_cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE video_shot DROP COLUMN ref_asset_ids"))
+        logger.info("dropped video_shot.ref_asset_ids")
+
+    project_cols = column_names("video_project")
+    if project_cols and "assets" in project_cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE video_project DROP COLUMN assets"))
+        logger.info("dropped video_project.assets")
 
 
 def _backfill_default_projects() -> None:

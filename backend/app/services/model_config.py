@@ -23,6 +23,35 @@ from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.model_config")
 
+# 各家控制台上的「复制接入地址」经常给的是能直接跑通一次调用的完整 URL，接口路径
+# 也在里面。拼请求时那一段是系统自己加的，多带一份就是 ``…/v3/chat/completions/chat/completions``，
+# 上游只回一个看不出原因的 404。保存时把这一截去掉，让库里存的始终是「到版本号那一层」。
+# 顺序有讲究：更长的必须排在前面，否则 ``/chat/completions`` 会先被 ``/completions``
+# 命中，剩下一个说不清是什么的 ``…/v3/chat``。
+_ENDPOINT_SUFFIXES = (
+    "/chat/completions",
+    "/completions",
+    "/embeddings",
+    "/responses",
+    "/images/generations",
+    "/contents/generations/tasks",
+)
+
+
+def normalize_base_url(raw: str) -> str:
+    """去空白与尾斜杠、补上缺失的协议、去掉误粘的接口路径。
+
+    协议只补 ``https://``：绝大多数上游是公网 HTTPS，本地裸 HTTP 的服务（vLLM、
+    Ollama）还得由人自己写清楚，猜成 https 反而更难懂。
+    """
+    value = (raw or "").strip().rstrip("/")
+    if value and "://" not in value:
+        value = f"https://{value}"
+    for suffix in _ENDPOINT_SUFFIXES:
+        if value.endswith(suffix):
+            return value[: -len(suffix)].rstrip("/")
+    return value
+
 
 def default_model_config(
     db: Session, owner_id: int, purpose: ModelPurpose
@@ -85,7 +114,7 @@ class ModelConfigService:
             purpose=payload.purpose.value,
             title=payload.title,
             model_name=payload.model_name,
-            base_url=payload.base_url.rstrip("/"),
+            base_url=normalize_base_url(payload.base_url),
             api_key_enc=encrypt(payload.api_key),
             remark=payload.remark,
             reasoning_mode=payload.reasoning_mode.value,
@@ -146,7 +175,7 @@ class ModelConfigService:
         # 而探测走的正是同一个客户端，所以两者一样处理。
         invalidates_last_test = False
         if data.get("base_url"):
-            new_url = data["base_url"].rstrip("/")
+            new_url = normalize_base_url(data["base_url"])
             invalidates_last_test = invalidates_last_test or new_url != config.base_url
             config.base_url = new_url
 

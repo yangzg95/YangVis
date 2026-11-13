@@ -4,7 +4,7 @@
  * 从 App.vue 抽出来做纯函数（静态叶由调用方传入），标签体系的核心规则
  * ——哪些路径有标签、动态标签叫什么——才钉得住单测。
  */
-import { FieldTimeOutlined, PlayCircleOutlined, SwapOutlined } from '@ant-design/icons-vue'
+import { FieldTimeOutlined, PlayCircleOutlined, SwapOutlined, VideoCameraOutlined } from '@ant-design/icons-vue'
 
 export interface TabLeaf {
   path: string
@@ -21,10 +21,14 @@ const RUNS_PAGE_RE = /^\/workflows\/(\d+)\/runs$/
 /** 与 router 里的 /workflows/compare/:a(\\d+)/:b(\\d+)? 同一形状：双运行对比。 */
 const COMPARE_RE = /^\/workflows\/compare\/(\d+)(?:\/(\d+))?$/
 
+/** 与 router 里的 /office/videos/:id(\\d+)/workbench 同一形状：一条片子的工作台。 */
+const VIDEO_WORKBENCH_RE = /^\/office\/videos\/(\d+)\/workbench$/
+
 /**
- * 这个路径对应哪一枚标签：先查静态菜单叶，再认三类按 id 展开的动态标签——
- * 运行现场（`/workflows/runs/<id>`）、流程的运行记录（`/workflows/<id>/runs`）
- * 与双运行对比（`/workflows/compare/<a>[/<b>]`）；都对不上就没有标签。
+ * 这个路径对应哪一枚标签：先查静态菜单叶，再认四类按 id 展开的动态标签——
+ * 运行现场（`/workflows/runs/<id>`）、流程的运行记录（`/workflows/<id>/runs`）、
+ * 双运行对比（`/workflows/compare/<a>[/<b>]`）与短视频工作台
+ * （`/office/videos/<id>/workbench`）；都对不上就没有标签。
  */
 export function leafForPath(path: string, staticLeaves: TabLeaf[]): TabLeaf | undefined {
   const known = staticLeaves.find((leaf) => leaf.path === path)
@@ -47,6 +51,10 @@ export function leafForPath(path: string, staticLeaves: TabLeaf[]): TabLeaf | un
       title: b ? `运行对比 #${a} / #${b}` : `运行对比 #${a}`,
       icon: SwapOutlined,
     }
+  }
+  const workbench = VIDEO_WORKBENCH_RE.exec(path)
+  if (workbench) {
+    return { path, title: `短视频 #${workbench[1]}`, icon: VideoCameraOutlined }
   }
   return undefined
 }

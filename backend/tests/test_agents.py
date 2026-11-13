@@ -149,6 +149,8 @@ def test_builtin_slugs_are_the_ones_the_module_documents():
         "resume-polisher",
         "resume-checker",
         "slide-architect",
+        "video-briefer",
+        "video-storyboarder",
     }
 
 
@@ -171,6 +173,8 @@ def test_feature_owned_personas_stay_out_of_the_picker():
         "resume-polisher",
         "resume-checker",
         "slide-architect",
+        "video-briefer",
+        "video-storyboarder",
     }
     # 运维工具面的开关只有对话里那个运维助手需要：server-ops / db-ops 是功能人设，
     # 能不能执行由工具白名单决定，不由这个标志决定。

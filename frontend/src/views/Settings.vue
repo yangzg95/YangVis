@@ -1,22 +1,22 @@
 <template>
   <div class="page-card">
-    <div class="page-title">模型与集成</div>
+<!--    <div class="page-title">模型与集成</div>-->
 
     <a-tabs v-model:activeKey="activeTab">
       <!-- ================= 模型管理 ================= -->
       <a-tab-pane key="models" tab="模型管理">
         <!-- 模型配置有两个入口，容易找错：这里是站内自用模型，AI 网关是对外供给。
              两边各自指路，省得用户在两个页面之间来回翻。 -->
-        <a-alert type="info" show-icon class="gate-alert">
-          <template #message>这一页配的是站内自用模型</template>
-          <template #description>
-            控制台里的对话、简历、幻灯片与知识库检索都从这里取模型，每个账号各配各的。
-            如果你要找的是「把本站当成 OpenAI 接口给别人调用」，那是管理员在「AI 网关」维护的上游通道、模型路由与统一密钥。
-          </template>
-          <template #action>
-            <a-button v-if="auth.isAdmin" size="small" @click="goGateway">前往 AI 网关</a-button>
-          </template>
-        </a-alert>
+<!--        <a-alert type="info" show-icon class="gate-alert">-->
+<!--          <template #message>这一页配的是站内自用模型</template>-->
+<!--          <template #description>-->
+<!--            控制台里的对话、简历、幻灯片、短视频与知识库检索都从这里取模型，每个账号各配各的。-->
+<!--            如果你要找的是「把本站当成 OpenAI 接口给别人调用」，那是管理员在「AI 网关」维护的上游通道、模型路由与统一密钥。-->
+<!--          </template>-->
+<!--          <template #action>-->
+<!--            <a-button v-if="auth.isAdmin" size="small" @click="goGateway">前往 AI 网关</a-button>-->
+<!--          </template>-->
+<!--        </a-alert>-->
 
         <a-alert
           v-if="!loading && !status.embedding.ready"
@@ -46,11 +46,30 @@
           </template>
         </a-alert>
 
+        <!-- 出图和出片是两个独立的位：只配了一档时短视频页仍能跑一半（出首帧），
+             所以这里合成一条报缺哪些，而不是叠两条长得几乎一样的告警。 -->
+        <a-alert
+          v-if="!loading && mediaMissing.length"
+          type="warning"
+          show-icon
+          class="gate-alert"
+          :message="`未配置可用的${mediaMissing.join('、')}模型`"
+          description="短视频靠「图片」模型出首帧、靠「视频」模型出片，两档都要填火山方舟的 Model ID，并各自通过连通性测试。"
+        >
+          <template #action>
+            <a-button size="small" type="primary" @click="openCreate(mediaMissingPurpose)">
+              立即添加
+            </a-button>
+          </template>
+        </a-alert>
+
         <div class="toolbar toolbar--between toolbar--snug">
           <a-radio-group v-model:value="filterPurpose" button-style="solid" @change="load">
             <a-radio-button value="">全部</a-radio-button>
             <a-radio-button value="chat">对话</a-radio-button>
             <a-radio-button value="embedding">向量</a-radio-button>
+            <a-radio-button value="image">图片</a-radio-button>
+            <a-radio-button value="video">视频</a-radio-button>
           </a-radio-group>
           <a-button type="primary" @click="openCreate()">
             <PlusOutlined /> 新增模型
@@ -68,8 +87,8 @@
         >
           <template #bodyCell="{ column, record }">
             <template v-if="column.key === 'purpose'">
-              <a-tag :color="record.purpose === 'chat' ? 'blue' : 'purple'">
-                {{ record.purpose === 'chat' ? '对话' : '向量' }}
+              <a-tag :color="purposeColor(record.purpose)">
+                {{ purposeLabel(record.purpose) }}
               </a-tag>
               <a-tag v-if="record.is_default" color="green">默认</a-tag>
               <a-tag v-if="record.purpose === 'chat' && record.supports_vision" color="cyan">
@@ -154,13 +173,13 @@
 
       <!-- ================= 长期记忆 ================= -->
       <a-tab-pane key="memory" tab="长期记忆">
-        <a-alert
-          type="info"
-          show-icon
-          class="gate-alert"
-          message="长期记忆是 AI 在对话中自动沉淀的、关于你的持久事实（职业背景、偏好、长期目标等）。"
-          description="只有开了「长期记忆」开关的智能体会使用并积累记忆；你可以在这里查看、修改或删除任何一条。"
-        />
+<!--        <a-alert-->
+<!--          type="info"-->
+<!--          show-icon-->
+<!--          class="gate-alert"-->
+<!--          message="长期记忆是 AI 在对话中自动沉淀的、关于你的持久事实（职业背景、偏好、长期目标等）。"-->
+<!--          description="只有开了「长期记忆」开关的智能体会使用并积累记忆；你可以在这里查看、修改或删除任何一条。"-->
+<!--        />-->
 
         <div class="toolbar toolbar--between toolbar--snug">
           <a-button type="primary" @click="openMemoryCreate">
@@ -588,24 +607,59 @@
           <a-radio-group v-model:value="modal.form.purpose" button-style="solid">
             <a-radio-button value="chat">对话</a-radio-button>
             <a-radio-button value="embedding">向量</a-radio-button>
+            <a-radio-button value="image">图片</a-radio-button>
+            <a-radio-button value="video">视频</a-radio-button>
           </a-radio-group>
           <div class="hint">
-            对话模型用于生成回答；向量模型用于知识库检索。两者需分别配置。
+            对话模型用于生成回答；向量模型用于知识库检索；图片与视频两档给短视频出首帧、出片。
+            四类各配各的，互不顶替。
+            <template v-if="isMediaPurpose">
+              它们走的不是 OpenAI 兼容接口，而是火山方舟自己的视觉模型端点，但地址 / 密钥的填法一样。
+            </template>
+          </div>
+          <div v-if="isMediaPurpose" class="hint">
+            图片与视频各限 2 个在途作业：方舟个人用户账号级只有 3 个并发位子，两档共用，所以两边都留了余量。
           </div>
         </a-form-item>
         <a-form-item label="标题" required>
           <a-input v-model:value="modal.form.title" placeholder="例如：主力对话模型" />
         </a-form-item>
         <a-form-item label="模型名称" required>
-          <a-input v-model:value="modal.form.model_name" placeholder="例如：gpt-4o-mini" />
+          <a-auto-complete
+            v-if="isMediaPurpose"
+            v-model:value="modal.form.model_name"
+            :options="arkModelOptions"
+            placeholder="方舟 Model ID，例如 doubao-seedream-5-0-pro-260128"
+          />
+          <a-input v-else v-model:value="modal.form.model_name" placeholder="例如：gpt-4o-mini" />
           <div class="hint">
-            填服务商要求的模型标识。部分服务商此处要求填部署 / 接入点 ID 而非模型名，填错会导致调用全部失败，保存后请用「测试」验证。
+            <template v-if="isMediaPurpose">
+              下拉里是模型系列名，方舟实际要的是控制台里那条部署 / 接入点的 ID（模型名 ≠ Model ID，
+              通常带日期后缀，如 doubao-seedance-2-0-fast-250115），选中后请把后缀补成自己账号里的真实值。
+              「测试」验得出地址与密钥，验不出 Model ID——它要第一次真实生成时才校验。
+            </template>
+            <template v-else>
+              填服务商要求的模型标识。部分服务商此处要求填部署 / 接入点 ID 而非模型名，填错会导致调用全部失败，保存后请用「测试」验证。
+            </template>
           </div>
         </a-form-item>
         <a-form-item label="模型地址" required>
-          <a-input v-model:value="modal.form.base_url" placeholder="https://api.openai.com/v1" />
+          <a-input
+            v-model:value="modal.form.base_url"
+            :placeholder="isMediaPurpose ? ARK_BASE_URL : 'https://api.openai.com/v1'"
+          />
           <div class="hint">
-            兼容 OpenAI 协议的服务地址，通常以 /v1 结尾（火山方舟：https://ark.cn-beijing.volces.com/api/v3）。
+            <template v-if="isMediaPurpose">
+              填到版本号那一层为止，接口路径由系统自己拼（出图 /images/generations、出片
+              /contents/generations/tasks）。方舟的公开端点是
+              https://ark.cn-beijing.volces.com/api/v3；挂在套餐或网关下时前缀不同（例如
+              /api/plan/v3），照服务商文档填。
+            </template>
+            <template v-else>
+              兼容 OpenAI 协议的服务地址，通常以 /v1 结尾（火山方舟：https://ark.cn-beijing.volces.com/api/v3）。
+            </template>
+            要从 https:// 开始写（漏了协议保存时自动补）；从控制台整段复制来的地址如果多带了接口路径，
+            例如 /chat/completions，保存时也会去掉，只留到版本号那一层。
             注意：Coding Plan、Agent Plan 等套餐仅限厂商官方工具内使用，其 key 不能在此配置
             （API 调用有封号风险），请使用按量付费的 key。
           </div>
@@ -718,13 +772,62 @@ const filterPurpose = ref<'' | ModelPurpose>('')
 const status = ref<ReadinessStatus>({
   chat: { ready: false, model: null, config_id: null },
   embedding: { ready: false, model: null, config_id: null },
+  image: { ready: false, model: null, config_id: null },
+  video: { ready: false, model: null, config_id: null },
   kb: { status: 'uninitialized', doc_count: 0, chunk_count: 0, model_mismatch: false },
 })
+
+const PURPOSE_LABELS: Record<ModelPurpose, string> = {
+  chat: '对话',
+  embedding: '向量',
+  image: '图片',
+  video: '视频',
+}
+
+const PURPOSE_COLORS: Record<ModelPurpose, string> = {
+  chat: 'blue',
+  embedding: 'purple',
+  image: 'cyan',
+  video: 'geekblue',
+}
+
+/**
+ * 方舟视觉模型的系列名，当输入提示用。
+ *
+ * 这里不能直接当默认值填：方舟要的是控制台里那条部署 / 接入点 ID（名字后面带日期
+ * 后缀，且按账号不同），系列名填进去上游只会回一个找不到模型。
+ */
+const ARK_MODEL_SERIES: Record<'image' | 'video', string[]> = {
+  image: ['doubao-seedream-5.0-pro', 'doubao-seedream-5.0-flash'],
+  video: [
+    'doubao-seedance-2.5',
+    'doubao-seedance-2.0',
+    'doubao-seedance-2.0-fast',
+    'doubao-seedance-2.0-mini',
+  ],
+}
+
+const ARK_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3'
+
+const purposeLabel = (value: ModelPurpose) => PURPOSE_LABELS[value]
+const purposeColor = (value: ModelPurpose) => PURPOSE_COLORS[value]
+
+const mediaMissing = computed(() => {
+  const missing: string[] = []
+  if (!status.value.image.ready) missing.push('图片')
+  if (!status.value.video.ready) missing.push('视频')
+  return missing
+})
+
+/** 「立即添加」只能开一个用途：缺哪个先补哪个，两个都缺时先出图的。 */
+const mediaMissingPurpose = computed<'image' | 'video'>(() =>
+  status.value.image.ready ? 'video' : 'image',
+)
 
 const columns = [
   { title: '用途', key: 'purpose', width: 130 },
   { title: '标题', dataIndex: 'title' },
-  { title: '模型名称', dataIndex: 'model_name' },
+  { title: '模型名称 / Model ID', dataIndex: 'model_name' },
   { title: '模型地址', dataIndex: 'base_url', ellipsis: true },
   { title: '密钥', key: 'api_key', width: 130 },
   { title: '状态', key: 'state', width: 130 },
@@ -754,6 +857,17 @@ const modal = reactive({
   loading: false,
   form: emptyForm(),
 })
+
+const isMediaPurpose = computed(
+  () => modal.form.purpose === 'image' || modal.form.purpose === 'video',
+)
+
+const arkModelOptions = computed(() =>
+  (modal.form.purpose === 'image' || modal.form.purpose === 'video'
+    ? ARK_MODEL_SERIES[modal.form.purpose]
+    : []
+  ).map((value) => ({ value })),
+)
 
 function testedAtText(record: ModelConfig): string {
   return record.last_tested_at

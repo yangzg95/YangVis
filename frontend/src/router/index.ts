@@ -148,6 +148,30 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '幻灯片放映', bare: true},
     },
     {
+        path: '/office/videos',
+        name: 'Videos',
+        component: () => import('@/views/Videos.vue'),
+        meta: {title: '短视频'},
+    },
+    {
+        // 素材库：账号级的图片/视频素材。放在短视频之后、与它同级，是因为目前只有
+        // 短视频工作台的镜头会引用它；库里的人物形象图换一条选题还要接着用，所以它
+        // 不属于任何一条片子。
+        path: '/office/materials',
+        name: 'Materials',
+        component: () => import('@/views/Materials.vue'),
+        meta: {title: '素材库'},
+    },
+    {
+        // 短视频工作台：左分镜、中提示词、右竖屏预览。与幻灯片工作台不同，这一条
+        // 不挂 bare——它在顶栏按项目 id 占一枚标签（见 utils/appTabs.ts），切去别的
+        // 标签再切回来时 keep-alive 复用同一实例，页面自己 watch 路由参数换项目。
+        path: '/office/videos/:id(\\d+)/workbench',
+        name: 'VideoWorkbench',
+        component: () => import('@/views/VideoWorkbench.vue'),
+        meta: {title: '短视频工作台'},
+    },
+    {
         // 报告整页展示：列表页「查看报告」新开标签页进这里，bare 跳过主布局外壳，
         // 与全屏终端页同一模式。不加 public，未登录照样被守卫拦下。
         path: '/office/report/:kind(resume|comparison|toolkit)/:id(\\d+)',

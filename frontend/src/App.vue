@@ -160,6 +160,7 @@ import {
   CodeOutlined,
   DatabaseOutlined,
   DesktopOutlined,
+  FolderOpenOutlined,
   FundProjectionScreenOutlined,
   HomeOutlined,
   LogoutOutlined,
@@ -175,6 +176,7 @@ import {
   ThunderboltOutlined,
   ToolOutlined,
   UserOutlined,
+  VideoCameraOutlined,
 } from '@ant-design/icons-vue'
 import { ConfigProvider, theme as antdTheme } from 'ant-design-vue'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
@@ -226,6 +228,9 @@ const MENU: MenuNode[] = [
       // 面试记录曾是简历页里的一个 tab，实体和接口都独立，拆成同级叶子。
       { path: '/office/interviews', title: '面试', icon: SolutionOutlined },
       { path: '/office/slides', title: '幻灯片', icon: FundProjectionScreenOutlined },
+      { path: '/office/videos', title: '短视频', icon: VideoCameraOutlined },
+      // 库是账号级的，但今天只有短视频的镜头会引用它，所以紧跟在短视频后面同级摆放。
+      { path: '/office/materials', title: '素材库', icon: FolderOpenOutlined },
     ],
   },
   {

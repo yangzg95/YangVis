@@ -24,6 +24,7 @@ from app.models.entities import (
     Resume,
     SlideDeck,
     UserMemory,
+    VideoProject,
     Workflow,
     WorkflowRun,
 )
@@ -102,6 +103,7 @@ class DashboardService:
             conversation_count=conversation_count,
             resume_count=owned_count(Resume),
             slide_count=owned_count(SlideDeck),
+            video_project_count=owned_count(VideoProject),
             interview_count=owned_count(InterviewRecord),
             note_count=owned_count(Note),
             memory_count=owned_count(UserMemory),

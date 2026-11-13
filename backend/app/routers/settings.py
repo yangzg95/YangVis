@@ -23,6 +23,7 @@ from app.models.schemas import (
     TestResult,
 )
 from app.services.knowledge import KnowledgeService
+from app.services.media import ark
 from app.services.model_config import ModelConfigService
 from app.services.providers import probe_embedding_dimension, test_chat_model
 
@@ -106,6 +107,11 @@ async def test_model(
     For embeddings this doubles as the dimension probe: the measured size is
     persisted because the Qdrant collection is created from it and cannot be
     resized later.
+
+    图片/视频这两类走方舟的媒体端点，不是 OpenAI 兼容的对话接口，所以探测的是
+    一个**免费的只读请求**（任务列表）。它验得出 base_url 与 api_key，验不出
+    Model ID——媒体调用一次就扣一次抵扣，没有「不花钱又能验证型号」的探测办法，
+    探测通过的提示语里已经把这句说明白了。
     """
     try:
         config = service.get(config_id)
@@ -115,6 +121,8 @@ async def test_model(
     vector_size: Optional[int] = None
     if config.purpose == ModelPurpose.EMBEDDING.value:
         ok, message, vector_size = await probe_embedding_dimension(config)
+    elif config.purpose in (ModelPurpose.IMAGE.value, ModelPurpose.VIDEO.value):
+        ok, message = await ark.probe(config)
     else:
         ok, message = await test_chat_model(config)
 
@@ -127,14 +135,22 @@ def readiness_status(
     user: CurrentUser = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> APIResponse[ReadinessStatus]:
-    """Report whether chat, embedding and the knowledge base are usable.
+    """Report whether chat, embedding, the two media purposes and the KB are usable.
 
-    The SPA calls this before rendering the chat and knowledge pages so it can
-    guide the user to configuration instead of failing mid-action.
+    The SPA calls this before rendering the chat, knowledge and short-video pages
+    so it can guide the user to configuration instead of failing mid-action.
+
+    短视频把 image 与 video 两个位子分开报，是因为「只配了出图、没配出片」完全可
+    能，而那正好对应工作台上「出首帧」和「渲染视频」两个不同的按钮。
     """
     service = ModelConfigService(db, user.user_id)
     result = ReadinessStatus()
-    for purpose, field in ((ModelPurpose.CHAT, "chat"), (ModelPurpose.EMBEDDING, "embedding")):
+    for purpose, field in (
+        (ModelPurpose.CHAT, "chat"),
+        (ModelPurpose.EMBEDDING, "embedding"),
+        (ModelPurpose.IMAGE, "image"),
+        (ModelPurpose.VIDEO, "video"),
+    ):
         config = service.get_default(purpose)
         if config is not None:
             setattr(

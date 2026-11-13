@@ -27,6 +27,7 @@ from app.models.entities import (
     Resume,
     SlideDeck,
     UserMemory,
+    VideoProject,
     Workflow,
     WorkflowRun,
 )
@@ -62,6 +63,7 @@ def _mine(db, owner_id: int = OWNER) -> None:
             ChatConversation(owner_id=owner_id, title="会话"),
             Resume(owner_id=owner_id, title="r", filename="r.pdf", content="x"),
             SlideDeck(owner_id=owner_id, title="s", source_text="x"),
+            VideoProject(owner_id=owner_id, title="v"),
             InterviewRecord(owner_id=owner_id, company="c", position="p"),
             Note(owner_id=owner_id, title="n"),
             UserMemory(owner_id=owner_id, content="偏好简洁回答"),
@@ -93,6 +95,7 @@ def test_counts_are_scoped_to_owner(db):
     assert data.knowledge_document_count == 1
     assert data.resume_count == 1
     assert data.slide_count == 1
+    assert data.video_project_count == 1
     assert data.interview_count == 1
     assert data.note_count == 1
     # 长期记忆同样按 owner 隔离：两个 owner 各一条，自己只能数到自己的。
