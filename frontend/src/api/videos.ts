@@ -243,4 +243,14 @@ export const videosApi = {
       method: 'POST',
       skipErrorToast: true,
     }),
+  /**
+   * 把这一镜渲好的首帧复制一条进素材库。名字与归属都在服务端定（``项目｜第 N 镜首帧``），
+   * 所以这里没有请求体；库里那条与产物是两份文件，删项目不会把它带走。
+   */
+  saveFrameToMaterial: (id: number, shotId: number) =>
+    request<VideoProjectDetail>({
+      url: `/office/videos/${id}/shots/${shotId}/to-material`,
+      method: 'POST',
+      skipErrorToast: true,
+    }),
 }

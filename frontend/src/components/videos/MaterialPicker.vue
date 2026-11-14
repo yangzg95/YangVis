@@ -5,7 +5,6 @@
     width="760px"
     :ok-text="picked.length ? `确定（已选 ${picked.length}）` : '确定（不选用）'"
     cancel-text="取消"
-    @open-change="onOpenChange"
     @ok="onConfirm"
   >
     <div class="toolbar toolbar--between toolbar--snug">
@@ -69,7 +68,7 @@
 <script setup lang="ts">
 // 镜头级的素材选择框：从账号级素材库里挑，而不是在项目里再传一份。
 // 库按账号归、镜头按项目走，所以这里只回 id 列表——素材本身的存在与删除归素材库页管。
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { Empty, message } from 'ant-design-vue'
 import { SearchOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import { materialsApi, type MaterialAsset, type MaterialKind } from '@/api'
@@ -118,12 +117,20 @@ async function load() {
   }
 }
 
-function onOpenChange(open: boolean) {
-  if (!open) return
+function onOpenChange() {
   // 每次打开都重新对一遍库：素材可能在素材库页刚被删掉，用旧列表会挑出已经不存在的 id。
   picked.value = [...props.selected]
   void load()
 }
+// 这一版 ant-design-vue 的 Modal 只在关闭时 emit('change')，没有任何「打开」事件，
+// 所以「打开时对一遍库」只能自己盯 props.open——挂在 @open-change 上是一次都不会触发的。
+watch(
+  () => props.open,
+  (open) => {
+    if (open) onOpenChange()
+  },
+)
+
 
 function toggle(item: MaterialAsset) {
   const id = String(item.id)

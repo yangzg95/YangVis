@@ -14,13 +14,17 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, select
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 from app.config import get_settings
 from app.crypto import encrypt
-from app.database import Base
+from app.database import Base, get_db
+from app.deps import require_user
+from app.main import app
 from app.models.entities import (
+    MaterialAsset,
     MediaJob,
     ModelConfig,
     VideoProject,
@@ -28,7 +32,7 @@ from app.models.entities import (
     Workflow,
     WorkflowRun,
 )
-from app.models.schemas import MediaJobOut, ModelPurpose
+from app.models.schemas import CurrentUser, MediaJobOut, ModelPurpose
 from app.services.media import (
     BIZ_VIDEO_COVER,
     BIZ_VIDEO_SHOT,
@@ -44,6 +48,8 @@ from app.services.media import (
     MODE_T2V,
 )
 from app.services.media import store as media_store
+from app.services.materials import KIND_IMAGE as MATERIAL_IMAGE
+from app.services.materials import service as material_service
 from app.services.materials import store as material_store
 from app.services.materials.store import store_material
 from app.services.materials.service import MaterialService
@@ -129,6 +135,24 @@ def _service(db, owner_id: int = OWNER) -> VideoService:
     return VideoService(db, owner_id)
 
 
+@pytest.fixture()
+def client(db):
+    """按 OWNER 身份发请求的 TestClient。
+
+    不进上下文管理器，所以 lifespan 不跑：启动自检那几步要连真库，这里的表已经由
+    ``Base.metadata.create_all`` 建好了（与 ``test_materials.py`` 同一姿势）。
+    """
+    def override_get_db():
+        yield db
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[require_user] = lambda: CurrentUser(user_id=OWNER, username="u1")
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.clear()
+
+
 def _image_model(db, owner_id: int = OWNER, *, tested: bool = True) -> ModelConfig:
     config = ModelConfig(
         owner_id=owner_id,
@@ -190,6 +214,26 @@ def _shots(db, project_id: int, count: int = 2) -> list[VideoShot]:
     service = _service(db)
     service.save_shots(project_id, [_shot({}) for _ in range(count)])
     return service.shots_of(project_id)
+
+
+def _rendered(db, project_id: int, count: int = 2) -> tuple[list[VideoShot], list[MediaJob]]:
+    """渲好的镜头：作业行标成功、产物真的写进临时盘，``rel_path`` 与那个文件一致。
+
+    ``render_frames`` 只管入队，落盘是常驻循环（作业执行器）干的事，所以「这一镜出片了」
+    在测试里要自己把两半都造出来。
+    """
+    service = _service(db)
+    _image_model(db)
+    rows = _shots(db, project_id, count)
+    jobs = service.render_frames(project_id, [])
+    for job in jobs:
+        stored = media_store.store_blob(project_id, PNG)
+        job.status = JOB_SUCCEEDED
+        job.rel_path = stored.rel_path
+        job.mime = stored.mime
+        job.file_size = stored.size
+    db.commit()
+    return rows, jobs
 
 
 # ---- 创建与字段规范化 --------------------------------------------------------
@@ -547,6 +591,142 @@ def test_cancel_a_job_that_belongs_to_the_project(db):
     assert service.shots_of(project.id)[0].image_job_id == job.id, "取消不改指针"
 
 
+# ---- 产物存为素材 ------------------------------------------------------------
+
+
+def test_save_frame_copies_the_artifact_into_the_library(db, tmp_path):
+    """复制，不是移动，也不是引用：产物与素材是两份独立文件。"""
+    project = _project(db)
+    service = _service(db)
+    rows, jobs = _rendered(db, project.id, 2)
+    artifact = tmp_path / jobs[0].rel_path
+
+    asset = service.save_frame_to_material(project.id, rows[0].id)
+
+    assert (asset.owner_id, asset.kind, asset.size) == (OWNER, MATERIAL_IMAGE, len(PNG))
+    # 名字由服务端按「项目 + 镜头号」给：界面上没有一个填名框，库里也就说得出这是哪一张。
+    assert asset.name == "季度复盘三步｜第 1 镜首帧"
+    assert asset.rel_path.startswith(f"materials/{OWNER}/")
+    assert (tmp_path / asset.rel_path).read_bytes() == PNG
+    # 作业行一个字段都没改：这一镜的预览照旧指向产物，重做也不受影响。
+    assert artifact.exists() and artifact.read_bytes() == PNG
+    db.expire_all()
+    assert db.get(MediaJob, jobs[0].id).rel_path == jobs[0].rel_path
+    assert rows[0].material_ids in ([], None), "存进库不等于这一镜开始引用它"
+
+
+def test_the_copy_outlives_the_project(db, tmp_path):
+    """素材按账号分目录正是为了这一条：选题删了， reusable 的那张图还在。"""
+    project = _project(db)
+    service = _service(db)
+    run = db.scalar(select(WorkflowRun).where(WorkflowRun.subject_ref == str(project.id)))
+    run.status = "succeeded"
+    db.commit()
+    rows, jobs = _rendered(db, project.id)
+    asset = service.save_frame_to_material(project.id, rows[0].id)
+    artifact, material_file = tmp_path / jobs[0].rel_path, tmp_path / asset.rel_path
+
+    service.delete_project(project.id)
+    media_store.delete_project_dir(project.id)  # 删整棵产物目录是路由那一步
+
+    assert not artifact.exists()
+    assert material_file.exists()
+    assert MaterialService(db, OWNER).get_asset(asset.id).rel_path == asset.rel_path
+
+
+def test_save_frame_refuses_a_shot_that_has_no_artifact(db, tmp_path):
+    project = _project(db)
+    service = _service(db)
+    _image_model(db)
+    row = _shots(db, project.id, 1)[0]
+    job = service.render_frames(project.id, [])[0]
+
+    with pytest.raises(ValueError, match="还没有产物"):
+        service.save_frame_to_material(project.id, row.id)
+
+    # 成功却读不出文件：转存那一步挂掉时状态先落定、文件没落，界面只能给一条明确失败。
+    job.status = JOB_SUCCEEDED
+    job.rel_path = f"videos/{project.id}/0000000000000000.png"
+    db.commit()
+    with pytest.raises(ValueError, match="读不出来"):
+        service.save_frame_to_material(project.id, row.id)
+    assert db.scalar(select(func.count(MaterialAsset.id))) == 0
+    assert not (tmp_path / "materials").exists(), "拒绝要发生在建目录之前"
+
+
+def test_save_frame_only_accepts_a_shot_of_that_project(db):
+    first = _project(db)
+    second = _project(db, idea="另一个想法")
+    rows, _ = _rendered(db, first.id)
+
+    with pytest.raises(ValueError, match="不属于该项目"):
+        _service(db).save_frame_to_material(second.id, rows[0].id)
+    # 越界的项目读作不存在，与打错 id 同一种答复。
+    with pytest.raises(LookupError, match="短视频项目不存在"):
+        _service(db, OTHER).save_frame_to_material(first.id, rows[0].id)
+
+
+def test_save_frame_leaves_no_orphan_when_the_library_is_full(db, tmp_path, monkeypatch):
+    """库满这条拒绝来自 ``add``，而文件是这里刚写下去的，所以得由这里清掉。"""
+    monkeypatch.setattr(
+        material_service,
+        "settings",
+        SimpleNamespace(
+            upload_media_path=tmp_path,
+            UPLOAD_MEDIA_URL="/uploads",
+            MATERIAL_MAX_IMAGE_BYTES=settings.MATERIAL_MAX_IMAGE_BYTES,
+            MATERIAL_MAX_VIDEO_BYTES=settings.MATERIAL_MAX_VIDEO_BYTES,
+            MATERIAL_MAX_PER_OWNER=1,
+        ),
+    )
+    project = _project(db)
+    service = _service(db)
+    rows, _ = _rendered(db, project.id, 2)
+    service.save_frame_to_material(project.id, rows[0].id)
+
+    with pytest.raises(ValueError, match="最多存 1 条"):
+        service.save_frame_to_material(project.id, rows[1].id)
+
+    assert db.scalar(select(func.count(MaterialAsset.id))) == 1
+    kept = [path.name for path in (tmp_path / "materials" / str(OWNER)).iterdir()]
+    assert len(kept) == 1
+
+
+# ---- HTTP 层（产物存为素材）---------------------------------------------------
+
+
+def test_save_frame_http_shows_up_in_the_library(client, db):
+    """存完在素材库接口上就看得见：工作台的挑选框读的是那一条接口。"""
+    project = _project(db)
+    rows, jobs = _rendered(db, project.id)
+
+    body = client.post(
+        f"/api/office/videos/{project.id}/shots/{rows[0].id}/to-material"
+    ).json()
+
+    assert body["code"] == 0 and body["message"] == "已存进素材库"
+    assert body["data"]["shots"][0]["image_job"]["status"] == JOB_SUCCEEDED
+    listed = client.get("/api/office/materials").json()["data"]
+    assert listed["total"] == 1
+    assert listed["items"][0]["name"] == "季度复盘三步｜第 1 镜首帧"
+    asset = db.scalar(select(MaterialAsset))
+    assert listed["items"][0]["url"] == f"/uploads/{asset.rel_path}"
+    assert asset.rel_path != jobs[0].rel_path, "库里那份是另一份文件，不是产物本身"
+
+
+def test_save_frame_http_rejects_a_shot_still_in_the_queue(client, db):
+    project = _project(db)
+    _image_model(db)
+    row = _shots(db, project.id, 1)[0]
+
+    body = client.post(
+        f"/api/office/videos/{project.id}/shots/{row.id}/to-material"
+    ).json()
+
+    assert body["code"] == -1 and "还没有产物" in body["message"]
+    assert client.post("/api/office/videos/999999/shots/1/to-material").status_code == 404
+
+
 # ---- 删除闸门 --------------------------------------------------------------
 
 
@@ -715,6 +895,7 @@ def test_detail_serializes_jobs_without_the_upstream_url(db):
     assert not {"response", "rel_path", "request"} & set(MediaJobOut.model_fields)
     assert detail.params.generate_audio is False
     assert detail.shots[0].gen_mode == MODE_FIRST_FRAME
+
 
 
 def test_business_rows_still_carry_no_status_column(db):

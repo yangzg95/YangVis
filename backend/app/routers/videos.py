@@ -286,6 +286,32 @@ async def cancel_job(
     return APIResponse(data=service.to_detail(service.get_project(project_id)))
 
 
+@router.post(
+    "/{project_id}/shots/{shot_id}/to-material",
+    response_model=APIResponse[VideoProjectDetail],
+)
+def save_frame_to_material(
+    project_id: int,
+    shot_id: int,
+    service: VideoService = Depends(get_service),
+) -> APIResponse[VideoProjectDetail]:
+    """把这一镜渲出来的首帧复制进素材库，从此跨项目复用。
+
+    这里不带任何正文：素材的名字与归属都由服务端定（见服务层），而复制过去的字节与
+    产物是两份文件，删项目不会带走库里那条。``MediaFileError`` 是 ``ValueError`` 的
+    子类，所以产物读不出来、素材超限、库满三档拒绝都落在同一个答复里。
+    """
+    try:
+        service.save_frame_to_material(project_id, shot_id)
+    except LookupError as exc:
+        raise _not_found(exc) from exc
+    except ValueError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    return APIResponse(
+        data=service.to_detail(service.get_project(project_id)), message="已存进素材库"
+    )
+
+
 async def _script_task(owner_id: int, project_id: int) -> None:
     """跑完发起时建好的那条脚本运行。
 

@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models.entities import (
+    MaterialAsset,
     MediaJob,
     ModelConfig,
     VideoProject,
@@ -64,6 +65,7 @@ from app.services.media import jobs as media_jobs
 from app.services.media import store
 from app.services.materials import KIND_IMAGE as MATERIAL_IMAGE
 from app.services.materials.service import MaterialService
+from app.services.materials.store import store_material
 from app.services.videos.normalize import shots_from_model, text_of
 from app.services.workflows.builtin import finish_builtin_step, start_builtin
 from app.services.workflows.defs import WorkflowService
@@ -620,6 +622,48 @@ class VideoService:
 
     async def cancel_job(self, job_id: int) -> MediaJob:
         return await media_jobs.cancel(self._db, self._owner_id, job_id)
+
+    def save_frame_to_material(self, project_id: int, shot_id: int) -> MaterialAsset:
+        """把这一镜最近一次成功作业的产物**复制**一条进素材库。
+
+        复制而不是移动，两处都是理由：产物路径记在 ``media_job.rel_path`` 上，移动会
+        让这一镜的预览当场断掉；而目录归属本来就不同——产物按项目分（删项目 = 删一棵
+        目录树），素材按账号分（跨项目复用，删项目不带走人物形象图）。
+
+        名字由服务端按「项目 + 镜头号」生成，不叫调用方传：这一档动作九成是「这张后面
+        还要用」，多一个填名框只会把它变成一次要斟酌的输入。镜头号取自镜头行，改名、
+        重排之后存的是当时那一镜的号。
+        """
+        project = self.get_project(project_id)
+        row = next((item for item in self.shots_of(project_id) if item.id == shot_id), None)
+        if row is None:
+            raise ValueError("这一镜不属于该项目")
+        job = (
+            self._latest_jobs([row.image_job_id]).get(row.image_job_id)
+            if row.image_job_id
+            else None
+        )
+        if job is None or job.status != JOB_SUCCEEDED or not job.rel_path:
+            raise ValueError("这一镜还没有产物，先渲完再存")
+
+        # 读产物、落素材都是同步 IO，由线程池里的那个 def 端点调用。
+        stored = store_material(self._owner_id, store.read_blob(str(job.rel_path)))
+        try:
+            asset = self._materials().add(stored, f"{project.title}｜第 {row.sort_order} 镜首帧")
+        except ValueError:
+            # 条数闸门拦下时文件已经在盘上了，留着就是没有任何一行数据库指向它的孤儿。
+            store.delete_blob(stored.rel_path)
+            raise
+        logger.info(
+            "video frame copied to materials: owner=%s project=%s shot=%s job=%s asset=%s bytes=%d",
+            self._owner_id,
+            project.id,
+            row.id,
+            job.id,
+            asset.id,
+            asset.size,
+        )
+        return asset
 
     def capacity(self) -> List[MediaCapacityItem]:
         """这个账号现在各类作业占着几个位子、还能塞几个——渲染前那屏确认要用它。"""

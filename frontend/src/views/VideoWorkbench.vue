@@ -634,6 +634,15 @@
               >
                 <VideoCameraOutlined /> {{ frameUrl ? '重做这一镜' : '渲这一镜' }}
               </a-button>
+              <a-button
+                v-if="frameUrl && current.image_job?.id"
+                size="small"
+                :loading="storing"
+                title="复制一份进素材库，删掉这个项目它也还在"
+                @click="onSaveToMaterial"
+              >
+                <PlusOutlined /> 存为素材
+              </a-button>
             </a-space>
           </div>
 
@@ -862,6 +871,7 @@ const pickerOpen = ref(false)
 const renderModal = ref(false)
 const picked = ref<number[]>([])
 const capacity = ref<MediaCapacityOut | null>(null)
+const storing = ref(false)
 
 const current = computed(() => shots.value[selected.value])
 const dirty = computed(() => dirtyProject.value || dirtyShots.value)
@@ -1244,6 +1254,23 @@ async function onCancelJob(jobId?: number) {
     message.success('已取消')
   } catch (err) {
     message.error(errorText(err, '取消失败'))
+  }
+}
+
+async function onSaveToMaterial() {
+  const shotId = current.value?.id
+  if (!shotId) return
+  storing.value = true
+  try {
+    const detail = await videosApi.saveFrameToMaterial(projectId.value, shotId)
+    applyDetail(detail)
+    // 复制出去的这条要立刻能在「参考素材」里挑到，所以顺手对一遍清单。
+    await loadMaterials()
+    message.success('已存进素材库，其它选题也能复用')
+  } catch (err) {
+    message.error(errorText(err, '存为素材失败'))
+  } finally {
+    storing.value = false
   }
 }
 
