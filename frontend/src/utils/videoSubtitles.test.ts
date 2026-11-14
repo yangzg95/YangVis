@@ -19,6 +19,7 @@ function shot(over: Partial<VideoShot> = {}): VideoShot {
     gen_mode: 'first_frame',
     material_ids: [],
     image_job: null,
+    video_job: null,
     ...over,
   }
 }

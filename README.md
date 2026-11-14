@@ -292,6 +292,13 @@ location ^~ /api/ops/servers/ {
 
 超时给到 1 小时：慢但仍在动的长传输不该由 nginx 掐断，真正断流的由后端停顿看门狗（`OPS_SFTP_STALL_TIMEOUT`，60 秒没有新字节进出就判死）负责报错。前缀写成 `^~` 是为了压过可能更短的 `location /api/`；这条只管文件通道，终端 WebSocket 走 `/api/ops/terminal`，不受它影响。站点其它 location 里已有的通用反代头（`Host` / `X-Forwarded-*`）照抄一份即可。
 
+### 素材库的大小口径
+
+素材库（`/api/office/materials`）的闸门是 `MATERIAL_MAX_IMAGE_BYTES`（图片 10MB）、`MATERIAL_MAX_VIDEO_BYTES`（视频 50MB）、`MATERIAL_MAX_PER_OWNER`（每账号 200 条），超限与「库满」都是业务拒绝（`code: -1`）而不是 500。两条与部署相关的口径：
+
+- **反代的 `client_max_body_size` 要盖过 50MB**，否则 20–50MB 的视频素材会在 nginx 就被 413 拦掉，后端根本没收到请求、前端只能报一句看不懂的网络错误。线上网关已给 `/api/office/materials` 单开一条 52m 的放行（站点级仍是 20m），改后端上限时记得同步改它。
+- 短视频工作台「存为素材」把镜头首帧**复制**进素材库，走的是同一套闸门，而产物自己的上限更宽（`MEDIA_IMAGE_MAX_BYTES` 30MB）。所以一张 10–30MB 的首帧能渲出来、能预览，存进库时会以「素材超过 10MB 上限」被拒——这是刻意的：库的体积上限守的是账号目录，不是某一次渲染。
+
 ## API 概览
 
 统一前缀 `/api`，统一返回 `{ "code": 0, "message": "success", "data": ... }`，除登录外全部需要 Bearer token。
@@ -308,6 +315,8 @@ location ^~ /api/ops/servers/ {
 | `/api/ops` | 服务器/数据库台账、SQL 执行与收藏、表结构与设计表、数据浏览与行级写、全量导出、Redis 浏览与结构化写、审计、WS 终端 |
 | `/api/ops/servers/{id}/files` | SFTP 列目录/上传/下载/新建/删除 |
 | `/api/office` | 简历上传/分析/对比/下载、求职笔记 CRUD |
+| `/api/office/videos` | 项目与分镜 CRUD、脚本生成、首帧与片段渲染作业及取消（`/frames`、`/clips`）、封面、`/{project_id}/shots/{shot_id}/to-material`（把这一镜渲好的首帧复制进素材库）；字幕 SRT/ASS 在前端生成，不走接口 |
+| `/api/office/materials` | 账号级素材库：列表（`kind`/`q`/`limit`）、上传、删除 |
 | `/api/office/netdisk` | 网盘绑定状态、授权链接、绑定/解绑 |
 | `/api/ai-gateway` | 网关概览、上游通道、模型路由、统一密钥、调用日志与统计（仅管理员） |
 

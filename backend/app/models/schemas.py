@@ -3071,7 +3071,6 @@ class VideoParams(BaseModel):
 
     ratio: VideoRatio = "9:16"
     resolution: VideoResolution = "720p"
-    fps: int = Field(default=24, ge=1, le=60)
     watermark: bool = False
     generate_audio: bool = False
     image_size: ImageSize = "2K"
@@ -3160,11 +3159,9 @@ class MediaJobOut(BaseModel):
 
 
 class VideoShotOut(BaseModel):
-    """工作台里的一镜：两套提示词 + 最近一次首帧作业的现状。
+    """工作台里的一镜：两套提示词 + 最近一次首帧与片段作业的现状。
 
-    这里只有 ``image_job``：一期只渲染首帧，``video_prompt`` 与 ``video_job_id``
-    先落在镜头行上攒着，等视频片段那一轮再开口——界面上摆一个永远为空的「视频」
-    格子，不如等它真的有内容。
+    两个指针各带一条作业，状态与产物路径都从作业行读，镜头行上不抄第二份。
     """
 
     id: int
@@ -3182,6 +3179,7 @@ class VideoShotOut(BaseModel):
     # 引用的素材库 id（字符串形式，元素最多 4 个）。
     material_ids: List[str] = Field(default_factory=list)
     image_job: Optional[MediaJobOut] = None
+    video_job: Optional[MediaJobOut] = None
 
 
 class VideoShotIn(BaseModel):
@@ -3269,9 +3267,10 @@ class VideoShotsSave(BaseModel):
 
 
 class VideoRenderRequest(BaseModel):
-    """一次批量渲首帧：``shot_ids`` 空表示项目里全部镜头。
+    """一次批量渲染：``shot_ids`` 空表示项目里全部镜头。
 
-    一期只有首帧这一档，所以这里不收「阶段」：视频片段那一轮接口自己长。
+    首帧（``/frames``）与片段（``/clips``）共用这一种形状：阶段由路径决定，
+    正文里再放一个「阶段」字段就有了两处事实。
     """
 
     shot_ids: List[int] = Field(default_factory=list, max_length=60)

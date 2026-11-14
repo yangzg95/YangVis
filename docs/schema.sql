@@ -725,7 +725,7 @@ CREATE TABLE IF NOT EXISTS video_project (
   brief            JSON         NOT NULL COMMENT '创作卡：{hook, audience, structure, goal, duration_s}',
   script           MEDIUMTEXT   NOT NULL COMMENT '完整口播/剧情纯文本，供人通读与手改；分镜是它的切分',
   style            JSON         NOT NULL COMMENT '{visual_style, persona, palette}，逐镜提示词都要贴它',
-  params           JSON         NOT NULL COMMENT '渲染参数快照：{ratio, resolution, duration_s, watermark, fps...}，发起渲染时抄下，改模型配置不影响已入队的作业',
+  params           JSON         NOT NULL COMMENT '渲染参数快照：{ratio, resolution, watermark, generate_audio, image_size}，发起渲染时抄下，改模型配置不影响已入队的作业；本镜时长取 video_shot.duration_s',
   publish          JSON         NOT NULL COMMENT '{title_candidates, tags, cover_prompt}',
   created_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

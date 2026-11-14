@@ -34,6 +34,18 @@
             </a-button>
           </span>
         </a-tooltip>
+        <a-tooltip :title="clipBlockHint">
+          <span>
+            <a-button
+              size="small"
+              type="primary"
+              :disabled="Boolean(clipBlockHint)"
+              @click="openClipRender"
+            >
+              <PlayCircleOutlined /> 渲染片段
+            </a-button>
+          </span>
+        </a-tooltip>
         <a-dropdown trigger="click">
           <a-button size="small" :disabled="!shots.length">
             <DownloadOutlined /> 导出字幕
@@ -53,12 +65,24 @@
 
     <a-alert v-if="loadError" type="error" show-icon class="wb-alert" :message="loadError" />
     <a-alert
-      v-else-if="!imageReady"
+      v-if="!loadError && !imageReady"
       type="warning"
       show-icon
       class="wb-alert"
       message="渲染首帧要先配好用途为「图片」的模型"
       description="分镜可以先改；入队渲染时后端会当场拒绝没有默认图片模型的提交，免得留下一批停在「排队中」的作业。"
+    >
+      <template #action>
+        <a-button size="small" type="primary" @click="goToSettings">去配置</a-button>
+      </template>
+    </a-alert>
+    <a-alert
+      v-if="!loadError && !videoReady"
+      type="warning"
+      show-icon
+      class="wb-alert"
+      message="渲染片段要先配好用途为「视频」的模型"
+      description="首帧与分镜不受影响；片段入队时后端会当场拒绝没有默认视频模型的提交。出片按秒计费，配置要先通过连通性测试。"
     >
       <template #action>
         <a-button size="small" type="primary" @click="goToSettings">去配置</a-button>
@@ -90,7 +114,7 @@
             <span class="shot-no">{{ index + 1 }}</span>
             <span class="shot-text">
               <span class="shot-name">{{ shot.scene || shot.image_prompt || '（还没写画面）' }}</span>
-              <span class="shot-sub">{{ shot.duration_s }} 秒 · {{ jobText(shot) }}</span>
+              <span class="shot-sub">{{ shot.duration_s }} 秒 · {{ shotJobsText(shot) }}</span>
             </span>
             <span class="shot-ops">
               <a-button
@@ -112,7 +136,7 @@
                 <ArrowDownOutlined />
               </a-button>
               <a-popconfirm
-                title="删除这一镜？它的首帧文件会一并从服务器上删除。"
+                title="删除这一镜？已渲出的首帧与片段文件会留在服务器上，删掉整个项目时才一并清理。"
                 ok-text="删除"
                 cancel-text="取消"
                 @confirm="removeShot(index)"
@@ -206,14 +230,15 @@
                     @change="markShotDirty"
                   />
                 </a-form-item>
-                <a-form-item label="视频提示词（下一轮才用）">
+                <a-form-item label="运动提示词">
                   <a-textarea
                     v-model:value="current.video_prompt"
                     :rows="2"
                     :maxlength="PROMPT_MAX"
-                    placeholder="这一段视频里怎么动起来——一期只渲首帧，先攒着"
+                    placeholder="这一段视频里怎么动起来：主体动作、镜头运动、节奏"
                     @change="markShotDirty"
                   />
+                  <div class="hint">渲染片段用的就是这一段；空着这一镜无法入队。</div>
                 </a-form-item>
                 <a-form-item label="参考素材">
                   <div v-if="currentMaterials.length" class="material-chips">
@@ -462,7 +487,7 @@
                         @change="dirtyProject = true"
                       />
                       <div class="hint">
-                        视频片段那一轮才用它。默认 9 : 16：「自适应」跟着首帧的比例走，
+                        片段按它出画幅。默认 9 : 16：「自适应」跟着首帧的比例走，
                         出成方图就整条跟着方，竖屏不靠这个。
                       </div>
                     </a-form-item>
@@ -475,7 +500,7 @@
                         style="width: 100%"
                         @change="dirtyProject = true"
                       />
-                      <div class="hint">一期只渲首帧，这一档决定图片尺寸。</div>
+                      <div class="hint">首帧与封面按它出图，与片段分辨率是两档。</div>
                     </a-form-item>
                   </a-col>
                 </a-row>
@@ -488,25 +513,18 @@
                         style="width: 100%"
                         @change="dirtyProject = true"
                       />
-                      <div class="hint">视频片段那一轮才用它。</div>
+                      <div class="hint">
+                        上限由型号决定：fast 与 mini 只到 720p，参考图场景不支持 1080p。
+                      </div>
                     </a-form-item>
                   </a-col>
                   <a-col :span="12">
-                    <a-form-item label="帧率">
-                      <a-input-number
-                        v-model:value="params.fps"
-                        :min="1"
-                        :max="60"
-                        style="width: 100%"
-                        @change="dirtyProject = true"
-                      />
+                    <a-form-item label="水印">
+                      <a-switch v-model:checked="params.watermark" @change="dirtyProject = true" />
+                      <div class="hint">默认关，首帧与片段都按它。</div>
                     </a-form-item>
                   </a-col>
                 </a-row>
-                <a-form-item label="水印">
-                  <a-switch v-model:checked="params.watermark" @change="dirtyProject = true" />
-                  <div class="hint">默认关。</div>
-                </a-form-item>
                 <a-form-item label="生成音频">
                   <a-switch
                     v-model:checked="params.generate_audio"
@@ -572,8 +590,16 @@
         </div>
         <div class="preview-body">
           <div class="phone">
+            <video
+              v-if="clipUrl"
+              class="phone-frame"
+              :src="clipUrl"
+              controls
+              playsinline
+              preload="metadata"
+            />
             <img
-              v-if="frameUrl"
+              v-else-if="frameUrl"
               class="phone-frame"
               :src="frameUrl"
               alt="本镜首帧"
@@ -583,65 +609,72 @@
               <LoadingOutlined v-if="currentActive" spin />
               <span>{{ previewHint }}</span>
             </div>
-            <p v-if="current?.on_screen_text" class="phone-subtitle">
+            <p
+              v-if="current?.on_screen_text"
+              :class="['phone-subtitle', { 'phone-subtitle--video': clipUrl }]"
+            >
               {{ current.on_screen_text }}
             </p>
           </div>
 
-          <div v-if="current" class="job-meta">
+          <!-- 两类作业各一块：状态与产物都只在作业行上，这里不存第二份 -->
+          <div v-for="item in currentJobs" :key="item.kind" class="job-meta">
+            <div class="job-kind">{{ item.label }}</div>
             <div class="job-row">
               <span class="muted">状态</span>
-              <a-tag :color="jobColor(current)">{{ jobText(current) }}</a-tag>
+              <a-tag :color="jobColor(item.job)">{{ jobTextOf(item.job, item.kind) }}</a-tag>
             </div>
-            <template v-if="current.image_job">
+            <template v-if="item.job">
               <div class="job-row">
-                <span class="muted">模型</span><span>{{ current.image_job.model_name || '—' }}</span>
+                <span class="muted">模型</span><span>{{ item.job.model_name || '—' }}</span>
               </div>
               <div class="job-row">
                 <span class="muted">用时</span>
-                <span>{{
-                  current.image_job.elapsed_ms ? fmtElapsed(current.image_job.elapsed_ms) : '—'
-                }}</span>
+                <span>{{ item.job.elapsed_ms ? fmtElapsed(item.job.elapsed_ms) : '—' }}</span>
               </div>
               <div class="job-row">
                 <span class="muted">大小</span>
-                <span>{{
-                  current.image_job.file_size ? fmtSize(current.image_job.file_size) : '—'
-                }}</span>
+                <span>{{ item.job.file_size ? fmtSize(item.job.file_size) : '—' }}</span>
               </div>
               <a-alert
-                v-if="current.image_job.error_msg"
+                v-if="item.job.error_msg"
                 type="error"
                 show-icon
                 class="job-error"
-                :message="current.image_job.error_msg"
+                :message="item.job.error_msg"
               />
             </template>
             <a-space :size="8" wrap class="job-ops">
               <a-button
-                v-if="currentActive"
+                v-if="isActiveJob(item.job)"
                 size="small"
                 danger
-                @click="onCancelJob(current.image_job?.id)"
+                @click="onCancelJob(item.job?.id)"
               >
-                取消这一镜
+                取消
               </a-button>
+              <template v-else-if="item.kind === 'image'">
+                <a-button size="small" :disabled="!canRenderOne" @click="onRenderOne">
+                  <VideoCameraOutlined /> {{ frameUrl ? '重做这一镜' : '渲这一镜' }}
+                </a-button>
+                <a-button
+                  v-if="frameUrl && current?.image_job?.id"
+                  size="small"
+                  :loading="storing"
+                  title="复制一份进素材库，删掉这个项目它也还在"
+                  @click="onSaveToMaterial"
+                >
+                  <PlusOutlined /> 存为素材
+                </a-button>
+              </template>
               <a-button
                 v-else
                 size="small"
-                :disabled="!canRenderOne"
-                @click="onRenderOne"
+                :disabled="!canRenderClipOne"
+                :title="clipProblem(current)"
+                @click="onRenderClipOne"
               >
-                <VideoCameraOutlined /> {{ frameUrl ? '重做这一镜' : '渲这一镜' }}
-              </a-button>
-              <a-button
-                v-if="frameUrl && current.image_job?.id"
-                size="small"
-                :loading="storing"
-                title="复制一份进素材库，删掉这个项目它也还在"
-                @click="onSaveToMaterial"
-              >
-                <PlusOutlined /> 存为素材
+                <PlayCircleOutlined /> {{ clipUrl ? '重做片段' : '渲片段' }}
               </a-button>
             </a-space>
           </div>
@@ -661,7 +694,7 @@
             <span v-if="!shots.length" class="muted">还没有镜头</span>
           </div>
           <div class="hint timeline-hint">
-            起点由镜头顺序累加：{{ totalDuration }} 秒。一镜一段，不做拼接。
+            起点由镜头顺序累加：{{ totalDuration }} 秒。一镜一段，合成成片还没开。
           </div>
         </div>
       </section>
@@ -729,6 +762,72 @@
         </template>
       </a-table>
     </a-modal>
+
+    <!-- 片段渲染前那屏确认：这次发几条、视频位子还剩几个、每一镜这一档能不能发 -->
+    <a-modal
+      v-model:open="clipModal"
+      title="渲染片段"
+      ok-text="开始渲染"
+      cancel-text="取消"
+      width="760px"
+      :ok-button-props="{ disabled: clipOkDisabled }"
+      @ok="onClipConfirm"
+    >
+      <a-alert
+        type="info"
+        show-icon
+        class="render-alert"
+        :message="`这次发 ${renderTargets.length} 条视频作业，一镜一段`"
+        :description="clipCapacityHint"
+      />
+      <a-alert
+        v-if="clipResolutionWarning"
+        type="warning"
+        show-icon
+        class="render-alert"
+        message="这一档分辨率可能超出型号上限"
+        :description="clipResolutionWarning"
+      />
+      <a-alert
+        v-if="clipProblemsInTarget.length"
+        type="warning"
+        show-icon
+        class="render-alert"
+        message="这些镜头现在发不出去"
+        :description="clipProblemsText"
+      />
+      <div class="toolbar toolbar--between toolbar--snug">
+        <span class="muted">不勾选表示渲染全部 {{ shots.length }} 镜</span>
+        <a-button v-if="picked.length" size="small" type="text" @click="picked = []">
+          清空勾选
+        </a-button>
+      </div>
+      <a-table
+        :columns="clipColumns"
+        :data-source="shots"
+        row-key="id"
+        size="small"
+        :pagination="false"
+        :row-selection="{ selectedRowKeys: picked, onChange: onPick }"
+        :scroll="{ y: 320 }"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'scene'">
+            <span>{{ record.scene || record.image_prompt || '（还没写画面）' }}</span>
+          </template>
+          <template v-else-if="column.key === 'mode'">
+            <span>{{ genModeLabel(record.gen_mode) }}</span>
+          </template>
+          <template v-else-if="column.key === 'ready'">
+            <a-tag v-if="!clipProblem(record)" color="success">可发</a-tag>
+            <a-tag v-else color="error">{{ clipProblem(record) }}</a-tag>
+          </template>
+          <template v-else-if="column.key === 'job'">
+            <span class="muted">{{ jobTextOf(record.video_job, 'video') }}</span>
+          </template>
+        </template>
+      </a-table>
+    </a-modal>
   </div>
 </template>
 
@@ -744,6 +843,7 @@ import {
   LoadingOutlined,
   MinusOutlined,
   PictureOutlined,
+  PlayCircleOutlined,
   PlusOutlined,
   ReloadOutlined,
   SaveOutlined,
@@ -757,6 +857,8 @@ import {
   type MaterialAsset,
   type MaterialKind,
   type MediaCapacityOut,
+  type MediaJob,
+  type MediaJobKind,
   type MediaJobStatus,
   type VideoBrief,
   type VideoGenMode,
@@ -779,10 +881,12 @@ import { buildAss, buildSrt, subtitleCues } from '@/utils/videoSubtitles'
 // 短视频工作台：左边分镜（顺序即成片顺序）、中间两套提示词与全片参数、右边竖屏预览。
 //
 // 两阶段的进度在这里各看各的：脚本阶段是项目状态（从认领本项目的运行翻译过来），
-// 渲染阶段是这一镜最近那条 media_job 的状态。所以详情接口轮询一次就把两件事都说清了。
+// 渲染阶段是这一镜最近那两条 media_job（首帧 / 片段）的状态。所以详情接口轮询一次
+// 就把这几件事都说清了。
 //
-// 一期只渲首帧：video_prompt 照旧攒在镜头行上，界面上不摆一个永远为空的「视频」格子。
-// 字幕也不烧进画面——预览按屏幕文字叠加，导出的是旁边的 SRT / ASS 文件。
+// 渲染分两步：先出首帧，再由首帧出片段（t2v 与参考图档不需要首帧）。合成成片还没开，
+// 时间轴只是「一镜一段」的示意；字幕也不烧进画面——预览按屏幕文字叠加，导出的是
+// 旁边的 SRT / ASS 文件。
 
 const route = useRoute()
 const router = useRouter()
@@ -797,17 +901,18 @@ const SHOT_MAX_S = 15
 const MAX_REFS_PER_SHOT = 4
 const MAX_SEGMENTS = 8
 
-const GEN_MODE_OPTIONS: { value: VideoGenMode; label: string }[] = [
+const GEN_MODE_OPTIONS: { value: VideoGenMode; label: string; disabled?: boolean }[] = [
   { value: 'first_frame', label: '首帧生视频（默认）' },
   { value: 't2v', label: '文生视频' },
-  { value: 'first_last_frame', label: '首尾帧生视频' },
+  { value: 'first_last_frame', label: '首尾帧生视频（还没开）', disabled: true },
   { value: 'reference', label: '参考图生视频' },
 ]
 const GEN_MODE_HINTS: Record<VideoGenMode, string> = {
-  first_frame: '先出这一镜的首帧，再由首帧生成视频片段。一期的首帧渲染就是它的第一步。',
+  first_frame: '先出这一镜的首帧，再由首帧生成片段：长什么样由首帧定，怎么动由运动提示词定。',
   t2v: '直接从提示词生成视频，不需要首帧——画面一致性强依赖参考图时不建议选它。',
-  first_last_frame: '给定首尾两帧，中间由模型补：动作跨度大时比首帧流稳。',
-  reference: '用参考图当主体，模型按参考图里的形象生成：人物一致性靠这一档。',
+  first_last_frame:
+    '给定首尾两帧，中间由模型补。这一档还没开：尾帧要另起一条产物链路，选了会在入队时被拒。',
+  reference: '用参考图当主体，模型按参考图里的形象生成：人物一致性靠这一档。只认图片类素材。',
 }
 const RATIO_OPTIONS = [
   { value: 'adaptive', label: '自适应' },
@@ -845,7 +950,6 @@ const style = reactive<VideoStyle>({ visual_style: '', persona: '', palette: '' 
 const params = reactive<VideoParams>({
   ratio: '9:16',
   resolution: '720p',
-  fps: 24,
   watermark: false,
   generate_audio: false,
   image_size: '2K',
@@ -866,9 +970,13 @@ const dirtyShots = ref(false)
 const saving = ref(false)
 const loadError = ref('')
 const imageReady = ref(true)
+const videoReady = ref(true)
+/** 默认视频模型的名字：确认屏上按它提示分辨率档位，认不出型号时以上游报错为准。 */
+const videoModel = ref('')
 
 const pickerOpen = ref(false)
 const renderModal = ref(false)
+const clipModal = ref(false)
 const picked = ref<number[]>([])
 const capacity = ref<MediaCapacityOut | null>(null)
 const storing = ref(false)
@@ -880,15 +988,23 @@ const totalDuration = computed(() =>
   shots.value.reduce((sum, shot) => sum + (shot.duration_s || 0), 0),
 )
 const currentActive = computed(
-  () =>
-    Boolean(current.value?.image_job?.status) &&
-    ACTIVE_JOB_STATUS.includes(current.value!.image_job!.status),
+  () => isActiveJob(current.value?.image_job) || isActiveJob(current.value?.video_job),
 )
-const frameUrl = computed(() =>
-  current.value?.image_job?.status === 'succeeded' ? current.value.image_job.url : '',
+const frameUrl = computed(() => frameUrlOf(current.value))
+const clipUrl = computed(() =>
+  current.value?.video_job?.status === 'succeeded' ? current.value.video_job.url : '',
 )
 const rendering = computed(() =>
-  shots.value.some((shot) => shot.image_job && ACTIVE_JOB_STATUS.includes(shot.image_job.status)),
+  shots.value.some((shot) => isActiveJob(shot.image_job) || isActiveJob(shot.video_job)),
+)
+/** 预览区那两块作业现场：没渲过也要摆出来，两个「渲」按钮得有地方待。 */
+const currentJobs = computed(() =>
+  current.value
+    ? [
+        { label: '首帧作业', kind: 'image' as const, job: current.value.image_job },
+        { label: '片段作业', kind: 'video' as const, job: current.value.video_job },
+      ]
+    : [],
 )
 /** 这次要发出去的镜头：一个都没勾就是全部——与后端「shot_ids 空表示全部」同一口径。 */
 const renderTargets = computed(() =>
@@ -909,6 +1025,39 @@ const renderBlockHint = computed(() => {
 const renderOkDisabled = computed(
   () => Boolean(renderBlockHint.value) || missingPromptInTarget.value.length > 0,
 )
+/** 片段这一档的门槛：首帧那几条之外，还要有验证过的视频模型。 */
+const clipBlockHint = computed(() =>
+  videoReady.value ? renderBlockHint.value : '先配好用途为「视频」的模型',
+)
+const clipProblemsInTarget = computed(() =>
+  renderTargets.value
+    .map((shot) => ({ sort_order: shot.sort_order, problem: clipProblem(shot) }))
+    .filter((item) => item.problem),
+)
+const clipProblemsText = computed(
+  () =>
+    clipProblemsInTarget.value
+      .map((item) => `第 ${item.sort_order} 镜：${item.problem}`)
+      .join('；') +
+    '。整批里有一镜不合格就会被服务端拒掉（不是跳过它），先补齐或只勾选能发的镜头。',
+)
+const clipOkDisabled = computed(
+  () => Boolean(clipBlockHint.value) || clipProblemsInTarget.value.length > 0,
+)
+const clipCapacityHint = computed(() => {
+  const video = (capacity.value?.jobs ?? []).find((item) => item.kind === 'video')
+  const base = video
+    ? `视频作业在途 ${video.inflight}/${video.limit}：超出上限的会排在本地队列里依次提交。`
+    : '并发余量没取到，入队后按排队处理。'
+  const model = videoModel.value ? `当前视频模型：${videoModel.value}。` : ''
+  return `${base}${model}出片按秒计费，一条几十秒到几分钟，这一屏关掉也不影响渲染。`
+})
+/** 型号认得出来才提示：接入点 ID（ep-…）看不出家族，那种情况以上游报错为准。 */
+const clipResolutionWarning = computed(() => {
+  const name = videoModel.value.toLowerCase()
+  if (params.resolution !== '1080p' || !(name.includes('fast') || name.includes('mini'))) return ''
+  return `「${videoModel.value}」是 fast/mini 档，只支持到 720p，1080p 会被上游拒掉；先在「全片 · 渲染参数」里调回 720p。`
+})
 /** 一格引用：库里还留着的是素材本身，删掉了的也要占个位子，否则人看不出引用去了哪儿。 */
 type MaterialChip = {
   id: string
@@ -939,7 +1088,14 @@ const canRenderOne = computed(
     Boolean(current.value) &&
     !dirtyShots.value &&
     Boolean(current.value?.image_prompt.trim()) &&
-    !currentActive.value,
+    !isActiveJob(current.value?.image_job),
+)
+const canRenderClipOne = computed(
+  () =>
+    Boolean(current.value) &&
+    !dirtyShots.value &&
+    !clipProblem(current.value) &&
+    !isActiveJob(current.value?.video_job),
 )
 const capacityHint = computed(() => {
   const jobs = capacity.value?.jobs ?? []
@@ -982,6 +1138,7 @@ function blankShot(): VideoShot {
     gen_mode: 'first_frame',
     material_ids: [],
     image_job: null,
+    video_job: null,
   }
 }
 
@@ -1018,8 +1175,12 @@ async function loadReadiness() {
   try {
     const status = await settingsApi.status()
     imageReady.value = status.image.ready
+    videoReady.value = status.video.ready
+    videoModel.value = status.video.model || ''
   } catch {
+    // 取不到就不拦：真正的门槛在服务端入队那一步，这里只是提前说一句。
     imageReady.value = true
+    videoReady.value = true
   }
 }
 
@@ -1038,28 +1199,38 @@ function syncPolling() {
   else pollLoop.stop()
 }
 
-// 「刚出图」和「刚失败」都值得说一句：几十秒到几分钟的过程，用户不会一直盯着。
-function lastJobStatus(): Map<number, MediaJobStatus | undefined> {
-  const map = new Map<number, MediaJobStatus | undefined>()
+// 「刚出图 / 刚出片」和「刚失败」都值得说一句：几十秒到几分钟的过程，用户不会一直盯着。
+// 键带上作业类别：一镜两条作业，只按镜号记会让片段的变化被首帧的盖掉。
+function jobKey(shotId: number, kind: MediaJobKind): string {
+  return `${shotId}:${kind}`
+}
+
+function lastJobStatus(): Map<string, MediaJobStatus | undefined> {
+  const map = new Map<string, MediaJobStatus | undefined>()
   for (const shot of shots.value) {
-    if (shot.id) map.set(shot.id, shot.image_job?.status)
+    if (!shot.id) continue
+    map.set(jobKey(shot.id, 'image'), shot.image_job?.status)
+    map.set(jobKey(shot.id, 'video'), shot.video_job?.status)
   }
   return map
 }
 
-function announceJobs(before: Map<number, MediaJobStatus | undefined>) {
+function announceJobs(before: Map<string, MediaJobStatus | undefined>) {
   if (!before.size) return
-  let done = 0
+  const done = { image: 0, video: 0 }
   let failed = 0
   for (const shot of shots.value) {
-    const previous = before.get(shot.id)
-    const now = shot.image_job?.status
-    if (!previous || !ACTIVE_JOB_STATUS.includes(previous) || !now) continue
-    if (now === 'succeeded') done += 1
-    else if (now === 'failed' || now === 'expired') failed += 1
+    for (const kind of ['image', 'video'] as const) {
+      const job = kind === 'image' ? shot.image_job : shot.video_job
+      const previous = before.get(jobKey(shot.id, kind))
+      if (!previous || !ACTIVE_JOB_STATUS.includes(previous) || !job) continue
+      if (job.status === 'succeeded') done[kind] += 1
+      else if (job.status === 'failed' || job.status === 'expired') failed += 1
+    }
   }
-  if (done) message.success(`${done} 镜首帧已出图`)
-  if (failed) message.error(`${failed} 镜渲染失败，预览区有原因`)
+  if (done.image) message.success(`${done.image} 镜首帧已出图`)
+  if (done.video) message.success(`${done.video} 镜片段已出片`)
+  if (failed) message.error(`${failed} 条渲染失败，预览区有原因`)
 }
 
 // ---- 分镜编辑 ----------------------------------------------------------------
@@ -1140,7 +1311,7 @@ function projectPayload() {
     brief: { ...brief, duration_s: Number(brief.duration_s) || 15 },
     script: script.value,
     style: { ...style },
-    params: { ...params, fps: Number(params.fps) || 24 },
+    params: { ...params },
     publish: {
       title_candidates: publish.title_candidates.slice(0, 6),
       tags: publish.tags.slice(0, 8),
@@ -1229,6 +1400,45 @@ async function onRenderOne() {
     const detail = await videosApi.renderFrames(projectId.value, [current.value.id])
     applyDetail(detail)
     message.success('已开始渲染这一镜')
+    syncPolling()
+  } catch (err) {
+    message.error(errorText(err, '渲染失败'))
+  }
+}
+
+async function openClipRender() {
+  picked.value = []
+  clipModal.value = true
+  try {
+    capacity.value = await videosApi.capacity()
+  } catch {
+    // 并发余量只是确认屏上的参考信息，取不到不拦渲染。
+    capacity.value = null
+  }
+}
+
+async function onClipConfirm() {
+  try {
+    const detail = await videosApi.renderClips(
+      projectId.value,
+      // 不勾表示全部：服务端把空数组当成「项目里全部镜头」。
+      picked.value.length ? picked.value : [],
+    )
+    applyDetail(detail)
+    clipModal.value = false
+    message.success('已开始渲染片段，出片需要几十秒到几分钟')
+    syncPolling()
+  } catch (err) {
+    message.error(errorText(err, '渲染失败'))
+  }
+}
+
+async function onRenderClipOne() {
+  if (!current.value?.id) return
+  try {
+    const detail = await videosApi.renderClips(projectId.value, [current.value.id])
+    applyDetail(detail)
+    message.success('已开始渲染这一镜的片段')
     syncPolling()
   } catch (err) {
     message.error(errorText(err, '渲染失败'))
@@ -1339,13 +1549,14 @@ function genModeHint(mode: VideoGenMode) {
   return GEN_MODE_HINTS[mode] || ''
 }
 
-function jobStatusText(status: MediaJobStatus | string): string {
+function jobStatusText(status: MediaJobStatus | string, kind: MediaJobKind = 'image'): string {
+  const verb = kind === 'video' ? '片' : '图'
   return (
     {
       queued: '排队中',
-      running: '出图中',
+      running: `出${verb}中`,
       downloading: '转存中',
-      succeeded: '已出图',
+      succeeded: `已出${verb}`,
       failed: '失败',
       cancelled: '已取消',
       expired: '超时未完成',
@@ -1353,8 +1564,12 @@ function jobStatusText(status: MediaJobStatus | string): string {
   )
 }
 
-function jobColor(shot: VideoShot): string {
-  const status = shot.image_job?.status
+function isActiveJob(job?: MediaJob | null): boolean {
+  return Boolean(job && ACTIVE_JOB_STATUS.includes(job.status))
+}
+
+function jobColor(job?: MediaJob | null): string {
+  const status = job?.status
   if (!status) return 'default'
   return (
     {
@@ -1369,8 +1584,44 @@ function jobColor(shot: VideoShot): string {
   )
 }
 
+function jobTextOf(job: MediaJob | null | undefined, kind: MediaJobKind): string {
+  return job ? jobStatusText(job.status, kind) : '还没渲'
+}
+
 function jobText(shot: VideoShot): string {
-  return shot.image_job ? jobStatusText(shot.image_job.status) : '还没渲'
+  return jobTextOf(shot.image_job, 'image')
+}
+
+/** 分镜列表那行副标题：两类作业都报，没渲过片段就只报首帧。 */
+function shotJobsText(shot: VideoShot): string {
+  const frame = `图 ${jobText(shot)}`
+  return shot.video_job ? `${frame} · 片 ${jobStatusText(shot.video_job.status, 'video')}` : frame
+}
+
+function frameUrlOf(shot?: VideoShot): string {
+  return shot?.image_job?.status === 'succeeded' ? shot.image_job.url : ''
+}
+
+function genModeLabel(mode: VideoGenMode): string {
+  return GEN_MODE_OPTIONS.find((item) => item.value === mode)?.label || mode
+}
+
+/** 参考图档只认图片类素材：视频素材要公网地址，进不了 base64 那一档。 */
+function imageRefCount(shot: VideoShot): number {
+  return shot.material_ids.filter((id) => materialById.value.get(id)?.kind === 'image').length
+}
+
+/**
+ * 这一镜现在能不能发片段：与服务端 ``render_clips`` 的四档拒绝一一对应。
+ * 确认屏上先说清楚，就少一次「点了开始渲染才被整批拒掉」。
+ */
+function clipProblem(shot?: VideoShot): string {
+  if (!shot) return '还没有镜头'
+  if (shot.gen_mode === 'first_last_frame') return '首尾帧这一档还没开'
+  if (!shot.video_prompt.trim()) return '缺运动提示词'
+  if (shot.gen_mode === 'first_frame' && !frameUrlOf(shot)) return '首帧还没出图'
+  if (shot.gen_mode === 'reference' && !imageRefCount(shot)) return '没挑图片素材'
+  return ''
 }
 
 const renderColumns = [
@@ -1379,6 +1630,15 @@ const renderColumns = [
   { title: '时长', dataIndex: 'duration_s', key: 'duration', width: 70 },
   { title: '首帧提示词', key: 'prompt', width: 110 },
   { title: '上次渲染', key: 'job', width: 100 },
+]
+
+const clipColumns = [
+  { title: '镜号', dataIndex: 'sort_order', key: 'sort', width: 60 },
+  { title: '画面', key: 'scene', ellipsis: true },
+  { title: '时长', dataIndex: 'duration_s', key: 'duration', width: 70 },
+  { title: '生成方式', key: 'mode', width: 130 },
+  { title: '这一档', key: 'ready', width: 120 },
+  { title: '上次片段', key: 'job', width: 100 },
 ]
 
 function goToSettings() {
@@ -1459,7 +1719,9 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   align-items: center;
   gap: 8px;
   min-width: 0;
-  flex: 1;
+  /* basis不能是0：那样这一组永远不换行，窄屏时会被压到比内容还窄，
+     标题与meta溢出画到按钮底下。给一个内容下限，放不下就整组换行。 */
+  flex: 1 1 340px;
 }
 
 .wb-title-input {
@@ -1658,6 +1920,8 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   margin: 0 auto;
   width: 100%;
   max-width: 320px;
+  /* 预览列里还有作业现场与时间轴：内容超高时让列滚动，而不是把竖屏框压扁。 */
+  flex-shrink: 0;
   border-radius: 12px;
   overflow: hidden;
   background: #0d1116;
@@ -1696,6 +1960,11 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   line-height: 1.4;
 }
 
+/* 片段在放时让开原生控制条，否则屏幕字正好压在播放/进度上。 */
+.phone-subtitle--video {
+  bottom: 56px;
+}
+
 .job-meta {
   display: flex;
   flex-direction: column;
@@ -1704,6 +1973,11 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   border: 1px solid var(--hairline);
   border-radius: var(--radius-md, 10px);
   padding: 10px 12px;
+}
+
+.job-kind {
+  font-weight: 600;
+  color: var(--text-3);
 }
 
 .job-row {
@@ -1799,8 +2073,40 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
 }
 
 @media (max-width: 1180px) {
+  /* 单列时三块按内容撑高、整页滚动（外壳内容区本来就 overflow:auto）。
+     原来三行平分一屏高：预览框被 flex 收缩压成一条线，分镜与表单也只剩
+     两百像素的滚动窗，竖屏预览根本看不见。 */
+  .workbench {
+    height: auto;
+  }
+
   .wb-body {
     grid-template-columns: 1fr;
+    grid-auto-rows: min-content;
+  }
+
+  .shot-list {
+    flex: none;
+    max-height: 320px;
+  }
+
+  .wb-tabs {
+    flex: none;
+  }
+
+  .wb-tabs :deep(.ant-tabs-content),
+  .wb-tabs :deep(.ant-tabs-tabpane),
+  .pane-form {
+    height: auto;
+  }
+
+  .pane-form,
+  .preview-body {
+    overflow: visible;
+  }
+
+  .preview-body {
+    flex: none;
   }
 }
 </style>

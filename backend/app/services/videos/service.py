@@ -1,4 +1,4 @@
-"""智能应用 · 短视频：项目存取、脚本触发与首帧渲染入队。
+"""智能应用 · 短视频：项目存取、脚本触发与首帧/片段渲染入队。
 
 数据访问按单个用户隔离（与 :class:`ResumeService`、:class:`SlideService` 同一
 约定）：所有查询都经过 :meth:`VideoService._scope`，handler 不直接接触 session。
@@ -16,9 +16,9 @@
 成功的作业）。想加一列 status 的冲动在这里一定是错的——那就有第三份事实源要同步，
 而重启时它们必然给出三个答案。
 
-一期只渲染首帧，所以这里只有 ``render_frames`` / ``render_cover`` 两个入队口，没有
-视频片段那一档；镜头行上的 ``video_prompt`` 与 ``video_job_id`` 是脚本已经产出的
-内容，不是半成品接口。
+渲染阶段有三个入队口：``render_frames``（首帧图）、``render_clips``（视频片段）、
+``render_cover``（封面图）。片段吃的是首帧的产物，所以顺序上先出图再出片；
+``first_last_frame`` 那一档还没开——尾帧要另起一条产物链路，入队时当场拒绝。
 """
 from __future__ import annotations
 
@@ -59,6 +59,10 @@ from app.services.media import (
     KIND_IMAGE,
     KIND_VIDEO,
     MODE_FIRST_FRAME,
+    MODE_FIRST_LAST_FRAME,
+    MODE_REFERENCE,
+    ROLE_FIRST_FRAME,
+    ROLE_REFERENCE_IMAGE,
     VIDEO_GEN_MODES,
 )
 from app.services.media import jobs as media_jobs
@@ -109,6 +113,21 @@ def _clamp_prompt(text: str) -> str:
     limit = settings.VIDEO_MAX_PROMPT_CHARS
     clean = (text or "").strip()
     return clean if len(clean) <= limit else clean[:limit]
+
+
+def _shot_nums(orders: Sequence[int]) -> str:
+    return "、".join(str(num) for num in orders)
+
+
+def _ready_rel_path(job: Optional[MediaJob]) -> str:
+    """产物真的可用时的 ``rel_path``，否则空串。
+
+    认「succeeded 且有 rel_path」而不是只认状态：转存是作业的最后一步，一条报了成功
+    却没落下文件的行喂给上游只会换来一次「参考图路径不合法」。
+    """
+    if job is None or job.status != JOB_SUCCEEDED or not job.rel_path:
+        return ""
+    return str(job.rel_path)
 
 
 def _style_note(style: Dict[str, Any]) -> str:
@@ -179,6 +198,10 @@ class VideoService:
     def require_image_config(self) -> ModelConfig:
         """渲染阶段的门槛：媒体配置要求**已经通过探测**，理由见 :func:`resolve_media_config`。"""
         return media_jobs.resolve_media_config(self._db, self._owner_id, KIND_IMAGE)
+
+    def require_video_config(self) -> ModelConfig:
+        """片段渲染的门槛：用途 ``video`` 的那一条，同样要求已通过探测。"""
+        return media_jobs.resolve_media_config(self._db, self._owner_id, KIND_VIDEO)
 
     # -- 项目 -----------------------------------------------------------------
 
@@ -553,8 +576,9 @@ class VideoService:
         )
         created: List[MediaJob] = []
         for row in picked:
-            # 只有图片类素材进得了这一期的请求体：参考视频要公网可达的地址，而渲染
-            # 只到首帧，视频素材在镜头上是一条「已记录、暂未使用」的引用。
+            # 只有图片类素材进得了请求体：参考视频要公网可达的地址，而默认那一档
+            # 是把本地文件内联成 base64。视频素材在镜头上是一条「已记录、暂未使用」
+            # 的引用（片段渲染的参考图档同一取舍）。
             refs = [
                 materials[ref].rel_path
                 for ref in [str(item) for item in (row.material_ids or [])]
@@ -582,6 +606,114 @@ class VideoService:
         self._db.commit()
         logger.info(
             "video frames enqueued: project=%s owner=%s jobs=%s materials=%s",
+            project.id,
+            self._owner_id,
+            len(created),
+            len(materials),
+        )
+        return created
+
+    def render_clips(self, project_id: int, shot_ids: Sequence[int]) -> List[MediaJob]:
+        """给这些镜头各入队一条视频片段作业；``shot_ids`` 空表示全部镜头。
+
+        与 :meth:`render_frames` 同一口径：整批里有一镜不合格就整条拒掉，不跳过它。
+        四档不合格一次报全（缺运动提示词、首帧还没渲出来、选了没开的首尾帧、参考图
+        档没挑图片素材），免得用户补一条、提交、再撞下一条。
+
+        首帧档喂的是**这一镜已经渲好的首帧产物**，不再重新出图：状态与路径的唯一
+        事实源是作业行，所以这里认的是指针指向那条作业真的落盘了没有。
+        """
+        project = self.get_project(project_id)
+        config = self.require_video_config()
+        rows = self.shots_of(project_id)
+        wanted_ids = {int(item) for item in shot_ids or ()}
+        picked = [row for row in rows if not wanted_ids or row.id in wanted_ids]
+        if wanted_ids - {row.id for row in picked}:
+            raise ValueError("选中了不属于该项目的镜头")
+        if not picked:
+            raise ValueError("还没有镜头可以渲染，先生成脚本")
+
+        frames = self._latest_jobs([row.image_job_id for row in picked])
+        materials = self._materials().materials_for(
+            [str(ref) for row in picked for ref in (row.material_ids or [])]
+        )
+        # 只有图片类素材进得了请求体：参考视频要公网可达的地址，而默认那一档是把
+        # 本地文件内联成 base64（与 render_frames 同一取舍）。
+        refs = {
+            row.id: [
+                materials[ref].rel_path
+                for ref in [str(item) for item in (row.material_ids or [])]
+                if ref in materials
+                and materials[ref].kind == MATERIAL_IMAGE
+                and materials[ref].rel_path
+            ]
+            for row in picked
+        }
+
+        problems: List[str] = []
+        unsupported = [row.sort_order for row in picked if row.gen_mode == MODE_FIRST_LAST_FRAME]
+        if unsupported:
+            problems.append(f"第 {_shot_nums(unsupported)} 镜选了首尾帧生视频，这一档还没开")
+        no_prompt = [row.sort_order for row in picked if not (row.video_prompt or "").strip()]
+        if no_prompt:
+            problems.append(f"第 {_shot_nums(no_prompt)} 镜还没有运动提示词")
+        no_frame = [
+            row.sort_order
+            for row in picked
+            if row.gen_mode == MODE_FIRST_FRAME
+            and not _ready_rel_path(frames.get(row.image_job_id))
+        ]
+        if no_frame:
+            problems.append(f"第 {_shot_nums(no_frame)} 镜的首帧还没渲出来")
+        no_refs = [
+            row.sort_order for row in picked if row.gen_mode == MODE_REFERENCE and not refs[row.id]
+        ]
+        if no_refs:
+            problems.append(f"第 {_shot_nums(no_refs)} 镜选了参考图生视频，但没挑图片素材")
+        if problems:
+            raise ValueError("；".join(problems) + "。先补齐再渲染")
+
+        params = project.params or {}
+        created: List[MediaJob] = []
+        for row in picked:
+            images: List[Dict[str, str]] = []
+            if row.gen_mode == MODE_FIRST_FRAME:
+                images = [
+                    {
+                        "role": ROLE_FIRST_FRAME,
+                        "rel_path": _ready_rel_path(frames.get(row.image_job_id)),
+                    }
+                ]
+            elif row.gen_mode == MODE_REFERENCE:
+                images = [{"role": ROLE_REFERENCE_IMAGE, "rel_path": path} for path in refs[row.id]]
+            # 剩下的只有 t2v：一张图都不给，给了就把纯文生变成了图生视频。
+            job = media_jobs.enqueue(
+                self._db,
+                self._owner_id,
+                kind=KIND_VIDEO,
+                biz_type=BIZ_VIDEO_SHOT,
+                biz_id=row.id,
+                request={
+                    "project_id": project.id,
+                    "prompt": row.video_prompt,
+                    # 键名与方舟请求体同名，作业层原样透传（``jobs._video_params``
+                    # 不兜默认值）。时长是**本镜**的，不是全片的：一镜一条任务。
+                    "params": {
+                        "ratio": str(params.get("ratio") or "9:16"),
+                        "resolution": str(params.get("resolution") or "720p"),
+                        "duration": int(row.duration_s),
+                        "watermark": bool(params.get("watermark")),
+                        "generate_audio": bool(params.get("generate_audio")),
+                    },
+                    "images": images,
+                },
+                config=config,
+            )
+            row.video_job_id = job.id
+            created.append(job)
+        self._db.commit()
+        logger.info(
+            "video clips enqueued: project=%s owner=%s jobs=%s materials=%s",
             project.id,
             self._owner_id,
             len(created),
@@ -779,7 +911,9 @@ class VideoService:
 
     def to_detail(self, project: VideoProject) -> VideoProjectDetail:
         rows = self.shots_of(project.id)
-        jobs = self._latest_jobs([row.image_job_id for row in rows])
+        jobs = self._latest_jobs(
+            [row.image_job_id for row in rows] + [row.video_job_id for row in rows]
+        )
         cover = self._cover_jobs([project.id]).get(str(project.id))
         base = self._item_of(
             project,
@@ -832,6 +966,7 @@ class VideoService:
                     gen_mode=row.gen_mode,
                     material_ids=[str(item) for item in (row.material_ids or [])],
                     image_job=_job_out(jobs.get(row.image_job_id)) if row.image_job_id else None,
+                    video_job=_job_out(jobs.get(row.video_job_id)) if row.video_job_id else None,
                 )
                 for row in rows
             ],

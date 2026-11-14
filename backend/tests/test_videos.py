@@ -1,4 +1,4 @@
-"""短视频的服务层：分镜清洗、镜头时间轴、首帧入队、删除闸门与序列化。
+"""短视频的服务层：分镜清洗、镜头时间轴、首帧与片段入队、删除闸门与序列化。
 
 脚本那条两步流程（模型调用 → 创作卡 + 分镜）在 ``test_workflow_flows.py`` 里测；这里
 接在它后面——从「分镜已经落进 ``video_shot``」开始，那一段不碰服务商：``render_frames``
@@ -45,7 +45,11 @@ from app.services.media import (
     KIND_IMAGE,
     KIND_VIDEO,
     MODE_FIRST_FRAME,
+    MODE_FIRST_LAST_FRAME,
+    MODE_REFERENCE,
     MODE_T2V,
+    ROLE_FIRST_FRAME,
+    ROLE_REFERENCE_IMAGE,
 )
 from app.services.media import store as media_store
 from app.services.materials import KIND_IMAGE as MATERIAL_IMAGE
@@ -159,6 +163,22 @@ def _image_model(db, owner_id: int = OWNER, *, tested: bool = True) -> ModelConf
         purpose=ModelPurpose.IMAGE.value,
         title="测试图片模型",
         model_name="doubao-seedream-5-0-pro-260128",
+        base_url="https://ark.cn-beijing.volces.com/api/v3",
+        api_key_enc=encrypt("sk-unit-test"),
+        is_default=True,
+        last_test_ok=tested,
+    )
+    db.add(config)
+    db.commit()
+    return config
+
+
+def _video_model(db, owner_id: int = OWNER, *, tested: bool = True) -> ModelConfig:
+    config = ModelConfig(
+        owner_id=owner_id,
+        purpose=ModelPurpose.VIDEO.value,
+        title="测试视频模型",
+        model_name="doubao-seedance-2-0-260128",
         base_url="https://ark.cn-beijing.volces.com/api/v3",
         api_key_enc=encrypt("sk-unit-test"),
         is_default=True,
@@ -591,6 +611,188 @@ def test_cancel_a_job_that_belongs_to_the_project(db):
     assert service.shots_of(project.id)[0].image_job_id == job.id, "取消不改指针"
 
 
+# ---- 片段入队 --------------------------------------------------------------
+
+
+def test_render_clips_feeds_the_ready_first_frame(db):
+    """首帧档吃的是已经落盘的那张图；参数按**本镜**时长发，一镜一条任务。"""
+    project = _project(db, params={"resolution": "1080p", "watermark": True})
+    service = _service(db)
+    rows, frames = _rendered(db, project.id, 2)
+    # 两镜不同时长：片段时长取的是镜头行，不是项目级的成片时长。
+    service.save_shots(
+        project.id,
+        [_shot({"id": rows[0].id, "duration_s": 5}), _shot({"id": rows[1].id, "duration_s": 9})],
+    )
+    _video_model(db)
+
+    jobs = service.render_clips(project.id, [])
+
+    assert len(jobs) == 2
+    assert all(job.kind == KIND_VIDEO and job.status == JOB_QUEUED for job in jobs)
+    assert [job.biz_type for job in jobs] == [BIZ_VIDEO_SHOT, BIZ_VIDEO_SHOT]
+    assert [job.biz_id for job in jobs] == [str(row.id) for row in rows]
+    assert jobs[0].model_name == "doubao-seedance-2-0-260128"
+    fresh = service.shots_of(project.id)
+    assert [row.video_job_id for row in fresh] == [job.id for job in jobs]
+    assert [row.image_job_id for row in fresh] == [job.id for job in frames], "首帧指针不该被动"
+
+    first, second = (job.request for job in jobs)
+    assert first["project_id"] == project.id
+    assert first["prompt"] == rows[0].video_prompt
+    assert first["images"] == [{"role": ROLE_FIRST_FRAME, "rel_path": frames[0].rel_path}]
+    assert first["params"] == {
+        "ratio": "9:16",
+        "resolution": "1080p",
+        "duration": 5,
+        "watermark": True,
+        "generate_audio": False,
+    }
+    assert second["params"]["duration"] == 9
+    assert "fps" not in first["params"], "方舟没有 fps 这个键，发过去就是白烧一次 400"
+
+
+def test_render_clips_t2v_sends_no_image(db):
+    """纯文生一张图都不给，也不要求先渲首帧——给了图它就变成图生视频了。"""
+    project = _project(db)
+    service = _service(db)
+    _video_model(db)
+    service.save_shots(project.id, [_shot({"gen_mode": MODE_T2V})])
+
+    request = service.render_clips(project.id, [])[0].request
+
+    assert request["images"] == []
+    assert request["prompt"] == "镜头缓慢推近，人物眨眼"
+
+
+def test_render_clips_reference_sends_image_materials_only(db):
+    """参考图档与首帧同一取舍：视频素材要公网地址，进不了 base64 那一档。"""
+    project = _project(db)
+    service = _service(db)
+    _video_model(db)
+    image = _material(db, "主角形象.png", PNG)
+    clip = _material(db, "主角走位.mp4", MP4)
+    service.save_shots(
+        project.id,
+        [_shot({"gen_mode": MODE_REFERENCE, "material_ids": [str(image.id), str(clip.id)]})],
+    )
+
+    request = service.render_clips(project.id, [])[0].request
+
+    assert request["images"] == [{"role": ROLE_REFERENCE_IMAGE, "rel_path": image.rel_path}]
+    assert service.shots_of(project.id)[0].material_ids == [str(image.id), str(clip.id)]
+
+
+def test_render_clips_reports_every_problem_in_one_rejection(db):
+    """四档不合格一次报全：补一条、提交、再撞下一条是最难用的拒绝方式。"""
+    project = _project(db)
+    service = _service(db)
+    _image_model(db)
+    _video_model(db)
+    service.save_shots(
+        project.id,
+        [
+            _shot({"video_prompt": "  "}),
+            _shot({}),
+            _shot({"gen_mode": MODE_FIRST_LAST_FRAME}),
+            _shot({"gen_mode": MODE_REFERENCE}),
+        ],
+    )
+    rows = service.shots_of(project.id)
+    # 第 2 镜故意不渲首帧，其余三镜的首帧都落盘，好让四档问题各归各的镜号。
+    frames = service.render_frames(project.id, [rows[0].id, rows[2].id, rows[3].id])
+    for job in frames:
+        job.status = JOB_SUCCEEDED
+        job.rel_path = media_store.store_blob(project.id, PNG).rel_path
+    db.commit()
+
+    with pytest.raises(ValueError) as exc:
+        service.render_clips(project.id, [])
+
+    message = str(exc.value)
+    assert "第 1 镜还没有运动提示词" in message
+    assert "第 2 镜的首帧还没渲出来" in message
+    assert "第 3 镜选了首尾帧生视频" in message
+    assert "第 4 镜选了参考图生视频" in message
+    assert db.scalar(select(MediaJob.id).where(MediaJob.kind == KIND_VIDEO)) is None
+
+
+def test_render_clips_needs_a_stored_frame_not_just_a_succeeded_row(db):
+    """报了成功却没落盘的那种行（转存死在中途）喂不上去，入队前就要拦住。"""
+    project = _project(db)
+    service = _service(db)
+    _image_model(db)
+    _video_model(db)
+    _shots(db, project.id, 1)
+    frame = service.render_frames(project.id, [])[0]
+    frame.status = JOB_SUCCEEDED
+    db.commit()
+
+    with pytest.raises(ValueError, match="首帧还没渲出来"):
+        service.render_clips(project.id, [])
+
+
+def test_render_clips_needs_a_tested_video_model(db):
+    """图片模型通过探测顶不了视频这一档：purpose 是两条配置。"""
+    project = _project(db)
+    service = _service(db)
+    _rendered(db, project.id, 1)
+
+    with pytest.raises(ValueError, match="尚未配置视频生成模型"):
+        service.render_clips(project.id, [])
+    assert db.scalar(select(MediaJob.id).where(MediaJob.kind == KIND_VIDEO)) is None
+
+    _video_model(db, tested=False)
+    with pytest.raises(ValueError, match="连通性测试"):
+        service.render_clips(project.id, [])
+    assert db.scalar(select(MediaJob.id).where(MediaJob.kind == KIND_VIDEO)) is None
+
+
+def test_render_clips_can_target_selected_shots(db):
+    project = _project(db)
+    service = _service(db)
+    rows, _frames = _rendered(db, project.id, 3)
+    _video_model(db)
+
+    jobs = service.render_clips(project.id, [rows[1].id])
+
+    assert [job.biz_id for job in jobs] == [str(rows[1].id)]
+    assert [row.video_job_id for row in service.shots_of(project.id)] == [None, jobs[0].id, None]
+    with pytest.raises(ValueError, match="不属于该项目"):
+        service.render_clips(project.id, [rows[0].id + 9999])
+
+    empty = _project(db, idea="另一个想法")
+    with pytest.raises(ValueError, match="先生成脚本"):
+        service.render_clips(empty.id, [])
+
+
+def test_clips_http_enqueues_and_returns_both_jobs(client, db):
+    project = _project(db)
+    _rendered(db, project.id, 1)
+    _video_model(db)
+
+    body = client.post(f"/api/office/videos/{project.id}/clips", json={"shot_ids": []}).json()
+
+    assert body["code"] == 0 and "已开始渲染片段" in body["message"]
+    shot = body["data"]["shots"][0]
+    assert shot["image_job"]["status"] == JOB_SUCCEEDED
+    assert shot["video_job"]["status"] == JOB_QUEUED
+    assert shot["video_job"]["kind"] == KIND_VIDEO
+    assert shot["video_job"]["url"] == "", "还没出片就没有地址"
+    assert client.post("/api/office/videos/999999/clips", json={"shot_ids": []}).status_code == 404
+
+
+def test_clips_http_rejects_a_shot_without_a_frame(client, db):
+    project = _project(db)
+    _image_model(db)
+    _video_model(db)
+    _shots(db, project.id, 1)
+
+    body = client.post(f"/api/office/videos/{project.id}/clips", json={"shot_ids": []}).json()
+
+    assert body["code"] == -1 and "首帧还没渲出来" in body["message"]
+
+
 # ---- 产物存为素材 ------------------------------------------------------------
 
 
@@ -873,7 +1075,10 @@ def test_items_carry_shot_count_and_local_cover(db):
 
 
 def test_detail_serializes_jobs_without_the_upstream_url(db):
-    """界面上的地址只能是本站的 rel_path 拼出来的：上游那条 24 小时链接不出门。"""
+    """界面上的地址只能是本站的 rel_path 拼出来的：上游那条 24 小时链接不出门。
+
+    首帧与片段两条作业一起带回来，各认各的产物。
+    """
     project = _project(db)
     service = _service(db)
     _image_model(db)
@@ -896,6 +1101,20 @@ def test_detail_serializes_jobs_without_the_upstream_url(db):
     assert detail.params.generate_audio is False
     assert detail.shots[0].gen_mode == MODE_FIRST_FRAME
 
+    _video_model(db)
+    clip = service.render_clips(project.id, [])[0]
+    clip.status = JOB_SUCCEEDED
+    clip.rel_path = f"videos/{project.id}/abc123def4567891.mp4"
+    clip.mime = "video/mp4"
+    clip.response = {"video_url": "https://ark.example.com/gone-in-24h.mp4"}
+    db.commit()
+
+    detail = service.to_detail(service.get_project(project.id))
+
+    assert detail.shots[0].video_job.kind == KIND_VIDEO
+    assert detail.shots[0].video_job.url == f"/uploads/videos/{project.id}/abc123def4567891.mp4"
+    assert detail.shots[0].image_job.url.endswith(".png"), "两类作业各带各的产物"
+    assert "ark.example.com" not in detail.model_dump_json()
 
 
 def test_business_rows_still_carry_no_status_column(db):

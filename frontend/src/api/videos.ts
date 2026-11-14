@@ -1,19 +1,19 @@
 /**
- * 短视频域：项目的创建与保存、脚本（创作卡 + 分镜）的重新生成、首帧渲染与取消。
+ * 短视频域：项目的创建与保存、脚本（创作卡 + 分镜）的重新生成、首帧与片段渲染及取消。
  * 参考素材不在这里——它在账号级的素材库（api/materials.ts），镜头上只存引用的 id。
  * 字面量类型与后端 ``models/schemas.py`` 的白名单一字不差——那些值原样进方舟的请求体，
  * 中间没有翻译层，这里写错一个字符就是上游 400。
  *
  * 两阶段各有进度来源：脚本阶段是工作流运行（``status``），渲染阶段是 ``media_job``
- * （``image_job.status``）。所以这一页既没有「等待结果」的接口，也不该有：入队之后
- * 唯一诚实的答案是「排队中」，出片要几十秒到几分钟，靠详情接口的轮询跟随。
+ * （``image_job.status`` / ``video_job.status``）。所以这一页既没有「等待结果」的接口，
+ * 也不该有：入队之后唯一诚实的答案是「排队中」，出片要几十秒到几分钟，靠详情接口的轮询跟随。
  */
 import { request } from './http'
 
 // ---- 智能应用 · 短视频 -------------------------------------------------------
 
 export type VideoPlatform = 'douyin' | 'kuaishou' | 'other'
-/** 首帧流是默认档：一期只渲首帧，另外三档先攒在镜头行上。 */
+/** 首帧流是默认档；``first_last_frame`` 还没开（尾帧要另起一条产物链路），界面上禁用。 */
 export type VideoGenMode = 't2v' | 'first_frame' | 'first_last_frame' | 'reference'
 export type VideoRatio = 'adaptive' | '21:9' | '16:9' | '4:3' | '1:1' | '3:4' | '9:16'
 export type VideoResolution = '480p' | '720p' | '1080p'
@@ -55,7 +55,6 @@ export interface VideoStyle {
 export interface VideoParams {
   ratio: VideoRatio
   resolution: VideoResolution
-  fps: number
   watermark: boolean
   /** 默认关：方舟那一侧默认开，留着就会拿到一条模型自己编的人声。 */
   generate_audio: boolean
@@ -88,7 +87,7 @@ export interface MediaJob {
   finished_at: string | null
 }
 
-/** 工作台里的一镜。一期只有 image_job，视频片段的作业接口下一轮才长。 */
+/** 工作台里的一镜：两个指针各带最近一次作业，状态与产物都从作业行读。 */
 export interface VideoShot {
   id: number
   sort_order: number
@@ -106,6 +105,7 @@ export interface VideoShot {
   /** 素材库里的 id（字符串形式），最多 4 条；只有图片类会真的进请求体。 */
   material_ids: string[]
   image_job: MediaJob | null
+  video_job: MediaJob | null
 }
 
 /** 整批保存时的一行：不带 ``id`` 是新建，没列进来的现有镜头会被删掉。 */
@@ -227,6 +227,14 @@ export const videosApi = {
   renderFrames: (id: number, shotIds: number[]) =>
     request<VideoProjectDetail>({
       url: `/office/videos/${id}/frames`,
+      method: 'POST',
+      data: { shot_ids: shotIds },
+      skipErrorToast: true,
+    }),
+  /** ``shotIds`` 为空表示项目里全部镜头。首帧档要求这一镜的首帧产物已经落盘。 */
+  renderClips: (id: number, shotIds: number[]) =>
+    request<VideoProjectDetail>({
+      url: `/office/videos/${id}/clips`,
       method: 'POST',
       data: { shot_ids: shotIds },
       skipErrorToast: true,

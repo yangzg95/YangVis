@@ -4,12 +4,12 @@
 
 * 脚本（想法 → 创作卡 → 分镜）走工作流引擎，请求里建一条认领本项目的运行、
   ``BackgroundTasks`` 跑完它，前端轮询详情接口看进度——与幻灯片、简历同一形态；
-* 渲染（镜头 → 首帧图）只往 ``media_job`` 入队，执行体是 lifespan 里那个常驻循环，
-  接口既不等待也不占用请求级任务。所以这里没有任何「等结果」的接口：详情接口
-  把每镜最近一次作业的状态一起带回来，前端刷新它就是进度。
+* 渲染（镜头 → 首帧图 → 视频片段）只往 ``media_job`` 入队，执行体是 lifespan 里那个
+  常驻循环，接口既不等待也不占用请求级任务。所以这里没有任何「等结果」的接口：详情
+  接口把每镜最近一次作业的状态一起带回来，前端刷新它就是进度。
 
-媒体调用的门槛放在最前面（``require_image_config``）：没通过连通性测试就入队，
-只会留下一批停在「排队中」、白烧额度的作业。
+媒体调用的门槛放在最前面（``require_image_config`` / ``require_video_config``）：没通过
+连通性测试就入队，只会留下一批停在「排队中」、白烧额度的作业。
 """
 from __future__ import annotations
 
@@ -248,6 +248,29 @@ def render_frames(
     return APIResponse(
         data=service.to_detail(service.get_project(project_id)),
         message="已开始渲染首帧，出片需要几十秒到几分钟",
+    )
+
+
+@router.post("/{project_id}/clips", response_model=APIResponse[VideoProjectDetail])
+def render_clips(
+    project_id: int,
+    payload: VideoRenderRequest,
+    service: VideoService = Depends(get_service),
+) -> APIResponse[VideoProjectDetail]:
+    """批量渲染视频片段：每个选中镜头一条视频作业，``shot_ids`` 空就是全部。
+
+    与 ``/frames`` 同一形态（入队即返回，进度看详情里的 ``video_job.status``），
+    但门槛多一道：首帧档要求这一镜的首帧产物已经落盘，缺了整批拒绝。
+    """
+    try:
+        service.render_clips(project_id, payload.shot_ids)
+    except LookupError as exc:
+        raise _not_found(exc) from exc
+    except ValueError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    return APIResponse(
+        data=service.to_detail(service.get_project(project_id)),
+        message="已开始渲染片段，出片需要几十秒到几分钟",
     )
 
 

@@ -122,6 +122,7 @@ function onOpenChange() {
   picked.value = [...props.selected]
   void load()
 }
+
 // 这一版 ant-design-vue 的 Modal 只在关闭时 emit('change')，没有任何「打开」事件，
 // 所以「打开时对一遍库」只能自己盯 props.open——挂在 @open-change 上是一次都不会触发的。
 watch(
@@ -130,7 +131,6 @@ watch(
     if (open) onOpenChange()
   },
 )
-
 
 function toggle(item: MaterialAsset) {
   const id = String(item.id)
