@@ -21,6 +21,7 @@ from app.services.tools import validate_registry as validate_local_tool_registry
 from app.services.ops.actions import reset_stale_ops_actions
 from app.services.workflows.builtin import seed_builtin_workflows
 from app.services.workflows.runs import prune_runs, reset_stale_runs
+from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.bootstrap")
 
@@ -90,6 +91,43 @@ def create_tables() -> None:
     """
     Base.metadata.create_all(bind=engine)
     logger.info("database schema verified")
+
+
+# 两侧墙钟的容差。正常情况只差这条 SQL 与 ``db_now()`` 之间的执行间隔，秒级；
+# 给到 60 秒是为了不把偶发的慢启动读成时区配错。
+CLOCK_MAX_SKEW_SECONDS = 60
+
+
+def verify_clock_agreement() -> None:
+    """实测 MySQL 的 ``NOW()`` 与 :func:`app.timeutil.db_now` 是否同一口径。
+
+    ``db_now`` 固定写 +08，而同一行的 ``created_at`` / ``updated_at`` 由数据库自己的
+    时区给（``--default-time-zone`` 或容器 ``TZ``）。这个差值只能启动时实测：写在
+    配置文件里的时区说明，一定是某次改完之后没跟着改的那份。线上曾因基础镜像升
+    Debian 13 让 ``TZ=PRC`` 静默失效而两套时钟并存四个月，就是因为没人比对过。
+
+    偏差只报 ERROR 不 raise：偏 8 小时坏的是时间列的观感，拒启坏的是整站在部署
+    那一刻不可用。SQLite（测试库）没有 ``NOW()``，按 ``migrate_schema`` 里同样的
+    方言判断跳过。
+    """
+    if engine.dialect.name != "mysql":
+        return
+    with engine.connect() as conn:
+        mysql_now = conn.exec_driver_sql("SELECT NOW()").scalar()
+    app_now = db_now()
+    skew = abs((mysql_now - app_now).total_seconds())
+    if skew > CLOCK_MAX_SKEW_SECONDS:
+        logger.error(
+            "clock mismatch: db_now()=%s but MySQL NOW()=%s (skew %.0fs > %ss)——同一行的"
+            "时间列会自相矛盾。要么数据库时区不是 +08（--default-time-zone / 容器 TZ），"
+            "要么 app.timeutil.BEIJING_TZ 的口径已经和这套部署不符。",
+            app_now,
+            mysql_now,
+            skew,
+            CLOCK_MAX_SKEW_SECONDS,
+        )
+        return
+    logger.info("clock agreement verified: db_now()=%s mysql_now()=%s", app_now, mysql_now)
 
 
 # 在「项目」这个概念出现之前创建的知识类型最终会落到这里。

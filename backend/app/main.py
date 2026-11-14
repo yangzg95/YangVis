@@ -25,6 +25,7 @@ from app.bootstrap import (
     seed_workflows,
     validate_local_tools,
     validate_settings,
+    verify_clock_agreement,
 )
 from app.config import get_settings
 from app.errors import BusinessError
@@ -77,6 +78,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     for step_name, step in (
         ("validate_settings", lambda: validate_settings(settings)),
         ("create_tables", create_tables),
+        # 应用侧与 MySQL 侧两套时钟一旦错开，同一行的时间列会自相矛盾且没人报错，
+        # 所以建完表立刻实测一次（只喊 ERROR，不因时区问题拒启）。
+        ("verify_clock_agreement", verify_clock_agreement),
         ("migrate_schema", migrate_schema),
         # 迁移之后校验本地工具注册表：坏工具名/重名/docstring 不合规启动即失败。
         ("validate_local_tools", validate_local_tools),

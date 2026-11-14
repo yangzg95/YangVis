@@ -182,6 +182,34 @@ docker-compose up -d --build
 构建开头要多拉一次外部镜像，镜像站 502 一下整场构建还没开始就挂。若哪天确实用到了
 `RUN --mount` 这类新语法，再把前端镜像换成能访问的源。
 
+### 上传卷的属主：产物写盘报 `[Errno 13] Permission denied`
+
+界面提示「产物写入服务器失败：[Errno 13] Permission denied: '/app/uploads/…'」、幻灯片配图传不上、知识库代码仓库克隆不动，多半是同一个原因：`uploads_data` / `repos_data` 里的目录属主不是容器运行用户。
+
+镜像以非 root 的 `yangvis`（uid 1000）运行，Dockerfile 里 `mkdir -p /app/uploads /app/data/repos` 加 `chown -R yangvis:yangvis /app` 只解决**空卷第一次挂上时**的初始化——Docker 拿镜像里这个路径的属主去建卷，路径不存在卷就落成 root。卷一旦有内容就不再回头看镜像，于是两种情况会把已有目录留成 root 属主：老镜像还是 root 运行期间建的卷，或迁移时用 root 身份的 rsync / `docker cp` 把旧数据复制进卷。此后 uid 1000 在这些老目录里新建文件一律 EACCES，而卷根目录本身看着还是正常的，容易查偏。
+
+一次性改回来即可，属主记在卷里，重建镜像和容器都不会丢：
+
+```bash
+docker exec --user root <容器名> chown -R 1000:1000 /app/uploads /app/data/repos
+```
+
+验证和排查（应无输出；有输出就是还没修干净的子目录）：
+
+```bash
+find /var/lib/docker/volumes/<项目名>_uploads_data/_data ! -user 1000
+```
+
+迁移复制这两份数据时带上 `rsync --chown=1000:1000`，或复制完立刻执行上面的 chown，别让下一次换镜像再踩一遍。
+
+### 容器时区与时间列口径
+
+库里所有 `DATETIME` 列都是 **+08 的墙上时间、无时区**：`created_at` / `updated_at` 由 MySQL 的 `NOW()` 给，其余「此刻」由 `app.timeutil.db_now()` 给。`db_now()` 固定取 +08（`datetime.now(BEIJING_TZ).replace(tzinfo=None)`），**不跟容器时区**——跟了就把库里的时间押在部署侧那一行 `TZ` 上。
+
+部署侧别写 `TZ: PRC`。Debian 13 的 tzdata 不再带 `/usr/share/zoneinfo/PRC`（`PRC` / `ROC` / `Cuba` 这类旧名字拆进了 `tzdata-legacy`，slim 镜像不装），glibc 找不到这个 zone 既不报错也不回退 `/etc/localtime`，而是静默退回 UTC 且 `time.tzname` 仍显示 `PRC`——线上曾因此让 Python 写的时间列整体比 MySQL 写的早 8 小时，持续四个月没有任何日志提示。写标准名 `TZ: Asia/Shanghai`（本仓库 `docker-compose.yml` 就是这个值），或者不设、靠镜像层 `ENV TZ=Asia/Shanghai`。
+
+每次启动会实测一次两侧时钟（`bootstrap.verify_clock_agreement()`）：`db_now()` 与 `SELECT NOW()` 相差超过 60 秒就打 `clock mismatch: ... ERROR`，只喊不拒启——时区配错坏的是时间列的观感，拒启坏的是整站在部署那一刻不可用。看到这条 ERROR 去查数据库时区（`--default-time-zone` 或 MySQL 容器的 `TZ`）。测试库里没有 `NOW()`（SQLite），这一步在非 MySQL 方言上直接跳过。
+
 ## 本地开发
 
 ```bash

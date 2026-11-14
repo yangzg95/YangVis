@@ -1,4 +1,4 @@
-"""写库与展示的时间戳约定：本地 naive。
+"""写库与展示的时间戳约定：固定的 +08 墙上时间，naive。
 
 库里所有 ``DATETIME`` 列都是无时区的墙上时间，因为 ``created_at`` / ``updated_at``
 走的是 MySQL 的 ``NOW()``——落的是数据库所在时区（+08）的时间。显式写 UTC 的话，
@@ -26,8 +26,16 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 def db_now() -> datetime:
-    """写进 ``DATETIME`` 列的「此刻」：本地 naive，与 ``created_at`` 同一口径。"""
-    return datetime.now()
+    """写进 ``DATETIME`` 列的「此刻」：+08 墙上时间、naive，与 ``created_at`` 同一口径。
+
+    取的是真实时刻再剥掉偏移，不跟进程时区。跟进程时区的写法（裸 ``datetime.now()``）
+    等于把库里的时间戳押在部署侧那一行 ``TZ`` 上：网关 compose 曾写 ``TZ: PRC``，基础
+    镜像升到 Debian 13 后 ``PRC`` 这个 zone 文件被拆进 ``tzdata-legacy``（slim 不装），
+    glibc 找不到不报错、静默退回 UTC——同一行就成了「创建时间 17:53、开始时间 09:53」，
+    而 ``created_at`` 那半边由 MySQL 的 ``NOW()`` 提供，照旧是对的，所以没人察觉。
+    ``bootstrap.verify_clock_agreement()`` 每次启动实测两边差值，就是不让它再静默。
+    """
+    return datetime.now(BEIJING_TZ).replace(tzinfo=None)
 
 
 def beijing_now() -> datetime:
