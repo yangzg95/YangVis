@@ -59,6 +59,7 @@ from app.routers import (
     workflows,
 )
 from app.services.media import jobs as media_jobs
+from app.services.publish.runner import reset_stale_on_startup as reset_stale_publish_jobs
 
 logger = logging.getLogger("yangvis")
 
@@ -88,6 +89,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         ("seed_agents", seed_agents),
         ("seed_workflows", seed_workflows),
         ("reset_stale_jobs", reset_stale_jobs),
+        # 成片合成跑在请求级后台任务里，重启会把中途的 publish_job 丢下：
+        # 在这儿收成明确的失败，否则它会永久占着「该项目正在合成」的位子。
+        ("reset_stale_publish_jobs", reset_stale_publish_jobs),
         # 清理放在收尾之后：遗留的 running 先变成失败，才谈得上按窗口删。
         ("prune_workflow_runs", prune_workflow_runs),
         # 通知发送留痕的清理：与上面两个没有顺序依赖，纯归类放最后。

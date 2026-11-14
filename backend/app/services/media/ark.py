@@ -130,15 +130,21 @@ def image_data_url(raw: bytes, mime: str) -> str:
 def build_video_content(
     prompt: str,
     images: Sequence[Tuple[str, str]] = (),
+    videos: Sequence[Tuple[str, str]] = (),
 ) -> List[dict]:
-    """把提示词与图片拼成 ``content`` 数组。
+    """把提示词与参考素材拼成 ``content`` 数组。
 
-    图片以 ``(role, url_or_data_url)`` 传入，由调用方决定每档模式该给几张、给什么
-    role——这一层不认识「镜头」，只认识方舟的入参形状。
+    两者都以 ``(role, url)`` 传入，由调用方决定每档模式该给几个、给什么 role——这一层
+    不认识「镜头」，只认识方舟的入参形状。
+
+    图片与视频**不是同一个键**：图片走 ``image_url``（可以是 base64），视频走
+    ``video_url`` 且只接受公网 URL 或 ``asset://`` 素材 ID，方舟不收视频的 base64。
     """
     content: List[dict] = [{"type": "text", "text": prompt}]
     for role, url in images:
         content.append({"type": "image_url", "image_url": {"url": url}, "role": role})
+    for role, url in videos:
+        content.append({"type": "video_url", "video_url": {"url": url}, "role": role})
     return content
 
 

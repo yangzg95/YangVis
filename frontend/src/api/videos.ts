@@ -9,6 +9,7 @@
  * 也不该有：入队之后唯一诚实的答案是「排队中」，出片要几十秒到几分钟，靠详情接口的轮询跟随。
  */
 import { request } from './http'
+import type { RunStatus, RunStepStatus } from './workflows'
 
 // ---- 智能应用 · 短视频 -------------------------------------------------------
 
@@ -123,6 +124,49 @@ export interface VideoShotInput {
   material_ids: string[]
 }
 
+/** 脚本生成里的一步。prompt、产物与轨迹都在运行详情页，这里只要状态与耗时。 */
+export interface VideoScriptStep {
+  /** 内置流程的两步：``brief``（创作卡）与 ``script``（分镜）。 */
+  key: string
+  status: RunStepStatus
+  elapsed_ms: number | null
+  /** 在跑的那一步靠它算「已跑多久」；还没轮到就没有。 */
+  started_at: string | null
+  finished_at: string | null
+}
+
+/** 最近一次脚本生成。两步串行，AI 网关按调用分行记日志，这里给整条的分解。 */
+export interface VideoScriptRun {
+  id: number
+  status: RunStatus
+  /** 整条的墙上时间，不是各步相加。 */
+  elapsed_ms: number | null
+  started_at: string | null
+  steps: VideoScriptStep[]
+}
+
+/** 发布作业状态；通道字面量与后端 Literal 白名单一字不差。 */
+export type PublishJobStatus = 'queued' | 'running' | 'succeeded' | 'failed'
+export type PublishChannel = 'manual'
+
+/**
+ * 一条发布作业（成片合成 + 手动发布包）。``url`` 是成片的站内地址，
+ * 还没合成成功时是空串——rel_path 不出后端，前端只认这个地址。
+ */
+export interface PublishJob {
+  id: number
+  platform: VideoPlatform
+  channel: PublishChannel
+  status: PublishJobStatus
+  url: string
+  file_size: number | null
+  error_msg: string | null
+  /** 从入队算到成片落盘的本机耗时。未跑完为 null。 */
+  elapsed_ms: number | null
+  created_at: string | null
+  finished_at: string | null
+}
+
 export interface VideoProjectItem {
   id: number
   title: string
@@ -147,6 +191,10 @@ export interface VideoProjectDetail extends VideoProjectItem {
   params: VideoParams
   publish: VideoPublish
   shots: VideoShot[]
+  /** 最近一次脚本生成的现场；运行记录被留存清理删掉后为 null。 */
+  script_run: VideoScriptRun | null
+  /** 最近一次成片合成作业；从没合成过为 null。 */
+  publish_job: PublishJob | null
 }
 
 export interface VideoProjectCreate {
@@ -184,6 +232,8 @@ export interface MediaCapacityOut {
   jobs: MediaCapacity[]
   /** data_url 时首帧必须落在服务器本地；public_url 需要配公网基址。 */
   image_transport: string
+  /** 「参考上一版片段」能不能用：方舟的视频参考只收公网 URL，没配基址就发不出去。 */
+  video_reference_ready: boolean
 }
 
 export const videosApi = {
@@ -231,12 +281,15 @@ export const videosApi = {
       data: { shot_ids: shotIds },
       skipErrorToast: true,
     }),
-  /** ``shotIds`` 为空表示项目里全部镜头。首帧档要求这一镜的首帧产物已经落盘。 */
-  renderClips: (id: number, shotIds: number[]) =>
+  /**
+   * ``shotIds`` 为空表示项目里全部镜头。首帧档要求这一镜的首帧产物已经落盘。
+   * ``referencePrevious`` 再把本镜上一版成片挂成参考视频，要求它也已落盘。
+   */
+  renderClips: (id: number, shotIds: number[], referencePrevious = false) =>
     request<VideoProjectDetail>({
       url: `/office/videos/${id}/clips`,
       method: 'POST',
-      data: { shot_ids: shotIds },
+      data: { shot_ids: shotIds, reference_previous: referencePrevious },
       skipErrorToast: true,
     }),
   renderCover: (id: number) =>
@@ -258,6 +311,13 @@ export const videosApi = {
   saveFrameToMaterial: (id: number, shotId: number) =>
     request<VideoProjectDetail>({
       url: `/office/videos/${id}/shots/${shotId}/to-material`,
+      method: 'POST',
+      skipErrorToast: true,
+    }),
+  /** 入队一条成片合成：各镜最近一次成功片段按镜头顺序拼成一个 MP4，进度看 publish_job。 */
+  compose: (id: number) =>
+    request<VideoProjectDetail>({
+      url: `/office/videos/${id}/compose`,
       method: 'POST',
       skipErrorToast: true,
     }),

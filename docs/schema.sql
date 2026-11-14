@@ -769,7 +769,7 @@ CREATE TABLE IF NOT EXISTS media_job (
   status          VARCHAR(16)  NOT NULL DEFAULT 'queued' COMMENT 'queued|running|downloading|succeeded|failed|cancelled|expired，前六个与方舟 status 同名同义',
   error_code      VARCHAR(64)  NULL     COMMENT '上游错误码或 Timeout/NoModelConfig 这类本地码',
   error_msg       VARCHAR(512) NULL,
-  request         JSON         NOT NULL COMMENT '要发什么的归一形状（提示词+参数+参考图 rel_path）；base64 不进库',
+  request         JSON         NOT NULL COMMENT '要发什么的归一形状（提示词+参数+参考素材 rel_path，图片与视频共用 images 键）；base64 不进库',
   response        JSON         NULL     COMMENT '最后一次查询到的原始响应（按字段截断），出错时唯一能看出上游说了什么',
   rel_path        VARCHAR(512) NULL     COMMENT '转存后的本地产物相对路径；上游 URL 24 小时失效，所以这一列才是产物',
   mime            VARCHAR(64)  NULL,
@@ -897,3 +897,32 @@ CREATE TABLE IF NOT EXISTS media_job (
 -- ALTER TABLE notify_huawei_config
 --   ADD COLUMN service_account_enc VARBINARY(8192) NULL
 --   COMMENT 'AGC 服务账号私钥 JSON 的 Fernet 密文（JWT bearer 授权）' AFTER client_secret_enc;
+
+-- ---------------------------------------------------------------------------
+-- 智能应用 · 短视频发布（成片合成 + 手动发布包，由 create_all 自动建表）
+--
+-- media_job 对接火山方舟、由常驻循环推进；publish_job 是本机 ffmpeg 的活，
+-- 跑在请求级后台任务里。request.sources 是发起时的片段 rel_path 顺序快照，
+-- 成片落在 videos/<project_id>/ 下，删项目时跟着目录树一起清。
+-- channel 目前只有 manual；open_api / browser 是预留通道，不需要迁移。
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS publish_job (
+  id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id    BIGINT       NOT NULL,
+  project_id  BIGINT       NOT NULL,
+  platform    VARCHAR(16)  NOT NULL DEFAULT 'douyin' COMMENT 'douyin | kuaishou | other，发起时从项目抄过来',
+  channel     VARCHAR(16)  NOT NULL DEFAULT 'manual' COMMENT 'manual | open_api | browser，后两个预留',
+  status      VARCHAR(16)  NOT NULL DEFAULT 'queued' COMMENT 'queued | running | succeeded | failed',
+  error_msg   VARCHAR(512) NULL,
+  request     JSON         NOT NULL COMMENT 'sources 片段 rel_path 顺序快照 + 标题/标签/封面快照',
+  rel_path    VARCHAR(512) NULL COMMENT '合成成片的相对路径，URL 由 store 现拼，与 media_job 同一约定',
+  mime        VARCHAR(64)  NULL,
+  file_size   BIGINT       NULL,
+  elapsed_ms  BIGINT       NULL COMMENT '从入队执行到产物落盘的墙上时间',
+  created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  finished_at DATETIME     NULL,
+  KEY idx_publish_project (project_id, id),
+  KEY idx_publish_owner_status (owner_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='短视频发布作业：成片合成与发布包';

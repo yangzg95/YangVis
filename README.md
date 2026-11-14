@@ -258,6 +258,8 @@ npm run dev                   # http://localhost:5173，/api 与网关的 /v1 �
 | `AI_GATEWAY_AUTO_CLASSIFY_TIMEOUT` | 8 | 上面那次分类的独立超时（秒），超时/报错都按「没判出来」继续走优先级 |
 | `AI_GATEWAY_AUTO_CLASSIFY_CHARS` | 1200 | 送进分类 prompt 的用户正文截断长度 |
 | `AI_GATEWAY_PUBLIC_ORIGIN` | 空 | 对外公布的站点 origin（如 `https://ai.nanwa.xyz`），概览页据此显示接入地址；留空则按打开控制台时的 origin 推导。`/v1` 由程序拼接 |
+| `MEDIA_IMAGE_TRANSPORT` | data_url | 参考图怎么送给方舟：`data_url` 读本地文件内联成 base64，`public_url` 改发 `PUBLIC_MEDIA_BASE_URL` + 产物路径 |
+| `PUBLIC_MEDIA_BASE_URL` | 空 | 本站对外 origin（如 `https://yangvis.nanwa.xyz`）。**短视频「参考上一版片段」的硬前置**，见下文；留空则该开关入队即拒、界面上禁用 |
 
 ### 上传上限与反代配合
 
@@ -298,6 +300,21 @@ location ^~ /api/ops/servers/ {
 
 - **反代的 `client_max_body_size` 要盖过 50MB**，否则 20–50MB 的视频素材会在 nginx 就被 413 拦掉，后端根本没收到请求、前端只能报一句看不懂的网络错误。线上网关已给 `/api/office/materials` 单开一条 52m 的放行（站点级仍是 20m），改后端上限时记得同步改它。
 - 短视频工作台「存为素材」把镜头首帧**复制**进素材库，走的是同一套闸门，而产物自己的上限更宽（`MEDIA_IMAGE_MAX_BYTES` 30MB）。所以一张 10–30MB 的首帧能渲出来、能预览，存进库时会以「素材超过 10MB 上限」被拒——这是刻意的：库的体积上限守的是账号目录，不是某一次渲染。
+
+### 短视频「参考上一版片段」要公网基址
+
+重做某一镜的片段时，可以把**这一镜上一版成片**当参考视频一起送给方舟，让新片沿用上一版的主体形象与运镜，而不是重掷一次骰子。工作台「片段作业」那块与「渲染片段」确认屏各有一个「参考上一版」勾选框（共用一个开关，默认不勾），接口上是 `POST /api/office/videos/{id}/clips` 正文里的 `reference_previous`。默认关：开着就拿不到「完全重来一版」了。
+
+部署上有一条硬前置，**不配就一条也发不出去**：
+
+- 方舟的 `content[].video_url` 只接受**公网 URL** 或 `asset://<ASSET_ID>` 素材 ID，**不收 base64**（图片才收）。所以必须配 `PUBLIC_MEDIA_BASE_URL=https://<本站域名>`，并让反代放行 `/uploads`，使方舟能从公网拉到那个 mp4。没配时入队当场拒绝（`code: -1`，文案点名 `PUBLIC_MEDIA_BASE_URL`），`/capacity` 的 `video_reference_ready` 也会是 `false`。
+- `/uploads` **不带鉴权**，靠随机文件名不可猜来防遍历。配上这个基址就等于承认产物可被公网读取——这是本功能的前提，不是可选项。
+- 本地开发机上 `/uploads` 对公网不可达，所以本地开着这个开关只会被拒；要实测得在线上渲。
+
+模型侧还有两条口径（按方舟文档，2.0 系与 2.5 不同）：
+
+- 挂了参考视频后，任务会被判成**参考生视频 / 视频编辑 / 视频延长**三类之一。后两类要求 `ratio=adaptive`、`duration=-1`，与本项目按镜传 `9:16` + 镜头秒数冲突，会异步报错 `InvalidParameter.TaskTypeConstraint`。能显式锁定子任务的 `omni_reference_task_type` **只有 Seedance 2.5 支持**，2.0 系传不得，所以这里靠提示词措辞落在「参考」那一类：自动拼在提示词最前面的引用句刻意避开「修改/替换/去掉」与「延长/续写」。自己改运动提示词时也请避开这些词。首帧档还会同时挂着 `first_frame`，而 2.5 的首帧任务本身也要求 `ratio=adaptive`——两档混用时上游怎么判没有文档明说，以实测为准。
+- 参考视频规格：2.0 系单个时长 [2,15] 秒、最多 3 个且总时长 ≤15 秒（2.5 放宽到 [2,30] 秒 / 10 个 / 总 30 秒）；含人脸的视频要求是**本账号近 30 天内由 Seedance 2.5/2.0 系列生成的原始视频**——本功能喂的正是自己刚渲的那份，天然满足，但超过保留期（`VIDEO_RETENTION_DAYS`，30 天）的旧产物不要再指望能当参考。
 
 ## API 概览
 

@@ -283,6 +283,9 @@ class Settings(BaseSettings):
     VIDEO_MAX_PROMPT_CHARS: int = 480
     # 产物保留天数，与 workflow_run 的 30 天同一口径：视频比幻灯片更吃盘。
     VIDEO_RETENTION_DAYS: int = 30
+    # 一次成片合成（ffmpeg 拼接各镜片段）的最长秒数。本地进程活，正常十几段 720p
+    # 直拼只要几秒；超时通常是回退重编码卡住，到点杀进程比留一条永远 running 的作业诚实。
+    PUBLISH_COMPOSE_TIMEOUT: float = 300.0
 
     @property
     def database_url(self) -> str:

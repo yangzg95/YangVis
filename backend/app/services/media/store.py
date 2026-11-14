@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 from app.config import Settings, get_settings
 
@@ -141,6 +143,53 @@ def read_blob(rel_path: str) -> bytes:
     if not raw:
         raise MediaFileError("产物文件是空的")
     return raw
+
+
+def store_file(project_id: int, src: Path) -> StoredBlob:
+    """把一个**已经在磁盘上**的成品文件移进媒体目录并登记（ffmpeg 合成的成片走这里）。
+
+    与 :func:`store_blob` 同一套防线，但入口是路径而不是字节：合成产物可能上百 MB，
+    先整块读进内存再写一遍只是白白复制两次。仍然按文件头魔数判类型（只读前 16 字节，
+    所有签名的最大偏移是 8），不信容器后缀；文件名同样是随机 id，``src`` 的名字不参与
+    路径拼接。``shutil.move`` 在同一文件系统上是原子改名——合成的临时目录就开在媒体
+    目录下面，落库时不会出现半个文件。
+    """
+    try:
+        with src.open("rb") as handle:
+            head = handle.read(16)
+        size = src.stat().st_size
+    except OSError as exc:
+        raise MediaFileError(f"成品文件读不出来：{exc}") from exc
+    mime, extension = sniff_media(head)
+    limit = _VIDEO_MAX_BYTES if mime.startswith("video/") else _IMAGE_MAX_BYTES
+    if size > limit:
+        raise MediaFileError(f"成品超过 {limit // 1024 // 1024}MB 上限")
+
+    asset_id = uuid.uuid4().hex[:16]
+    relative = f"{_DIR}/{project_id}/{asset_id}{extension}"
+    target = settings.upload_media_path / relative
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(target))
+    except OSError as exc:
+        logger.error("media file move failed: %s -> %s (%s)", src, target, exc)
+        raise MediaFileError(f"成品写入服务器失败：{exc}") from exc
+
+    logger.info(
+        "media file stored: project=%s id=%s mime=%s bytes=%d",
+        project_id,
+        asset_id,
+        mime,
+        size,
+    )
+    return StoredBlob(
+        id=asset_id,
+        mime=mime,
+        ext=extension,
+        size=size,
+        rel_path=relative,
+        url=f"{settings.UPLOAD_MEDIA_URL}/{relative}",
+    )
 
 
 def resolve_url(rel_path: str) -> str:

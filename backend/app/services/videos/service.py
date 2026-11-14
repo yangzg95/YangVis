@@ -17,7 +17,8 @@
 而重启时它们必然给出三个答案。
 
 渲染阶段有三个入队口：``render_frames``（首帧图）、``render_clips``（视频片段）、
-``render_cover``（封面图）。片段吃的是首帧的产物，所以顺序上先出图再出片；
+``render_cover``（封面图）。片段吃的是首帧的产物，所以顺序上先出图再出片；重做片段时
+可选把本镜上一版成片挂成参考视频（``reference_previous``，要 ``PUBLIC_MEDIA_BASE_URL``）。
 ``first_last_frame`` 那一档还没开——尾帧要另起一条产物链路，入队时当场拒绝。
 """
 from __future__ import annotations
@@ -34,6 +35,7 @@ from app.models.entities import (
     MaterialAsset,
     MediaJob,
     ModelConfig,
+    PublishJob,
     VideoProject,
     VideoShot,
     WorkflowRun,
@@ -41,11 +43,14 @@ from app.models.entities import (
 from app.models.schemas import (
     MediaCapacityItem,
     MediaJobOut,
+    PublishJobOut,
     VideoBrief,
     VideoParams,
     VideoProjectDetail,
     VideoProjectItem,
     VideoPublish,
+    VideoScriptRunOut,
+    VideoScriptStepOut,
     VideoShotOut,
     VideoStyle,
 )
@@ -63,6 +68,7 @@ from app.services.media import (
     MODE_REFERENCE,
     ROLE_FIRST_FRAME,
     ROLE_REFERENCE_IMAGE,
+    ROLE_REFERENCE_VIDEO,
     VIDEO_GEN_MODES,
 )
 from app.services.media import jobs as media_jobs
@@ -70,6 +76,11 @@ from app.services.media import store
 from app.services.materials import KIND_IMAGE as MATERIAL_IMAGE
 from app.services.materials.service import MaterialService
 from app.services.materials.store import store_material
+from app.services.publish import (
+    CHANNEL_MANUAL,
+    PUBLISH_ACTIVE_STATES,
+    PUBLISH_QUEUED,
+)
 from app.services.videos.normalize import shots_from_model, text_of
 from app.services.workflows.builtin import finish_builtin_step, start_builtin
 from app.services.workflows.defs import WorkflowService
@@ -102,6 +113,15 @@ PLATFORM_LABELS = {
     "kuaishou": "快手（竖屏，老铁式直给，人物要亲切）",
     "other": "通用短视频（竖屏）",
 }
+
+# 「参考上一版」拼在运动提示词**最前面**：方舟的示例都显式引用素材编号，只挂素材不
+# 引用，模型可能直接忽略它；放前面还能保证它不被 480 字上限截掉。
+#
+# 措辞刻意避开「修改/替换/去掉」与「延长/续写」：挂了参考视频后，2.0 系会按提示词意图
+# 把任务判成参考生视频/视频编辑/视频延长三类之一，后两类要求 ratio=adaptive、
+# duration=-1，与这里按镜传的 9:16 + 镜头秒数冲突（异步报错）。能显式锁定子任务的
+# omni_reference_task_type 只有 2.5 支持，2.0 系传不得，所以只能靠措辞落在「参考」那类。
+REFERENCE_PREVIOUS_HINT = "参考@视频1的主体形象、画面风格与运镜节奏，按以下描述重新生成一段视频："
 
 
 def _clamp_prompt(text: str) -> str:
@@ -337,6 +357,27 @@ class VideoService:
         if active:
             raise ValueError(f"还有 {active} 个渲染没有结束，请先到工作台取消再删")
 
+        # 合成是本机后台任务，跑到一半删项目会让 ffmpeg 往一棵已经没有主人的目录
+        # 里写成片。终态作业不拦：产物本来就在项目目录里，跟着目录树一起清。
+        publishing = int(
+            self._db.scalar(
+                select(func.count(PublishJob.id)).where(
+                    PublishJob.owner_id == self._owner_id,
+                    PublishJob.project_id == project_id,
+                    PublishJob.status.in_(tuple(PUBLISH_ACTIVE_STATES)),
+                )
+            )
+            or 0
+        )
+        if publishing:
+            raise ValueError("成片还在合成中，等它结束再删项目")
+
+        self._db.execute(
+            delete(PublishJob).where(
+                PublishJob.owner_id == self._owner_id,
+                PublishJob.project_id == project_id,
+            )
+        )
         self._db.execute(
             delete(VideoShot).where(
                 VideoShot.owner_id == self._owner_id, VideoShot.project_id == project_id
@@ -613,18 +654,33 @@ class VideoService:
         )
         return created
 
-    def render_clips(self, project_id: int, shot_ids: Sequence[int]) -> List[MediaJob]:
+    def render_clips(
+        self,
+        project_id: int,
+        shot_ids: Sequence[int],
+        reference_previous: bool = False,
+    ) -> List[MediaJob]:
         """给这些镜头各入队一条视频片段作业；``shot_ids`` 空表示全部镜头。
 
         与 :meth:`render_frames` 同一口径：整批里有一镜不合格就整条拒掉，不跳过它。
         四档不合格一次报全（缺运动提示词、首帧还没渲出来、选了没开的首尾帧、参考图
-        档没挑图片素材），免得用户补一条、提交、再撞下一条。
+        档没挑图片素材），免得用户补一条、提交、再撞下一条；开了「参考上一版」再加
+        一档：本镜上一版片段还没落盘。
 
         首帧档喂的是**这一镜已经渲好的首帧产物**，不再重新出图：状态与路径的唯一
         事实源是作业行，所以这里认的是指针指向那条作业真的落盘了没有。
+
+        ``reference_previous`` 是重做时的「参考上一版」：把本镜 ``video_job_id`` 指着
+        的那份成片再挂成 ``reference_video``，让新片沿用上一版的形象与运镜，而不是
+        重掷一次骰子。默认关——开着就再也拿不到「完全重来一版」了。
         """
         project = self.get_project(project_id)
         config = self.require_video_config()
+        if reference_previous and not (settings.PUBLIC_MEDIA_BASE_URL or "").strip():
+            raise ValueError(
+                "「参考上一版」需要公网地址：方舟的视频参考只收公网 URL，"
+                "请先在服务端配置 PUBLIC_MEDIA_BASE_URL（本站对外 origin）"
+            )
         rows = self.shots_of(project_id)
         wanted_ids = {int(item) for item in shot_ids or ()}
         picked = [row for row in rows if not wanted_ids or row.id in wanted_ids]
@@ -634,11 +690,16 @@ class VideoService:
             raise ValueError("还没有镜头可以渲染，先生成脚本")
 
         frames = self._latest_jobs([row.image_job_id for row in picked])
+        clips = (
+            self._latest_jobs([row.video_job_id for row in picked])
+            if reference_previous
+            else {}
+        )
         materials = self._materials().materials_for(
             [str(ref) for row in picked for ref in (row.material_ids or [])]
         )
-        # 只有图片类素材进得了请求体：参考视频要公网可达的地址，而默认那一档是把
-        # 本地文件内联成 base64（与 render_frames 同一取舍）。
+        # 素材库里只有图片类进得了请求体：视频素材那一档还没接（它同样要公网地址，
+        # 与下面「参考上一版」走的是同一条路），镜头上只留一条已记录、暂未使用的引用。
         refs = {
             row.id: [
                 materials[ref].rel_path
@@ -670,6 +731,16 @@ class VideoService:
         ]
         if no_refs:
             problems.append(f"第 {_shot_nums(no_refs)} 镜选了参考图生视频，但没挑图片素材")
+        if reference_previous:
+            no_clip = [
+                row.sort_order
+                for row in picked
+                if not _ready_rel_path(clips.get(row.video_job_id))
+            ]
+            if no_clip:
+                problems.append(
+                    f"第 {_shot_nums(no_clip)} 镜还没有可参考的上一版片段，先关掉「参考上一版」或把它们渲出来"
+                )
         if problems:
             raise ValueError("；".join(problems) + "。先补齐再渲染")
 
@@ -687,6 +758,15 @@ class VideoService:
             elif row.gen_mode == MODE_REFERENCE:
                 images = [{"role": ROLE_REFERENCE_IMAGE, "rel_path": path} for path in refs[row.id]]
             # 剩下的只有 t2v：一张图都不给，给了就把纯文生变成了图生视频。
+            prompt = row.video_prompt
+            if reference_previous:
+                images.append(
+                    {
+                        "role": ROLE_REFERENCE_VIDEO,
+                        "rel_path": _ready_rel_path(clips.get(row.video_job_id)),
+                    }
+                )
+                prompt = _clamp_prompt(f"{REFERENCE_PREVIOUS_HINT}{prompt}")
             job = media_jobs.enqueue(
                 self._db,
                 self._owner_id,
@@ -695,7 +775,7 @@ class VideoService:
                 biz_id=row.id,
                 request={
                     "project_id": project.id,
-                    "prompt": row.video_prompt,
+                    "prompt": prompt,
                     # 键名与方舟请求体同名，作业层原样透传（``jobs._video_params``
                     # 不兜默认值）。时长是**本镜**的，不是全片的：一镜一条任务。
                     "params": {
@@ -713,11 +793,12 @@ class VideoService:
             created.append(job)
         self._db.commit()
         logger.info(
-            "video clips enqueued: project=%s owner=%s jobs=%s materials=%s",
+            "video clips enqueued: project=%s owner=%s jobs=%s materials=%s reference_previous=%s",
             project.id,
             self._owner_id,
             len(created),
             len(materials),
+            reference_previous,
         )
         return created
 
@@ -796,6 +877,89 @@ class VideoService:
             asset.size,
         )
         return asset
+
+    # -- 发布（成片合成 + 手动发布包） -----------------------------------------
+
+    def compose_publish(self, project_id: int) -> PublishJob:
+        """入队一条成片合成作业：把各镜最近一次成功片段按镜头顺序拼成一个 MP4。
+
+        与渲染入队同一口径——整批里有一镜没有可用片段就整条拒掉，并一次报全缺的
+        是哪几镜，而不是拼到一半才发现少一段。片段文件还要在盘上：作业行报成功但
+        文件被手工清掉时，发 ffmpeg 只会换来看不懂的 No such file。
+        """
+        project = self.get_project(project_id)
+        rows = self.shots_of(project_id)
+        if not rows:
+            raise ValueError("还没有镜头可以合成，先生成脚本")
+
+        active = int(
+            self._db.scalar(
+                select(func.count(PublishJob.id)).where(
+                    PublishJob.owner_id == self._owner_id,
+                    PublishJob.project_id == project_id,
+                    PublishJob.status.in_(tuple(PUBLISH_ACTIVE_STATES)),
+                )
+            )
+            or 0
+        )
+        if active:
+            raise ValueError("这个项目已有成片合成在进行，等它结束再发起")
+
+        clip_jobs = self._latest_jobs([row.video_job_id for row in rows])
+        missing: List[int] = []
+        sources: List[str] = []
+        for row in rows:
+            rel_path = _ready_rel_path(clip_jobs.get(row.video_job_id))
+            if not rel_path or not (settings.upload_media_path / rel_path).is_file():
+                missing.append(row.sort_order)
+            else:
+                sources.append(rel_path)
+        if missing:
+            raise ValueError(
+                f"第 {_shot_nums(missing)} 镜还没有可用的视频片段，先把片段渲完再合成"
+            )
+
+        cover = self._cover_jobs([project_id]).get(str(project_id))
+        publish = project.publish or {}
+        candidates = list(publish.get("title_candidates") or [])
+        job = PublishJob(
+            owner_id=self._owner_id,
+            project_id=project_id,
+            platform=project.platform,
+            channel=CHANNEL_MANUAL,
+            status=PUBLISH_QUEUED,
+            # 快照而不是指针：之后重渲片段、改文案都不影响这次合成要拼什么、
+            # 发布包里带哪版标题——与 media_job.request 同一个理由。
+            request={
+                "sources": sources,
+                "title": str(candidates[0] if candidates else project.title),
+                "tags": [str(tag) for tag in (publish.get("tags") or [])][:8],
+                "cover": cover.rel_path if cover else "",
+            },
+        )
+        self._db.add(job)
+        self._db.commit()
+        self._db.refresh(job)
+        logger.info(
+            "publish job enqueued: id=%s owner=%s project=%s clips=%s",
+            job.id,
+            self._owner_id,
+            project_id,
+            len(sources),
+        )
+        return job
+
+    def latest_publish_job(self, project_id: int) -> Optional[PublishJob]:
+        """项目最近一次发布作业（任何状态）；详情接口只带这一条，历史都在表里。"""
+        return self._db.scalar(
+            select(PublishJob)
+            .where(
+                PublishJob.owner_id == self._owner_id,
+                PublishJob.project_id == project_id,
+            )
+            .order_by(PublishJob.id.desc())
+            .limit(1)
+        )
 
     def capacity(self) -> List[MediaCapacityItem]:
         """这个账号现在各类作业占着几个位子、还能塞几个——渲染前那屏确认要用它。"""
@@ -915,9 +1079,10 @@ class VideoService:
             [row.image_job_id for row in rows] + [row.video_job_id for row in rows]
         )
         cover = self._cover_jobs([project.id]).get(str(project.id))
+        run = latest_run(self._db, self._owner_id, SUBJECT_VIDEO_PROJECT, project.id)
         base = self._item_of(
             project,
-            latest_run(self._db, self._owner_id, SUBJECT_VIDEO_PROJECT, project.id),
+            run,
             (len(rows), sum(row.duration_s for row in rows)),
             cover,
         )
@@ -970,6 +1135,34 @@ class VideoService:
                 )
                 for row in rows
             ],
+            script_run=self._script_run_out(run),
+            publish_job=_publish_out(self.latest_publish_job(project.id)),
+        )
+
+    def _script_run_out(self, run: Optional[WorkflowRun]) -> Optional[VideoScriptRunOut]:
+        """把脚本运行翻译成工作台要的两步现场：谁在跑、各自跑了多久。
+
+        网关日志一次调用一行，这条流程有两行；只报其中一行会让人以为整个生成
+        就是那几十秒。整条的墙上时间取运行行上的 ``elapsed_ms``，不是各步相加。
+        """
+        if run is None:
+            return None
+        rows = WorkflowService(self._db, self._owner_id).run_steps(run.id)
+        return VideoScriptRunOut(
+            id=run.id,
+            status=run.status,
+            elapsed_ms=run.elapsed_ms,
+            started_at=run.started_at,
+            steps=[
+                VideoScriptStepOut(
+                    key=row.key,
+                    status=row.status,
+                    elapsed_ms=row.elapsed_ms,
+                    started_at=row.started_at,
+                    finished_at=row.finished_at,
+                )
+                for row in rows
+            ],
         )
 
 
@@ -984,6 +1177,24 @@ def _job_out(job: Optional[MediaJob]) -> Optional[MediaJobOut]:
         model_name=job.model_name,
         url=store.resolve_url(job.rel_path or "") if job.rel_path else "",
         mime=job.mime,
+        file_size=job.file_size,
+        error_msg=job.error_msg,
+        elapsed_ms=job.elapsed_ms,
+        created_at=job.created_at,
+        finished_at=job.finished_at,
+    )
+
+
+def _publish_out(job: Optional[PublishJob]) -> Optional[PublishJobOut]:
+    """发布作业的对外视图：成片地址同样只给站内的，rel_path 不出门。"""
+    if job is None:
+        return None
+    return PublishJobOut(
+        id=job.id,
+        platform=job.platform,
+        channel=job.channel,
+        status=job.status,
+        url=store.resolve_url(job.rel_path or "") if job.rel_path else "",
         file_size=job.file_size,
         error_msg=job.error_msg,
         elapsed_ms=job.elapsed_ms,

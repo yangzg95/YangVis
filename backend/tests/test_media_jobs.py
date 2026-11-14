@@ -35,6 +35,7 @@ from app.services.media import (
     KIND_IMAGE,
     KIND_VIDEO,
     ROLE_FIRST_FRAME,
+    ROLE_REFERENCE_VIDEO,
 )
 from app.services.media import ark, jobs
 from app.services.media import store as media_store
@@ -477,22 +478,59 @@ def test_video_job_is_submitted_then_polled_then_stored(db, fake_ark):
     assert fake_ark.downloaded == ["https://ark.example.com/1.mp4"]
 
 
-def test_video_content_keeps_the_roles(db):
-    blob = media_store.store_blob(7, PNG)
+def test_video_content_keeps_the_roles(db, monkeypatch):
+    monkeypatch.setattr(
+        jobs,
+        "settings",
+        SimpleNamespace(**{**LIMITS.__dict__, "PUBLIC_MEDIA_BASE_URL": "https://cdn.example.com"}),
+    )
+    image = media_store.store_blob(7, PNG)
+    clip = media_store.store_blob(7, MP4)
     request = {
         "project_id": 7,
         "prompt": "动起来",
         "images": [
-            {"role": ROLE_FIRST_FRAME, "rel_path": blob.rel_path},
-            {"role": "reference_video", "rel_path": blob.rel_path},
-            {"role": "", "rel_path": blob.rel_path},
+            {"role": ROLE_FIRST_FRAME, "rel_path": image.rel_path},
+            {"role": ROLE_REFERENCE_VIDEO, "rel_path": clip.rel_path},
+            {"role": "", "rel_path": image.rel_path},
             {"role": ROLE_FIRST_FRAME, "rel_path": ""},
         ],
     }
     content = jobs.build_video_content(request)
 
     assert content[0] == {"type": "text", "text": "动起来"}
-    assert [item["role"] for item in content[1:]] == ["first_frame"], "认不出的 role 直接丢掉"
+    assert [item["role"] for item in content[1:]] == [
+        ROLE_FIRST_FRAME,
+        ROLE_REFERENCE_VIDEO,
+    ], "认不出的 role 直接丢掉"
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    # 图片内联、视频走公网：MEDIA_IMAGE_TRANSPORT 还是 data_url，但方舟的 video_url
+    # 根本不收 base64，所以视频这一档没有内联可选。
+    assert content[2] == {
+        "type": "video_url",
+        "video_url": {"url": f"https://cdn.example.com/uploads/{clip.rel_path}"},
+        "role": ROLE_REFERENCE_VIDEO,
+    }
+
+
+def test_reference_video_without_a_public_base_is_refused(db):
+    """没配公网基址就当场判死，而不是发一个方舟拉不到的地址过去等异步报错。"""
+    clip = media_store.store_blob(7, MP4)
+
+    with pytest.raises(jobs.MediaJobError, match="PUBLIC_MEDIA_BASE_URL"):
+        jobs.to_ark_video_url(clip.rel_path)
+
+
+def test_reference_video_with_an_unsafe_path_is_refused(db, monkeypatch):
+    monkeypatch.setattr(
+        jobs,
+        "settings",
+        SimpleNamespace(**{**LIMITS.__dict__, "PUBLIC_MEDIA_BASE_URL": "https://cdn.example.com"}),
+    )
+
+    with pytest.raises(jobs.MediaJobError, match="路径不合法"):
+        jobs.to_ark_video_url("../../etc/passwd")
 
 
 def test_upstream_failure_and_expiry_are_recorded_as_they_come(db, fake_ark):

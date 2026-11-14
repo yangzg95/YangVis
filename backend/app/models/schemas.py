@@ -3205,6 +3205,32 @@ class VideoShotIn(BaseModel):
     material_ids: List[str] = Field(default_factory=list, max_length=4)
 
 
+class VideoScriptStepOut(BaseModel):
+    """脚本生成里的一步。只报状态与耗时：prompt、产物、轨迹都在运行详情页，
+    工作台每几秒取一次详情，不该把那些大字段跟着来回搬。
+    """
+
+    key: str
+    status: str
+    elapsed_ms: Optional[int] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+
+class VideoScriptRunOut(BaseModel):
+    """认领本项目的那条脚本运行。
+
+    这条流程是两步串行（创作卡 → 分镜），AI 网关的日志按**一次调用**分行，只看
+    其中一行会以为整个生成就是那几十秒。这里给整条的分解，口径与运行详情页一致。
+    """
+
+    id: int
+    status: str
+    elapsed_ms: Optional[int] = None
+    started_at: Optional[datetime] = None
+    steps: List[VideoScriptStepOut] = Field(default_factory=list)
+
+
 class VideoProjectItem(BaseModel):
     """列表里的一行。``status`` 是脚本阶段的状态，从认领本项目的运行翻译过来。"""
 
@@ -3231,6 +3257,10 @@ class VideoProjectDetail(VideoProjectItem):
     params: VideoParams = Field(default_factory=VideoParams)
     publish: VideoPublish = Field(default_factory=VideoPublish)
     shots: List[VideoShotOut] = Field(default_factory=list)
+    # 最近一次发布作业（成片合成 + 手动发布包）；从没合成过就是 None。
+    publish_job: Optional[PublishJobOut] = None
+    # 最近一次脚本生成的现场；还没生成过（老项目直接改分镜）时为 None。
+    script_run: Optional[VideoScriptRunOut] = None
 
 
 class VideoProjectCreate(BaseModel):
@@ -3269,11 +3299,21 @@ class VideoShotsSave(BaseModel):
 class VideoRenderRequest(BaseModel):
     """一次批量渲染：``shot_ids`` 空表示项目里全部镜头。
 
-    首帧（``/frames``）与片段（``/clips``）共用这一种形状：阶段由路径决定，
-    正文里再放一个「阶段」字段就有了两处事实。
+    阶段由路径决定，正文里再放一个「阶段」字段就有了两处事实。片段那一档用
+    :class:`VideoClipRenderRequest` 往下扩一个开关，基类只留两档都要的部分。
     """
 
     shot_ids: List[int] = Field(default_factory=list, max_length=60)
+
+
+class VideoClipRenderRequest(VideoRenderRequest):
+    """片段渲染多一个开关：把本镜上一版成片当参考视频一起送上去。
+
+    单独一种形状而不是塞进 ``VideoRenderRequest``：首帧那一档没有「上一版片段」可参考，
+    共用一个正文就等于让 ``/frames`` 收下一个它永远不读的字段。
+    """
+
+    reference_previous: bool = False
 
 
 class MediaCapacityItem(BaseModel):
@@ -3289,3 +3329,32 @@ class MediaCapacityOut(BaseModel):
     # 参考图送进方舟的方式：data_url 时首帧必须落在服务器本地，换公网地址要配
     # PUBLIC_MEDIA_BASE_URL，界面上得说清当前是哪一种。
     image_transport: str = "data_url"
+    # 「参考上一版片段」能不能用：方舟的视频参考只收公网 URL，没配 PUBLIC_MEDIA_BASE_URL
+    # 就一条也发不出去，界面上那个勾选框据此禁用。
+    video_reference_ready: bool = False
+
+
+# 发布作业的状态与通道。通道目前只开 manual（手动发布包），Literal 先只放它，
+# open_api / browser 接入时再扩——前端按字面量联合收窄，比 str 更早发现拼错。
+PublishJobStatus = Literal["queued", "running", "succeeded", "failed"]
+PublishChannel = Literal["manual"]
+
+
+class PublishJobOut(BaseModel):
+    """一条发布作业的对外形状：合成状态与成片地址都从这一行读。
+
+    详情接口只带项目**最近一次**发布作业（与封面作业同一口径）；历史按项目 id
+    在表里都留着，等界面上需要「挑一版成片」时再开口子。
+    """
+
+    id: int
+    platform: VideoPlatform = "douyin"
+    channel: PublishChannel = "manual"
+    status: PublishJobStatus = "queued"
+    # 成片的站内地址，由 rel_path 现拼；还没合成成功时是空串。
+    url: str = ""
+    file_size: Optional[int] = None
+    error_msg: Optional[str] = None
+    elapsed_ms: Optional[int] = None
+    created_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None

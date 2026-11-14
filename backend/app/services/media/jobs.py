@@ -10,6 +10,7 @@
 * ``video``：``{"project_id", "prompt", "params": {...}, "images": [{"role", "rel_path"}]}``
 
 base64 内联在发送那一刻才拼出来，不进数据库——否则一条 2K 首帧图要在库里躺 5MB。
+视频参考是例外：方舟只收公网 URL，所以它拼的是 ``PUBLIC_MEDIA_BASE_URL`` + ``rel_path``。
 
 **为什么是一个常驻循环而不是 ``BackgroundTasks``**：一条视频要在上游排队几十秒到
 几分钟，而且成功之后还必须转存（上游链接 24 小时失效）。请求级后台任务的寿命跟着一次
@@ -59,6 +60,7 @@ from app.services.media import (
     ROLE_FIRST_FRAME,
     ROLE_LAST_FRAME,
     ROLE_REFERENCE_IMAGE,
+    ROLE_REFERENCE_VIDEO,
 )
 from app.services.media import ark, store
 from app.services.model_config import default_model_config
@@ -79,6 +81,7 @@ _ROLE_BY_NAME = {
     ROLE_FIRST_FRAME: ROLE_FIRST_FRAME,
     ROLE_LAST_FRAME: ROLE_LAST_FRAME,
     ROLE_REFERENCE_IMAGE: ROLE_REFERENCE_IMAGE,
+    ROLE_REFERENCE_VIDEO: ROLE_REFERENCE_VIDEO,
 }
 
 # 本进程正在执行的作业 id（见模块 docstring）。
@@ -186,9 +189,31 @@ def to_ark_image_url(rel_path: str) -> str:
     return ark.image_data_url(raw, mime)
 
 
+def to_ark_video_url(rel_path: str) -> str:
+    """参考视频只能给公网地址：方舟的 ``video_url`` 不收 base64（只有图片收）。
+
+    所以这一档没有 ``data_url`` 可选，``PUBLIC_MEDIA_BASE_URL`` 是硬前置。没配就当场
+    判失败，而不是发一个方舟拉不到的地址过去——那要等异步报错才知道，还白占一个位子。
+    """
+    base = (settings.PUBLIC_MEDIA_BASE_URL or "").rstrip("/")
+    if not base:
+        raise MediaJobError(
+            "参考视频需要公网地址：请在服务端配置 PUBLIC_MEDIA_BASE_URL（本站对外 origin）"
+        )
+    url = store.resolve_url(rel_path)
+    if not url:
+        raise MediaJobError(f"参考视频路径不合法：{rel_path!r}")
+    return f"{base}/{url.lstrip('/')}"
+
+
 def build_video_content(request: Dict[str, Any]) -> List[dict]:
-    """把镜头提示词 + 参考图拼成方舟的 ``content`` 数组。"""
-    pairs: List[Tuple[str, str]] = []
+    """把镜头提示词 + 参考素材拼成方舟的 ``content`` 数组。
+
+    ``images`` 这个键同时装图片与视频条目，靠 ``role`` 分流：键名是历史形状，库里
+    可能还躺着按它入队的作业，改不得。
+    """
+    images: List[Tuple[str, str]] = []
+    videos: List[Tuple[str, str]] = []
     for item in request.get("images") or []:
         if not isinstance(item, dict):
             continue
@@ -197,8 +222,11 @@ def build_video_content(request: Dict[str, Any]) -> List[dict]:
         if role is None or not rel_path:
             logger.warning("media job image entry skipped, bad role or rel_path: %r", item)
             continue
-        pairs.append((role, to_ark_image_url(rel_path)))
-    return ark.build_video_content(str(request.get("prompt") or ""), pairs)
+        if role == ROLE_REFERENCE_VIDEO:
+            videos.append((role, to_ark_video_url(rel_path)))
+        else:
+            images.append((role, to_ark_image_url(rel_path)))
+    return ark.build_video_content(str(request.get("prompt") or ""), images, videos)
 
 
 def _project_id_of(job: MediaJob) -> int:

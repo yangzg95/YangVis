@@ -2060,3 +2060,60 @@ class NotifyHuaweiConfig(Base):
             f"<NotifyHuaweiConfig channel_id={self.channel_id} "
             f"target_type={self.target_type!r}>"
         )
+
+
+class PublishJob(Base):
+    """一次「成片合成 + 发布包」作业。
+
+    与 :class:`MediaJob` 的分工：媒体作业对接火山方舟，执行体是 lifespan 里的常驻
+    循环；发布作业是**本机活**（ffmpeg 拼接各镜已经落盘的片段），一次后台任务几秒
+    到几分钟就结束，所以走 ``BackgroundTasks`` 而不是再挂一个循环。它仍然单独成行
+    而不是在项目上加状态列，理由和媒体作业一样——状态与产物路径只在作业行上，项目
+    行不抄第二份，重做也留下历史。
+
+    ``request`` 存发起那一刻的归一形状：``sources`` 是按镜头顺序排好的片段
+    ``rel_path`` 快照（之后重渲片段不会改这次合成要拼什么），外加标题/标签/封面快照。
+    合成产物落盘规则与媒体产物完全一致（``videos/<项目 id>/<随机 id>.mp4``），
+    删项目时跟着目录树一起清掉。
+
+    ``channel`` 现在只有 ``manual``（手动发布包：合成完由人拿去创作者平台上传）；
+    列先留着，以后接开放平台 API / 浏览器自动化时同一张表加通道，不需要迁移。
+    """
+
+    __tablename__ = "publish_job"
+    __table_args__ = (
+        Index("idx_publish_project", "project_id", "id"),
+        Index("idx_publish_owner_status", "owner_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    project_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    # 与 video_project.platform 同一词表（douyin / kuaishou / other），发起时抄过来。
+    platform: Mapped[str] = mapped_column(String(16), nullable=False, default="douyin")
+    # manual | open_api | browser，后两个是预留通道，目前只会写 manual。
+    channel: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")
+    # queued | running | succeeded | failed（取值见 services/publish 词表）。
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    error_msg: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # {"sources": [rel_path...], "title": str, "tags": [...], "cover": rel_path | ""}
+    request: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    # 合成产物。与 media_job 同一约定：只存相对路径，URL 由 store 现拼。
+    rel_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    mime: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    elapsed_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<PublishJob id={self.id} project={self.project_id} status={self.status!r}>"

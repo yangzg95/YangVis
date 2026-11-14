@@ -576,6 +576,71 @@
                   <img v-if="coverUrl" class="cover-mini" :src="coverUrl" alt="封面" />
                 </div>
                 </a-form-item>
+                <a-form-item label="成片合成">
+                  <a-space wrap>
+                    <a-button
+                      type="primary"
+                      :loading="composing"
+                      :disabled="Boolean(composeProblem)"
+                      :title="composeProblem || '把各镜片段按镜头顺序拼成一个 MP4'"
+                      @click="onCompose"
+                    >
+                      <VideoCameraOutlined /> 合成成片
+                    </a-button>
+                    <span v-if="composeProblem" class="hint">{{ composeProblem }}</span>
+                  </a-space>
+                  <div v-if="publishJob" class="job-meta publish-job">
+                    <div class="job-kind">发布作业 #{{ publishJob.id }}</div>
+                    <div class="job-row">
+                      <span class="muted">状态</span>
+                      <a-tag :color="publishStatusColor(publishJob.status)">
+                        {{ publishStatusText(publishJob.status) }}
+                      </a-tag>
+                    </div>
+                    <div class="job-row">
+                      <span class="muted">用时</span>
+                      <span>{{ publishJob.elapsed_ms ? fmtElapsed(publishJob.elapsed_ms) : '—' }}</span>
+                    </div>
+                    <div class="job-row">
+                      <span class="muted">大小</span>
+                      <span>{{ publishJob.file_size ? fmtSize(publishJob.file_size) : '—' }}</span>
+                    </div>
+                    <a-alert
+                      v-if="publishJob.error_msg"
+                      type="error"
+                      show-icon
+                      class="job-error"
+                      :message="publishJob.error_msg"
+                    />
+                    <a-space
+                      v-if="publishJob.status === 'succeeded'"
+                      :size="8"
+                      wrap
+                      class="job-ops"
+                    >
+                      <a-button size="small" type="primary" @click="onDownloadFinal">
+                        <DownloadOutlined /> 下载成片 MP4
+                      </a-button>
+                      <a-button v-if="coverUrl" size="small" @click="onDownloadCover">
+                        <PictureOutlined /> 下载封面
+                      </a-button>
+                      <a-button size="small" @click="onCopyPublishText">
+                        <CopyOutlined /> 复制标题与话题
+                      </a-button>
+                      <a-button
+                        size="small"
+                        href="https://creator.douyin.com"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        <CloudUploadOutlined /> 去抖音创作者平台
+                      </a-button>
+                    </a-space>
+                    <div v-if="publishJob.status === 'succeeded'" class="hint">
+                      手动发布包：下载成片与封面、复制文案，再到创作者平台上传——这一期不代发，账号凭据不经过本站。
+                    </div>
+                  </div>
+                </a-form-item>
               </div>
             </a-form>
           </a-tab-pane>
@@ -615,6 +680,29 @@
             >
               {{ current.on_screen_text }}
             </p>
+          </div>
+
+          <!-- 脚本生成是两步串行：网关日志按调用分行，这里给整条的分解 -->
+          <div v-if="scriptRun" class="job-meta">
+            <div class="job-kind">
+              脚本生成
+              <a-button type="link" size="small" class="job-kind-link" @click="goToScriptRun">
+                运行详情
+              </a-button>
+            </div>
+            <div v-for="step in scriptSteps" :key="step.key" class="job-row">
+              <span class="muted">{{ step.label }}</span>
+              <span class="job-step">
+                <a-tag :color="runStatusColor(step.status)">{{ runStatusText(step.status) }}</a-tag>
+                {{ step.elapsed }}
+              </span>
+            </div>
+            <div class="job-row">
+              <span class="muted">合计</span><span>{{ scriptTotalText }}</span>
+            </div>
+            <div class="hint">
+              先定钩子与结构，再照它切镜，两步串行。网关日志一次调用一行，只看一行会少算前一步。
+            </div>
           </div>
 
           <!-- 两类作业各一块：状态与产物都只在作业行上，这里不存第二份 -->
@@ -667,15 +755,25 @@
                   <PlusOutlined /> 存为素材
                 </a-button>
               </template>
-              <a-button
-                v-else
-                size="small"
-                :disabled="!canRenderClipOne"
-                :title="clipProblem(current)"
-                @click="onRenderClipOne"
-              >
-                <PlayCircleOutlined /> {{ clipUrl ? '重做片段' : '渲片段' }}
-              </a-button>
+              <template v-else>
+                <!-- antd 的 Checkbox 不把 title 透到 label 上，禁用原因得挂在外层。 -->
+                <span :title="referencePreviousHint">
+                  <a-checkbox
+                    v-model:checked="referencePrevious"
+                    :disabled="!videoReferenceReady"
+                  >
+                    参考上一版
+                  </a-checkbox>
+                </span>
+                <a-button
+                  size="small"
+                  :disabled="!canRenderClipOne"
+                  :title="clipProblem(current)"
+                  @click="onRenderClipOne"
+                >
+                  <PlayCircleOutlined /> {{ clipUrl ? '重做片段' : '渲片段' }}
+                </a-button>
+              </template>
             </a-space>
           </div>
 
@@ -694,7 +792,7 @@
             <span v-if="!shots.length" class="muted">还没有镜头</span>
           </div>
           <div class="hint timeline-hint">
-            起点由镜头顺序累加：{{ totalDuration }} 秒。一镜一段，合成成片还没开。
+            起点由镜头顺序累加：{{ totalDuration }} 秒。一镜一段，整片合成在「全片 · 发布」里。
           </div>
         </div>
       </section>
@@ -796,6 +894,12 @@
         message="这些镜头现在发不出去"
         :description="clipProblemsText"
       />
+      <div class="toolbar toolbar--snug">
+        <a-checkbox v-model:checked="referencePrevious" :disabled="!videoReferenceReady">
+          参考上一版片段
+        </a-checkbox>
+        <span class="muted">{{ referencePreviousHint }}</span>
+      </div>
       <div class="toolbar toolbar--between toolbar--snug">
         <span class="muted">不勾选表示渲染全部 {{ shots.length }} 镜</span>
         <a-button v-if="picked.length" size="small" type="text" @click="picked = []">
@@ -838,6 +942,8 @@ import {
   ArrowDownOutlined,
   ArrowUpOutlined,
   CloseOutlined,
+  CloudUploadOutlined,
+  CopyOutlined,
   DeleteOutlined,
   DownloadOutlined,
   LoadingOutlined,
@@ -860,6 +966,8 @@ import {
   type MediaJob,
   type MediaJobKind,
   type MediaJobStatus,
+  type PublishJob,
+  type PublishJobStatus,
   type VideoBrief,
   type VideoGenMode,
   type VideoParams,
@@ -867,25 +975,28 @@ import {
   type VideoProjectDetail,
   type VideoProjectStatus,
   type VideoPublish,
+  type VideoScriptRun,
+  type VideoScriptStep,
   type VideoShot,
   type VideoShotInput,
   type VideoStyle,
 } from '@/api'
 import MaterialPicker from '@/components/videos/MaterialPicker.vue'
+import { copyText } from '@/utils/clipboard'
 import { saveTextFile } from '@/utils/download'
 import { errorText } from '@/utils/errors'
-import { fmtElapsed, fmtSize } from '@/utils/format'
+import { fmtElapsed, fmtSize, runStatusColor, runStatusText } from '@/utils/format'
 import { createPollLoop } from '@/utils/polling'
 import { buildAss, buildSrt, subtitleCues } from '@/utils/videoSubtitles'
 
 // 短视频工作台：左边分镜（顺序即成片顺序）、中间两套提示词与全片参数、右边竖屏预览。
 //
-// 两阶段的进度在这里各看各的：脚本阶段是项目状态（从认领本项目的运行翻译过来），
-// 渲染阶段是这一镜最近那两条 media_job（首帧 / 片段）的状态。所以详情接口轮询一次
-// 就把这几件事都说清了。
+// 三段进度在这里各看各的：脚本阶段是项目状态（从认领本项目的运行翻译过来），
+// 渲染阶段是这一镜最近那两条 media_job（首帧 / 片段）的状态，成片阶段是项目最近
+// 一条 publish_job（本机 ffmpeg 拼接）。详情接口轮询一次就把这几件事都说清了。
 //
-// 渲染分两步：先出首帧，再由首帧出片段（t2v 与参考图档不需要首帧）。合成成片还没开，
-// 时间轴只是「一镜一段」的示意；字幕也不烧进画面——预览按屏幕文字叠加，导出的是
+// 渲染分两步：先出首帧，再由首帧出片段（t2v 与参考图档不需要首帧）；各镜片段都出片后，
+// 在「全片 · 发布」里合成一个 MP4。字幕不烧进画面——预览按屏幕文字叠加，导出的是
 // 旁边的 SRT / ASS 文件。
 
 const route = useRoute()
@@ -962,6 +1073,17 @@ const shots = ref<VideoShot[]>([])
 const materials = ref<MaterialAsset[]>([])
 /** 封面无镜头行可挂：详情接口只把它作为「最新一次成功的封面作业」的 URL 带回来。 */
 const coverUrl = ref('')
+/** 最近一次脚本生成的现场：两步串行，各自的状态与耗时都由运行行给。 */
+const scriptRun = ref<VideoScriptRun | null>(null)
+/** 最近一次成片合成作业；从没合成过为 null，历史在服务端表里。 */
+const publishJob = ref<PublishJob | null>(null)
+/** 合成按钮自己的点击态：请求回来前防重复点，作业本身的进度看 publishJob。 */
+const composing = ref(false)
+/** 只在脚本生成时走动的秒级钟，让「已跑 3 分 12 秒」自己走，不必等下一次轮询。 */
+const nowMs = ref(Date.now())
+
+/** 发布作业还没落定的两档：与后端 PUBLISH_ACTIVE_STATES 同义。 */
+const PUBLISH_ACTIVE: PublishJobStatus[] = ['queued', 'running']
 
 const selected = ref(0)
 const editorTab = ref<'shot' | 'film'>('shot')
@@ -980,6 +1102,8 @@ const clipModal = ref(false)
 const picked = ref<number[]>([])
 const capacity = ref<MediaCapacityOut | null>(null)
 const storing = ref(false)
+/** 重做片段时把上一版成片当参考视频送上去。默认关：开着就拿不到「完全重来一版」了。 */
+const referencePrevious = ref(false)
 
 const current = computed(() => shots.value[selected.value])
 const dirty = computed(() => dirtyProject.value || dirtyShots.value)
@@ -991,9 +1115,7 @@ const currentActive = computed(
   () => isActiveJob(current.value?.image_job) || isActiveJob(current.value?.video_job),
 )
 const frameUrl = computed(() => frameUrlOf(current.value))
-const clipUrl = computed(() =>
-  current.value?.video_job?.status === 'succeeded' ? current.value.video_job.url : '',
-)
+const clipUrl = computed(() => clipUrlOf(current.value))
 const rendering = computed(() =>
   shots.value.some((shot) => isActiveJob(shot.image_job) || isActiveJob(shot.video_job)),
 )
@@ -1006,6 +1128,23 @@ const currentJobs = computed(() =>
       ]
     : [],
 )
+/** 脚本生成那两步的 key 长在流程定义里，文案在这里翻。 */
+const SCRIPT_STEP_LABELS: Record<string, string> = { brief: '创作卡', script: '分镜脚本' }
+const scriptSteps = computed(() =>
+  (scriptRun.value?.steps ?? []).map((step) => ({
+    key: step.key,
+    label: SCRIPT_STEP_LABELS[step.key] ?? step.key,
+    status: step.status,
+    elapsed: scriptElapsedText(step),
+  })),
+)
+/** 合计取运行行的墙上时间，不是把两步相加——口径与运行详情页一致。 */
+const scriptTotalText = computed(() => {
+  const run = scriptRun.value
+  if (!run) return '—'
+  if (run.elapsed_ms != null) return fmtElapsed(run.elapsed_ms)
+  return run.started_at ? `已跑 ${fmtElapsed(liveMs(run.started_at))}` : '—'
+})
 /** 这次要发出去的镜头：一个都没勾就是全部——与后端「shot_ids 空表示全部」同一口径。 */
 const renderTargets = computed(() =>
   picked.value.length
@@ -1028,6 +1167,13 @@ const renderOkDisabled = computed(
 /** 片段这一档的门槛：首帧那几条之外，还要有验证过的视频模型。 */
 const clipBlockHint = computed(() =>
   videoReady.value ? renderBlockHint.value : '先配好用途为「视频」的模型',
+)
+/** 余量取不到时不拦：真正的门槛在服务端入队那一步，与 loadReadiness 同一取舍。 */
+const videoReferenceReady = computed(() => capacity.value?.video_reference_ready ?? true)
+const referencePreviousHint = computed(() =>
+  videoReferenceReady.value
+    ? '把本镜上一版成片当参考视频一起送上去，沿用它的主体形象与运镜；只有已出片的镜头能发。'
+    : '服务端还没配 PUBLIC_MEDIA_BASE_URL：方舟的视频参考只收公网地址，配好才能用这一档。',
 )
 const clipProblemsInTarget = computed(() =>
   renderTargets.value
@@ -1057,6 +1203,37 @@ const clipResolutionWarning = computed(() => {
   const name = videoModel.value.toLowerCase()
   if (params.resolution !== '1080p' || !(name.includes('fast') || name.includes('mini'))) return ''
   return `「${videoModel.value}」是 fast/mini 档，只支持到 720p，1080p 会被上游拒掉；先在「全片 · 渲染参数」里调回 720p。`
+})
+/** 成片合成还占着位子：这一档要继续轮询，也不允许再发一条。 */
+const publishActive = computed(
+  () => Boolean(publishJob.value) && PUBLISH_ACTIVE.includes(publishJob.value!.status),
+)
+/**
+ * 合成按钮的前置门槛，与服务端 ``compose_publish`` 的拒绝一一对应：
+ * 预检先把人话摆在按钮旁边，服务端那道是绕过界面时的同一口径。
+ */
+const composeProblem = computed(() => {
+  if (!shots.value.length) return '还没有镜头，先生成脚本'
+  if (dirtyProject.value || dirtyShots.value) return '有未保存的改动，先保存再合成'
+  if (generating.value) return '脚本还在生成'
+  if (rendering.value) return '还有首帧或片段在渲染'
+  const missing = shots.value
+    .filter((shot) => shot.video_job?.status !== 'succeeded' || !shot.video_job?.url)
+    .map((shot) => shot.sort_order)
+  if (missing.length) return `第 ${missing.join('、')} 镜还没有可用的视频片段，先把片段渲完`
+  if (publishActive.value) return '成片正在合成中，等它结束再发起'
+  return ''
+})
+const canCompose = computed(() => !composeProblem.value && !composing.value)
+/** 手动发布包要复制的文案：首条标题候选（没有就项目名）+ 统一补 # 的话题。 */
+const publishCopyText = computed(() => {
+  const heading = publish.title_candidates[0] || title.value
+  const tags = publish.tags
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+    .map((tag) => (tag.startsWith('#') ? tag : `#${tag}`))
+    .join(' ')
+  return [heading, tags].filter(Boolean).join('\n')
 })
 /** 一格引用：库里还留着的是素材本身，删掉了的也要占个位子，否则人看不出引用去了哪儿。 */
 type MaterialChip = {
@@ -1156,6 +1333,8 @@ function applyDetail(detail: VideoProjectDetail) {
   Object.assign(publish, detail.publish)
   shots.value = detail.shots
   coverUrl.value = detail.cover_url
+  scriptRun.value = detail.script_run
+  publishJob.value = detail.publish_job
   if (selected.value >= detail.shots.length) selected.value = Math.max(0, detail.shots.length - 1)
   dirtyProject.value = false
   dirtyShots.value = false
@@ -1184,20 +1363,48 @@ async function loadReadiness() {
   }
 }
 
-// 脚本在跑、或有镜头作业在途时轮询；两者都落定就停表，不留空转定时器。
+// 脚本在跑、有镜头作业在途、或成片还在合成时轮询；都落定就停表，不留空转定时器。
 const pollLoop = createPollLoop(
   async () => {
     const before = lastJobStatus()
+    const publishBefore = publishJob.value?.status
     await load(true)
     announceJobs(before)
+    announcePublish(publishBefore)
   },
-  { shouldContinue: () => generating.value || rendering.value },
+  {
+    // 后端媒体循环 5s 才向方舟查一次视频任务，图片也在同一个 tick 里落定：
+    // 前端比这更密只是白打详情请求，看不到更早的状态。
+    interval: 5000,
+    shouldContinue: () => generating.value || rendering.value || publishActive.value,
+  },
 )
 
 function syncPolling() {
-  if (generating.value || rendering.value) pollLoop.start()
+  if (generating.value || rendering.value || publishActive.value) pollLoop.start()
   else pollLoop.stop()
 }
+
+// 秒级钟只服务于「脚本生成中」那一段：跑完就停，切走标签页也停，不留空转定时器。
+let clock: ReturnType<typeof setInterval> | null = null
+
+function syncClock() {
+  if (generating.value && !clock) {
+    nowMs.value = Date.now()
+    clock = setInterval(() => {
+      nowMs.value = Date.now()
+    }, 1000)
+  } else if (!generating.value && clock) {
+    stopClock()
+  }
+}
+
+function stopClock() {
+  if (clock) clearInterval(clock)
+  clock = null
+}
+
+watch(generating, syncClock, { immediate: true })
 
 // 「刚出图 / 刚出片」和「刚失败」都值得说一句：几十秒到几分钟的过程，用户不会一直盯着。
 // 键带上作业类别：一镜两条作业，只按镜号记会让片段的变化被首帧的盖掉。
@@ -1231,6 +1438,14 @@ function announceJobs(before: Map<string, MediaJobStatus | undefined>) {
   if (done.image) message.success(`${done.image} 镜首帧已出图`)
   if (done.video) message.success(`${done.video} 镜片段已出片`)
   if (failed) message.error(`${failed} 条渲染失败，预览区有原因`)
+}
+
+/** 成片合成从在途翻到终态时说一句：本机拼接也要几十秒，用户不会一直盯着按钮。 */
+function announcePublish(before: PublishJobStatus | undefined) {
+  if (!before || !PUBLISH_ACTIVE.includes(before)) return
+  const after = publishJob.value?.status
+  if (after === 'succeeded') message.success('成片合成完成，「全片 · 发布」里可以下载了')
+  else if (after === 'failed') message.error('成片合成失败，原因在发布区的作业卡片里')
 }
 
 // ---- 分镜编辑 ----------------------------------------------------------------
@@ -1406,15 +1621,19 @@ async function onRenderOne() {
   }
 }
 
-async function openClipRender() {
-  picked.value = []
-  clipModal.value = true
+/** 并发余量与「参考上一版」能不能用都从这一条接口来；取不到不拦渲染。 */
+async function loadCapacity() {
   try {
     capacity.value = await videosApi.capacity()
   } catch {
-    // 并发余量只是确认屏上的参考信息，取不到不拦渲染。
     capacity.value = null
   }
+}
+
+async function openClipRender() {
+  picked.value = []
+  clipModal.value = true
+  await loadCapacity()
 }
 
 async function onClipConfirm() {
@@ -1423,6 +1642,7 @@ async function onClipConfirm() {
       projectId.value,
       // 不勾表示全部：服务端把空数组当成「项目里全部镜头」。
       picked.value.length ? picked.value : [],
+      referencePrevious.value,
     )
     applyDetail(detail)
     clipModal.value = false
@@ -1436,7 +1656,11 @@ async function onClipConfirm() {
 async function onRenderClipOne() {
   if (!current.value?.id) return
   try {
-    const detail = await videosApi.renderClips(projectId.value, [current.value.id])
+    const detail = await videosApi.renderClips(
+      projectId.value,
+      [current.value.id],
+      referencePrevious.value,
+    )
     applyDetail(detail)
     message.success('已开始渲染这一镜的片段')
     syncPolling()
@@ -1493,6 +1717,72 @@ function onExportSubtitle({ key }: { key: string | number }) {
   if (key === 'ass') saveTextFile(`${name}.ass`, buildAss(shots.value, title.value), 'text/plain')
   else saveTextFile(`${name}.srt`, buildSrt(shots.value), 'text/plain')
   message.success('字幕文件已下载（时间轴按当前镜头顺序）')
+}
+
+// ---- 发布（成片合成 + 手动发布包） --------------------------------------------
+
+async function onCompose() {
+  if (!canCompose.value) return
+  composing.value = true
+  try {
+    // 入队即返回：后台任务在本机跑 ffmpeg，进度靠详情轮询里的 publish_job 跟随。
+    const detail = await videosApi.compose(projectId.value)
+    applyDetail(detail)
+    message.success('已开始合成成片，本机拼接通常几十秒内完成')
+    syncPolling()
+  } catch (err) {
+    message.error(errorText(err, '合成发起失败'))
+  } finally {
+    composing.value = false
+  }
+}
+
+async function onCopyPublishText() {
+  const ok = await copyText(publishCopyText.value)
+  if (ok) message.success('标题与话题已复制，粘贴到发布框即可')
+  else message.error('复制失败：浏览器没给剪贴板权限，手动从上方文案拷一下')
+}
+
+function safeFileName(fallback: string): string {
+  return title.value.trim().replace(/[\\/:*?"<>|]/g, '_') || fallback
+}
+
+/** 站内 /uploads 是同源地址，download 属性给得出友好文件名，不必先拉成 blob。 */
+function downloadByUrl(url: string, filename: string) {
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.rel = 'noopener'
+  anchor.click()
+}
+
+function urlExt(url: string, fallback: string): string {
+  return url.split('?')[0].split('.').pop() || fallback
+}
+
+function onDownloadFinal() {
+  const job = publishJob.value
+  if (!job?.url) return
+  downloadByUrl(job.url, `${safeFileName('final-video')}.${urlExt(job.url, 'mp4')}`)
+}
+
+function onDownloadCover() {
+  if (!coverUrl.value) return
+  downloadByUrl(coverUrl.value, `${safeFileName('cover')}-封面.${urlExt(coverUrl.value, 'jpg')}`)
+}
+
+function publishStatusText(status: PublishJobStatus): string {
+  return (
+    { queued: '排队中', running: '合成中', succeeded: '已合成', failed: '合成失败' }[status] ||
+    status
+  )
+}
+
+function publishStatusColor(status: PublishJobStatus): string {
+  return (
+    { queued: 'default', running: 'processing', succeeded: 'success', failed: 'error' }[status] ||
+    'default'
+  )
 }
 
 // ---- 素材引用 ----------------------------------------------------------------
@@ -1568,6 +1858,20 @@ function isActiveJob(job?: MediaJob | null): boolean {
   return Boolean(job && ACTIVE_JOB_STATUS.includes(job.status))
 }
 
+/** 一步的用时：落定了报服务端量到的，还在跑就按它自己的开始时间走秒。 */
+function scriptElapsedText(step: VideoScriptStep): string {
+  if (step.elapsed_ms != null) return fmtElapsed(step.elapsed_ms)
+  if (step.status === 'running' && step.started_at) {
+    return `已跑 ${fmtElapsed(liveMs(step.started_at))}`
+  }
+  return '—'
+}
+
+/** 服务端时钟与浏览器不齐时不让它显示成负数。 */
+function liveMs(startedAt: string): number {
+  return Math.max(0, nowMs.value - new Date(startedAt).getTime())
+}
+
 function jobColor(job?: MediaJob | null): string {
   const status = job?.status
   if (!status) return 'default'
@@ -1602,6 +1906,10 @@ function frameUrlOf(shot?: VideoShot): string {
   return shot?.image_job?.status === 'succeeded' ? shot.image_job.url : ''
 }
 
+function clipUrlOf(shot?: VideoShot): string {
+  return shot?.video_job?.status === 'succeeded' ? shot.video_job.url : ''
+}
+
 function genModeLabel(mode: VideoGenMode): string {
   return GEN_MODE_OPTIONS.find((item) => item.value === mode)?.label || mode
 }
@@ -1612,7 +1920,7 @@ function imageRefCount(shot: VideoShot): number {
 }
 
 /**
- * 这一镜现在能不能发片段：与服务端 ``render_clips`` 的四档拒绝一一对应。
+ * 这一镜现在能不能发片段：与服务端 ``render_clips`` 的拒绝档一一对应。
  * 确认屏上先说清楚，就少一次「点了开始渲染才被整批拒掉」。
  */
 function clipProblem(shot?: VideoShot): string {
@@ -1621,6 +1929,7 @@ function clipProblem(shot?: VideoShot): string {
   if (!shot.video_prompt.trim()) return '缺运动提示词'
   if (shot.gen_mode === 'first_frame' && !frameUrlOf(shot)) return '首帧还没出图'
   if (shot.gen_mode === 'reference' && !imageRefCount(shot)) return '没挑图片素材'
+  if (referencePrevious.value && !clipUrlOf(shot)) return '没有上一版可参考'
   return ''
 }
 
@@ -1645,22 +1954,36 @@ function goToSettings() {
   router.push('/system/settings')
 }
 
+/** 两步的 prompt、产物与轨迹都在运行现场那一页，这里只报状态与耗时。 */
+function goToScriptRun() {
+  if (scriptRun.value) router.push(`/workflows/runs/${scriptRun.value.id}`)
+}
+
 // ---- 生命周期 ----------------------------------------------------------------
 
 onMounted(async () => {
-  await Promise.all([load(), loadReadiness(), loadMaterials()])
+  await Promise.all([load(), loadReadiness(), loadMaterials(), loadCapacity()])
   syncPolling()
 })
 
-onUnmounted(() => pollLoop.stop())
+onUnmounted(() => {
+  pollLoop.stop()
+  stopClock()
+})
 
 // keep-alive：切去别的标签页时停表，回来时按状态恢复。
-onDeactivated(() => pollLoop.stop())
+onDeactivated(() => {
+  pollLoop.stop()
+  stopClock()
+})
 onActivated(() => {
   void load(true)
   // 期间可能去过素材库页：那边的增删只有重新取一次清单才看得见。
   void loadMaterials()
+  // 也可能去设置页配好了公网基址：「参考上一版」那个勾选框据此解禁。
+  void loadCapacity()
   syncPolling()
+  syncClock()
 })
 
 // 同一枚标签页换个项目 id：keep-alive 复用同一个实例，参数变了必须自己重载，
@@ -1975,15 +2298,41 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   padding: 10px 12px;
 }
 
+/* 发布区的作业卡片夹在按钮行下面，补一点呼吸。 */
+.publish-job {
+  margin-top: 10px;
+}
+
 .job-kind {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   font-weight: 600;
   color: var(--text-3);
+}
+
+.job-kind-link {
+  height: auto;
+  padding: 0;
+  font-size: var(--fs-xs);
+  font-weight: 400;
 }
 
 .job-row {
   display: flex;
   justify-content: space-between;
   gap: 12px;
+}
+
+.job-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.job-step :deep(.ant-tag) {
+  margin-inline-end: 0;
 }
 
 .job-error {

@@ -33,3 +33,5 @@ pypdf==5.9.0
 python-docx==1.2.0
 # 登录图形验证码绘制。wheel 自带 FreeType，不需要系统级字体库。
 pillow==11.3.0
+# 短视频成片合成：wheel 内自带 ffmpeg 可执行文件，不要求机器上装系统级 ffmpeg。
+imageio-ffmpeg==0.5.1

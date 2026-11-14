@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -31,8 +32,9 @@ from app.models.entities import (
     VideoShot,
     Workflow,
     WorkflowRun,
+    WorkflowRunStep,
 )
-from app.models.schemas import CurrentUser, MediaJobOut, ModelPurpose
+from app.models.schemas import CurrentUser, MediaJobOut, ModelPurpose, VideoScriptStepOut
 from app.services.media import (
     BIZ_VIDEO_COVER,
     BIZ_VIDEO_SHOT,
@@ -50,6 +52,7 @@ from app.services.media import (
     MODE_T2V,
     ROLE_FIRST_FRAME,
     ROLE_REFERENCE_IMAGE,
+    ROLE_REFERENCE_VIDEO,
 )
 from app.services.media import store as media_store
 from app.services.materials import KIND_IMAGE as MATERIAL_IMAGE
@@ -58,9 +61,14 @@ from app.services.materials import store as material_store
 from app.services.materials.store import store_material
 from app.services.materials.service import MaterialService
 from app.services.videos.normalize import MAX_SHOTS_FROM_MODEL, shots_from_model, text_of
+from app.services.videos import service as video_service
 from app.services.videos.service import VideoService, _script_inputs
 from app.services.workflows import (
     RUN_PENDING,
+    RUN_RUNNING,
+    RUN_SUCCEEDED,
+    STEP_RUNNING,
+    STEP_SUCCEEDED,
     SUBJECT_ANALYZING,
     SUBJECT_ERROR,
     SUBJECT_READY,
@@ -683,6 +691,87 @@ def test_render_clips_reference_sends_image_materials_only(db):
     assert service.shots_of(project.id)[0].material_ids == [str(image.id), str(clip.id)]
 
 
+def _stored_clip(db, service, project_id: int) -> MediaJob:
+    """先渲一版并让它真的落盘：「参考上一版」要的就是这份产物（与 ``_rendered`` 同一姿势）。"""
+    job = service.render_clips(project_id, [])[0]
+    stored = media_store.store_blob(project_id, MP4)
+    job.status = JOB_SUCCEEDED
+    job.rel_path = stored.rel_path
+    job.mime = stored.mime
+    job.file_size = stored.size
+    db.commit()
+    return job
+
+
+def test_render_clips_can_reference_the_previous_clip(db, monkeypatch):
+    """重做时把上一版成片挂成参考视频：沿用形象与运镜，而不是重掷一次骰子。"""
+    monkeypatch.setattr(
+        video_service.settings, "PUBLIC_MEDIA_BASE_URL", "https://yangvis.example.com"
+    )
+    project = _project(db)
+    service = _service(db)
+    rows, frames = _rendered(db, project.id, 1)
+    _video_model(db)
+    previous = _stored_clip(db, service, project.id)
+
+    job = service.render_clips(project.id, [], reference_previous=True)[0]
+
+    assert job.request["images"] == [
+        {"role": ROLE_FIRST_FRAME, "rel_path": frames[0].rel_path},
+        {"role": ROLE_REFERENCE_VIDEO, "rel_path": previous.rel_path},
+    ]
+    assert "@视频1" in job.request["prompt"], "只挂素材不引用，模型可能直接忽略它"
+    assert job.request["prompt"].endswith(rows[0].video_prompt)
+    # 子任务类型靠措辞落在「参考生视频」那一类：ratio/duration 仍按本镜发，而能显式
+    # 锁定子任务的 omni_reference_task_type 只有 2.5 支持，2.0 系传不得。
+    assert job.request["params"]["ratio"] == "9:16"
+    assert "omni_reference_task_type" not in job.request["params"]
+    assert service.shots_of(project.id)[0].video_job_id == job.id
+
+
+def test_render_clips_reference_previous_needs_a_stored_clip(db, monkeypatch):
+    monkeypatch.setattr(
+        video_service.settings, "PUBLIC_MEDIA_BASE_URL", "https://yangvis.example.com"
+    )
+    project = _project(db)
+    service = _service(db)
+    _rendered(db, project.id, 1)
+    _video_model(db)
+
+    with pytest.raises(ValueError, match="还没有可参考的上一版片段"):
+        service.render_clips(project.id, [], reference_previous=True)
+
+
+def test_render_clips_reference_previous_needs_a_public_base(db, monkeypatch):
+    """方舟的视频参考只收公网 URL：没配基址就入队前拒掉，别等异步报错才发现。"""
+    monkeypatch.setattr(video_service.settings, "PUBLIC_MEDIA_BASE_URL", "")
+    project = _project(db)
+    service = _service(db)
+    _rendered(db, project.id, 1)
+    _video_model(db)
+
+    with pytest.raises(ValueError, match="PUBLIC_MEDIA_BASE_URL"):
+        service.render_clips(project.id, [], reference_previous=True)
+
+
+def test_reference_previous_hint_survives_the_prompt_clamp(db, monkeypatch):
+    """引用句拼在最前面：480 字上限截掉的是运动提示词的尾巴，不是那句引用。"""
+    monkeypatch.setattr(
+        video_service.settings, "PUBLIC_MEDIA_BASE_URL", "https://yangvis.example.com"
+    )
+    project = _project(db)
+    service = _service(db)
+    rows, _ = _rendered(db, project.id, 1)
+    _video_model(db)
+    service.save_shots(project.id, [_shot({"id": rows[0].id, "video_prompt": "推" * 600})])
+    _stored_clip(db, service, project.id)
+
+    prompt = service.render_clips(project.id, [], reference_previous=True)[0].request["prompt"]
+
+    assert len(prompt) == settings.VIDEO_MAX_PROMPT_CHARS
+    assert "@视频1" in prompt
+
+
 def test_render_clips_reports_every_problem_in_one_rejection(db):
     """四档不合格一次报全：补一条、提交、再撞下一条是最难用的拒绝方式。"""
     project = _project(db)
@@ -791,6 +880,44 @@ def test_clips_http_rejects_a_shot_without_a_frame(client, db):
     body = client.post(f"/api/office/videos/{project.id}/clips", json={"shot_ids": []}).json()
 
     assert body["code"] == -1 and "首帧还没渲出来" in body["message"]
+
+
+def test_clips_http_passes_reference_previous(client, db, monkeypatch):
+    """开关要真的从正文走到服务层：路由漏传一个参数，服务层的用例是看不出来的。"""
+    monkeypatch.setattr(
+        video_service.settings, "PUBLIC_MEDIA_BASE_URL", "https://yangvis.example.com"
+    )
+    project = _project(db)
+    service = _service(db)
+    _rendered(db, project.id, 1)
+    _video_model(db)
+    _stored_clip(db, service, project.id)
+
+    body = client.post(
+        f"/api/office/videos/{project.id}/clips",
+        json={"shot_ids": [], "reference_previous": True},
+    ).json()
+
+    assert body["code"] == 0
+    latest = db.scalar(
+        select(MediaJob).where(MediaJob.kind == KIND_VIDEO).order_by(MediaJob.id.desc())
+    )
+    assert [item["role"] for item in latest.request["images"]] == [
+        ROLE_FIRST_FRAME,
+        ROLE_REFERENCE_VIDEO,
+    ]
+
+
+def test_capacity_reports_whether_reference_video_is_usable(client, db, monkeypatch):
+    """界面上那个勾选框据此禁用：没配公网基址时勾了也发不出去。"""
+    url = "/api/office/videos/capacity"
+    monkeypatch.setattr(video_service.settings, "PUBLIC_MEDIA_BASE_URL", "")
+    assert client.get(url).json()["data"]["video_reference_ready"] is False
+
+    monkeypatch.setattr(
+        video_service.settings, "PUBLIC_MEDIA_BASE_URL", "https://yangvis.example.com"
+    )
+    assert client.get(url).json()["data"]["video_reference_ready"] is True
 
 
 # ---- 产物存为素材 ------------------------------------------------------------
@@ -1115,6 +1242,95 @@ def test_detail_serializes_jobs_without_the_upstream_url(db):
     assert detail.shots[0].video_job.url == f"/uploads/videos/{project.id}/abc123def4567891.mp4"
     assert detail.shots[0].image_job.url.endswith(".png"), "两类作业各带各的产物"
     assert "ark.example.com" not in detail.model_dump_json()
+
+
+# ---- 脚本生成现场 ------------------------------------------------------------
+
+
+def _script_run(db, project: VideoProject) -> tuple[WorkflowRun, list[WorkflowRunStep]]:
+    """认领本项目的那条运行与它的步骤行（创建项目时就建齐了，都是 pending）。"""
+    run = db.scalar(select(WorkflowRun).where(WorkflowRun.subject_ref == str(project.id)))
+    steps = list(
+        db.scalars(
+            select(WorkflowRunStep)
+            .where(WorkflowRunStep.run_id == run.id)
+            .order_by(WorkflowRunStep.sort_order)
+        ).all()
+    )
+    return run, steps
+
+
+def test_detail_carries_the_script_run_breakdown(db):
+    """两步各自的耗时都要在详情里。
+
+    这条流程是「创作卡 → 分镜」两次模型调用，AI 网关的日志按调用分行：只报其中
+    一行，用户会以为整个生成就是那几十秒，而前面那一步可能已经跑了几分钟。
+    """
+    project = _project(db)
+    service = _service(db)
+    run, steps = _script_run(db, project)
+    assert [row.key for row in steps] == ["brief", "script"]
+
+    started = datetime(2026, 11, 14, 23, 14, 14)
+    run.status = RUN_RUNNING
+    run.started_at = started
+    steps[0].status = STEP_SUCCEEDED
+    steps[0].started_at = started
+    steps[0].finished_at = started + timedelta(seconds=247)
+    steps[0].elapsed_ms = 247300
+    steps[1].status = STEP_RUNNING
+    steps[1].started_at = started + timedelta(seconds=247)
+    db.commit()
+    db.expire_all()
+
+    detail = service.to_detail(service.get_project(project.id))
+
+    assert detail.script_run.id == run.id
+    assert detail.script_run.status == RUN_RUNNING
+    assert [(row.key, row.status, row.elapsed_ms) for row in detail.script_run.steps] == [
+        ("brief", STEP_SUCCEEDED, 247300),
+        ("script", STEP_RUNNING, None),
+    ]
+    assert detail.script_run.steps[1].started_at is not None, "在跑的那步靠它算「已跑多久」"
+    # 现场只报状态与耗时：prompt、产物、轨迹留在运行详情页，不跟着轮询来回搬。
+    assert not {"prompt", "output", "parsed", "trace"} & set(VideoScriptStepOut.model_fields)
+
+    run.status = RUN_SUCCEEDED
+    run.elapsed_ms = 312500
+    steps[1].status = STEP_SUCCEEDED
+    steps[1].elapsed_ms = 65100
+    db.commit()
+    db.expire_all()
+
+    done = service.to_detail(service.get_project(project.id)).script_run
+
+    assert done.elapsed_ms == 312500, "合计取运行行的墙上时间，不是把各步相加"
+    assert [row.elapsed_ms for row in done.steps] == [247300, 65100]
+
+
+def test_detail_script_run_is_none_after_the_runs_are_pruned(db):
+    """运行记录会被留存清理删掉，项目还在：详情照常给，只是没有现场可报。"""
+    project = _project(db)
+    run, steps = _script_run(db, project)
+    for row in steps:
+        db.delete(row)
+    db.delete(run)
+    db.commit()
+    db.expire_all()
+
+    detail = _service(db).to_detail(_service(db).get_project(project.id))
+
+    assert detail.script_run is None
+
+
+def test_detail_http_carries_the_script_run(client, db):
+    project = _project(db)
+
+    body = client.get(f"/api/office/videos/{project.id}").json()
+
+    assert body["code"] == 0
+    assert body["data"]["script_run"]["status"] == RUN_PENDING
+    assert [row["key"] for row in body["data"]["script_run"]["steps"]] == ["brief", "script"]
 
 
 def test_business_rows_still_carry_no_status_column(db):

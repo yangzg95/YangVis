@@ -26,6 +26,7 @@ from app.models.schemas import (
     CurrentUser,
     ListResponse,
     MediaCapacityOut,
+    VideoClipRenderRequest,
     VideoProjectCreate,
     VideoProjectDetail,
     VideoProjectItem,
@@ -77,7 +78,9 @@ def render_capacity(
     """
     return APIResponse(
         data=MediaCapacityOut(
-            jobs=service.capacity(), image_transport=settings.MEDIA_IMAGE_TRANSPORT
+            jobs=service.capacity(),
+            image_transport=settings.MEDIA_IMAGE_TRANSPORT,
+            video_reference_ready=bool((settings.PUBLIC_MEDIA_BASE_URL or "").strip()),
         )
     )
 
@@ -254,16 +257,17 @@ def render_frames(
 @router.post("/{project_id}/clips", response_model=APIResponse[VideoProjectDetail])
 def render_clips(
     project_id: int,
-    payload: VideoRenderRequest,
+    payload: VideoClipRenderRequest,
     service: VideoService = Depends(get_service),
 ) -> APIResponse[VideoProjectDetail]:
     """批量渲染视频片段：每个选中镜头一条视频作业，``shot_ids`` 空就是全部。
 
     与 ``/frames`` 同一形态（入队即返回，进度看详情里的 ``video_job.status``），
     但门槛多一道：首帧档要求这一镜的首帧产物已经落盘，缺了整批拒绝。
+    ``reference_previous`` 再加一道：本镜上一版片段也得已经落盘。
     """
     try:
-        service.render_clips(project_id, payload.shot_ids)
+        service.render_clips(project_id, payload.shot_ids, payload.reference_previous)
     except LookupError as exc:
         raise _not_found(exc) from exc
     except ValueError as exc:
@@ -333,6 +337,47 @@ def save_frame_to_material(
     return APIResponse(
         data=service.to_detail(service.get_project(project_id)), message="已存进素材库"
     )
+
+
+# ---- 发布（成片合成 + 手动发布包） -------------------------------------------
+
+
+@router.post("/{project_id}/compose", response_model=APIResponse[VideoProjectDetail])
+def compose_project(
+    project_id: int,
+    background: BackgroundTasks,
+    service: VideoService = Depends(get_service),
+) -> APIResponse[VideoProjectDetail]:
+    """入队一条成片合成：各镜最近一次成功片段按镜头顺序拼成一个 MP4。
+
+    合成是本机 ffmpeg 的活，交给 ``BackgroundTasks``；详情接口把最近一次发布作业
+    一起带回来，前端轮询它就是进度，与渲染作业同一套交互。
+    """
+    try:
+        job = service.compose_publish(project_id)
+    except LookupError as exc:
+        raise _not_found(exc) from exc
+    except ValueError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    background.add_task(_compose_task, service.owner_id, job.id)
+    return APIResponse(
+        data=service.to_detail(service.get_project(project_id)),
+        message="已开始合成成片",
+    )
+
+
+async def _compose_task(owner_id: int, job_id: int) -> None:
+    """跑完一条发布作业。延迟导入与会话约定同 ``_script_task``。"""
+    from app.database import SessionLocal
+    from app.services.publish.runner import run_publish_job
+
+    with SessionLocal() as db:
+        try:
+            await run_publish_job(db, job_id)
+        except Exception:  # noqa: BLE001 - run_publish_job 内部已把失败落进行
+            logger.exception(
+                "publish compose task crashed: owner=%s job=%s", owner_id, job_id
+            )
 
 
 async def _script_task(owner_id: int, project_id: int) -> None:
