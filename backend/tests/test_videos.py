@@ -710,23 +710,84 @@ def test_render_clips_can_reference_the_previous_clip(db, monkeypatch):
     )
     project = _project(db)
     service = _service(db)
-    rows, frames = _rendered(db, project.id, 1)
+    rows, _ = _rendered(db, project.id, 1)
     _video_model(db)
     previous = _stored_clip(db, service, project.id)
 
     job = service.render_clips(project.id, [], reference_previous=True)[0]
 
+    # 首帧**不能**跟着一起发：方舟对首帧/尾帧与参考素材混用直接回 400
+    # （InvalidParameter: first/last frame content cannot be mixed with reference
+    # media content）。上一版成片已经承载了画面，这一档只发它。
     assert job.request["images"] == [
-        {"role": ROLE_FIRST_FRAME, "rel_path": frames[0].rel_path},
         {"role": ROLE_REFERENCE_VIDEO, "rel_path": previous.rel_path},
     ]
     assert "@视频1" in job.request["prompt"], "只挂素材不引用，模型可能直接忽略它"
     assert job.request["prompt"].endswith(rows[0].video_prompt)
-    # 子任务类型靠措辞落在「参考生视频」那一类：ratio/duration 仍按本镜发，而能显式
-    # 锁定子任务的 omni_reference_task_type 只有 2.5 支持，2.0 系传不得。
+    # 纯「参考生视频」任务对 ratio/duration 无特殊限制，仍按本镜发；能显式锁定子任务
+    # 的 omni_reference_task_type 只有 2.5 支持，2.0 系传不得。
     assert job.request["params"]["ratio"] == "9:16"
     assert "omni_reference_task_type" not in job.request["params"]
     assert service.shots_of(project.id)[0].video_job_id == job.id
+
+
+def test_render_clips_reference_previous_keeps_reference_images(db, monkeypatch):
+    """参考图档的图片素材留着：图片 + 视频的组合参考是允许的，只有首帧/尾帧不行。"""
+    monkeypatch.setattr(
+        video_service.settings, "PUBLIC_MEDIA_BASE_URL", "https://yangvis.example.com"
+    )
+    project = _project(db)
+    service = _service(db)
+    _video_model(db)
+    image = _material(db, "主角形象.png", PNG)
+    service.save_shots(
+        project.id,
+        [_shot({"gen_mode": MODE_REFERENCE, "material_ids": [str(image.id)]})],
+    )
+    previous = _stored_clip(db, service, project.id)
+
+    request = service.render_clips(project.id, [], reference_previous=True)[0].request
+
+    assert request["images"] == [
+        {"role": ROLE_REFERENCE_IMAGE, "rel_path": image.rel_path},
+        {"role": ROLE_REFERENCE_VIDEO, "rel_path": previous.rel_path},
+    ]
+
+
+def test_render_clips_reference_previous_does_not_need_a_frame(db, monkeypatch):
+    """首帧既然不发，「首帧还没出图」那一档就不该再拦着重做。"""
+    monkeypatch.setattr(
+        video_service.settings, "PUBLIC_MEDIA_BASE_URL", "https://yangvis.example.com"
+    )
+    project = _project(db)
+    service = _service(db)
+    _video_model(db)
+    rows = _shots(db, project.id, 1)
+    assert rows[0].gen_mode == MODE_FIRST_FRAME and rows[0].image_job_id is None
+    stored = media_store.store_blob(project.id, MP4)
+    previous = MediaJob(
+        owner_id=OWNER,
+        kind=KIND_VIDEO,
+        biz_type=BIZ_VIDEO_SHOT,
+        biz_id=str(rows[0].id),
+        model_name="doubao-seedance-2-0-260128",
+        status=JOB_SUCCEEDED,
+        rel_path=stored.rel_path,
+        request={"project_id": project.id},
+    )
+    db.add(previous)
+    db.flush()
+    rows[0].video_job_id = previous.id
+    db.commit()
+
+    job = service.render_clips(project.id, [], reference_previous=True)[0]
+
+    assert job.request["images"] == [
+        {"role": ROLE_REFERENCE_VIDEO, "rel_path": stored.rel_path},
+    ]
+    # 同一个镜头关掉开关就仍然被首帧那一档拦住：开关只改这一档，不是把门槛拆了。
+    with pytest.raises(ValueError, match="首帧还没渲出来"):
+        service.render_clips(project.id, [])
 
 
 def test_render_clips_reference_previous_needs_a_stored_clip(db, monkeypatch):
@@ -902,10 +963,7 @@ def test_clips_http_passes_reference_previous(client, db, monkeypatch):
     latest = db.scalar(
         select(MediaJob).where(MediaJob.kind == KIND_VIDEO).order_by(MediaJob.id.desc())
     )
-    assert [item["role"] for item in latest.request["images"]] == [
-        ROLE_FIRST_FRAME,
-        ROLE_REFERENCE_VIDEO,
-    ]
+    assert [item["role"] for item in latest.request["images"]] == [ROLE_REFERENCE_VIDEO]
 
 
 def test_capacity_reports_whether_reference_video_is_usable(client, db, monkeypatch):

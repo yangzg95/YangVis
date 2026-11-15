@@ -673,6 +673,9 @@ class VideoService:
         ``reference_previous`` 是重做时的「参考上一版」：把本镜 ``video_job_id`` 指着
         的那份成片再挂成 ``reference_video``，让新片沿用上一版的形象与运镜，而不是
         重掷一次骰子。默认关——开着就再也拿不到「完全重来一版」了。
+
+        这一档**不再发首帧**，因此也不要求首帧已出图：方舟禁止首帧/尾帧与参考素材
+        混用，而上一版成片已经承载了画面。任务类型随之变成纯「参考生视频」。
         """
         project = self.get_project(project_id)
         config = self.require_video_config()
@@ -722,6 +725,7 @@ class VideoService:
             row.sort_order
             for row in picked
             if row.gen_mode == MODE_FIRST_FRAME
+            and not reference_previous
             and not _ready_rel_path(frames.get(row.image_job_id))
         ]
         if no_frame:
@@ -748,7 +752,11 @@ class VideoService:
         created: List[MediaJob] = []
         for row in picked:
             images: List[Dict[str, str]] = []
-            if row.gen_mode == MODE_FIRST_FRAME:
+            # 挂了参考视频就**不能再给首帧**：方舟直接 400（InvalidParameter，原话
+            # "first/last frame content cannot be mixed with reference media content"）。
+            # 上一版成片本身承载了画面，首帧在这一档是冗余的，所以丢掉它而不是拒绝整批。
+            # 参考图档不受影响：图片 + 视频的组合参考是允许的。
+            if row.gen_mode == MODE_FIRST_FRAME and not reference_previous:
                 images = [
                     {
                         "role": ROLE_FIRST_FRAME,

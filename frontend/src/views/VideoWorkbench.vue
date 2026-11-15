@@ -1172,7 +1172,7 @@ const clipBlockHint = computed(() =>
 const videoReferenceReady = computed(() => capacity.value?.video_reference_ready ?? true)
 const referencePreviousHint = computed(() =>
   videoReferenceReady.value
-    ? '把本镜上一版成片当参考视频一起送上去，沿用它的主体形象与运镜；只有已出片的镜头能发。'
+    ? '把本镜上一版成片当参考视频送上去，沿用它的主体形象与运镜；这一档不再发首帧（方舟禁止两者混用），只有已出片的镜头能发。'
     : '服务端还没配 PUBLIC_MEDIA_BASE_URL：方舟的视频参考只收公网地址，配好才能用这一档。',
 )
 const clipProblemsInTarget = computed(() =>
@@ -1927,7 +1927,8 @@ function clipProblem(shot?: VideoShot): string {
   if (!shot) return '还没有镜头'
   if (shot.gen_mode === 'first_last_frame') return '首尾帧这一档还没开'
   if (!shot.video_prompt.trim()) return '缺运动提示词'
-  if (shot.gen_mode === 'first_frame' && !frameUrlOf(shot)) return '首帧还没出图'
+  if (shot.gen_mode === 'first_frame' && !referencePrevious.value && !frameUrlOf(shot))
+    return '首帧还没出图'
   if (shot.gen_mode === 'reference' && !imageRefCount(shot)) return '没挑图片素材'
   if (referencePrevious.value && !clipUrlOf(shot)) return '没有上一版可参考'
   return ''
