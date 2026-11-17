@@ -39,11 +39,15 @@
             @change="toggle(item)"
           />
           <span class="picker-thumb">
-            <img v-if="item.kind === 'image'" :src="item.url" :alt="item.name" loading="lazy" />
+            <!-- 缩略图没有时回退原图：缩略图是提速件，缺了不该让这格空白。 -->
+            <img v-if="item.kind === 'image'" :src="item.thumb_url || item.url" :alt="item.name" loading="lazy" />
             <video v-else-if="item.url" :src="item.url" preload="metadata" muted playsinline />
             <span v-else class="thumb-missing">已丢失</span>
           </span>
-          <span class="picker-name" :title="item.name">{{ item.name }}</span>
+          <span class="picker-name" :title="item.name">
+            {{ item.name }}
+            <a-tag v-if="item.tag" class="picker-tag">{{ item.tag }}</a-tag>
+          </span>
           <span class="hint">
             {{ item.kind === 'video' ? '视频' : '图片' }} · {{ fmtSize(item.size) }}
           </span>
@@ -216,6 +220,12 @@ async function onUpload(file: File) {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+.picker-tag {
+  margin-left: 6px;
+  transform: scale(0.86);
+  vertical-align: middle;
 }
 
 .picker-foot {

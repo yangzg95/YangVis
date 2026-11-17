@@ -15,10 +15,14 @@ export interface MaterialAsset {
   id: number
   kind: MaterialKind
   name: string
+  /** 打标分组：从短视频存进来的首帧自动打上项目名；null = 未打标（按时间分组展示）。 */
+  tag: string | null
   mime: string
   size: number
   /** 站内可浏览地址；文件被挪走时为空串，按「素材已丢失」呈现。 */
   url: string
+  /** 列表缩略图（320px WebP）；没有时为空串，回退到 url。 */
+  thumb_url: string
   created_at: string | null
 }
 
@@ -50,4 +54,12 @@ export const materialsApi = {
   },
   remove: (id: number) =>
     request<null>({ url: `/office/materials/${id}`, method: 'DELETE', skipErrorToast: true }),
+  /** 改打标分组；空串表示摘掉标签，归回「按时间分组」。 */
+  setTag: (id: number, tag: string) =>
+    request<MaterialAsset>({
+      url: `/office/materials/${id}/tag`,
+      method: 'PUT',
+      data: { tag },
+      skipErrorToast: true,
+    }),
 }
