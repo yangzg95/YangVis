@@ -1988,10 +1988,13 @@ onActivated(() => {
 })
 
 // 同一枚标签页换个项目 id：keep-alive 复用同一个实例，参数变了必须自己重载，
-// 否则屏幕上还是上一个项目的分镜。
+// 否则屏幕上还是上一个项目的分镜。必须先认路由名——「运行详情」会跳到
+// /workflows/runs/:id，那个 id 是运行 id 不是项目 id；组件停用时 watcher
+// 仍然生效，不拦下就会拿运行 id 去请求 /office/videos/{id}，换回一个 404。
 watch(
   () => route.params.id,
   (value) => {
+    if (route.name !== 'VideoWorkbench') return
     const id = Number(value)
     if (!id || id === projectId.value) return
     projectId.value = id
