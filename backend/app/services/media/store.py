@@ -51,7 +51,10 @@ _SIGNATURES: tuple[tuple[int, bytes, str, str], ...] = (
     (4, b"ftyp", "video/mp4", ".mp4"),
     (0, b"\x1a\x45\xdf\xa3", "video/webm", ".webm"),
 )
-_EXT_RE = re.compile(r"^[0-9a-f]{16}\.(?:png|jpe?g|gif|webp|bmp|mp4|webm)$")
+# ``<随机 id>[_thumb].<白名单扩展名>``。``_thumb`` 是素材缩略图
+# （``services/materials/store.py`` 生成）：只出现在 ``materials`` 树下，但这里的
+# 口径是纯形状白名单（安全边界是「仍在媒体目录内」），一并放行不值得分树特判。
+_EXT_RE = re.compile(r"^[0-9a-f]{16}(?:_thumb)?\.(?:png|jpe?g|gif|webp|bmp|mp4|webm)$")
 _NUMERIC_ID_RE = re.compile(r"^\d{1,20}$")
 
 # 一张首帧图/一段片段的上限。真正拦人的是上游（图 <30MB），这里是磁盘闸门：
@@ -201,13 +204,20 @@ def resolve_url(rel_path: str) -> str:
 
 
 def delete_blob(rel_path: str) -> None:
-    """best-effort 删一个文件：数据库行已经删了，磁盘残留不该阻塞删除流程。"""
+    """best-effort 删一个文件：数据库行已经删了，磁盘残留不该阻塞删除流程。
+
+    顺手连 ``_thumb`` 变体一起删：素材删了，它的缩略图不该变孤儿。缩略图固定是
+    ``.webp``（见 ``services/materials/store.py``），与主文件扩展名无关；别处这一步
+    就是查一个不存在的路径，没有副作用。
+    """
     if not is_safe_rel_path(rel_path):
         logger.warning("media blob delete skipped, unsafe rel_path: %r", rel_path)
         return
     path = (settings.upload_media_path / rel_path).resolve()
     try:
         path.unlink(missing_ok=True)
+        stem, _, _ = path.name.partition(".")
+        path.with_name(f"{stem}_thumb.webp").unlink(missing_ok=True)
     except OSError as exc:
         logger.warning("media blob delete failed: %s (%s)", path, exc)
 

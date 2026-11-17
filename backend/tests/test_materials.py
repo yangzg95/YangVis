@@ -11,11 +11,13 @@
 """
 from __future__ import annotations
 
+import io
 import json
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.orm import sessionmaker
 
@@ -201,6 +203,56 @@ def test_media_guard_reads_material_paths(tmp_path):
     assert media_store.read_blob(stored.rel_path) == PNG
 
 
+# ---- 缩略图 -----------------------------------------------------------------
+
+
+def _real_png(width: int = 2048, height: int = 1152) -> bytes:
+    """一张真的能被 Pillow 打开的图：首帧就是 2K PNG，缩略图要吃得住这个档。"""
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (18, 52, 86)).save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+def test_store_material_generates_a_webp_thumbnail_for_images(tmp_path):
+    """图片落盘顺手生成 320px 的 WebP 缩略图；视频不生成。
+
+    列表一屏几十张原图（每张好几 MB）同时进网络就是卡的根因；320px 的 WebP
+    一张几十 KB，差出两个数量级。视频走 ``preload=metadata`` 本来就只取首帧
+    元数据，没有全量字节的问题要解。
+    """
+    stored = store_material(OWNER, _real_png())
+
+    thumb = material_store.thumbnail_url(stored.rel_path, KIND_IMAGE)
+    assert thumb.startswith(f"/uploads/materials/{OWNER}/") and thumb.endswith("_thumb.webp")
+    rel_thumb = thumb.removeprefix("/uploads/")
+    with Image.open(tmp_path / rel_thumb) as image:
+        assert image.format == "WEBP"
+        assert image.size == (320, 180), "最长边压到 320，2048x1152 等比缩到 320x180"
+    # 缩略图是读方（StaticFiles）认的白名单形状，不能靠猜后缀挡掉。
+    assert media_store.is_safe_rel_path(rel_thumb)
+    assert media_store.read_blob(rel_thumb)[:4] == b"RIFF"
+    # 已在盘上时 ensure 只做一次 stat，不再动它。
+    assert material_store.ensure_thumbnail(stored.rel_path, KIND_IMAGE) == thumb
+
+    video = store_material(OWNER, MP4)
+    assert material_store.thumbnail_url(video.rel_path, KIND_VIDEO) == ""
+    assert material_store.ensure_thumbnail(video.rel_path, KIND_VIDEO) == ""
+
+
+def test_thumbnail_generation_falls_back_safely(tmp_path):
+    """魔数对但内容不是图的文件生成不了缩略图：退回空串让界面回退原图。
+
+    缩略图是提速件，坏了不该把列表也带走；盘上也不留半个文件。
+    """
+    stored = store_material(OWNER, PNG)
+
+    assert material_store.ensure_thumbnail(stored.rel_path, KIND_IMAGE) == ""
+    assert material_store.thumbnail_url(stored.rel_path, KIND_IMAGE) == ""
+    assert [p.name for p in (tmp_path / "materials" / str(OWNER)).iterdir()] == [
+        stored.rel_path.rsplit("/", 1)[-1]
+    ]
+
+
 # ---- 服务层 -----------------------------------------------------------------
 
 
@@ -290,6 +342,27 @@ def test_remove_deletes_the_row_and_unbinds_the_shots(db):
         _service(db).remove(gone.id)
 
 
+def test_tag_is_normalized_on_write_and_searchable(db):
+    """打标分组：空白即摘掉、超长即截断，名字与标签两条检索路都得能命中。"""
+    service = _service(db)
+    asset = _add(db)
+    assert asset.tag is None, "直接上传的素材没打标，列表按时间分组"
+
+    assert service.set_tag(asset.id, "  季度复盘  ").tag == "季度复盘"
+    # 空白标签归一回「没打标」：两种分组之间不留「空标签」这个第三态。
+    assert service.set_tag(asset.id, "   ").tag is None
+    assert service.set_tag(asset.id, "长" * 200).tag == "长" * 128
+
+    second = _add(db, "片头.mp4", MP4)
+    service.set_tag(second.id, "年度大片")
+    # 搜分组标签命中打标的那条，搜名字照旧命中名字那条。
+    assert [row.id for row in service.list_assets(keyword="年度大片")[0]] == [second.id]
+    assert [row.id for row in service.list_assets(keyword="片头")[0]] == [second.id]
+    # 越界的 id 读作不存在，与打错的 id 同一种答案。
+    with pytest.raises(LookupError):
+        service.set_tag(asset.id + 9999, "x")
+
+
 # ---- HTTP 层 ----------------------------------------------------------------
 
 
@@ -366,7 +439,75 @@ def test_another_account_cannot_delete_or_see(client_for):
     assert other.delete(f"/api/office/materials/{asset_id}").status_code == 404
 
 
+def test_tag_endpoint_updates_and_clears(client, db):
+    asset_id = client.post(
+        "/api/office/materials", files={"file": ("主角形象.png", PNG, "image/png")}
+    ).json()["data"]["id"]
+
+    body = client.put(f"/api/office/materials/{asset_id}/tag", json={"tag": "季度复盘"}).json()
+    assert body["message"] == "已更新分组"
+    assert body["data"]["tag"] == "季度复盘"
+    db.expire_all()
+    assert db.get(MaterialAsset, asset_id).tag == "季度复盘"
+
+    # 空白 = 摘掉标签，归回「按时间分组」那一边。
+    body = client.put(f"/api/office/materials/{asset_id}/tag", json={"tag": "  "}).json()
+    assert body["data"]["tag"] is None
+
+    assert client.put(
+        f"/api/office/materials/{asset_id + 9999}/tag", json={"tag": "x"}
+    ).status_code == 404
+
+
+def test_list_serves_the_thumbnail_url(client):
+    """列表出参带缩略图 URL：界面按它渲染，空串时自己回退原图。"""
+    client.post(
+        "/api/office/materials", files={"file": ("主角形象.png", _real_png(), "image/png")}
+    )
+
+    item = client.get("/api/office/materials").json()["data"]["items"][0]
+    assert item["thumb_url"].startswith(f"/uploads/materials/{OWNER}/")
+    assert item["thumb_url"].endswith("_thumb.webp")
+    assert item["tag"] is None
+
+
+def test_delete_http_removes_the_thumbnail_too(client, tmp_path):
+    """删素材得连缩略图一起删：留着就是没有任何一行数据库指向它的孤儿。"""
+    client.post(
+        "/api/office/materials", files={"file": ("主角形象.png", _real_png(), "image/png")}
+    )
+    data = client.get("/api/office/materials").json()["data"]
+    item = data["items"][0]
+    rel_path = item["url"].removeprefix("/uploads/")
+    rel_thumb = item["thumb_url"].removeprefix("/uploads/")
+    assert (tmp_path / rel_thumb).exists()
+
+    client.delete(f"/api/office/materials/{item['id']}")
+
+    assert not (tmp_path / rel_path).exists()
+    assert not (tmp_path / rel_thumb).exists()
+
+
 # ---- 旧参考图列的退役 ---------------------------------------------------------
+
+
+def test_migrate_backfills_the_tag_column(db, engine):
+    """升级前的库没有打标分组列：启动时补上，已有行读作 NULL（按时间分组）。
+
+    与下面那两条退役列同一个口径：create_all 看不见已存在的表的新列，幂等
+    ALTER 是旧库唯一的升级通道。
+    """
+    _add(db)
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE material_asset DROP COLUMN tag"))
+
+    bootstrap.migrate_schema()
+
+    assert "tag" in {column["name"] for column in inspect(engine).get_columns("material_asset")}
+    db.expire_all()
+    assert db.scalar(select(MaterialAsset)).tag is None
+    # 幂等：列已经在了，第二次启动是空操作。
+    bootstrap.migrate_schema()
 
 
 def _make_legacy_video_shape(db, engine):

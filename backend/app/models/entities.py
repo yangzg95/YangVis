@@ -1154,6 +1154,9 @@ class MaterialAsset(Base):
     # 不信任客户端报的 Content-Type。
     kind: Mapped[str] = mapped_column(String(8), nullable=False)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
+    # 分组标签（打标分组）：从短视频存进来的首帧自动打上项目名，其余由用户在素材库改。
+    # 空串一律归一成 NULL，界面上「没打标」与「打了标」是两种分组，不存在第三态。
+    tag: Mapped[str | None] = mapped_column(String(128), nullable=True)
     mime: Mapped[str] = mapped_column(String(64), nullable=False)
     size: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     rel_path: Mapped[str] = mapped_column(String(512), nullable=False)

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 
 from fastapi import (
     APIRouter,
@@ -38,10 +39,11 @@ from app.models.schemas import (
     CurrentUser,
     MaterialAssetOut,
     MaterialListOut,
+    MaterialTagIn,
 )
 from app.services.materials import MATERIAL_KINDS
 from app.services.materials.service import MaterialService
-from app.services.materials.store import store_material
+from app.services.materials.store import ensure_thumbnail, store_material, thumbnail_url
 from app.services.media import store
 from app.services.media.store import MediaFileError
 from app.services.uploads import (
@@ -69,15 +71,56 @@ def _not_found(exc: LookupError) -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
 
 
-def _out(asset) -> MaterialAssetOut:
+# 一页里当场生成缩略图的上限：每张几十毫秒，24 张是「最坏也就多等一秒」的档位。
+_THUMB_GEN_BUDGET = 24
+
+
+def _resolve_thumbs(rows) -> list[str]:
+    """按行的顺序解析缩略图 URL：已在盘上的直接给；缺的当场补最新的一批，剩下的
+    丢进后台线程慢慢补。
+
+    缺口只来自存量旧素材（新上传的在落盘时已经顺手生成过）。旧库第一次被读到时
+    全部当场补的话，几百张图能把一个列表请求拖成几十秒；按最新优先补一批，这一屏
+    最坏也就多等一秒，余下的在后台补完，下一次列表就全是纯静态文件的速度。后台
+    那一趟只碰文件（路径全部验过形状），不碰数据库，重复补同一张也只是同字节写两遍。
+    """
+    urls: list[str] = []
+    pending: list[tuple[str, str]] = []
+    budget = _THUMB_GEN_BUDGET
+    for row in rows:
+        rel, kind = str(row.rel_path or ""), str(row.kind or "")
+        url = thumbnail_url(rel, kind)
+        if url:
+            urls.append(url)
+        elif budget > 0:
+            budget -= 1
+            urls.append(ensure_thumbnail(rel, kind))
+        else:
+            urls.append("")
+            pending.append((rel, kind))
+    if pending:
+
+        def _backfill() -> None:
+            for rel, kind in pending:
+                ensure_thumbnail(rel, kind)
+
+        threading.Thread(target=_backfill, daemon=True).start()
+    return urls
+
+
+def _out(asset, thumb_url: str = "") -> MaterialAssetOut:
     return MaterialAssetOut(
         id=asset.id,
         kind=asset.kind,
         name=asset.name,
+        tag=asset.tag,
         mime=asset.mime,
         size=asset.size,
         # URL 由 rel_path 现拼：文件被手工挪走时这里给空串，界面按「素材已丢失」处理。
         url=store.resolve_url(asset.rel_path),
+        # 缩略图由调用方给（列表按预算批量解析，单条的场景传 ensure_thumbnail 的结果）；
+        # 空串时界面回退原图——提速件坏了不该把列表也带走。
+        thumb_url=thumb_url,
         created_at=asset.created_at,
     )
 
@@ -94,9 +137,10 @@ def list_materials(
     rows, total, bytes_total = service.list_assets(
         kind=kind if kind in MATERIAL_KINDS else None, keyword=q, limit=limit, offset=offset
     )
+    thumbs = _resolve_thumbs(rows)
     return APIResponse(
         data=MaterialListOut(
-            items=[_out(row) for row in rows],
+            items=[_out(row, thumb) for row, thumb in zip(rows, thumbs)],
             total=total,
             bytes_total=bytes_total,
             max_per_owner=settings.MATERIAL_MAX_PER_OWNER,
@@ -136,7 +180,33 @@ async def upload_material(
         # 落库没成功的话，刚才写下的文件就是孤儿，顺手清掉。
         store.delete_blob(stored.rel_path)
         return APIResponse(code=-1, message=str(exc))
-    return APIResponse(data=_out(asset), message="已存入素材库")
+    return APIResponse(
+        data=_out(
+            asset,
+            ensure_thumbnail(str(asset.rel_path or ""), str(asset.kind or "")),
+        ),
+        message="已存入素材库",
+    )
+
+
+@router.put("/{asset_id}/tag", response_model=APIResponse[MaterialAssetOut])
+def set_material_tag(
+    asset_id: int,
+    body: MaterialTagIn,
+    service: MaterialService = Depends(get_service),
+) -> APIResponse[MaterialAssetOut]:
+    """改一条素材的打标分组；空串摘掉标签，归一回「按时间分组」那一边。"""
+    try:
+        asset = service.set_tag(asset_id, body.tag)
+    except LookupError as exc:
+        raise _not_found(exc) from exc
+    return APIResponse(
+        data=_out(
+            asset,
+            ensure_thumbnail(str(asset.rel_path or ""), str(asset.kind or "")),
+        ),
+        message="已更新分组",
+    )
 
 
 @router.delete("/{asset_id}", response_model=APIResponse[None])

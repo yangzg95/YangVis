@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
@@ -32,6 +32,15 @@ MAX_PAGE_SIZE = 200
 
 # LIKE 通配符转义，与 services/note.py 同一张表：用户搜的 % 与 _ 是普通字符。
 _LIKE_ESCAPE = str.maketrans({"/": "//", "%": "/%", "_": "/_"})
+
+# 打标分组与名字同一长度上限：分组标题由它原样充当，再长只会把界面撑坏。
+_MAX_TAG_LEN = 128
+
+
+def _normalize_tag(value: str | None) -> str | None:
+    """空串归一成 ``None``：打了标与没打标是两种分组，不留给「空标签」第三态。"""
+    text = (value or "").strip()
+    return text[:_MAX_TAG_LEN] or None
 
 
 class MaterialService:
@@ -65,9 +74,12 @@ class MaterialService:
         stmt = self._scope(select(MaterialAsset))
         if kind in MATERIAL_KINDS:
             stmt = stmt.where(MaterialAsset.kind == kind)
-        term = (keyword or "").strip()
+        term = (keyword or "").strip().translate(_LIKE_ESCAPE)
         if term:
-            stmt = stmt.where(MaterialAsset.name.ilike(f"%{term.translate(_LIKE_ESCAPE)}%", escape="/"))
+            # 名字与打标分组一起搜：从短视频存进来的首帧名字是「项目名｜第 N 镜首帧」，
+            # 但打标分组才是它的检索键——搜项目名两条路都得能命中。
+            like = f"%{term}%"
+            stmt = stmt.where(or_(MaterialAsset.name.ilike(like, escape="/"), MaterialAsset.tag.ilike(like, escape="/")))
 
         total = int(self._db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
         rows = list(
@@ -93,11 +105,13 @@ class MaterialService:
 
     # -- 写 -------------------------------------------------------------------
 
-    def add(self, stored: StoredMaterial, name: str) -> MaterialAsset:
+    def add(self, stored: StoredMaterial, name: str, tag: str | None = None) -> MaterialAsset:
         """登记一条已落盘的素材；超量时拒绝，文件由调用方删。
 
-        视频素材在这里只是**被存下来**：本期的渲染只到首帧，参考视频要发给上游得靠
-        公网可达的媒体地址，那一条链路还没接通，所以界面与提示都要说清它现在的角色。
+        ``tag`` 是打标分组（可空）：短视频侧存首帧时自动打上项目名，直接上传的
+        由用户在素材库里补。视频素材在这里只是**被存下来**：本期的渲染只到首帧，
+        参考视频要发给上游得靠公网可达的媒体地址，那一条链路还没接通，所以界面
+        与提示都要说清它现在的角色。
         """
         count = int(
             self._db.scalar(
@@ -112,6 +126,7 @@ class MaterialService:
             owner_id=self._owner_id,
             kind=stored.kind,
             name=(name or "").strip()[:128] or stored.rel_path.rsplit("/", 1)[-1],
+            tag=_normalize_tag(tag),
             mime=stored.mime,
             size=stored.size,
             rel_path=stored.rel_path,
@@ -125,6 +140,17 @@ class MaterialService:
             self._owner_id,
             asset.kind,
             asset.size,
+        )
+        return asset
+
+    def set_tag(self, asset_id: int, tag: str | None) -> MaterialAsset:
+        """改一条素材的打标分组；空串按「摘掉标签」处理，归一回按时间分组。"""
+        asset = self.get_asset(asset_id)
+        asset.tag = _normalize_tag(tag)
+        self._db.commit()
+        self._db.refresh(asset)
+        logger.info(
+            "material tagged: id=%s owner=%s tag=%r", asset.id, self._owner_id, asset.tag
         )
         return asset
 

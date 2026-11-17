@@ -707,6 +707,7 @@ CREATE TABLE IF NOT EXISTS material_asset (
   owner_id   BIGINT       NOT NULL,
   kind       VARCHAR(8)   NOT NULL COMMENT 'image | video，由文件头魔数判定，不信客户端报的 Content-Type',
   name       VARCHAR(128) NOT NULL COMMENT '界面上看得出的名字，取自上传文件名；不参与任何路径拼接',
+  tag        VARCHAR(128) NULL     COMMENT '打标分组：从短视频存进来的首帧自动打上项目名，用户可改；NULL = 未打标',
   mime       VARCHAR(64)  NOT NULL,
   size       BIGINT       NOT NULL DEFAULT 0 COMMENT '字节数，页面用它报全库占用',
   rel_path   VARCHAR(512) NOT NULL COMMENT '相对 UPLOAD_MEDIA_DIR 的路径，URL 由它现拼（不入库，避免两份事实）',

@@ -3112,16 +3112,26 @@ class MaterialAssetOut(BaseModel):
     """素材库里的一条图片/视频素材。
 
     ``url`` 由 ``rel_path`` 现拼（不入库）：拼不出空串就说明文件已经不在盘上了，
-    这时候界面上给一张裂开的缩略图不如什么都不给。
+    这时候界面上给一张裂开的缩略图不如什么都不给。``thumb_url`` 同理由
+    ``rel_path`` 现拼，还多一层「没有就当场生成」——生成不了也是空串，界面回退
+    到 ``url``。``tag`` 是打标分组，``None`` 表示没打标（按时间分组展示）。
     """
 
     id: int
     kind: MaterialKind
     name: str
+    tag: Optional[str] = None
     mime: str = ""
     size: int = 0
     url: str = ""
+    thumb_url: str = ""
     created_at: Optional[datetime] = None
+
+
+class MaterialTagIn(BaseModel):
+    """改打标分组的一次请求正文。空串表示把标签摘掉，归一回「按时间分组」。"""
+
+    tag: str = Field(default="", max_length=128)
 
 
 class MaterialListOut(BaseModel):

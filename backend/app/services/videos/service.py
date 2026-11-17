@@ -870,7 +870,11 @@ class VideoService:
         # 读产物、落素材都是同步 IO，由线程池里的那个 def 端点调用。
         stored = store_material(self._owner_id, store.read_blob(str(job.rel_path)))
         try:
-            asset = self._materials().add(stored, f"{project.title}｜第 {row.sort_order} 镜首帧")
+            # 打标分组就是项目名：同一批存进来的首帧在素材库里按它聚成一组，
+            # 不用用户再去认哪几张是同一条片子的。名字保持原样，检索两条路都能走。
+            asset = self._materials().add(
+                stored, f"{project.title}｜第 {row.sort_order} 镜首帧", tag=project.title
+            )
         except ValueError:
             # 条数闸门拦下时文件已经在盘上了，留着就是没有任何一行数据库指向它的孤儿。
             store.delete_blob(stored.rel_path)

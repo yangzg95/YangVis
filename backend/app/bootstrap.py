@@ -478,6 +478,14 @@ def migrate_schema() -> None:
             )
         logger.info("added notify_huawei_config.service_account_enc")
 
+    # 素材库补打标分组列：从短视频存进来的首帧自动打上项目名，列表按标签分组展示。
+    # 新库随 create_all 已带此列，这里只给已存在的旧库补。
+    material_columns = column_names("material_asset")
+    if material_columns and "tag" not in material_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE material_asset ADD COLUMN tag VARCHAR(128) NULL"))
+        logger.info("added material_asset.tag")
+
     for table, retired in RETIRED_STATUS_COLUMNS.items():
         existing = column_names(table)
         for column in retired:

@@ -993,6 +993,8 @@ def test_save_frame_copies_the_artifact_into_the_library(db, tmp_path):
     assert (asset.owner_id, asset.kind, asset.size) == (OWNER, MATERIAL_IMAGE, len(PNG))
     # 名字由服务端按「项目 + 镜头号」给：界面上没有一个填名框，库里也就说得出这是哪一张。
     assert asset.name == "季度复盘三步｜第 1 镜首帧"
+    # 打标分组就是项目名：同一批存进来的首帧在素材库里按它聚成一组，不用用户再认。
+    assert asset.tag == "季度复盘三步"
     assert asset.rel_path.startswith(f"materials/{OWNER}/")
     assert (tmp_path / asset.rel_path).read_bytes() == PNG
     # 作业行一个字段都没改：这一镜的预览照旧指向产物，重做也不受影响。
