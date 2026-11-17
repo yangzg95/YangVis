@@ -267,9 +267,20 @@
                       </a-button>
                     </span>
                   </div>
-                  <a-button size="small" class="pick-material" @click="pickerOpen = true">
-                    <PictureOutlined /> {{ currentMaterials.length ? '改选' : '从素材库选择' }}
-                  </a-button>
+                  <a-space :size="8" wrap>
+                    <a-button size="small" class="pick-material" @click="pickerOpen = true">
+                      <PictureOutlined /> {{ currentMaterials.length ? '改选' : '从素材库选择' }}
+                    </a-button>
+                    <a-button
+                      v-if="shots.length > 1"
+                      size="small"
+                      :disabled="!currentMaterials.length"
+                      title="把这一镜已挑的参考素材复制到每个镜头；生成方式不变，保存后生效"
+                      @click="applyMaterialsToAll"
+                    >
+                      <CopyOutlined /> 套用到全部镜头
+                    </a-button>
+                  </a-space>
                   <div class="hint">
                     人物与场景的一致性靠它：最多 {{ MAX_REFS_PER_SHOT }} 条，来自账号级的素材库。
                     这一期只有图片类素材真的进首帧请求，视频类记下引用还不参与渲染。
@@ -1104,6 +1115,12 @@ const capacity = ref<MediaCapacityOut | null>(null)
 const storing = ref(false)
 /** 重做片段时把上一版成片当参考视频送上去。默认关：开着就拿不到「完全重来一版」了。 */
 const referencePrevious = ref(false)
+// 这枚勾选只对「已出过片的镜头」有意义，却是跨镜头常驻状态：在第一镜勾上后切到
+// 没出过片的镜头，残留的勾会让「渲片段」无声置灰（原因只挂在按钮 tooltip 上）。
+// 换镜头即复位，每一镜都从默认关开始；批量弹窗里那枚同名勾选绑同一变量，一并复位。
+watch(selected, () => {
+  referencePrevious.value = false
+})
 
 const current = computed(() => shots.value[selected.value])
 const dirty = computed(() => dirtyProject.value || dirtyShots.value)
@@ -1810,6 +1827,30 @@ function dropMaterial(id: string) {
   if (!current.value) return
   current.value.material_ids = current.value.material_ids.filter((item) => item !== id)
   markShotDirty()
+}
+
+/**
+ * 把这一镜的参考素材复制到全部镜头：跨镜人物/场景一致性的批量入口，免得一镜一镜挂。
+ * 只动 material_ids，生成方式（首帧/参考图/t2v）不跟着改——那是每镜各自的取舍。
+ */
+function applyMaterialsToAll() {
+  const ids = (current.value?.material_ids ?? []).slice(0, MAX_REFS_PER_SHOT)
+  if (!ids.length) {
+    message.warning('这一镜还没挑参考素材')
+    return
+  }
+  const others = shots.value.length - 1
+  Modal.confirm({
+    title: '把这一镜的参考素材套到全部镜头？',
+    content: `会覆盖其余 ${others} 个镜头已选的参考素材，生成方式保持不变；改动保存后才生效。`,
+    okText: '套用',
+    cancelText: '取消',
+    onOk: () => {
+      for (const shot of shots.value) shot.material_ids = [...ids]
+      markShotDirty()
+      message.success(`已套用到全部 ${shots.value.length} 个镜头，记得保存`)
+    },
+  })
 }
 
 function goToMaterials() {
