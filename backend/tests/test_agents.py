@@ -181,6 +181,16 @@ def test_feature_owned_personas_stay_out_of_the_picker():
     assert {agent.slug for agent in BUILTIN_AGENTS if agent.use_ops} == {"ops-assistant"}
 
 
+def test_video_storyboarder_declares_silence_when_dialogue_is_empty():
+    """空对白镜头只有 BGM：渲染端只吃 video_prompt，人设里必须强制声明无对白，
+    否则视频模型会让人物凭空对口型。"""
+    prompt = next(a for a in BUILTIN_AGENTS if a.slug == "video-storyboarder").system_prompt
+    assert "无对白" in prompt
+    assert "嘴唇" in prompt
+    # 不能把无人的空镜也套上闭嘴规则：那条只针对有人物出镜的镜头。
+    assert "看不到面部" in prompt
+
+
 def test_every_workflow_step_points_at_an_agent_that_exists():
     # 步骤里是一个裸字符串 agent_slug，没有任何静态引用会跟着改名一起红。
     from app.services.workflows.builtin import BUILTIN_WORKFLOWS
