@@ -593,6 +593,23 @@ def test_video_script_prompt_only_says_what_was_filled_in(db, model_call):
     assert "可用参考图" not in steps["script"].prompt
 
 
+def test_video_script_style_note_reaches_the_storyboarder(db, model_call):
+    """人物设定只喂策划师时，分镜师各镜各画一套衣服：风格段必须透到 script 步骤。"""
+    model_call({"video-briefer": BRIEF_OUTPUT, "video-storyboarder": SCRIPT_OUTPUT})
+    service = VideoService(db, OWNER)
+    project = _project(
+        db,
+        style={"visual_style": "", "persona": "贾经理，藏青西装不打领带", "palette": ""},
+    )
+
+    asyncio.run(service.run_script(project.id))
+    _read_after_engine_writes(db)
+
+    steps = _steps_of(db, _latest(db, project.id))
+    assert "全片风格" in steps["script"].prompt
+    assert "藏青西装" in steps["script"].prompt
+
+
 def test_video_script_never_sees_the_material_library(db, model_call):
     """库是账号级的，模型没有依据替人挑素材：重新生成脚本时也不给素材清单。
 

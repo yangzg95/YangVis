@@ -343,6 +343,9 @@ BUILTIN_WORKFLOWS: tuple[BuiltinWorkflow, ...] = (
                 prompt_tpl=(
                     "创作卡（钩子、结构、总时长按它执行，不要自己改）：\n"
                     "{{brief}}\n\n"
+                    # 风格段（含人物设定）此前只喂给策划师：分镜师看不到它，各镜
+                    # image_prompt 就会各画各的脸和衣服。空串时整段不渲染，与旧模板等价。
+                    "{{style_note}}"
                     "把它切成能直接送去生成的镜头：最多 {{max_shots}} 镜，产出分镜 JSON。"
                 ),
                 group_key="script",
