@@ -278,6 +278,9 @@ class Settings(BaseSettings):
     MATERIAL_MAX_IMAGE_BYTES: int = 10 * 1024 * 1024
     MATERIAL_MAX_VIDEO_BYTES: int = 50 * 1024 * 1024
     MATERIAL_MAX_PER_OWNER: int = 200
+    # 删除后的撤销窗口（秒）：这段时间里行与文件都还在，只是不再出现在列表里；
+    # 过期由列表请求顺手清理（懒清理，不引入后台任务）。
+    MATERIAL_TRASH_TTL_SECONDS: int = 600
     # 单条提示词长度上限。方舟的硬限制是中文 500 字 / 英文 1000 词，模型给的
     # 分镜提示词经常压线，超长在入队前截断并留痕，别让整个批量被一条 400 打断。
     VIDEO_MAX_PROMPT_CHARS: int = 480

@@ -3134,6 +3134,71 @@ class MaterialTagIn(BaseModel):
     tag: str = Field(default="", max_length=128)
 
 
+class MaterialRenameIn(BaseModel):
+    """给素材改名。名字是列表里唯一认得出的标签，空白名字不允许。"""
+
+    name: str = Field(min_length=1, max_length=128)
+
+
+class MaterialBatchTagIn(BaseModel):
+    """一批素材一次性改成同一个分组：整组改名不再发 N 次请求。"""
+
+    ids: List[int] = Field(min_length=1, max_length=200)
+    tag: str = Field(default="", max_length=128)
+
+
+class MaterialIdsIn(BaseModel):
+    """按 id 批量查询引用影响（删除前给用户看）。"""
+
+    ids: List[int] = Field(default_factory=list, max_length=200)
+
+
+class MaterialTagResult(BaseModel):
+    """批量分组后的最小回执：前端按 id 原地改标签，不必整页重取。"""
+
+    id: int
+    tag: Optional[str] = None
+
+
+class MaterialBatchTagOut(BaseModel):
+    items: List[MaterialTagResult] = Field(default_factory=list)
+
+
+class MaterialBatchDeleteOut(BaseModel):
+    """删除回执：删除先进回收期，``references`` 是仍在引用它的镜头数。
+
+    ``undo_seconds`` 由配置给出，界面照它说「N 分钟内可撤销」，不自己猜时限。
+    """
+
+    deleted: int = 0
+    references: int = 0
+    undo_seconds: int = 0
+
+
+class MaterialBatchRestoreOut(BaseModel):
+    """撤销删除的回执：真正恢复的条数（过期或超出账号上限的不在其中）。"""
+
+    restored: int = 0
+
+
+class MaterialUsageShot(BaseModel):
+    id: int
+    sort_order: int
+
+
+class MaterialUsageProject(BaseModel):
+    project_id: int
+    title: str
+    shots: List[MaterialUsageShot] = Field(default_factory=list)
+
+
+class MaterialUsageOut(BaseModel):
+    """一条素材被哪些短视频的哪些镜头引用：删除前的影响面。"""
+
+    asset_id: int
+    projects: List[MaterialUsageProject] = Field(default_factory=list)
+
+
 class MaterialListOut(BaseModel):
     """一屏素材 + 两个总量。
 
@@ -3146,6 +3211,8 @@ class MaterialListOut(BaseModel):
     total: int = 0
     bytes_total: int = 0
     max_per_owner: int = 0
+    # 删除后的撤销窗口：界面照它写「N 分钟内可撤销」，与后端配置同一口径。
+    trash_ttl_seconds: int = 0
 
 
 class MediaJobOut(BaseModel):

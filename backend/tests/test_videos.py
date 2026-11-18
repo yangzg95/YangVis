@@ -336,7 +336,37 @@ def test_script_inputs_only_attach_the_sections_that_exist(db):
     plain = _script_inputs(_project(db))
     assert plain["style_note"] == "" and plain["requirement_note"] == ""
     # 键名要跟内置流程声明一致，多一个少一个都在 create_run 那里当场报错。
-    assert set(plain) == {"idea", "platform_note", "style_note", "requirement_note", "max_shots"}
+    assert set(plain) == {
+        "idea",
+        "platform_note",
+        "style_note",
+        "requirement_note",
+        "brief_note",
+        "max_shots",
+    }
+    assert plain["brief_note"] == "", "没改过的创作卡不该被当成用户前提带进去"
+
+
+def test_confirmed_brief_note_carries_the_card_the_user_edited(db):
+    """创作卡被人改过时，重新生成要把这张卡带进策划那一步。"""
+    project = _project(db)
+    service = _service(db)
+    # 直接改项目上的卡，等价于工作台里编辑并保存。
+    service.update_project(
+        project.id,
+        brief={
+            "hook_type": "反差",
+            "hook": "月薪 3000 和 30000 的区别",
+            "structure": ["开场", "对比", "收束"],
+        },
+    )
+
+    note = service._confirmed_brief_note(service.get_project(project.id))
+
+    assert "钩子类型：反差" in note
+    assert "开头钩子：月薪 3000 和 30000 的区别" in note
+    assert "段落顺序：开场 → 对比 → 收束" in note
+    assert _script_inputs(service.get_project(project.id), note)["brief_note"] == note
 
 
 # ---- 模型输出的清洗 ----------------------------------------------------------

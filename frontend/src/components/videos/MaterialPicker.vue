@@ -19,7 +19,7 @@
           allow-clear
           size="small"
           class="picker-search"
-          placeholder="按名称搜"
+          placeholder="按名称或分组搜，回车确认"
           @press-enter="load"
         >
           <template #suffix><SearchOutlined @click="load" /></template>

@@ -312,6 +312,7 @@ BUILTIN_WORKFLOWS: tuple[BuiltinWorkflow, ...] = (
             BuiltinInput("platform_note", "平台与时长段落", required=False),
             BuiltinInput("style_note", "风格段落", required=False),
             BuiltinInput("requirement_note", "补充要求段落", required=False),
+            BuiltinInput("brief_note", "已确认的创作卡段落", required=False),
             BuiltinInput("max_shots", "镜头数上限"),
         ),
         steps=(
@@ -319,7 +320,7 @@ BUILTIN_WORKFLOWS: tuple[BuiltinWorkflow, ...] = (
                 key="brief",
                 agent_slug="video-briefer",
                 prompt_tpl=(
-                    "{{platform_note}}{{style_note}}{{requirement_note}}"
+                    "{{platform_note}}{{style_note}}{{requirement_note}}{{brief_note}}"
                     "想法：\n\"\"\"\n{{idea}}\n\"\"\"\n\n"
                     "请先定这条短视频的创作卡：把「凭什么让人看完」说清楚，产出 JSON。"
                 ),

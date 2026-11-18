@@ -163,11 +163,14 @@ def _style_note(style: Dict[str, Any]) -> str:
     return f"全片风格（每一镜的提示词都要贴住它）：{'；'.join(parts)}\n\n" if parts else ""
 
 
-def _script_inputs(project: VideoProject) -> Dict[str, str]:
+def _script_inputs(project: VideoProject, brief_note: str = "") -> Dict[str, str]:
     """把一行项目整理成那条流程声明的输入变量。
 
     「有风格才附风格」这类条件拼装留在代码里，模板只做替换（与幻灯片同一约定）；
     目标时长并进平台那一段，因为它们合起来就是「这条片子要发在哪、多长」。
+
+    ``brief_note`` 只在创作卡被人改过时才有内容：把命题带进这一轮，才让「先改
+    钩子再重新生成」真的按人定下来的方向切镜，而不是被模型再随机定一遍。
 
     键名必须与流程声明的一字不差：多一个少一个都在 ``create_run`` 那里当场报错，
     这是有意的——拼错的变量名静默消失，喂给模型的就是一段缺料的分镜。
@@ -183,8 +186,28 @@ def _script_inputs(project: VideoProject) -> Dict[str, str]:
         "requirement_note": (
             f"用户的补充要求：{project.requirement}\n\n" if project.requirement else ""
         ),
+        "brief_note": brief_note,
         "max_shots": str(settings.VIDEO_MAX_SHOTS),
     }
+
+
+# 创作卡里由人决定的字段。与上一轮策划产物不同，就说明这张卡是用户拍板的，
+# 重新生成时必须作为前提带进去；duration_s 除外——它另走一条独立参数。
+_BRIEF_FIELD_LABELS = {
+    "hook_type": "钩子类型",
+    "hook": "开头钩子",
+    "audience": "受众",
+    "goal": "目标",
+    "structure": "段落顺序",
+    "risk_notes": "风险提示",
+}
+
+
+def _brief_value(value: Any) -> Any:
+    """比对用的归一：空串与缺省视为同一值，段落列表按去空格后的元组比。"""
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item).strip() for item in value)
+    return str(value or "").strip()
 
 
 class VideoService:
@@ -395,12 +418,12 @@ class VideoService:
 
     # -- 脚本阶段 -------------------------------------------------------------
 
-    def _start_script_run(self, project: VideoProject) -> WorkflowRun:
+    def _start_script_run(self, project: VideoProject, brief_note: str = "") -> WorkflowRun:
         return start_builtin(
             self._db,
             self._owner_id,
             WORKFLOW_SCRIPT,
-            _script_inputs(project),
+            _script_inputs(project, brief_note),
             subject=(SUBJECT_VIDEO_PROJECT, project.id),
             subject_label=project.title,
         )
@@ -428,8 +451,37 @@ class VideoService:
             project.brief = merged
         self._db.commit()
         self._db.refresh(project)
-        self._start_script_run(project)
+        self._start_script_run(project, self._confirmed_brief_note(project))
         return project
+
+    def _confirmed_brief_note(self, project: VideoProject) -> str:
+        """用户改过的创作卡 → 一段给策划师的前提。
+
+        与最近一次成功策划的产物逐字段比对：一致说明这张卡是模型给的，重跑时
+        仍从零定；不一致才说明是人拍板的，必须带进这一轮。不这样区分，
+        「改完钩子直接重新生成」会被模型再随机定一遍，看起来就像白改。
+        """
+        current = VideoBrief(**(project.brief or {}))
+        run = latest_run(self._db, self._owner_id, SUBJECT_VIDEO_PROJECT, project.id)
+        produced = self._brief_of_run(run.id) if run else {}
+        lines: List[str] = []
+        for key, label in _BRIEF_FIELD_LABELS.items():
+            value = getattr(current, key)
+            if _brief_value(value) == _brief_value(produced.get(key)):
+                continue
+            if key == "structure":
+                text = " → ".join(item.strip() for item in value if str(item).strip())
+            else:
+                text = str(value or "").strip()
+            if text:
+                lines.append(f"{label}：{text}")
+        if not lines:
+            return ""
+        return (
+            "用户已确认的创作卡（这一版沿用这些选择，可以补细节，但不要推翻）：\n"
+            + "\n".join(lines)
+            + "\n\n"
+        )
 
     async def run_script(self, project_id: int) -> None:
         """后台任务体：跑发起时建好的那条运行，把两步产物落到项目与镜头行上。

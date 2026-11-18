@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -54,6 +55,7 @@ def _fake_settings(root, **overrides):
         "MATERIAL_MAX_IMAGE_BYTES": settings.MATERIAL_MAX_IMAGE_BYTES,
         "MATERIAL_MAX_VIDEO_BYTES": settings.MATERIAL_MAX_VIDEO_BYTES,
         "MATERIAL_MAX_PER_OWNER": settings.MATERIAL_MAX_PER_OWNER,
+        "MATERIAL_TRASH_TTL_SECONDS": settings.MATERIAL_TRASH_TTL_SECONDS,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -150,6 +152,15 @@ def _shot(db, project_id: int, material_ids: list[str]) -> VideoShot:
     db.add(row)
     db.commit()
     return row
+
+
+def _expire(db, *asset_ids: int) -> None:
+    """把删除时间调到撤销窗口之外：状态与「用户十小时前删的」一致。"""
+    for asset_id in asset_ids:
+        row = db.get(MaterialAsset, asset_id)
+        row.deleted_at = datetime(2000, 1, 1)
+    db.commit()
+    db.expire_all()
 
 
 # ---- 落盘 -------------------------------------------------------------------
@@ -322,24 +333,84 @@ def test_materials_for_tolerates_garbage_ids(db):
     assert set(_service(db).materials_for([str(asset.id), "不是数字", ""])) == {str(asset.id)}
 
 
-def test_remove_deletes_the_row_and_unbinds_the_shots(db):
-    """删素材得跟着解掉镜头引用：留着就是指向一个已经不存在的文件。"""
+def test_remove_moves_the_row_to_trash_and_keeps_the_shots(db):
+    """删除先进回收期：行、文件与镜头引用都原样留着，只是列表不再看它。
+
+    反过来先解绑的话，「撤销」就得把镜头引用一条条补回来，还不知道期间用户有没有
+    改过；把解绑推迟到过期清理那一刻，撤销就只剩一个字段。
+    """
     project = _project(db)
     gone = _add(db)
     kept = _add(db, "片头.mp4", MP4)
     first = _shot(db, project.id, [str(gone.id), str(kept.id)])
-    # 一条素材常被多镜复用（同一个人物形象贯穿全片），解绑要按引用逐条来。
+    # 一条素材常被多镜复用（同一个人物形象贯穿全片），引用数要按镜头逐条算。
     second = _shot(db, project.id, [str(gone.id)])
 
-    rel_path, unbound = _service(db).remove(gone.id)
+    references = _service(db).remove(gone.id)
 
-    assert (rel_path, unbound) == (gone.rel_path, 2)
-    assert db.get(MaterialAsset, gone.id) is None
+    assert references == 2
     db.expire_all()
-    assert first.material_ids == [str(kept.id)]
-    assert second.material_ids == []
+    row = db.get(MaterialAsset, gone.id)
+    assert row is not None and row.deleted_at is not None
+    assert first.material_ids == [str(gone.id), str(kept.id)]
+    assert second.material_ids == [str(gone.id)]
+    # 列表、计数与占用都不再算它：删掉一条就等于立刻腾出一个名额。
+    rows, total, bytes_total = _service(db).list_assets()
+    assert [item.id for item in rows] == [kept.id]
+    assert total == 1 and bytes_total == kept.size
+    # 已经删过的再删一次与不存在的 id 同一种答案。
     with pytest.raises(LookupError):
         _service(db).remove(gone.id)
+
+
+def test_restore_brings_a_trashed_asset_back(db):
+    asset = _add(db)
+    _service(db).remove(asset.id)
+    assert _service(db).list_assets()[1] == 0
+
+    assert _service(db).restore_many([asset.id]) == 1
+
+    assert [row.id for row in _service(db).list_assets()[0]] == [asset.id]
+    db.expire_all()
+    assert db.get(MaterialAsset, asset.id).deleted_at is None
+    # 已经在列表里的再恢复是空操作，不该报错，也不该重复计数。
+    assert _service(db).restore_many([asset.id]) == 0
+
+
+def test_purge_after_the_window_drops_the_row_file_and_references(db, tmp_path):
+    """过了撤销窗口：删行、删文件（含缩略图）、解掉镜头引用，一次做齐。"""
+    project = _project(db)
+    asset = _service(db).add(store_material(OWNER, _real_png()), "主角形象.png")
+    shot = _shot(db, project.id, [str(asset.id)])
+    rel_thumb = material_store.thumbnail_url(asset.rel_path, asset.kind).removeprefix("/uploads/")
+    assert (tmp_path / asset.rel_path).exists()
+    assert (tmp_path / rel_thumb).exists()
+
+    _service(db).remove(asset.id)
+    # 窗口内文件还在：撤销要能恢复到「和删之前一模一样」。
+    assert (tmp_path / asset.rel_path).exists()
+    assert (tmp_path / rel_thumb).exists()
+
+    _expire(db, asset.id)
+    assert _service(db).list_assets()[1] == 0, "列表顺手做懒清理"
+
+    db.expire_all()
+    assert db.get(MaterialAsset, asset.id) is None
+    assert db.get(VideoShot, shot.id).material_ids == []
+    assert not (tmp_path / asset.rel_path).exists()
+    assert not (tmp_path / rel_thumb).exists()
+
+
+def test_trash_frees_a_quota_slot_and_restore_respects_the_cap(db, tmp_path, monkeypatch):
+    """删掉就腾名额；名额被别人占了之后，撤销不能再把库撑过上限。"""
+    monkeypatch.setattr(material_service, "settings", _fake_settings(tmp_path, MATERIAL_MAX_PER_OWNER=1))
+    first = _add(db)
+    _service(db).remove(first.id)
+    _add(db, "新片头.png")
+
+    # 名额已满，这条留在回收期等过期清理，而不是把账号撑到 2 条。
+    assert _service(db).restore_many([first.id]) == 0
+    assert _service(db).list_assets()[1] == 1
 
 
 def test_tag_is_normalized_on_write_and_searchable(db):
@@ -400,7 +471,7 @@ def test_upload_rejects_an_image_over_its_own_gate(client, tmp_path, monkeypatch
     assert body["code"] == -1 and "超过" in body["message"]
 
 
-def test_delete_http_reports_the_unbinding(client, db):
+def test_delete_http_reports_the_references_and_the_undo_window(client, db):
     project = _project(db)
     asset_id = client.post(
         "/api/office/materials", files={"file": ("主角形象.png", PNG, "image/png")}
@@ -408,14 +479,17 @@ def test_delete_http_reports_the_unbinding(client, db):
     shot = _shot(db, project.id, [str(asset_id)])
 
     body = client.delete(f"/api/office/materials/{asset_id}").json()
-    assert body["message"] == "已删除，1 个镜头去掉这条引用"
+    assert body["message"] == "已删除，10 分钟内可撤销；1 个镜头还在引用"
+    # 回收期里引用不动，撤销才能原样回来。
     db.expire_all()
-    assert shot.material_ids == []
+    assert shot.material_ids == [str(asset_id)]
+    assert client.get("/api/office/materials").json()["data"]["total"] == 0
 
+    # 已删过的不再是删除目标。
     assert client.delete(f"/api/office/materials/{asset_id}").status_code == 404
 
 
-def test_delete_http_removes_the_file_too(client, tmp_path):
+def test_delete_http_keeps_the_file_during_the_undo_window(client, tmp_path):
     asset_id = client.post(
         "/api/office/materials", files={"file": ("主角形象.png", PNG, "image/png")}
     ).json()["data"]["id"]
@@ -426,7 +500,7 @@ def test_delete_http_removes_the_file_too(client, tmp_path):
 
     client.delete(f"/api/office/materials/{asset_id}")
 
-    assert not (tmp_path / rel_path).exists()
+    assert (tmp_path / rel_path).exists(), "撤销窗口内文件必须还在，否则撤销回来的是空壳"
 
 
 def test_another_account_cannot_delete_or_see(client_for):
@@ -471,8 +545,8 @@ def test_list_serves_the_thumbnail_url(client):
     assert item["tag"] is None
 
 
-def test_delete_http_removes_the_thumbnail_too(client, tmp_path):
-    """删素材得连缩略图一起删：留着就是没有任何一行数据库指向它的孤儿。"""
+def test_list_http_purges_expired_trash_and_its_thumbnail(client, db, tmp_path):
+    """过了撤销窗口的素材由下一次列表顺手清掉：行、缩略图、原图一起消失。"""
     client.post(
         "/api/office/materials", files={"file": ("主角形象.png", _real_png(), "image/png")}
     )
@@ -483,16 +557,142 @@ def test_delete_http_removes_the_thumbnail_too(client, tmp_path):
     assert (tmp_path / rel_thumb).exists()
 
     client.delete(f"/api/office/materials/{item['id']}")
+    _expire(db, item["id"])
+    assert client.get("/api/office/materials").json()["data"]["total"] == 0
 
+    db.expire_all()
+    assert db.get(MaterialAsset, item["id"]) is None
     assert not (tmp_path / rel_path).exists()
     assert not (tmp_path / rel_thumb).exists()
+
+
+# ---- 改名、批量操作与删除影响 -------------------------------------------------
+
+
+def test_rename_trims_and_rejects_blank_name(client, db):
+    asset_id = client.post(
+        "/api/office/materials", files={"file": ("主角形象.png", PNG, "image/png")}
+    ).json()["data"]["id"]
+
+    body = client.put(
+        f"/api/office/materials/{asset_id}/name", json={"name": "  主角三视图.png  "}
+    ).json()
+    assert body["message"] == "已重命名"
+    assert body["data"]["name"] == "主角三视图.png"
+    db.expire_all()
+    assert db.get(MaterialAsset, asset_id).name == "主角三视图.png"
+
+    # 空白名字拒绝：名字是列表里唯一认得出这条素材的东西。
+    assert client.put(
+        f"/api/office/materials/{asset_id}/name", json={"name": "   "}
+    ).status_code == 400
+    assert client.put(
+        f"/api/office/materials/{asset_id + 9999}/name", json={"name": "x"}
+    ).status_code == 404
+
+
+def test_batch_tag_updates_in_one_request(client, db):
+    ids = [
+        client.post(
+            "/api/office/materials", files={"file": (f"主角{i}.png", PNG, "image/png")}
+        ).json()["data"]["id"]
+        for i in range(2)
+    ]
+
+    body = client.post(
+        "/api/office/materials/batch-tag", json={"ids": ids, "tag": "季度复盘"}
+    ).json()
+    assert body["message"] == "已更新 2 条"
+    assert [item["tag"] for item in body["data"]["items"]] == ["季度复盘", "季度复盘"]
+    db.expire_all()
+    assert [db.get(MaterialAsset, asset_id).tag for asset_id in ids] == ["季度复盘", "季度复盘"]
+
+    # 空白 = 摘掉标签，与单条改分组同一口径。
+    body = client.post(
+        "/api/office/materials/batch-tag", json={"ids": ids, "tag": " "}
+    ).json()
+    assert [item["tag"] for item in body["data"]["items"]] == [None, None]
+    assert client.post(
+        "/api/office/materials/batch-tag", json={"ids": [], "tag": "x"}
+    ).status_code == 422
+
+
+def test_usage_lists_the_projects_and_shots_before_delete(client, db):
+    asset = _add(db)
+    project = _project(db)
+    _shot(db, project.id, [str(asset.id)])
+
+    body = client.post(
+        "/api/office/materials/usage", json={"ids": [asset.id]}
+    ).json()["data"][0]
+
+    assert body["asset_id"] == asset.id
+    assert body["projects"][0]["title"] == "季度复盘三步"
+    assert [shot["sort_order"] for shot in body["projects"][0]["shots"]] == [1]
+    # 没被引用的素材返回空影响面，界面照常显示「没有镜头引用」。
+    assert client.post(
+        "/api/office/materials/usage", json={"ids": [asset.id + 9999]}
+    ).json()["data"][0]["projects"] == []
+
+
+def test_batch_delete_trashes_and_restore_undoes_it(client, db):
+    assets = [
+        client.post(
+            "/api/office/materials", files={"file": (f"参考{i}.png", PNG, "image/png")}
+        ).json()["data"]["id"]
+        for i in range(2)
+    ]
+    project = _project(db)
+    shot = _shot(db, project.id, [str(asset_id) for asset_id in assets])
+
+    body = client.post(
+        "/api/office/materials/batch-delete", json={"ids": assets}
+    ).json()
+    assert body["data"] == {"deleted": 2, "references": 1, "undo_seconds": 600}
+    assert body["message"] == "已删除 2 条素材，10 分钟内可撤销；1 个镜头还在引用"
+    # 回收期内：行还在（只是带删除时间），镜头引用原样保留。
+    db.expire_all()
+    assert all(db.get(MaterialAsset, asset_id).deleted_at is not None for asset_id in assets)
+    assert db.get(VideoShot, shot.id).material_ids == [str(asset_id) for asset_id in assets]
+    assert client.get("/api/office/materials").json()["data"]["total"] == 0
+
+    restored = client.post(
+        "/api/office/materials/batch-restore", json={"ids": assets}
+    ).json()
+    assert restored["data"] == {"restored": 2}
+    assert restored["message"] == "已恢复 2 条素材"
+    assert client.get("/api/office/materials").json()["data"]["total"] == 2
+
+    # 再恢复一次没有可恢复的：列入列表的不算回收期内。
+    assert client.post(
+        "/api/office/materials/batch-restore", json={"ids": assets}
+    ).json()["data"] == {"restored": 0}
+
+
+def test_batch_delete_unbinds_only_after_the_window(client, db):
+    assets = [
+        client.post(
+            "/api/office/materials", files={"file": (f"参考{i}.png", PNG, "image/png")}
+        ).json()["data"]["id"]
+        for i in range(2)
+    ]
+    project = _project(db)
+    shot = _shot(db, project.id, [str(asset_id) for asset_id in assets])
+
+    client.post("/api/office/materials/batch-delete", json={"ids": assets})
+    _expire(db, *assets)
+    assert client.get("/api/office/materials").json()["data"]["total"] == 0
+
+    db.expire_all()
+    assert db.get(MaterialAsset, assets[0]) is None
+    assert db.get(VideoShot, shot.id).material_ids == []
 
 
 # ---- 旧参考图列的退役 ---------------------------------------------------------
 
 
 def test_migrate_backfills_the_tag_column(db, engine):
-    """升级前的库没有打标分组列：启动时补上，已有行读作 NULL（按时间分组）。
+    """升级前的库没有打标分组列与回收期列：启动时补上，已有行读作 NULL。
 
     与下面那两条退役列同一个口径：create_all 看不见已存在的表的新列，幂等
     ALTER 是旧库唯一的升级通道。
@@ -500,12 +700,16 @@ def test_migrate_backfills_the_tag_column(db, engine):
     _add(db)
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE material_asset DROP COLUMN tag"))
+        conn.execute(text("ALTER TABLE material_asset DROP COLUMN deleted_at"))
 
     bootstrap.migrate_schema()
 
-    assert "tag" in {column["name"] for column in inspect(engine).get_columns("material_asset")}
+    columns = {column["name"] for column in inspect(engine).get_columns("material_asset")}
+    assert {"tag", "deleted_at"} <= columns
     db.expire_all()
-    assert db.scalar(select(MaterialAsset)).tag is None
+    row = db.scalar(select(MaterialAsset))
+    assert row.tag is None
+    assert row.deleted_at is None, "存量行都在正常可见状态，不是待清理的回收期条目"
     # 幂等：列已经在了，第二次启动是空操作。
     bootstrap.migrate_schema()
 

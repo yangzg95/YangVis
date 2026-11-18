@@ -38,8 +38,16 @@ from app.models.schemas import (
     APIResponse,
     CurrentUser,
     MaterialAssetOut,
+    MaterialBatchDeleteOut,
+    MaterialBatchRestoreOut,
+    MaterialBatchTagIn,
+    MaterialBatchTagOut,
+    MaterialIdsIn,
     MaterialListOut,
+    MaterialRenameIn,
     MaterialTagIn,
+    MaterialTagResult,
+    MaterialUsageOut,
 )
 from app.services.materials import MATERIAL_KINDS
 from app.services.materials.service import MaterialService
@@ -69,6 +77,15 @@ def get_service(
 
 def _not_found(exc: LookupError) -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+
+def _undo_hint(seconds: int) -> str:
+    """把撤销窗口写成界面文案：整分钟就说分钟，否则说秒。"""
+    if seconds <= 0:
+        return "删除不可撤销"
+    if seconds % 60 == 0:
+        return f"{seconds // 60} 分钟内可撤销"
+    return f"{seconds} 秒内可撤销"
 
 
 # 一页里当场生成缩略图的上限：每张几十毫秒，24 张是「最坏也就多等一秒」的档位。
@@ -133,7 +150,7 @@ def list_materials(
     offset: int = Query(default=0, ge=0),
     service: MaterialService = Depends(get_service),
 ) -> APIResponse[MaterialListOut]:
-    """一屏素材 + 全库用量。``kind`` 不在白名单就按「全部」处理，不报错。"""
+    """一屏素材 + 全库用量。``kind`` 不在白名单就按「全部」处理，不报错；``q`` 同时搜名字与分组标签。"""
     rows, total, bytes_total = service.list_assets(
         kind=kind if kind in MATERIAL_KINDS else None, keyword=q, limit=limit, offset=offset
     )
@@ -144,6 +161,7 @@ def list_materials(
             total=total,
             bytes_total=bytes_total,
             max_per_owner=settings.MATERIAL_MAX_PER_OWNER,
+            trash_ttl_seconds=service.trash_ttl_seconds,
         )
     )
 
@@ -209,17 +227,102 @@ def set_material_tag(
     )
 
 
+@router.put("/{asset_id}/name", response_model=APIResponse[MaterialAssetOut])
+def rename_material(
+    asset_id: int,
+    body: MaterialRenameIn,
+    service: MaterialService = Depends(get_service),
+) -> APIResponse[MaterialAssetOut]:
+    """给素材改名；空名（含全空格）拒绝。"""
+    try:
+        asset = service.rename(asset_id, body.name)
+    except LookupError as exc:
+        raise _not_found(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return APIResponse(
+        data=_out(
+            asset,
+            ensure_thumbnail(str(asset.rel_path or ""), str(asset.kind or "")),
+        ),
+        message="已重命名",
+    )
+
+
+@router.post("/batch-tag", response_model=APIResponse[MaterialBatchTagOut])
+def batch_tag_materials(
+    body: MaterialBatchTagIn,
+    service: MaterialService = Depends(get_service),
+) -> APIResponse[MaterialBatchTagOut]:
+    """一批素材改成同一个分组：整组改名、批量整理都走这一条，不再逐条发请求。"""
+    try:
+        rows = service.set_tag_many(body.ids, body.tag)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return APIResponse(
+        data=MaterialBatchTagOut(
+            items=[MaterialTagResult(id=row.id, tag=row.tag) for row in rows]
+        ),
+        message=f"已更新 {len(rows)} 条" if rows else "没有找到要更新的素材",
+    )
+
+
+@router.post("/usage", response_model=APIResponse[list[MaterialUsageOut]])
+def material_usage(
+    body: MaterialIdsIn,
+    service: MaterialService = Depends(get_service),
+) -> APIResponse[list[MaterialUsageOut]]:
+    """删除前的影响面：每条素材被哪些项目的哪些镜头引用。
+
+    批量删除时把整批 id 一次带过来，返回与入参同序，界面按项目聚合即可。
+    """
+    return APIResponse(data=service.usage(body.ids))
+
+
+@router.post("/batch-delete", response_model=APIResponse[MaterialBatchDeleteOut])
+def batch_delete_materials(
+    body: MaterialIdsIn,
+    service: MaterialService = Depends(get_service),
+) -> APIResponse[MaterialBatchDeleteOut]:
+    """批量删除素材：先进回收期，窗口内可撤销；过期才删文件、解掉镜头引用。"""
+    deleted, references = service.remove_many(body.ids)
+    message = f"已删除 {deleted} 条素材，{_undo_hint(service.trash_ttl_seconds)}"
+    if references:
+        message += f"；{references} 个镜头还在引用"
+    return APIResponse(
+        data=MaterialBatchDeleteOut(
+            deleted=deleted,
+            references=references,
+            undo_seconds=service.trash_ttl_seconds,
+        ),
+        message=message,
+    )
+
+
+@router.post("/batch-restore", response_model=APIResponse[MaterialBatchRestoreOut])
+def restore_materials(
+    body: MaterialIdsIn,
+    service: MaterialService = Depends(get_service),
+) -> APIResponse[MaterialBatchRestoreOut]:
+    """撤销删除：把还在撤销窗口里的素材原样恢复。"""
+    restored = service.restore_many(body.ids)
+    return APIResponse(
+        data=MaterialBatchRestoreOut(restored=restored),
+        message=f"已恢复 {restored} 条素材" if restored else "没有可恢复的素材，可能已过撤销期限",
+    )
+
+
 @router.delete("/{asset_id}", response_model=APIResponse[None])
 def delete_material(
     asset_id: int,
     service: MaterialService = Depends(get_service),
 ) -> APIResponse[None]:
-    """删一条素材，并解掉引用它的镜头。"""
+    """删一条素材：先进回收期，窗口内可撤销；引用到期才解绑。"""
     try:
-        rel_path, unbound = service.remove(asset_id)
+        references = service.remove(asset_id)
     except LookupError as exc:
         raise _not_found(exc) from exc
-    if rel_path:
-        store.delete_blob(rel_path)
-    message = f"已删除，{unbound} 个镜头去掉这条引用" if unbound else "已删除"
+    message = f"已删除，{_undo_hint(service.trash_ttl_seconds)}"
+    if references:
+        message += f"；{references} 个镜头还在引用"
     return APIResponse(message=message)

@@ -74,7 +74,7 @@
           <a-space :size="4" wrap>
             <a-button size="small" type="link" @click="openWorkbench(record.id)">工作台</a-button>
             <a-popconfirm
-              title="重新生成会覆盖当前编辑过的分镜，确认继续？"
+              title="重新生成会整包替换创作卡、口播文案与全部分镜（含已保存内容），已渲出的首帧与片段将不再挂在新镜头上，确认继续？"
               ok-text="重新生成"
               cancel-text="取消"
               @confirm="onRegenerate(record)"

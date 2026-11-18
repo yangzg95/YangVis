@@ -30,6 +30,13 @@ export default defineConfig(({ mode }) => {
           target: env.VITE_API_TARGET || 'http://localhost:18099',
           changeOrigin: true,
         },
+        // 上传产物（短视频参考图、素材库缩略图）都是 /uploads/… 的站内同源路径：
+        // 生产环境前后端同源直接命中；开发环境不转发的话会被 SPA 回退吃掉，
+        // 页面上所有缩略图都是裂图。
+        '/uploads': {
+          target: env.VITE_API_TARGET || 'http://localhost:18099',
+          changeOrigin: true,
+        },
       },
     },
     build: {

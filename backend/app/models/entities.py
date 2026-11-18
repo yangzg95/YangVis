@@ -1160,6 +1160,10 @@ class MaterialAsset(Base):
     mime: Mapped[str] = mapped_column(String(64), nullable=False)
     size: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     rel_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    # 软删除：删除先进回收期，窗口内可原样恢复；过期由 service 懒清理（删行、
+    # 解掉镜头引用、删文件）。所有读路径、计数与上传闸门都只看 ``IS NULL`` 的行，
+    # 所以删掉一条素材等于立刻腾出一个名额。
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()

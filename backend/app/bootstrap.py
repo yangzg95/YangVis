@@ -486,6 +486,13 @@ def migrate_schema() -> None:
             conn.execute(text("ALTER TABLE material_asset ADD COLUMN tag VARCHAR(128) NULL"))
         logger.info("added material_asset.tag")
 
+    # 回收期列：删除改成「打上 deleted_at，窗口内可撤销」，过期才真删。
+    # NULL 表示正常可见，旧库补上后所有存量行都是 NULL，行为与删除功能上线前一致。
+    if material_columns and "deleted_at" not in material_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE material_asset ADD COLUMN deleted_at DATETIME NULL"))
+        logger.info("added material_asset.deleted_at")
+
     for table, retired in RETIRED_STATUS_COLUMNS.items():
         existing = column_names(table)
         for column in retired:

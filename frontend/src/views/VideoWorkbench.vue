@@ -354,6 +354,9 @@
 
               <div class="form-section">
                 <div class="form-section-title">创作卡</div>
+                <div class="hint section-hint">
+                  保存后，下一次「重新生成脚本」会按这张卡切分镜；没保存的改动不参与。
+                </div>
                 <a-row :gutter="12">
                   <a-col :span="12">
                     <a-form-item label="开头钩子">
@@ -454,7 +457,7 @@
                     @change="dirtyProject = true"
                   />
                   <div class="hint">
-                    这一期不做口播：这段是内容底稿，字幕用每一镜的「屏幕文字」。
+                    这一期不做口播：这段是成稿记录，不会反向影响重新生成；字幕用每一镜的「屏幕文字」。
                   </div>
                 </a-form-item>
                 <a-form-item label="画面风格">
@@ -481,7 +484,7 @@
                   />
                 </a-form-item>
                 <div class="hint style-hint">
-                  这三项是给策划师与分镜师的约束，改动要在下一次「重新生成脚本」才落到分镜上；
+                  这三项是给策划师与分镜师的约束：保存后，下一次「重新生成脚本」会带上它；
                   已经生成的镜头不会自动跟着变。
                 </div>
               </div>
@@ -843,10 +846,19 @@
         description="整批里有一个镜头缺提示词就会被服务端拒掉（不是跳过它），先补上或只勾选有提示词的镜头。"
       />
       <div class="toolbar toolbar--between toolbar--snug">
-        <span class="muted">不勾选表示渲染全部 {{ shots.length }} 镜</span>
-        <a-button v-if="picked.length" size="small" type="text" @click="picked = []">
-          清空勾选
-        </a-button>
+        <span :class="picked.length ? 'muted' : 'pick-empty'">
+          {{
+            picked.length
+              ? `已选 ${picked.length} / ${shots.length} 镜（默认全选，取消勾选即不渲染）`
+              : '还没选镜头：至少勾选一镜，或点右侧「全选」'
+          }}
+        </span>
+        <a-space :size="8">
+          <a-button size="small" type="text" @click="pickAllShots">全选</a-button>
+          <a-button v-if="picked.length" size="small" type="text" @click="picked = []">
+            全不选
+          </a-button>
+        </a-space>
       </div>
       <a-table
         :columns="renderColumns"
@@ -912,10 +924,19 @@
         <span class="muted">{{ referencePreviousHint }}</span>
       </div>
       <div class="toolbar toolbar--between toolbar--snug">
-        <span class="muted">不勾选表示渲染全部 {{ shots.length }} 镜</span>
-        <a-button v-if="picked.length" size="small" type="text" @click="picked = []">
-          清空勾选
-        </a-button>
+        <span :class="picked.length ? 'muted' : 'pick-empty'">
+          {{
+            picked.length
+              ? `已选 ${picked.length} / ${shots.length} 镜（默认全选，取消勾选即不渲染）`
+              : '还没选镜头：至少勾选一镜，或点右侧「全选」'
+          }}
+        </span>
+        <a-space :size="8">
+          <a-button size="small" type="text" @click="pickAllShots">全选</a-button>
+          <a-button v-if="picked.length" size="small" type="text" @click="picked = []">
+            全不选
+          </a-button>
+        </a-space>
       </div>
       <a-table
         :columns="clipColumns"
@@ -1162,11 +1183,9 @@ const scriptTotalText = computed(() => {
   if (run.elapsed_ms != null) return fmtElapsed(run.elapsed_ms)
   return run.started_at ? `已跑 ${fmtElapsed(liveMs(run.started_at))}` : '—'
 })
-/** 这次要发出去的镜头：一个都没勾就是全部——与后端「shot_ids 空表示全部」同一口径。 */
+/** 这次要发出去的镜头：只认显式勾选，打开确认屏时默认全选。 */
 const renderTargets = computed(() =>
-  picked.value.length
-    ? shots.value.filter((shot) => picked.value.includes(shot.id))
-    : shots.value,
+  shots.value.filter((shot) => picked.value.includes(shot.id)),
 )
 /** 只拦「这一批里真会发出去的」镜头：缺提示词时服务端整批拒，不是跳过它。 */
 const missingPromptInTarget = computed(() =>
@@ -1179,7 +1198,10 @@ const renderBlockHint = computed(() => {
   return ''
 })
 const renderOkDisabled = computed(
-  () => Boolean(renderBlockHint.value) || missingPromptInTarget.value.length > 0,
+  () =>
+    Boolean(renderBlockHint.value) ||
+    !renderTargets.value.length ||
+    missingPromptInTarget.value.length > 0,
 )
 /** 片段这一档的门槛：首帧那几条之外，还要有验证过的视频模型。 */
 const clipBlockHint = computed(() =>
@@ -1205,7 +1227,10 @@ const clipProblemsText = computed(
     '。整批里有一镜不合格就会被服务端拒掉（不是跳过它），先补齐或只勾选能发的镜头。',
 )
 const clipOkDisabled = computed(
-  () => Boolean(clipBlockHint.value) || clipProblemsInTarget.value.length > 0,
+  () =>
+    Boolean(clipBlockHint.value) ||
+    !renderTargets.value.length ||
+    clipProblemsInTarget.value.length > 0,
 )
 const clipCapacityHint = computed(() => {
   const video = (capacity.value?.jobs ?? []).find((item) => item.kind === 'video')
@@ -1552,7 +1577,7 @@ function projectPayload() {
   }
 }
 
-async function onSave() {
+async function onSave(): Promise<boolean> {
   saving.value = true
   try {
     let detail = await videosApi.save(projectId.value, projectPayload())
@@ -1560,25 +1585,30 @@ async function onSave() {
     // 用服务端规范化的结果对齐：新镜的 id、夹过的时长、截过的提示词都在它那份里。
     applyDetail(detail)
     message.success('已保存')
+    return true
   } catch (err) {
     message.error(errorText(err, '保存失败'))
+    return false
   } finally {
     saving.value = false
   }
 }
 
 function onRegenerate() {
-  if (dirty.value) {
-    Modal.confirm({
-      title: '重新生成脚本会覆盖当前分镜',
-      content: '创作卡、口播文案与全部镜头都会被这一轮的结果整包替换，未保存的改动会丢掉。',
-      okText: '重新生成',
-      cancelText: '取消',
-      onOk: () => doRegenerate(),
-    })
-    return
-  }
-  void doRegenerate()
+  const replaces = shots.value.length
+    ? `创作卡、口播文案与 ${shots.value.length} 个已保存镜头都会被这一轮的结果整包替换，已渲出的首帧与片段将不再挂在新镜头上。`
+    : '创作卡与口播文案都会被这一轮的结果整包替换。'
+  Modal.confirm({
+    title: dirty.value ? '保存并重新生成脚本' : '重新生成脚本',
+    content: dirty.value ? `会先保存当前改动，再用它重新生成；${replaces}` : replaces,
+    okText: dirty.value ? '保存并重新生成' : '重新生成',
+    cancelText: '取消',
+    async onOk() {
+      // 保存失败就别继续：带着旧的项目字段去重生成，等于把用户刚改的东西丢掉。
+      if (dirty.value && !(await onSave())) return
+      await doRegenerate()
+    },
+  })
 }
 
 async function doRegenerate() {
@@ -1595,8 +1625,12 @@ async function doRegenerate() {
   }
 }
 
+function pickAllShots() {
+  picked.value = shots.value.map((shot) => shot.id)
+}
+
 async function openRender() {
-  picked.value = []
+  pickAllShots()
   renderModal.value = true
   try {
     capacity.value = await videosApi.capacity()
@@ -1611,12 +1645,9 @@ function onPick(keys: (string | number)[]) {
 }
 
 async function onRenderConfirm() {
+  if (!picked.value.length) return
   try {
-    const detail = await videosApi.renderFrames(
-      projectId.value,
-      // 不勾表示全部：服务端把空数组当成「项目里全部镜头」。
-      picked.value.length ? picked.value : [],
-    )
+    const detail = await videosApi.renderFrames(projectId.value, picked.value)
     applyDetail(detail)
     renderModal.value = false
     message.success('已开始渲染首帧，出片需要几十秒到几分钟')
@@ -1648,17 +1679,17 @@ async function loadCapacity() {
 }
 
 async function openClipRender() {
-  picked.value = []
+  pickAllShots()
   clipModal.value = true
   await loadCapacity()
 }
 
 async function onClipConfirm() {
+  if (!picked.value.length) return
   try {
     const detail = await videosApi.renderClips(
       projectId.value,
-      // 不勾表示全部：服务端把空数组当成「项目里全部镜头」。
-      picked.value.length ? picked.value : [],
+      picked.value,
       referencePrevious.value,
     )
     applyDetail(detail)
@@ -2253,6 +2284,15 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
 
 .style-hint {
   margin: -6px 0 12px;
+}
+
+.section-hint {
+  margin: -4px 0 10px;
+}
+
+/* 一镜都没勾时把提示染成警示色，避免用户点了灰按钮却不知道为什么。 */
+.pick-empty {
+  color: var(--warning, #d48806);
 }
 
 .cover-meta {
