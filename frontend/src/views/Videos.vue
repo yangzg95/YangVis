@@ -29,9 +29,43 @@
     </a-alert>
 
     <div class="toolbar toolbar--between toolbar--snug">
-      <span class="muted">
-        共 {{ projects.length }} 条片子；一条想法进来，先出创作卡与分镜，再逐镜渲首帧
-      </span>
+      <a-space :size="12" wrap>
+        <span class="muted">
+          {{ filteredProjects.length === projects.length
+            ? `共 ${projects.length} 条片子`
+            : `筛出 ${filteredProjects.length} / ${projects.length} 条片子` }}
+        </span>
+        <a-select v-model:value="lifecycleFilter" size="small" class="lifecycle-filter">
+          <a-select-option value="">全部制作进度</a-select-option>
+          <a-select-opt-group label="脚本">
+            <a-select-option value="script:pending">待生成</a-select-option>
+            <a-select-option value="script:active">生成中</a-select-option>
+            <a-select-option value="script:done">已生成</a-select-option>
+            <a-select-option value="script:attention">脚本失败</a-select-option>
+          </a-select-opt-group>
+          <a-select-opt-group label="首帧">
+            <a-select-option value="frames:pending">待渲染</a-select-option>
+            <a-select-option value="frames:active">渲染中</a-select-option>
+            <a-select-option value="frames:partial">部分完成</a-select-option>
+            <a-select-option value="frames:done">已完成</a-select-option>
+            <a-select-option value="frames:attention">需处理</a-select-option>
+          </a-select-opt-group>
+          <a-select-opt-group label="片段">
+            <a-select-option value="clips:pending">待渲染</a-select-option>
+            <a-select-option value="clips:active">渲染中</a-select-option>
+            <a-select-option value="clips:partial">部分完成</a-select-option>
+            <a-select-option value="clips:done">已完成</a-select-option>
+            <a-select-option value="clips:attention">需处理</a-select-option>
+          </a-select-opt-group>
+          <a-select-opt-group label="成片">
+            <a-select-option value="publish:blocked">待片段</a-select-option>
+            <a-select-option value="publish:pending">待合成</a-select-option>
+            <a-select-option value="publish:active">合成中</a-select-option>
+            <a-select-option value="publish:done">已合成</a-select-option>
+            <a-select-option value="publish:attention">合成失败</a-select-option>
+          </a-select-opt-group>
+        </a-select>
+      </a-space>
       <a-button type="primary" :disabled="!chatReady" @click="openCreate">
         <PlusOutlined /> 新建短视频
       </a-button>
@@ -39,7 +73,7 @@
 
     <a-table
       :columns="columns"
-      :data-source="projects"
+      :data-source="filteredProjects"
       :loading="loading"
       row-key="id"
       size="middle"
@@ -58,13 +92,33 @@
             {{ record.duration_s }} 秒
           </div>
         </template>
-        <template v-else-if="column.key === 'status'">
-          <!-- 状态是从认领这条片子的运行翻译出来的，点它直接看那次运行的现场。 -->
+        <template v-else-if="column.key === 'script'">
+          <!-- 脚本状态来自认领这条片子的运行，点它直接看那次运行的现场。 -->
           <a-tooltip :title="statusHint(record.status, record.error_msg)">
-            <a-tag :color="statusColor(record.status)" class="run-tag" @click="openRuns(record)">
+            <a-tag
+              :color="lifecycleFor(record, 'script').color"
+              class="run-tag"
+              @click="openRuns(record)"
+            >
               <LoadingOutlined v-if="record.status === 'analyzing'" />
-              {{ statusText(record.status) }}
+              {{ lifecycleFor(record, 'script').text }}
             </a-tag>
+          </a-tooltip>
+        </template>
+        <template v-else-if="['frames', 'clips', 'publish'].includes(column.key)">
+          <a-tooltip :title="lifecycleFor(record, column.key).hint">
+            <div class="lifecycle-cell">
+              <a-tag :color="lifecycleFor(record, column.key).color">
+                <LoadingOutlined v-if="lifecycleFor(record, column.key).state === 'active'" />
+                {{ lifecycleFor(record, column.key).text }}
+              </a-tag>
+              <div v-if="lifecycleFor(record, column.key).detail" class="stage-detail">
+                {{ lifecycleFor(record, column.key).detail }}
+                <span v-if="lifecycleFor(record, column.key).attention" class="stage-attention">
+                  · {{ lifecycleFor(record, column.key).attention }} 需处理
+                </span>
+              </div>
+            </div>
           </a-tooltip>
         </template>
         <template v-else-if="column.key === 'updated_at'">
@@ -93,7 +147,7 @@
               cancel-text="取消"
               @confirm="onRemove(record)"
             >
-              <a-button size="small" type="link" danger :disabled="record.status === 'analyzing'">
+              <a-button size="small" type="link" danger :disabled="hasActiveVideoWork(record)">
                 删除
               </a-button>
             </a-popconfirm>
@@ -101,7 +155,12 @@
         </template>
       </template>
       <template #emptyText>
-        <a-empty :image="simpleEmpty" description="还没有短视频，写一句想法生成第一版分镜" />
+        <a-empty
+          :image="simpleEmpty"
+          :description="lifecycleFilter
+            ? '没有符合当前制作进度的短视频'
+            : '还没有短视频，写一句想法生成第一版分镜'"
+        />
       </template>
     </a-table>
 
@@ -171,7 +230,7 @@
 </template>
 
 <script setup lang="ts">
-import { h, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, h, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { LoadingOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import { Button, Empty, message, notification } from 'ant-design-vue'
@@ -187,11 +246,16 @@ import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
 import { errorText } from '@/utils/errors'
 import { fmtDateTime } from '@/utils/format'
 import { createPollLoop } from '@/utils/polling'
+import {
+  hasActiveVideoWork,
+  matchesVideoLifecycle,
+  videoLifecycleStage,
+  type VideoLifecycleStage,
+} from '@/utils/videoLifecycle'
 
-// 智能应用 · 短视频列表：一句想法进来 → 后台跑创作卡与分镜 → 进工作台逐镜调 → 渲首帧。
-// 脚本阶段不在本页等：两步流程各要一次模型调用，几十秒起步，后端把它交给后台任务，
-// 这里落一行 analyzing 记录后靠轮询跟随，与幻灯片同一形态。
-// 渲染阶段不进这张表：它在 media_job 上，只有工作台需要看。
+// 智能应用 · 短视频列表：脚本、首帧、片段与成片各有事实源，本页只做摘要。
+// 脚本沿用工作流状态；首帧与片段汇总当前镜头的 media_job；成片取最近 publish_job。
+// 任何阶段还在活动都继续轮询，但筛选只改变展示，不影响完整列表的进度跟随。
 
 const router = useRouter()
 const simpleEmpty = Empty.PRESENTED_IMAGE_SIMPLE
@@ -200,11 +264,18 @@ const projects = ref<VideoProjectItem[]>([])
 const loading = ref(false)
 const chatReady = ref(true)
 const imageReady = ref(true)
+const lifecycleFilter = ref('')
+const filteredProjects = computed(() =>
+  projects.value.filter((item) => matchesVideoLifecycle(item, lifecycleFilter.value)),
+)
 
 const columns = [
   { key: 'cover', title: '封面', width: 72 },
-  { key: 'title', title: '片子', dataIndex: 'title', ellipsis: true },
-  { key: 'status', title: '状态', dataIndex: 'status', width: 110 },
+  { key: 'title', title: '片子', dataIndex: 'title', ellipsis: true, width: 260 },
+  { key: 'script', title: '脚本', dataIndex: 'status', width: 110 },
+  { key: 'frames', title: '首帧', width: 140 },
+  { key: 'clips', title: '片段', width: 140 },
+  { key: 'publish', title: '成片', width: 120 },
   { key: 'updated_at', title: '更新时间', dataIndex: 'updated_at', width: 180 },
   { key: 'actions', title: '操作', width: 230 },
 ]
@@ -215,6 +286,10 @@ const runsSubject = ref<WorkflowRunSubject | null>(null)
 function openRuns(record: VideoProjectItem) {
   runsSubject.value = { kind: 'video-project', ref: record.id, label: record.title }
   runsOpen.value = true
+}
+
+function lifecycleFor(record: VideoProjectItem, key: string) {
+  return videoLifecycleStage(record, key as VideoLifecycleStage)
 }
 
 /** 状态标签的悬浮说明：失败时先给原因，再告诉这点会开什么。 */
@@ -294,13 +369,13 @@ function notifyFinished(item: VideoProjectItem) {
   }
 }
 
-// 脚本生成是后台任务，列表靠轮询跟随；失败退避、页面隐藏暂停见 utils/polling.ts。
+// 四个阶段都可能后台推进；失败退避、页面隐藏暂停见 utils/polling.ts。
 const pollLoop = createPollLoop(load, {
-  shouldContinue: () => projects.value.some((item) => item.status === 'analyzing'),
+  shouldContinue: () => projects.value.some(hasActiveVideoWork),
 })
 
 function syncPolling() {
-  if (projects.value.some((item) => item.status === 'analyzing')) pollLoop.start()
+  if (projects.value.some(hasActiveVideoWork)) pollLoop.start()
   else pollLoop.stop()
 }
 
@@ -376,18 +451,6 @@ function platformText(platform: VideoPlatform | string): string {
   return { douyin: '抖音', kuaishou: '快手', other: '通用' }[platform] || platform
 }
 
-function statusText(status: VideoProjectStatus | string): string {
-  return (
-    { uploaded: '待生成', analyzing: '生成中', ready: '已生成', error: '失败' }[status] || status
-  )
-}
-
-function statusColor(status: VideoProjectStatus | string): string {
-  return { uploaded: 'default', analyzing: 'processing', ready: 'success', error: 'error' }[
-    status
-  ] || 'default'
-}
-
 onMounted(() => {
   void Promise.all([loadReadiness(), load()])
 })
@@ -397,6 +460,8 @@ onDeactivated(() => pollLoop.stop())
 
 onActivated(() => {
   syncPolling()
+  // 从工作台返回时立即带出最新渲染进度；首次 mounted 正在加载时不重复请求。
+  if (!loading.value) void load()
   void loadReadiness()
 })
 
@@ -434,6 +499,31 @@ onUnmounted(() => pollLoop.stop())
   color: var(--text-3);
   font-size: var(--fs-xs);
   margin-top: 2px;
+}
+
+.lifecycle-filter {
+  width: 190px;
+  text-align: left;
+}
+
+.lifecycle-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.lifecycle-cell :deep(.ant-tag) {
+  margin-inline-end: 0;
+}
+
+.stage-detail {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
+.stage-attention {
+  color: var(--danger, #cf1322);
 }
 
 .create-form :deep(.ant-form-item) {

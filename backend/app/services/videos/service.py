@@ -52,6 +52,7 @@ from app.models.schemas import (
     VideoScriptRunOut,
     VideoScriptStepOut,
     VideoShotOut,
+    VideoStageProgress,
     VideoStyle,
 )
 from app.services.agent_run import model_error_text, require_chat_model
@@ -59,6 +60,9 @@ from app.services.media import (
     BIZ_VIDEO_COVER,
     BIZ_VIDEO_SHOT,
     JOB_ACTIVE_STATES,
+    JOB_CANCELLED,
+    JOB_EXPIRED,
+    JOB_FAILED,
     JOB_FINAL_STATES,
     JOB_SUCCEEDED,
     KIND_IMAGE,
@@ -1014,16 +1018,8 @@ class VideoService:
         return job
 
     def latest_publish_job(self, project_id: int) -> Optional[PublishJob]:
-        """项目最近一次发布作业（任何状态）；详情接口只带这一条，历史都在表里。"""
-        return self._db.scalar(
-            select(PublishJob)
-            .where(
-                PublishJob.owner_id == self._owner_id,
-                PublishJob.project_id == project_id,
-            )
-            .order_by(PublishJob.id.desc())
-            .limit(1)
-        )
+        """项目最近一次发布作业（任何状态）；历史都留在表里。"""
+        return self._latest_publish_jobs([project_id]).get(project_id)
 
     def capacity(self) -> List[MediaCapacityItem]:
         """这个账号现在各类作业占着几个位子、还能塞几个——渲染前那屏确认要用它。"""
@@ -1078,16 +1074,48 @@ class VideoService:
         ).all()
         return {str(job.biz_id): job for job in rows}
 
-    def _shot_stats(self, project_ids: Sequence[int]) -> Dict[int, tuple[int, int]]:
-        """一次查询取回每个项目的镜头数与总时长，列表页不是每行查两次。"""
+    def _production_stats(
+        self, project_ids: Sequence[int]
+    ) -> Dict[int, tuple[tuple[int, int], VideoStageProgress, VideoStageProgress]]:
+        """一次取回当前镜头及其最新作业，镜头数、时长和两阶段进度共用这份事实。"""
         if not project_ids:
             return {}
-        rows = self._db.execute(
-            select(VideoShot.project_id, func.count(VideoShot.id), func.sum(VideoShot.duration_s))
-            .where(VideoShot.owner_id == self._owner_id, VideoShot.project_id.in_(project_ids))
-            .group_by(VideoShot.project_id)
+        rows = list(
+            self._db.scalars(
+                select(VideoShot).where(
+                    VideoShot.owner_id == self._owner_id,
+                    VideoShot.project_id.in_(project_ids),
+                )
+            ).all()
+        )
+        jobs = self._latest_jobs(
+            [row.image_job_id for row in rows] + [row.video_job_id for row in rows]
+        )
+        grouped: Dict[int, List[VideoShot]] = {project_id: [] for project_id in project_ids}
+        for row in rows:
+            grouped[row.project_id].append(row)
+        return {
+            project_id: (
+                (len(items), sum(item.duration_s for item in items)),
+                _stage_progress(items, jobs, KIND_IMAGE),
+                _stage_progress(items, jobs, KIND_VIDEO),
+            )
+            for project_id, items in grouped.items()
+        }
+
+    def _latest_publish_jobs(self, project_ids: Sequence[int]) -> Dict[int, PublishJob]:
+        """每个项目只留最近一次发布作业，列表与详情使用同一口径。"""
+        if not project_ids:
+            return {}
+        rows = self._db.scalars(
+            select(PublishJob)
+            .where(
+                PublishJob.owner_id == self._owner_id,
+                PublishJob.project_id.in_(project_ids),
+            )
+            .order_by(PublishJob.id)
         ).all()
-        return {int(pid): (int(count), int(total or 0)) for pid, count, total in rows}
+        return {job.project_id: job for job in rows}
 
     def _item_of(
         self,
@@ -1095,6 +1123,9 @@ class VideoService:
         run: Optional[WorkflowRun],
         stats: tuple[int, int],
         cover: Optional[MediaJob],
+        frames: VideoStageProgress,
+        clips: VideoStageProgress,
+        publish: Optional[PublishJob],
     ) -> VideoProjectItem:
         # idle 用 uploaded：项目一创建就带着一条脚本运行，走到「没有运行又没有镜头」
         # 的只剩运行记录被清掉那一种存量行。
@@ -1110,32 +1141,50 @@ class VideoService:
             shot_count=stats[0],
             duration_s=stats[1],
             cover_url=store.resolve_url(cover.rel_path or "") if cover else "",
+            frames=frames,
+            clips=clips,
+            publish_job=_publish_out(publish),
             created_at=project.created_at,
             updated_at=project.updated_at,
         )
 
     def to_item(self, project: VideoProject) -> VideoProjectItem:
+        stats, frames, clips = self._production_stats([project.id]).get(
+            project.id, ((0, 0), VideoStageProgress(), VideoStageProgress())
+        )
         return self._item_of(
             project,
             latest_run(self._db, self._owner_id, SUBJECT_VIDEO_PROJECT, project.id),
-            self._shot_stats([project.id]).get(project.id, (0, 0)),
+            stats,
             self._cover_jobs([project.id]).get(str(project.id)),
+            frames,
+            clips,
+            self.latest_publish_job(project.id),
         )
 
     def to_items(self, projects: List[VideoProject]) -> List[VideoProjectItem]:
         ids = [project.id for project in projects]
         runs = latest_runs(self._db, self._owner_id, SUBJECT_VIDEO_PROJECT, ids)
-        stats = self._shot_stats(ids)
+        production = self._production_stats(ids)
         covers = self._cover_jobs(ids)
-        return [
-            self._item_of(
-                project,
-                runs.get(str(project.id)),
-                stats.get(project.id, (0, 0)),
-                covers.get(str(project.id)),
+        publishes = self._latest_publish_jobs(ids)
+        items = []
+        for project in projects:
+            stats, frames, clips = production.get(
+                project.id, ((0, 0), VideoStageProgress(), VideoStageProgress())
             )
-            for project in projects
-        ]
+            items.append(
+                self._item_of(
+                    project,
+                    runs.get(str(project.id)),
+                    stats,
+                    covers.get(str(project.id)),
+                    frames,
+                    clips,
+                    publishes.get(project.id),
+                )
+            )
+        return items
 
     def to_detail(self, project: VideoProject) -> VideoProjectDetail:
         rows = self.shots_of(project.id)
@@ -1149,6 +1198,9 @@ class VideoService:
             run,
             (len(rows), sum(row.duration_s for row in rows)),
             cover,
+            _stage_progress(rows, jobs, KIND_IMAGE),
+            _stage_progress(rows, jobs, KIND_VIDEO),
+            self.latest_publish_job(project.id),
         )
         stored = {
             key: value
@@ -1200,7 +1252,6 @@ class VideoService:
                 for row in rows
             ],
             script_run=self._script_run_out(run),
-            publish_job=_publish_out(self.latest_publish_job(project.id)),
         )
 
     def _script_run_out(self, run: Optional[WorkflowRun]) -> Optional[VideoScriptRunOut]:
@@ -1228,6 +1279,30 @@ class VideoService:
                 for row in rows
             ],
         )
+
+
+def _stage_progress(
+    rows: Sequence[VideoShot], jobs: Dict[int, MediaJob], kind: str
+) -> VideoStageProgress:
+    """只数镜头当前指向的作业；重做前的历史行不再代表这条片子的现状。"""
+    progress = VideoStageProgress(total=len(rows))
+    for row in rows:
+        job_id = row.image_job_id if kind == KIND_IMAGE else row.video_job_id
+        job = jobs.get(job_id) if job_id else None
+        if job is None:
+            continue
+        if job.status == JOB_SUCCEEDED:
+            progress.succeeded += 1
+        elif job.status == JOB_FAILED:
+            progress.failed += 1
+        elif job.status == JOB_CANCELLED:
+            progress.cancelled += 1
+        elif job.status == JOB_EXPIRED:
+            progress.expired += 1
+        elif job.status not in JOB_FINAL_STATES:
+            # queued 也算活动：它还在本地等待提交，列表需要继续轮询。
+            progress.active += 1
+    return progress
 
 
 def _job_out(job: Optional[MediaJob]) -> Optional[MediaJobOut]:

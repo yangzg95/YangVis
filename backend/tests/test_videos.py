@@ -28,6 +28,7 @@ from app.models.entities import (
     MaterialAsset,
     MediaJob,
     ModelConfig,
+    PublishJob,
     VideoProject,
     VideoShot,
     Workflow,
@@ -39,6 +40,7 @@ from app.services.media import (
     BIZ_VIDEO_COVER,
     BIZ_VIDEO_SHOT,
     JOB_CANCELLED,
+    JOB_DOWNLOADING,
     JOB_EXPIRED,
     JOB_FAILED,
     JOB_QUEUED,
@@ -1289,6 +1291,105 @@ def test_items_carry_shot_count_and_local_cover(db):
 
     assert len(items) == 1
     assert items[0].cover_url == "/uploads/videos/1/abc123def4567890.png"
+
+
+def test_items_summarize_current_render_jobs_and_latest_publish(db):
+    project = _project(db)
+    rows = _shots(db, project.id, 8)
+
+    def put_job(shot, kind, status, *, current=True, owner_id=OWNER):
+        job = MediaJob(
+            owner_id=owner_id,
+            kind=kind,
+            biz_type=BIZ_VIDEO_SHOT,
+            biz_id=str(shot.id),
+            model_name="m",
+            status=status,
+            request={},
+        )
+        db.add(job)
+        db.flush()
+        if current:
+            if kind == KIND_IMAGE:
+                shot.image_job_id = job.id
+            else:
+                shot.video_job_id = job.id
+        return job
+
+    # 重做前的失败历史不算当前进度；当前指针指向的成功作业才算一镜完成。
+    put_job(rows[0], KIND_IMAGE, JOB_FAILED, current=False)
+    put_job(rows[0], KIND_IMAGE, JOB_SUCCEEDED)
+    for row, status in zip(
+        rows[1:7],
+        [JOB_QUEUED, JOB_RUNNING, JOB_DOWNLOADING, JOB_FAILED, JOB_CANCELLED, JOB_EXPIRED],
+    ):
+        put_job(row, KIND_IMAGE, status)
+    # 第 8 镜没有首帧作业，留在待渲染数里。
+
+    put_job(rows[0], KIND_VIDEO, JOB_SUCCEEDED)
+    put_job(rows[1], KIND_VIDEO, JOB_QUEUED)
+    put_job(rows[2], KIND_VIDEO, JOB_CANCELLED)
+    db.add_all(
+        [
+            PublishJob(
+                owner_id=OWNER,
+                project_id=project.id,
+                platform="douyin",
+                channel="manual",
+                status="failed",
+                error_msg="旧合成失败",
+                request={},
+            ),
+            PublishJob(
+                owner_id=OWNER,
+                project_id=project.id,
+                platform="douyin",
+                channel="manual",
+                status="succeeded",
+                request={},
+                rel_path=f"videos/{project.id}/abc123def4567890.mp4",
+                mime="video/mp4",
+                file_size=123,
+            ),
+            # id 最新但不属于当前账号，不能盖住本项目自己的最近作业。
+            PublishJob(
+                owner_id=OTHER,
+                project_id=project.id,
+                platform="douyin",
+                channel="manual",
+                status="failed",
+                error_msg="其他账号的作业",
+                request={},
+            ),
+        ]
+    )
+    db.commit()
+
+    item = _service(db).to_items(_service(db).list_projects())[0]
+
+    assert item.frames.model_dump() == {
+        "total": 8,
+        "succeeded": 1,
+        "active": 3,
+        "failed": 1,
+        "cancelled": 1,
+        "expired": 1,
+    }
+    assert item.clips.model_dump() == {
+        "total": 8,
+        "succeeded": 1,
+        "active": 1,
+        "failed": 0,
+        "cancelled": 1,
+        "expired": 0,
+    }
+    assert item.publish_job.status == "succeeded"
+    assert item.publish_job.url == f"/uploads/videos/{project.id}/abc123def4567890.mp4"
+    assert item.publish_job.file_size == 123
+    detail = _service(db).to_detail(_service(db).get_project(project.id))
+    assert detail.frames == item.frames
+    assert detail.clips == item.clips
+    assert detail.publish_job.id == item.publish_job.id
 
 
 def test_detail_serializes_jobs_without_the_upstream_url(db):

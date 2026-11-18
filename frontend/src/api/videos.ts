@@ -167,16 +167,31 @@ export interface PublishJob {
   finished_at: string | null
 }
 
+export interface VideoStageProgress {
+  total: number
+  succeeded: number
+  /** 本地排队、上游生成和转存都还在进行中。 */
+  active: number
+  failed: number
+  cancelled: number
+  expired: number
+}
+
 export interface VideoProjectItem {
   id: number
   title: string
   platform: VideoPlatform
+  /** 仅脚本阶段；首帧、片段与成片分别看下面三个字段。 */
   status: VideoProjectStatus | string
   error_msg: string | null
   shot_count: number
   /** 全部镜头时长之和，秒。 */
   duration_s: number
   cover_url: string
+  frames: VideoStageProgress
+  clips: VideoStageProgress
+  /** 最近一次成片合成作业；从没合成过为 null。 */
+  publish_job: PublishJob | null
   created_at: string
   updated_at: string
 }
@@ -193,8 +208,6 @@ export interface VideoProjectDetail extends VideoProjectItem {
   shots: VideoShot[]
   /** 最近一次脚本生成的现场；运行记录被留存清理删掉后为 null。 */
   script_run: VideoScriptRun | null
-  /** 最近一次成片合成作业；从没合成过为 null。 */
-  publish_job: PublishJob | null
 }
 
 export interface VideoProjectCreate {

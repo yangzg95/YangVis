@@ -3308,8 +3308,19 @@ class VideoScriptRunOut(BaseModel):
     steps: List[VideoScriptStepOut] = Field(default_factory=list)
 
 
+class VideoStageProgress(BaseModel):
+    """一类镜头作业的当前进度；没有作业指针的镜头数由调用方按总数减去各状态得出。"""
+
+    total: int = 0
+    succeeded: int = 0
+    active: int = 0
+    failed: int = 0
+    cancelled: int = 0
+    expired: int = 0
+
+
 class VideoProjectItem(BaseModel):
-    """列表里的一行。``status`` 是脚本阶段的状态，从认领本项目的运行翻译过来。"""
+    """列表里的一行。``status`` 是脚本阶段状态，首帧、片段与成片分别汇总。"""
 
     id: int
     title: str
@@ -3319,6 +3330,10 @@ class VideoProjectItem(BaseModel):
     shot_count: int = 0
     duration_s: int = 0
     cover_url: str = ""
+    frames: VideoStageProgress = Field(default_factory=VideoStageProgress)
+    clips: VideoStageProgress = Field(default_factory=VideoStageProgress)
+    # 最近一次发布作业（成片合成 + 手动发布包）；从没合成过就是 None。
+    publish_job: Optional[PublishJobOut] = None
     created_at: datetime
     updated_at: datetime
 
@@ -3334,8 +3349,6 @@ class VideoProjectDetail(VideoProjectItem):
     params: VideoParams = Field(default_factory=VideoParams)
     publish: VideoPublish = Field(default_factory=VideoPublish)
     shots: List[VideoShotOut] = Field(default_factory=list)
-    # 最近一次发布作业（成片合成 + 手动发布包）；从没合成过就是 None。
-    publish_job: Optional[PublishJobOut] = None
     # 最近一次脚本生成的现场；还没生成过（老项目直接改分镜）时为 None。
     script_run: Optional[VideoScriptRunOut] = None
 
