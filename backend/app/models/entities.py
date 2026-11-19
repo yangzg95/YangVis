@@ -1905,6 +1905,49 @@ class WorkflowEvaluation(Base):
         return f"<WorkflowEvaluation id={self.id} run_a={self.run_a_id} run_b={self.run_b_id}>"
 
 
+class JobPosting(Base):
+    """当前用户从外部招聘站点缓存的一条岗位。"""
+
+    __tablename__ = "job_posting"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_id", "source", "external_id", name="uk_job_posting_owner_source_external"
+        ),
+        Index("idx_job_posting_owner_published", "owner_id", "published_at"),
+        Index("idx_job_posting_owner_seen", "owner_id", "last_seen_at"),
+    )
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="boss")
+    external_id: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    company: Mapped[str] = mapped_column(String(200), nullable=False)
+    city: Mapped[str] = mapped_column(String(32), nullable=False)
+    district: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    salary_text: Mapped[str] = mapped_column(String(64), nullable=False)
+    salary_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    salary_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+    experience: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    education: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    skills: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    recruiter: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    # 只保存来源明确标注的岗位发布时间；招聘者活跃时间不能写入这里。
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    apply_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<JobPosting id={self.id} title={self.title!r} company={self.company!r}>"
+
+
 class Note(Base):
     """求职笔记本里的一条笔记（「简历」页的独立记录本，与面试记录同一性质）。
 

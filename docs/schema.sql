@@ -370,6 +370,31 @@ CREATE TABLE IF NOT EXISTS interview_record (
   KEY idx_owner (owner_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='面试场次记录（含问题清单与 AI 参考答案）';
 
+CREATE TABLE IF NOT EXISTS job_posting (
+  id            BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id      BIGINT        NOT NULL,
+  source        VARCHAR(16)   NOT NULL DEFAULT 'boss',
+  external_id   VARCHAR(128)  NOT NULL,
+  title         VARCHAR(200)  NOT NULL,
+  company       VARCHAR(200)  NOT NULL,
+  city          VARCHAR(32)   NOT NULL,
+  district      VARCHAR(64)   NULL,
+  salary_text   VARCHAR(64)   NOT NULL,
+  salary_min    DOUBLE        NULL COMMENT '最低月薪 K；面议/日薪/时薪为 NULL',
+  salary_max    DOUBLE        NULL COMMENT '最高月薪 K；50K以上等开放区间为 NULL',
+  experience    VARCHAR(32)   NULL,
+  education     VARCHAR(32)   NULL,
+  skills        JSON          NOT NULL COMMENT '最多 8 个技能/岗位标签',
+  recruiter     VARCHAR(200)  NULL,
+  published_at  DATETIME      NULL COMMENT '仅来源明确提供的岗位发布时间，不用活跃时间冒充',
+  apply_url     VARCHAR(512)  NOT NULL COMMENT '由岗位 ID 生成的 BOSS 官方 HTTPS 地址',
+  first_seen_at DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_job_posting_owner_source_external (owner_id, source, external_id),
+  KEY idx_job_posting_owner_published (owner_id, published_at),
+  KEY idx_job_posting_owner_seen (owner_id, last_seen_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='智能应用 · 当前用户缓存的外部招聘岗位';
+
 CREATE TABLE IF NOT EXISTS job_note (
   id         BIGINT PRIMARY KEY AUTO_INCREMENT,
   owner_id   BIGINT       NOT NULL,

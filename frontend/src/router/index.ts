@@ -109,6 +109,12 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '简历'},
     },
     {
+        path: '/office/jobs',
+        name: 'Jobs',
+        component: () => import('@/views/Jobs.vue'),
+        meta: {title: '岗位'},
+    },
+    {
         // 面试记录从简历页拆出独占一页；求职助手与笔记两个页签后来从简历页搬进这一页，
         // 于是「面试」页收着求职过程的三段（场次复盘、一次性生成、零散笔记）。问题明细仍在
         // /office/interview/:id 的 bare 整页详情里。路由是面试列表、/office/interview

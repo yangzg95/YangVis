@@ -42,6 +42,7 @@ from app.routers import (
     dashboard,
     devtools,
     interview,
+    jobs,
     knowledge,
     materials,
     mcp,
@@ -259,6 +260,7 @@ app.include_router(ops_files.router, prefix=API_PREFIX)
 app.include_router(resume.router, prefix=API_PREFIX)
 app.include_router(resume_builder.router, prefix=API_PREFIX)
 app.include_router(interview.router, prefix=API_PREFIX)
+app.include_router(jobs.router, prefix=API_PREFIX)
 app.include_router(note.router, prefix=API_PREFIX)
 app.include_router(notify.router, prefix=API_PREFIX)
 # App 静态令牌端点：自带 /app/v1 前缀，仍挂在统一的 /api 之下。

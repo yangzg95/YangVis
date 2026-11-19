@@ -17,6 +17,9 @@ CODE_NETDISK_NOT_CONFIGURED = 4201
 CODE_NETDISK_NOT_BOUND = 4202
 CODE_NETDISK_API_ERROR = 4203
 
+# 智能办公 · 外部招聘岗位来源
+CODE_JOB_SOURCE_ERROR = 4301
+
 
 class BusinessError(Exception):
     """带有前端可识别的错误码的业务拒绝（非程序缺陷）。

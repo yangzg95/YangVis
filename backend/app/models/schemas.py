@@ -2369,6 +2369,75 @@ class InterviewDetail(InterviewItem):
     questions: List[InterviewQuestion] = []
 
 
+# ---- 智能办公 · 招聘岗位 -------------------------------------------------------
+
+
+class JobFilter(BaseModel):
+    """BOSS 抓取与本地缓存列表共用的一组筛选条件。薪资单位是 K/月。"""
+
+    keyword: str = Field(default="", max_length=100)
+    city: str = Field(default="全国", min_length=1, max_length=32)
+    posted_days: Optional[int] = None
+    salary_min: Optional[float] = Field(default=None, ge=0, le=1000)
+    salary_max: Optional[float] = Field(default=None, ge=0, le=1000)
+
+    @field_validator("keyword", "city")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("city")
+    @classmethod
+    def _require_city(cls, value: str) -> str:
+        if not value:
+            raise ValueError("城市不能为空")
+        return value
+
+    @field_validator("posted_days")
+    @classmethod
+    def _check_posted_days(cls, value: Optional[int]) -> Optional[int]:
+        if value is not None and value not in (1, 3, 7, 30):
+            raise ValueError("发布时间只支持近 1、3、7、30 天")
+        return value
+
+    @model_validator(mode="after")
+    def _check_salary_range(self) -> "JobFilter":
+        if self.salary_min is not None and self.salary_max is not None:
+            if self.salary_min > self.salary_max:
+                raise ValueError("最低薪资不能高于最高薪资")
+        return self
+
+
+class JobItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    source: str
+    title: str
+    company: str
+    city: str
+    district: Optional[str] = None
+    salary_text: str
+    salary_min: Optional[float] = None
+    salary_max: Optional[float] = None
+    experience: Optional[str] = None
+    education: Optional[str] = None
+    skills: List[str] = Field(default_factory=list)
+    recruiter: Optional[str] = None
+    published_at: Optional[datetime] = None
+    apply_url: str
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+class JobFetchResult(BaseModel):
+    fetched: int
+    matched: int
+    created: int
+    updated: int
+    fetched_at: datetime
+
+
 # ---- 智能办公 · 求职笔记 -------------------------------------------------------
 
 

@@ -169,6 +169,7 @@ import {
   PartitionOutlined,
   ProfileOutlined,
   RobotOutlined,
+  SearchOutlined,
   SettingOutlined,
   SolutionOutlined,
   SyncOutlined,
@@ -225,6 +226,7 @@ const MENU: MenuNode[] = [
     children: [
       { path: '/chat', title: '对话', icon: MessageOutlined },
       { path: '/office/resume', title: '简历', icon: ProfileOutlined },
+      { path: '/office/jobs', title: '岗位', icon: SearchOutlined },
       // 面试记录曾是简历页里的一个 tab，实体和接口都独立，拆成同级叶子。
       { path: '/office/interviews', title: '面试', icon: SolutionOutlined },
       { path: '/office/slides', title: '幻灯片', icon: FundProjectionScreenOutlined },
