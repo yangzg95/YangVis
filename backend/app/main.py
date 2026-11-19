@@ -1,6 +1,7 @@
 """yangvis 的 FastAPI 应用入口。"""
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
@@ -18,6 +19,7 @@ from app.bootstrap import (
     bootstrap_admin,
     create_tables,
     migrate_schema,
+    prune_app_messages,
     prune_notify_logs,
     prune_workflow_runs,
     reset_stale_jobs,
@@ -59,6 +61,8 @@ from app.routers import (
     workflows,
 )
 from app.services.media import jobs as media_jobs
+from app.services.notify.app_stream import app_stream
+from app.services.notify.hooks import bind_notify_loop, unbind_notify_loop
 from app.services.publish.runner import reset_stale_on_startup as reset_stale_publish_jobs
 
 logger = logging.getLogger("yangvis")
@@ -75,6 +79,8 @@ logging.basicConfig(level=_log_level, format="%(asctime)s [%(levelname)s] %(name
 # 这个函数必须定义在 FastAPI(...) 之前——lifespan 是构造参数，不是装饰器。
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    notify_loop = asyncio.get_running_loop()
+    bind_notify_loop(notify_loop)
     # 每步单独记失败：裸 traceback 看不出死在哪一步。
     for step_name, step in (
         ("validate_settings", lambda: validate_settings(settings)),
@@ -96,6 +102,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         ("prune_workflow_runs", prune_workflow_runs),
         # 通知发送留痕的清理：与上面两个没有顺序依赖，纯归类放最后。
         ("prune_notify_logs", prune_notify_logs),
+        ("prune_app_messages", prune_app_messages),
         # 媒体作业留痕清理：只删没产物的失败/取消/判死记录。带产物的成功作业不在这儿
         # 动——那一行可能就是某个镜头现在的成片，按龄清文件要等界面上有「历史渲染挑
         # 一版」才做得对。
@@ -121,6 +128,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        unbind_notify_loop(notify_loop)
+        app_stream.close_all()
         # 先停循环再收工：正在下载的作业由下个进程按库里的状态接着推。
         await media_jobs.stop_loop()
         logger.info("yangvis backend shutting down")

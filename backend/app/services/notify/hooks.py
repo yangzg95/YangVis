@@ -9,6 +9,7 @@ f-string 会越抄越歪（脱敏规则尤其不能有两份）。
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Awaitable, Iterable, Optional, Sequence
 
@@ -24,21 +25,46 @@ _BULK_THRESHOLD = 3
 # 合并摘要里最多点名的条数，其余只报数量。
 _BULK_LISTED = 3
 
+_main_loop: asyncio.AbstractEventLoop | None = None
 
-def _safe_fire(coro: Awaitable) -> None:
-    """fire_and_forget 的兜底版。
 
-    正常挂载点都在事件循环里（SSE 生成器、请求路径、lifespan）；但 ``fail_run``
-    这类收尾可能被功能侧放进 ``to_thread`` 的线程里跑——那里没有事件循环，
-    ``asyncio.create_task`` 会抛 RuntimeError 击穿主流程。通知的合同是绝不
-    拖垮主流程，所以这里丢弃这条消息并记日志；``close()`` 释放协程资源，
-    顺带消掉「coroutine never awaited」的噪音。
-    """
+def bind_notify_loop(loop: asyncio.AbstractEventLoop) -> None:
+    global _main_loop
+    _main_loop = loop
+
+
+def unbind_notify_loop(loop: asyncio.AbstractEventLoop) -> None:
+    global _main_loop
+    if _main_loop is loop:
+        _main_loop = None
+
+
+def _schedule_on_main(coro: Awaitable) -> None:
     try:
         fire_and_forget(coro)
     except RuntimeError:
         coro.close()
-        logger.warning("notify dropped: no running event loop in this thread")
+        logger.warning("notify dropped: main event loop is no longer running")
+
+
+def _safe_fire(coro: Awaitable) -> None:
+    """在线程触发时转交 lifespan 所在循环，不再静默丢弃这条通知。"""
+    try:
+        fire_and_forget(coro)
+        return
+    except RuntimeError:
+        pass
+
+    loop = _main_loop
+    if loop is None or loop.is_closed():
+        coro.close()
+        logger.warning("notify dropped: main event loop is unavailable")
+        return
+    try:
+        loop.call_soon_threadsafe(_schedule_on_main, coro)
+    except RuntimeError:
+        coro.close()
+        logger.warning("notify dropped: main event loop is closed")
 
 
 def _command_first_word(command: Optional[str]) -> str:

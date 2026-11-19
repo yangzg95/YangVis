@@ -1,24 +1,15 @@
-"""通知分发：事件 → 订阅渠道 → 发送 → 落 ``notify_log``。
-
-用法（触发点侧只有一行）::
-
-    fire_and_forget(dispatch(owner_id, "workflow.failed", title=..., body=...))
+"""通知分发：事件先落 App 收件箱，再实时广播并发送外部 webhook。
 
 三条不变量：
 
-1. **绝不抛异常**。通知是旁路，调用方把它挂在主流程的关键节点上（工作流收尾、
-   审批落库），任何失败都只能进日志文件和 ``notify_log``，不能顺着
-   ``fire_and_forget`` 变成一条没人处理的 task 异常。
-2. **不复用调用方 session**。触发点多在请求 session 的生命周期边缘（async
-   generator 的结尾、启动阶段），这里自开短命 session，照 ``chat_ops.Auditor``
-   的模式把同步 commit 放进工作线程。
-3. **正文只带摘要**。title/body 由调用方负责脱敏（命令只给首词、SQL 不给全文），
-   这里只兜底截断长度。
+1. **绝不抛异常**。通知是旁路，任何失败都只能进日志文件和 ``notify_log``，
+   不能顺着后台任务变成一条没人处理的 task 异常。
+2. **不复用调用方 session**。这里自开短命 session，把同步 commit 放进工作线程。
+3. **正文只带摘要**。title/body 由调用方负责脱敏，这里只兜底截断长度。
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
@@ -28,16 +19,14 @@ from sqlalchemy import delete, select
 
 from app import database as app_db
 from app.crypto import decrypt
-from app.models.entities import NotifyChannel, NotifyHuaweiConfig, NotifyLog
-from app.services.notify.huawei import HuaweiAuth, send_huawei_message
+from app.models.entities import NotifyChannel, NotifyLog
+from app.services.notify.app_inbox import record_and_publish
 from app.services.notify.senders import TIMEOUT, send_to_channel
 from app.timeutil import beijing_now
 
 logger = logging.getLogger("yangvis.notify")
 
-# 与 schemas.NotifyKind.HUAWEI 同步；dispatch 是低层模块，直接用字符串常量，
-# 避免为一个枚举值反向依赖 schema 层。
-KIND_HUAWEI = "huawei"
+WEBHOOK_KINDS = frozenset({"feishu", "wecom", "dingtalk", "generic"})
 
 # 与实体列宽对齐：title 128、log 表 error 512（senders 侧已截 512，这里再兜一道）。
 _MAX_TITLE = 128
@@ -48,27 +37,21 @@ STATUS_FAILED = "failed"
 
 
 def render_text(title: str, body: str, now: Optional[datetime] = None) -> str:
-    """群消息的纯文本形态：text 类机器人只吃这一个字段。
-
-    公开给 service.py 的连通测试复用——测试消息和正式事件必须是同一种
-    形态，否则「测试通过、正式收不到」时没法对比排查。
-
-    时间由这里决定而不是由调用方传：这条文本的读者在 +08，而跑 dispatch 的
-    容器跟着自己的 ``TZ`` 走（部署侧没配就是 UTC），群里的时间戳会整整早 8 小时。
-    ``now`` 只给单测留一个确定性的注入口。
-    """
+    """群消息的纯文本形态：text 类机器人只吃这一个字段。"""
     moment = now if now is not None else beijing_now()
     return f"【yangvis】{title}\n{body}\n时间：{moment.strftime('%Y-%m-%d %H:%M:%S')}"
 
 
 async def dispatch(owner_id: int, event: str, *, title: str, body: str = "") -> None:
-    """把一个事件推给该用户所有订阅了它的启用渠道。
-
-    永远正常返回；任何失败只留下日志。查渠道需要同步 DB 访问，放到工作线程
-    里跑，避免在事件循环上做同步 IO（与 Auditor 同一个理由）。
-    """
+    """保存一条 App 通知，并推给该用户订阅了事件的启用 webhook。"""
     title = title[:_MAX_TITLE]
     body = body[:_MAX_BODY]
+    try:
+        await record_and_publish(owner_id, event, title=title, body=body)
+    except Exception:
+        # App 落库失败不拦其他渠道；广播也只在这条提交成功后发生。
+        logger.exception("failed to record app notification %s", event)
+
     try:
         channels = await asyncio.to_thread(_subscribed_channels, owner_id, event)
         if not channels:
@@ -76,31 +59,16 @@ async def dispatch(owner_id: int, event: str, *, title: str, body: str = "") -> 
         text = render_text(title, body)
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             for channel in channels:
-                if channel["kind"] == KIND_HUAWEI:
-                    # HMS Push：OAuth + messages:send，与 webhook 机器人完全不同的协议。
-                    hw = channel["huawei"]
-                    result = await send_huawei_message(
-                        client,
-                        app_id=hw["app_id"],
-                        auth=hw["auth"],
-                        target_type=hw["target_type"],
-                        target=hw["target"],
-                        title=title,
-                        body=body,
-                        # 顺带把事件名放进透传 data，App 存活时可据此做前台刷新。
-                        data={"event": event},
-                    )
-                else:
-                    result = await send_to_channel(
-                        client,
-                        kind=channel["kind"],
-                        webhook_url=channel["url"],
-                        secret=channel["secret"],
-                        event=event,
-                        title=title,
-                        body=body,
-                        text=text,
-                    )
+                result = await send_to_channel(
+                    client,
+                    kind=channel["kind"],
+                    webhook_url=channel["url"],
+                    secret=channel["secret"],
+                    event=event,
+                    title=title,
+                    body=body,
+                    text=text,
+                )
                 await asyncio.to_thread(
                     _write_log,
                     owner_id=owner_id,
@@ -125,29 +93,18 @@ async def dispatch(owner_id: int, event: str, *, title: str, body: str = "") -> 
 
 
 def _subscribed_channels(owner_id: int, event: str) -> list[dict]:
-    """查启用且订阅了该事件的渠道，解出各自所需的明文凭据。
-
-    两类渠道走不同的数据形状：webhook 机器人解 URL / secret；华为渠道读
-    1:1 的 ``notify_huawei_config``。解密失败（ENCRYPTION_KEY 换过）或配置
-    缺失的渠道跳过并发 warning——一个渠道失效不该拦住其他渠道的消息。
-    返回纯数据而不是 ORM 对象：session 在本函数结束时关闭，把 detached
-    对象交给事件循环用是隐患。
-    """
+    """查启用且订阅了事件的 webhook，解出 URL/secret 后返回纯数据。"""
     rows: list[dict] = []
     with app_db.SessionLocal() as db:
         channels = db.scalars(
             select(NotifyChannel).where(
                 NotifyChannel.owner_id == owner_id,
                 NotifyChannel.enabled.is_(True),
+                NotifyChannel.kind.in_(WEBHOOK_KINDS),
             )
         ).all()
         for channel in channels:
             if event not in (channel.events or []):
-                continue
-            if channel.kind == KIND_HUAWEI:
-                huawei = _load_huawei_target(db, channel)
-                if huawei is not None:
-                    rows.append(huawei)
                 continue
             try:
                 url = decrypt(channel.webhook_url_enc)
@@ -173,72 +130,6 @@ def _subscribed_channels(owner_id: int, event: str) -> list[dict]:
     return rows
 
 
-def build_huawei_auth(cfg: NotifyHuaweiConfig) -> HuaweiAuth:
-    """从配置行构造发送凭据：优先服务账号 JWT，否则 client_credentials。
-
-    两种模式互斥地落在同一行上（服务账号列为 NULL 即走客户端凭证对）。
-    解密失败会抛 :class:`DecryptionError`、JSON 损坏抛 :class:`ValueError`，
-    由调用方按各自语义处理（dispatch 跳过、连通测试回失败结论）。
-    """
-    if cfg.service_account_enc:
-        # 整段 JSON 在保存时已过 parse_service_account 校验，这里只需解密还原。
-        service_account = json.loads(decrypt(cfg.service_account_enc))
-        return HuaweiAuth.service_account(service_account)
-
-    client_id = decrypt(cfg.client_id_enc)
-    client_secret = decrypt(cfg.client_secret_enc)
-    if not (client_id and client_secret):
-        raise ValueError("华为推送凭据不完整：client_id/client_secret 与服务账号 JSON 均未配置")
-    return HuaweiAuth.client_credentials(client_id, client_secret)
-
-
-def _load_huawei_target(db, channel: NotifyChannel) -> Optional[dict]:
-    """解出一个华为渠道的发送参数；配置缺失/解密失败/字段不全时返回 None。
-
-    与 webhook 分支同样的「跳过不拦路」语义。明文凭据只在返回的纯字典里
-    短暂存在，随本次 dispatch 用完即弃。
-    """
-    cfg = db.scalar(
-        select(NotifyHuaweiConfig).where(
-            NotifyHuaweiConfig.channel_id == channel.id
-        )
-    )
-    if cfg is None:
-        logger.warning(
-            "notify huawei channel %s (%s) has no config row; skipped",
-            channel.id,
-            channel.name,
-        )
-        return None
-    try:
-        auth = build_huawei_auth(cfg)
-    except Exception:
-        logger.warning(
-            "notify huawei channel %s (%s) has undecryptable credentials; skipped",
-            channel.id,
-            channel.name,
-        )
-        return None
-    if not (cfg.app_id and cfg.target):
-        logger.warning(
-            "notify huawei channel %s (%s) has incomplete config; skipped",
-            channel.id,
-            channel.name,
-        )
-        return None
-    return {
-        "id": channel.id,
-        "name": channel.name,
-        "kind": KIND_HUAWEI,
-        "huawei": {
-            "app_id": cfg.app_id,
-            "auth": auth,
-            "target_type": cfg.target_type,
-            "target": cfg.target,
-        },
-    }
-
-
 def _write_log(
     *,
     owner_id: int,
@@ -261,7 +152,6 @@ def _write_log(
                     channel_name=channel_name,
                     event=event,
                     title=title,
-                    # body 在 dispatch 入口已截到 1024，这里兜一道空值。
                     body=body or None,
                     status=status,
                     error=error[:512] if error else None,
@@ -274,11 +164,7 @@ def _write_log(
 
 
 def prune_notify_logs(days: int = 7) -> int:
-    """清掉保留窗口之外的发送记录。挂在启动步骤里，全站口径。
-
-    返回删除行数，供 bootstrap 日志输出。注意与 ``prune_runs`` 不同：这里没有
-    「先收尾再清理」的顺序约束——被清掉的只是日志，不是状态本身。
-    """
+    """清掉保留窗口之外的发送记录。挂在启动步骤里，全站口径。"""
     cutoff = datetime.now() - timedelta(days=days)
     with app_db.SessionLocal() as db:
         result = db.execute(delete(NotifyLog).where(NotifyLog.created_at < cutoff))

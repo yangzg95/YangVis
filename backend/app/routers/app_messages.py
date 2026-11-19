@@ -1,44 +1,38 @@
-"""移动 App（yangvis-app）拉取历史通知的只读端点。
+"""移动 App 的专用通知令牌、增量消息和 SSE 端点。
 
-与 :mod:`app.routers.notify` 的关键区别：这套接口不给 Web 控制台的登录用户用，
-而是给手机 App 用，鉴权靠一个长期静态令牌（环境变量 ``NOTIFY_APP_TOKEN``），
-不走带图形验证码的登录流，也不签发 JWT。
-
-安全约定：
-
-- 令牌留空时端点直接回 404 而不是 401——不对外暴露这个功能的存在；
-- 令牌比对走 :func:`hmac.compare_digest`，避免时序侧信道；
-- 只返回 ``status=sent`` 的留痕：发送失败的通知没到过手机，不该出现在历史里；
-- 归属范围由 ``NOTIFY_APP_OWNER_ID`` 限定；留空则全站可见，仅适用单用户自用部署。
+这套端点只服务于后台长连接，不使用控制台的 12 小时 JWT。令牌与 owner 必须
+同时配置，避免个人部署的便利变成跨用户通知泄露。
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from fastapi.responses import StreamingResponse
 
 from app.config import get_settings
-from app.database import get_db
-from app.models.entities import NotifyLog
 from app.models.schemas import APIResponse, AppMessageItem, ListResponse
 from app.security import TokenError, extract_bearer_token
-from app.services.notify.dispatch import STATUS_SENT
+from app.services.notify.app_inbox import list_after, list_latest
+from app.services.notify.app_stream import AppStreamConnection, app_stream
+from app.sse import SSE_HEADERS, sse_event, with_heartbeat
 
 logger = logging.getLogger("yangvis.app_messages")
 
 router = APIRouter(prefix="/app/v1", tags=["app-messages"])
 
 _UNAUTHORIZED = HTTPException(status_code=401, detail="未授权")
+_PAGE_SIZE = 100
 
 
-def require_app_token(authorization: Optional[str] = Header(default=None)) -> None:
-    """校验 App 的静态 Bearer 令牌。未配置令牌时把端点藏起来（404）。"""
-    expected = get_settings().NOTIFY_APP_TOKEN
-    if not expected:
+def require_app_owner(authorization: Optional[str] = Header(default=None)) -> int:
+    settings = get_settings()
+    expected = settings.NOTIFY_APP_TOKEN
+    owner_id = settings.NOTIFY_APP_OWNER_ID
+    if not expected or owner_id is None:
         raise HTTPException(status_code=404, detail="接口不存在")
     try:
         token = extract_bearer_token(authorization)
@@ -48,21 +42,74 @@ def require_app_token(authorization: Optional[str] = Header(default=None)) -> No
     if not hmac.compare_digest(token, expected):
         logger.debug("rejecting app request: token mismatch")
         raise _UNAUTHORIZED
+    return owner_id
 
 
 @router.get("/messages", response_model=APIResponse[ListResponse[AppMessageItem]])
 def list_messages(
+    after_id: Optional[int] = Query(default=None, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
-    _: None = Depends(require_app_token),
-    db: Session = Depends(get_db),
+    owner_id: int = Depends(require_app_owner),
 ) -> APIResponse[ListResponse[AppMessageItem]]:
-    """最近成功送达的通知，倒序返回，供 App 的历史消息页渲染。"""
-    stmt = select(NotifyLog).where(NotifyLog.status == STATUS_SENT)
-    owner_id = get_settings().NOTIFY_APP_OWNER_ID
-    if owner_id is not None:
-        stmt = stmt.where(NotifyLog.owner_id == owner_id)
-    stmt = stmt.order_by(NotifyLog.id.desc()).limit(limit)
-
-    rows = db.scalars(stmt).all()
-    items = [AppMessageItem.model_validate(row) for row in rows]
+    """无游标时取最新记录；有游标时按 ID 升序补拉。"""
+    items = (
+        list_latest(owner_id, limit)
+        if after_id is None
+        else list_after(owner_id, after_id, limit)
+    )
     return APIResponse(data=ListResponse(items=items, total=len(items)))
+
+
+async def _message_events(
+    connection: AppStreamConnection, after_id: int
+) -> AsyncIterator[str]:
+    cursor = after_id
+    try:
+        # 先 register 再读 backlog：期间提交的消息会同时进队列，重复由 cursor 去掉。
+        while True:
+            batch = await asyncio.to_thread(
+                list_after, connection.owner_id, cursor, _PAGE_SIZE
+            )
+            if not batch:
+                break
+            for message in batch:
+                if message.id <= cursor:
+                    continue
+                cursor = message.id
+                yield sse_event(
+                    "message",
+                    message.model_dump(mode="json"),
+                    event_id=str(message.id),
+                )
+            if len(batch) < _PAGE_SIZE:
+                break
+
+        yield sse_event("ready", {"after_id": cursor})
+
+        while True:
+            message = await connection.next_message()
+            if message is None:
+                return
+            if message.id <= cursor:
+                continue
+            cursor = message.id
+            yield sse_event(
+                "message",
+                message.model_dump(mode="json"),
+                event_id=str(message.id),
+            )
+    finally:
+        app_stream.unregister(connection)
+
+
+@router.get("/messages/stream")
+async def stream_messages(
+    after_id: int = Query(default=0, ge=0),
+    owner_id: int = Depends(require_app_owner),
+) -> StreamingResponse:
+    connection = app_stream.register(owner_id)
+    return StreamingResponse(
+        with_heartbeat(_message_events(connection, after_id)),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+    )

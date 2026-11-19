@@ -18,6 +18,7 @@ import pytest
 from app.sse import (
     SSE_HEARTBEAT,
     SSE_HEARTBEAT_BYTES,
+    sse_event,
     with_byte_heartbeat,
     with_heartbeat,
 )
@@ -38,6 +39,15 @@ def collect(agen, close_early: bool = False) -> List[Any]:
         return items
 
     return asyncio.run(go())
+
+
+def test_sse_event_supports_optional_id_without_changing_existing_frames() -> None:
+    assert sse_event("message", {"title": "通知"}, event_id="42") == (
+        'id: 42\nevent: message\ndata: {"title": "通知"}\n\n'
+    )
+    assert sse_event("ready", {"after_id": 42}) == (
+        'event: ready\ndata: {"after_id": 42}\n\n'
+    )
 
 
 def test_source_is_always_driven_by_one_single_task() -> None:

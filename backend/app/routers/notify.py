@@ -13,19 +13,17 @@ from app.database import get_db
 from app.deps import require_user
 from app.models.schemas import (
     APIResponse,
+    AppMessageItem,
     CurrentUser,
-    HuaweiChannelCreate,
-    HuaweiChannelItem,
-    HuaweiChannelUpdate,
     ListResponse,
     NotifyChannelCreate,
     NotifyChannelItem,
     NotifyChannelUpdate,
     NotifyEventInfo,
-    NotifyKind,
     NotifyLogItem,
     TestResult,
 )
+from app.services.notify.app_inbox import list_latest
 from app.services.notify.events import event_infos
 from app.services.notify.service import NotifyChannelService
 
@@ -96,58 +94,6 @@ def delete_channel(
     return APIResponse(data=None, message="deleted")
 
 
-# -- 华为 HMS Push 渠道 -------------------------------------------------------
-#
-# 字段与 webhook 渠道完全不同（OAuth 凭据 + 主题/设备目标，没有 URL），单列
-# 一组端点；连通测试仍复用上面的 /channels/{id}/test，由 service 内部分流。
-
-
-@router.post("/channels/huawei", response_model=APIResponse[HuaweiChannelItem])
-def create_huawei_channel(
-    payload: HuaweiChannelCreate,
-    service: NotifyChannelService = Depends(get_service),
-) -> APIResponse[HuaweiChannelItem]:
-    try:
-        channel = service.create_huawei_channel(payload)
-    except ValueError as exc:
-        return APIResponse(code=-1, message=str(exc))
-    cfg = service.get_huawei_config(channel)
-    return APIResponse(data=service.to_huawei_item(channel, cfg))
-
-
-@router.put("/channels/{channel_id}/huawei", response_model=APIResponse[HuaweiChannelItem])
-def update_huawei_channel(
-    channel_id: int,
-    payload: HuaweiChannelUpdate,
-    service: NotifyChannelService = Depends(get_service),
-) -> APIResponse[HuaweiChannelItem]:
-    try:
-        channel = service.update_huawei_channel(channel_id, payload)
-    except LookupError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except ValueError as exc:
-        return APIResponse(code=-1, message=str(exc))
-    cfg = service.get_huawei_config(channel)
-    return APIResponse(data=service.to_huawei_item(channel, cfg))
-
-
-@router.get("/channels/{channel_id}/huawei", response_model=APIResponse[HuaweiChannelItem])
-def get_huawei_channel(
-    channel_id: int,
-    service: NotifyChannelService = Depends(get_service),
-) -> APIResponse[HuaweiChannelItem]:
-    try:
-        channel = service.get_channel(channel_id)
-        if channel.kind != NotifyKind.HUAWEI.value:
-            raise ValueError("该渠道不是华为推送渠道")
-        cfg = service.get_huawei_config(channel)
-    except LookupError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except ValueError as exc:
-        return APIResponse(code=-1, message=str(exc))
-    return APIResponse(data=service.to_huawei_item(channel, cfg))
-
-
 @router.post("/channels/{channel_id}/test", response_model=APIResponse[TestResult])
 async def test_channel(
     channel_id: int,
@@ -163,6 +109,16 @@ async def test_channel(
     return APIResponse(
         data=TestResult(success=result.ok, message=result.error or "发送成功，请到群里确认收到")
     )
+
+
+@router.get("/messages", response_model=APIResponse[ListResponse[AppMessageItem]])
+def list_app_messages(
+    limit: int = Query(default=50, ge=1, le=200),
+    user: CurrentUser = Depends(require_user),
+) -> APIResponse[ListResponse[AppMessageItem]]:
+    """App 内历史页使用的独立通知收件箱，与 webhook 发送审计分开。"""
+    items = list_latest(user.user_id, limit)
+    return APIResponse(data=ListResponse(items=items, total=len(items)))
 
 
 @router.get("/logs", response_model=APIResponse[ListResponse[NotifyLogItem]])

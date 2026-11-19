@@ -20,7 +20,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.crypto import encrypt
 from app.database import Base
-from app.models.entities import NotifyChannel, NotifyLog
+from app.models.entities import AppMessage, NotifyChannel, NotifyLog
 from app.services.notify.dispatch import (
     STATUS_FAILED,
     STATUS_SENT,
@@ -122,6 +122,10 @@ def _logs(db) -> list[NotifyLog]:
     return list(db.scalars(select(NotifyLog).order_by(NotifyLog.id)).all())
 
 
+def _messages(db) -> list[AppMessage]:
+    return list(db.scalars(select(AppMessage).order_by(AppMessage.id)).all())
+
+
 # ---- 基本分发 ---------------------------------------------------------------
 
 
@@ -141,6 +145,11 @@ def test_dispatch_sends_to_subscribed_channel(db, stub_send):
     assert rows[0].status == STATUS_SENT
     assert rows[0].event == EVENT
     assert rows[0].channel_name == "群机器人"
+    messages = _messages(db)
+    assert len(messages) == 1
+    assert messages[0].owner_id == OWNER
+    assert messages[0].title == "工作流失败：x #1"
+    assert messages[0].body == "步骤超时"
 
 
 def test_dispatch_skips_unsubscribed_disabled_and_foreign(db, stub_send):
@@ -155,11 +164,14 @@ def test_dispatch_skips_unsubscribed_disabled_and_foreign(db, stub_send):
     assert _logs(db) == []
 
 
-def test_dispatch_without_channels_is_silent(db, stub_send):
-    # 一个渠道都没有：安静返回，不报错、不落任何行。
-    asyncio.run(dispatch(OWNER, EVENT, title="t", body=""))
+def test_dispatch_without_channels_still_records_app_message(db, stub_send):
+    # 没有 webhook 不是丢弃 App 通知的理由；只有渠道审计为空。
+    asyncio.run(dispatch(OWNER, EVENT, title="t", body="正文"))
     assert stub_send.calls == []
     assert _logs(db) == []
+    messages = _messages(db)
+    assert len(messages) == 1
+    assert messages[0].title == "t" and messages[0].body == "正文"
 
 
 def test_dispatch_failure_logs_and_never_raises(db, stub_send):
@@ -192,6 +204,8 @@ def test_dispatch_continues_after_one_channel_fails(db, stub_send):
         ("第一个", STATUS_FAILED),
         ("第二个", STATUS_SENT),
     ]
+    # 多渠道各自留审计，但同一业务事件在 App 收件箱里只有一条。
+    assert len(_messages(db)) == 1
 
 
 def test_dispatch_skips_undecryptable_channel(db, stub_send):
@@ -212,6 +226,45 @@ def test_dispatch_truncates_long_title_and_body(db, stub_send):
     asyncio.run(dispatch(OWNER, EVENT, title="标" * 500, body="正" * 5000))
     assert len(stub_send.calls[0]["title"]) == 128
     assert len(stub_send.calls[0]["body"]) == 1024
+
+
+def test_legacy_huawei_row_is_archived_but_never_listed_or_sent(db, stub_send):
+    """旧库数据不迁移、不删除；退役 kind 不进 CRUD，也绝不落入 generic 发送。"""
+    from app.services.notify.service import NotifyChannelService
+
+    legacy = _channel(
+        db,
+        name="旧华为渠道",
+        kind="huawei",
+        webhook_url_enc=b"",
+    )
+    normal = _channel(db, name="正常 webhook")
+    db.add(
+        NotifyLog(
+            owner_id=OWNER,
+            channel_id=legacy.id,
+            channel_name=legacy.name,
+            event=EVENT,
+            title="历史华为发送",
+            status=STATUS_SENT,
+        )
+    )
+    db.commit()
+
+    service = NotifyChannelService(db, OWNER)
+    assert [channel.id for channel in service.list_channels()] == [normal.id]
+    with pytest.raises(LookupError):
+        service.get_channel(legacy.id)
+
+    asyncio.run(dispatch(OWNER, EVENT, title="新消息", body=""))
+    assert [call["webhook_url"] for call in stub_send.calls] == [
+        "https://open.feishu.cn/hook/xxx"
+    ]
+    assert [(row.channel_name, row.title) for row in service.list_logs()] == [
+        ("正常 webhook", "新消息"),
+        ("旧华为渠道", "历史华为发送"),
+    ]
+    assert len(_messages(db)) == 1
 
 
 # ---- 文本渲染 ---------------------------------------------------------------
@@ -328,40 +381,6 @@ def test_migrate_schema_adds_notify_log_body_to_legacy_db(engine, monkeypatch):
         assert title == "旧消息" and body is None
 
     # 幂等：列已存在时再跑一次必须是空操作而不是报错。
-    bootstrap.migrate_schema()
-
-
-def test_migrate_schema_adds_huawei_service_account_column(engine, monkeypatch):
-    """旧库（notify_huawei_config 还没有 service_account_enc）启动迁移补列。"""
-    from sqlalchemy import inspect, text
-
-    from app import bootstrap
-
-    monkeypatch.setattr(bootstrap, "engine", engine, raising=False)
-    monkeypatch.setattr(
-        bootstrap, "SessionLocal", sessionmaker(bind=engine, future=True)
-    )
-
-    # 重建为升级前的旧表形态：只有客户端凭证对两列，没有服务账号列。
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE notify_huawei_config"))
-        conn.execute(
-            text(
-                "CREATE TABLE notify_huawei_config ("
-                "id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id BIGINT NOT NULL, "
-                "app_id VARCHAR(32) NOT NULL, client_id_enc BLOB NOT NULL, "
-                "client_secret_enc BLOB NOT NULL, target_type VARCHAR(8) NOT NULL, "
-                "target VARCHAR(512) NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
-                "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
-            )
-        )
-
-    bootstrap.migrate_schema()
-
-    columns = {c["name"] for c in inspect(engine).get_columns("notify_huawei_config")}
-    assert "service_account_enc" in columns
-
-    # 幂等：再跑一次不报错。
     bootstrap.migrate_schema()
 
 

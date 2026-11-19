@@ -32,6 +32,9 @@ services:
       # First start only: creates the initial administrator.
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+      # Optional mobile App inbox + SSE. Both values must be set to enable it.
+      NOTIFY_APP_TOKEN: ${NOTIFY_APP_TOKEN:-}
+      NOTIFY_APP_OWNER_ID: ${NOTIFY_APP_OWNER_ID:-}
     volumes:
       # 幻灯片配图等用户上传的图片。镜像里的 /app 是构建产物，重建即覆盖，
       # 用户资产必须挂在卷上才留得住。

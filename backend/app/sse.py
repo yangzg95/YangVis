@@ -21,8 +21,9 @@ SSE_HEARTBEAT_BYTES = b": ping\n\n"
 DEFAULT_HEARTBEAT_INTERVAL = 15.0
 
 
-def sse_event(event: str, data: object) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+def sse_event(event: str, data: object, *, event_id: str | None = None) -> str:
+    id_line = f"id: {event_id}\n" if event_id is not None else ""
+    return f"{id_line}event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 SseChunk = TypeVar("SseChunk", str, bytes)

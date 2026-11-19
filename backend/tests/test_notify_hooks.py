@@ -4,8 +4,8 @@ hooks 是五个挂载点共用的翻译层，这里钉住三件事：
 
 1. **脱敏**：命令只出首词（参数里的路径/token/密码不进群消息）。
 2. **合并**：同一 owner 批量事件超过阈值合并成一条摘要，不同 owner 互不混流。
-3. **合同**：在工作线程（无事件循环）里调用也不抛——通知丢了可以，主流程
-   丢了不行。
+3. **合同**：在工作线程（无事件循环）里调用也不抛；主循环已绑定时转交执行，
+   未绑定的关停窗口才允许丢弃，主流程任何情况下都不能被通知炸掉。
 
 dispatch 本身在 test_notify_dispatch.py 验过，这里整模块打桩收集调用，
 不碰 DB 也不出网。
@@ -216,8 +216,9 @@ def test_command_first_word():
 # ---- 合同：无事件循环不抛 -----------------------------------------------------
 
 
-def test_safe_fire_in_thread_without_event_loop(caplog):
-    """挂载点合同：to_thread 线程里没有事件循环，通知只能丢，不能炸。"""
+def test_safe_fire_in_thread_without_bound_loop_drops_safely(monkeypatch):
+    """主循环不可用（如关停后）时才丢通知，且异常不穿透到工作线程。"""
+    monkeypatch.setattr(hooks, "_main_loop", None)
 
     async def coro():
         raise AssertionError("这个协程不该被调度")  # pragma: no cover
@@ -255,8 +256,31 @@ def test_safe_fire_with_loop_schedules_task():
     assert ran.is_set()
 
 
-def test_hooks_call_dispatch_without_raising_in_plain_thread():
-    """五个挂载点形态的端到端合同：同步上下文（无循环）里直接调也不抛。"""
+def test_safe_fire_in_worker_thread_schedules_on_bound_main_loop():
+    """to_thread 触发不能丢：通过 lifespan 绑定的主循环真正执行协程。"""
+    ran = asyncio.Event()
+
+    async def coro():
+        ran.set()
+
+    async def main():
+        loop = asyncio.get_running_loop()
+        hooks.bind_notify_loop(loop)
+        try:
+            thread = threading.Thread(target=lambda: _safe_fire(coro()))
+            thread.start()
+            await asyncio.wait_for(ran.wait(), timeout=1)
+            thread.join()
+        finally:
+            hooks.unbind_notify_loop(loop)
+
+    asyncio.run(main())
+    assert ran.is_set()
+
+
+def test_hooks_call_dispatch_without_raising_in_plain_thread(monkeypatch):
+    """未绑定主循环时，同步挂载点直接调也不抛。"""
+    monkeypatch.setattr(hooks, "_main_loop", None)
     calls = []
 
     # dispatch 打桩：记录调用即可，不真的发。

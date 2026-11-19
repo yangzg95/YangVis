@@ -634,14 +634,14 @@ CREATE TABLE IF NOT EXISTS workflow_evaluation (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一次 A/B 双运行对比评测';
 
 
--- 通知渠道与发送留痕（notify 模块）。webhook 机器人与华为 HMS Push 共用
--- notify_channel 占名，华为渠道的 OAuth 凭据单独落在 notify_huawei_config。
+-- 通知渠道、移动 App 收件箱与 webhook 发送留痕。AppMessage 是 App 的事实源，
+-- 不随渠道数量重复，也不因没有配置 webhook 而缺失。
 CREATE TABLE IF NOT EXISTS notify_channel (
   id              BIGINT PRIMARY KEY AUTO_INCREMENT,
   owner_id        BIGINT       NOT NULL COMMENT 'sys_user.id',
   name            VARCHAR(64)  NOT NULL,
-  kind            VARCHAR(16)  NOT NULL COMMENT 'feishu | wecom | dingtalk | generic | huawei',
-  webhook_url_enc VARBINARY(2048) NOT NULL COMMENT 'Fernet 密文；huawei 渠道存空 bytes 占位',
+  kind            VARCHAR(16)  NOT NULL COMMENT 'feishu | wecom | dingtalk | generic',
+  webhook_url_enc VARBINARY(2048) NOT NULL COMMENT 'Webhook URL 的 Fernet 密文',
   secret_enc      VARBINARY(1024) NULL COMMENT '加签密钥的 Fernet 密文',
   events          JSON         NOT NULL COMMENT '订阅的事件 key 列表',
   enabled         TINYINT(1)   NOT NULL DEFAULT 1,
@@ -652,7 +652,7 @@ CREATE TABLE IF NOT EXISTS notify_channel (
   updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uk_notify_owner_name (owner_id, name),
   KEY idx_notify_channel_owner (owner_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='通知渠道（webhook 机器人或华为推送）';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Webhook 机器人通知渠道';
 
 CREATE TABLE IF NOT EXISTS notify_log (
   id           BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -661,7 +661,7 @@ CREATE TABLE IF NOT EXISTS notify_log (
   channel_name VARCHAR(64)  NOT NULL COMMENT '渠道名快照，删渠道后历史仍可读',
   event        VARCHAR(32)  NOT NULL COMMENT '事件 key',
   title        VARCHAR(128) NOT NULL,
-  body         VARCHAR(1024) NULL COMMENT '通知正文快照，供移动 App 历史消息回放',
+  body         VARCHAR(1024) NULL COMMENT '通知正文快照，供 webhook 发送审计回放',
   status       VARCHAR(8)   NOT NULL COMMENT 'sent | failed',
   error        VARCHAR(512) NULL,
   elapsed_ms   BIGINT       NULL,
@@ -669,20 +669,19 @@ CREATE TABLE IF NOT EXISTS notify_log (
   KEY idx_notify_log_owner_time (owner_id, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一次通知发送的留痕';
 
-CREATE TABLE IF NOT EXISTS notify_huawei_config (
-  id                BIGINT PRIMARY KEY AUTO_INCREMENT,
-  channel_id        BIGINT        NOT NULL COMMENT 'notify_channel.id 逻辑外键，service 层级联删除',
-  app_id            VARCHAR(32)   NOT NULL COMMENT 'AGC 应用 app_id，非密钥，明文',
-  client_id_enc     VARBINARY(1024) NOT NULL COMMENT 'OAuth client_id 的 Fernet 密文；JWT 模式存空 bytes 占位',
-  client_secret_enc VARBINARY(1024) NOT NULL COMMENT 'OAuth client_secret 的 Fernet 密文；JWT 模式存空 bytes 占位',
-  service_account_enc VARBINARY(8192) NULL COMMENT 'AGC 服务账号私钥 JSON 的 Fernet 密文（JWT bearer 授权），与客户端凭证对二选一',
-  target_type       VARCHAR(8)    NOT NULL COMMENT 'topic | token',
-  target            VARCHAR(512)  NOT NULL COMMENT '主题名或设备 push token（token 模式按凭据掩码回显）',
-  created_at        DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at        DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_notify_huawei_channel (channel_id),
-  KEY idx_notify_huawei_channel (channel_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='华为 HMS Push 渠道的 1:1 配置';
+CREATE TABLE IF NOT EXISTS app_message (
+  id         BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id   BIGINT       NOT NULL COMMENT 'sys_user.id；专用通知令牌必须绑定一个 owner',
+  event      VARCHAR(32)  NOT NULL COMMENT '业务事件 key',
+  title      VARCHAR(128) NOT NULL,
+  body       VARCHAR(1024) NULL,
+  created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_app_message_owner_id (owner_id, id),
+  KEY idx_app_message_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='移动 App 通知收件箱；默认保留 30 天，SSE 按 id 增量补拉';
+
+-- 已部署库里的旧 HMS 渠道、配置表与 notify_log 只归档保留，不做 DROP 或数据改写。
+-- 新库不再创建 notify_huawei_config。
 
 
 -- ---------------------------------------------------------------------------
@@ -892,12 +891,7 @@ CREATE TABLE IF NOT EXISTS media_job (
 
 -- 通知留痕补正文快照（migrate_schema() 启动时自动补，手工重复执行会因列已存在而报错）：
 -- ALTER TABLE notify_log
---   ADD COLUMN body VARCHAR(1024) NULL COMMENT '通知正文快照，供移动 App 历史消息回放' AFTER title;
---
--- 华为渠道增加服务账号私钥凭据（与 client_id/client_secret 二选一，实测密文约 5KB）：
--- ALTER TABLE notify_huawei_config
---   ADD COLUMN service_account_enc VARBINARY(8192) NULL
---   COMMENT 'AGC 服务账号私钥 JSON 的 Fernet 密文（JWT bearer 授权）' AFTER client_secret_enc;
+--   ADD COLUMN body VARCHAR(1024) NULL COMMENT '通知正文快照，供 webhook 发送审计回放' AFTER title;
 
 -- ---------------------------------------------------------------------------
 -- 智能应用 · 短视频发布（成片合成 + 手动发布包，由 create_all 自动建表）

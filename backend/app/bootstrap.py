@@ -16,6 +16,7 @@ from app.services.knowledge.repo_sync import (
     gc_orphan_repo_dirs,
     reset_stale_repo_syncs,
 )
+from app.services.notify import app_inbox
 from app.services.notify import dispatch as notify_dispatch
 from app.services.tools import validate_registry as validate_local_tool_registry
 from app.services.ops.actions import reset_stale_ops_actions
@@ -464,20 +465,6 @@ def migrate_schema() -> None:
             )
         logger.info("added notify_log.body")
 
-    # notify_huawei_config 补服务账号私钥列：JWT bearer 授权模式的凭据。
-    # 表本身由 create_all 建立，但已部署的旧库没有这一列，需幂等 ALTER。
-    # VARBINARY(8192)：实测整段 JSON 明文 3.7KB，Fernet 密文膨胀到约 5KB。
-    huawei_columns = column_names("notify_huawei_config")
-    if huawei_columns and "service_account_enc" not in huawei_columns:
-        with engine.begin() as conn:
-            conn.execute(
-                text(
-                    "ALTER TABLE notify_huawei_config "
-                    "ADD COLUMN service_account_enc VARBINARY(8192) NULL"
-                )
-            )
-        logger.info("added notify_huawei_config.service_account_enc")
-
     # 素材库补打标分组列：从短视频存进来的首帧自动打上项目名，列表按标签分组展示。
     # 新库随 create_all 已带此列，这里只给已存在的旧库补。
     material_columns = column_names("material_asset")
@@ -652,6 +639,11 @@ def prune_notify_logs() -> None:
     顺序依赖——被清掉的只是日志，不是状态本身，放最后纯粹是归类。
     """
     notify_dispatch.prune_notify_logs()
+
+
+def prune_app_messages() -> None:
+    """清掉超过 App 收件箱保留窗口的消息，不影响 webhook 审计日志。"""
+    app_inbox.prune_app_messages()
 
 
 def bootstrap_admin(settings: Settings) -> None:
