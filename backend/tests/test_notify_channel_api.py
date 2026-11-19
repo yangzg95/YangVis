@@ -267,6 +267,30 @@ def test_test_channel_missing_is_404(env):
     assert client.post("/api/notify/channels/999/test").status_code == 404
 
 
+def test_test_app_message_uses_current_owner(env, monkeypatch):
+    _, _, make_client = env
+    calls: list[dict] = []
+
+    async def fake_dispatch(owner_id, event, *, title, body=""):
+        calls.append({"owner_id": owner_id, "event": event, "title": title, "body": body})
+
+    monkeypatch.setattr(notify_router, "dispatch", fake_dispatch)
+    resp = make_client(OTHER).post("/api/notify/messages/test")
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["success"] is True
+    assert data["message"] == "测试通知已触发，请在 App 消息列表或实时通知中确认"
+    assert calls == [
+        {
+            "owner_id": OTHER,
+            "event": "test",
+            "title": "App 通知测试",
+            "body": "这是一条来自设置页的测试通知。",
+        }
+    ]
+
+
 # -- 发送记录 ---------------------------------------------------------------
 
 

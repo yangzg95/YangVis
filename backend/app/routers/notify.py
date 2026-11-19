@@ -24,6 +24,7 @@ from app.models.schemas import (
     TestResult,
 )
 from app.services.notify.app_inbox import list_latest
+from app.services.notify.dispatch import dispatch
 from app.services.notify.events import event_infos
 from app.services.notify.service import NotifyChannelService
 
@@ -119,6 +120,25 @@ def list_app_messages(
     """App 内历史页使用的独立通知收件箱，与 webhook 发送审计分开。"""
     items = list_latest(user.user_id, limit)
     return APIResponse(data=ListResponse(items=items, total=len(items)))
+
+
+@router.post("/messages/test", response_model=APIResponse[TestResult])
+async def test_app_message(
+    user: CurrentUser = Depends(require_user),
+) -> APIResponse[TestResult]:
+    """给当前用户的 App 收件箱发一条测试消息，不触发正常事件订阅。"""
+    await dispatch(
+        user.user_id,
+        "test",
+        title="App 通知测试",
+        body="这是一条来自设置页的测试通知。",
+    )
+    return APIResponse(
+        data=TestResult(
+            success=True,
+            message="测试通知已触发，请在 App 消息列表或实时通知中确认",
+        )
+    )
 
 
 @router.get("/logs", response_model=APIResponse[ListResponse[NotifyLogItem]])

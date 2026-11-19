@@ -227,9 +227,14 @@
 
         <div class="toolbar toolbar--between toolbar--snug">
           <span class="hint">一个渠道＝一个群机器人或自定义接收端，订阅哪些事件按渠道各配。</span>
-          <a-button type="primary" @click="openNotifyCreate">
-            <PlusOutlined /> 新增渠道
-          </a-button>
+          <a-space>
+            <a-button :loading="notifyAppTesting" @click="onNotifyAppTest">
+              测试 App 通知
+            </a-button>
+            <a-button type="primary" @click="openNotifyCreate">
+              <PlusOutlined /> 新增渠道
+            </a-button>
+          </a-space>
         </div>
 
         <a-table
@@ -1042,6 +1047,7 @@ const notifyEvents = ref<NotifyEventInfo[]>([])
 const notifyLogs = ref<NotifyLogItem[]>([])
 const notifyLoading = ref(false)
 const notifyLogLoading = ref(false)
+const notifyAppTesting = ref(false)
 const notifyTestingId = ref<number | null>(null)
 let notifyLoaded = false
 
@@ -1212,6 +1218,22 @@ async function onNotifyToggle(channel: NotifyChannelItem, enabled: boolean) {
     return // 拦截器已弹 toast。
   }
   await loadNotify()
+}
+
+async function onNotifyAppTest() {
+  notifyAppTesting.value = true
+  try {
+    const result = await notifyApi.testAppMessage()
+    if (result.success) {
+      message.success(result.message)
+    } else {
+      Modal.error({ title: 'App 通知测试失败', content: result.message })
+    }
+  } catch {
+    message.error('测试请求失败，请稍后重试')
+  } finally {
+    notifyAppTesting.value = false
+  }
 }
 
 async function onNotifyTest(channel: NotifyChannelItem) {

@@ -77,6 +77,12 @@ export const notifyApi = {
       timeout: 60000,
       skipErrorToast: true,
     }),
+  testAppMessage: () =>
+    request<TestResult>({
+      url: '/notify/messages/test',
+      method: 'POST',
+      skipErrorToast: true,
+    }),
   logs: (limit = 50) =>
     request<{ items: NotifyLogItem[]; total: number }>({ url: '/notify/logs', params: { limit } }),
 }
