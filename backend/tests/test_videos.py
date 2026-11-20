@@ -183,12 +183,18 @@ def _image_model(db, owner_id: int = OWNER, *, tested: bool = True) -> ModelConf
     return config
 
 
-def _video_model(db, owner_id: int = OWNER, *, tested: bool = True) -> ModelConfig:
+def _video_model(
+    db,
+    owner_id: int = OWNER,
+    *,
+    tested: bool = True,
+    model_name: str = "doubao-seedance-2-0-260128",
+) -> ModelConfig:
     config = ModelConfig(
         owner_id=owner_id,
         purpose=ModelPurpose.VIDEO.value,
         title="测试视频模型",
-        model_name="doubao-seedance-2-0-260128",
+        model_name=model_name,
         base_url="https://ark.cn-beijing.volces.com/api/v3",
         api_key_enc=encrypt("sk-unit-test"),
         is_default=True,
@@ -197,6 +203,10 @@ def _video_model(db, owner_id: int = OWNER, *, tested: bool = True) -> ModelConf
     db.add(config)
     db.commit()
     return config
+
+
+# Seedance 2.5 接入点 ID 的典型形状（型号段的点在 ID 里是连字符）。
+SEEDANCE_25 = "doubao-seedance-2-5-251015"
 
 
 def _project(db, **overrides) -> VideoProject:
@@ -703,6 +713,77 @@ def test_render_clips_t2v_sends_no_image(db):
 
     assert request["images"] == []
     assert request["prompt"] == "镜头缓慢推近，人物眨眼"
+
+
+def test_seedance_25_detection_covers_id_and_series_spellings():
+    """接入点 ID 用连字符、系列名用点，两种写法都要认得；2.0 与其他型号不能误判。"""
+    assert video_service._is_seedance_25("doubao-seedance-2-5-251015")
+    assert video_service._is_seedance_25("doubao-seedance-2.5")
+    assert video_service._is_seedance_25("SEEDANCE-2-5-PRO")
+    assert not video_service._is_seedance_25("doubao-seedance-2-0-fast-250115")
+    assert not video_service._is_seedance_25("doubao-seedance-1-0-pro-250528")
+    assert not video_service._is_seedance_25("")
+
+
+def test_render_clips_seedance_25_first_frame_forces_adaptive_ratio(db):
+    """2.5 首帧档显式 ratio 会被上游 400（TaskTypeConstraint）：画幅跟首帧，只能发 adaptive。"""
+    project = _project(db, params={"ratio": "9:16", "resolution": "1080p"})
+    service = _service(db)
+    rows, frames = _rendered(db, project.id, 1)
+    _video_model(db, model_name=SEEDANCE_25)
+
+    request = service.render_clips(project.id, [])[0].request
+
+    assert request["images"] == [{"role": ROLE_FIRST_FRAME, "rel_path": frames[0].rel_path}]
+    assert request["params"]["ratio"] == "adaptive"
+    # 只改画幅口径，其余参数原样：分辨率、本镜时长、音频开关都不受影响。
+    assert request["params"]["resolution"] == "1080p"
+    assert request["params"]["duration"] == rows[0].duration_s
+    assert request["params"]["generate_audio"] is False
+
+
+def test_render_clips_seedance_25_t2v_keeps_the_explicit_ratio(db):
+    """纯文生没有首帧可跟，2.5 仍按项目的显式画幅发，不能一刀切 adaptive。"""
+    project = _project(db, params={"ratio": "9:16"})
+    service = _service(db)
+    _video_model(db, model_name=SEEDANCE_25)
+    service.save_shots(project.id, [_shot({"gen_mode": MODE_T2V})])
+
+    request = service.render_clips(project.id, [])[0].request
+
+    assert request["params"]["ratio"] == "9:16"
+    assert request["images"] == []
+
+
+def test_render_clips_seedance_20_first_frame_keeps_the_explicit_ratio(db):
+    """老型号的既有行为不能被 2.5 的适配带偏：2.0 首帧档仍吃显式 9:16。"""
+    project = _project(db)
+    service = _service(db)
+    _rendered(db, project.id, 1)
+    _video_model(db)  # 默认就是 doubao-seedance-2-0
+
+    request = service.render_clips(project.id, [])[0].request
+
+    assert request["params"]["ratio"] == "9:16"
+
+
+def test_render_clips_seedance_25_reference_previous_uses_adaptive(db, monkeypatch):
+    """2.5 上「参考上一版」可能被判成编辑/延长任务，那两类同样只收 adaptive。"""
+    monkeypatch.setattr(
+        video_service.settings, "PUBLIC_MEDIA_BASE_URL", "https://yangvis.example.com"
+    )
+    project = _project(db)
+    service = _service(db)
+    _rendered(db, project.id, 1)
+    _video_model(db, model_name=SEEDANCE_25)
+    previous = _stored_clip(db, service, project.id)
+
+    request = service.render_clips(project.id, [], reference_previous=True)[0].request
+
+    assert request["images"] == [
+        {"role": ROLE_REFERENCE_VIDEO, "rel_path": previous.rel_path},
+    ]
+    assert request["params"]["ratio"] == "adaptive"
 
 
 def test_render_clips_reference_sends_image_materials_only(db):

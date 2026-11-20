@@ -3066,6 +3066,10 @@ class VideoParams(BaseModel):
     ``ratio`` 默认**显式 9:16** 而不是 ``adaptive``：出图那一档只带尺寸不带画幅，
     ``adaptive`` 是「跟着首帧走」，首帧出成方图就整条跟着方。竖屏产品不能把方向
     交给运气，横屏选题在渲染参数里切回去就是。
+
+    例外：Seedance 2.5 的首帧/首尾帧生视频不再接受显式 ratio（上游 400
+    TaskTypeConstraint，画幅由首帧图决定），入队时这一档会被服务层自动改写成
+    ``adaptive``；纯文生与 2.0 及更早型号仍按这里的显式档位发送。
     """
 
     ratio: VideoRatio = "9:16"

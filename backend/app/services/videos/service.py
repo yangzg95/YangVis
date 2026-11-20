@@ -129,6 +129,18 @@ PLATFORM_LABELS = {
 # omni_reference_task_type 只有 2.5 支持，2.0 系传不得，所以只能靠措辞落在「参考」那类。
 REFERENCE_PREVIOUS_HINT = "参考@视频1的主体形象、画面风格与运镜节奏，按以下描述重新生成一段视频："
 
+# Seedance 2.5 型号识别：方舟接入点 ID 形如 doubao-seedance-2-5-251015（系列名里的
+# 点在 ID 里写成连字符），也兼容直接填 doubao-seedance-2.5 系列名的配置。
+# 2.5 起首帧/首尾帧生视频的输出画幅由首帧图决定，请求里带显式 ratio 会被上游
+# 400 InvalidParameter.TaskTypeConstraint 拒掉（原话：the output ratio follows
+# the first-frame image），这一档只能发 adaptive。
+_SEEDANCE_25_TOKENS = ("seedance-2-5", "seedance-2.5", "seedance2.5", "seedance2-5")
+
+
+def _is_seedance_25(model_name: str) -> bool:
+    name = (model_name or "").lower()
+    return any(token in name for token in _SEEDANCE_25_TOKENS)
+
 
 def _clamp_prompt(text: str) -> str:
     """提示词按方舟的字数限制截断。
@@ -833,6 +845,16 @@ class VideoService:
                     }
                 )
                 prompt = _clamp_prompt(f"{REFERENCE_PREVIOUS_HINT}{prompt}")
+            ratio = str(params.get("ratio") or "9:16")
+            # Seedance 2.5 的首帧/首尾帧档画幅跟着首帧图走，显式 ratio 上游直接 400；
+            # 「参考上一版」在 2.5 上可能被判成编辑/延长任务，那两类同样只收 adaptive。
+            # 2.0 及更早型号、以及纯文生（t2v）维持项目里的显式档位不变。
+            frame_driven = (
+                row.gen_mode in (MODE_FIRST_FRAME, MODE_FIRST_LAST_FRAME)
+                or reference_previous
+            )
+            if frame_driven and _is_seedance_25(config.model_name):
+                ratio = "adaptive"
             job = media_jobs.enqueue(
                 self._db,
                 self._owner_id,
@@ -845,7 +867,7 @@ class VideoService:
                     # 键名与方舟请求体同名，作业层原样透传（``jobs._video_params``
                     # 不兜默认值）。时长是**本镜**的，不是全片的：一镜一条任务。
                     "params": {
-                        "ratio": str(params.get("ratio") or "9:16"),
+                        "ratio": ratio,
                         "resolution": str(params.get("resolution") or "720p"),
                         "duration": int(row.duration_s),
                         "watermark": bool(params.get("watermark")),

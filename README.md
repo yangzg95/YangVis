@@ -315,12 +315,14 @@ location ^~ /api/ops/servers/ {
 
 - **只有 Seedance 2.5 与 2.0 系列（含 fast / mini）支持参考视频**，1.0 pro / pro fast 不支持。代码目前不按型号拦截：换成 1.0 系后开关照样能勾，请求照发，然后被上游拒。另外 mini / fast 档分辨率只到 720p。
 
+- **Seedance 2.5 的首帧/首尾帧生视频不再接受显式 `ratio`**：上游直接 400 `InvalidParameter.TaskTypeConstraint`（原话 the output ratio follows the first-frame image），画幅由首帧图决定。入队时服务层按接入点 ID 识别 2.5（`seedance-2-5` / `seedance-2.5`），把首帧档与「参考上一版」的 `ratio` 自动改写成 `adaptive`；纯文生（t2v）没有首帧可跟，仍发项目里的显式档位，2.0 及更早型号行为不变。
+
 - 挂了参考视频后，任务会被判成**参考生视频 / 视频编辑 / 视频延长**三类之一。后两类要求 `ratio=adaptive`、`duration=-1`，与本项目按镜传 `9:16` + 镜头秒数冲突，会异步报错 `InvalidParameter.TaskTypeConstraint`。能显式锁定子任务的 `omni_reference_task_type` **只有 Seedance 2.5 支持**，2.0 系传不得，所以这里靠提示词措辞落在「参考」那一类：自动拼在提示词最前面的引用句刻意避开「修改/替换/去掉」与「延长/续写」。自己改运动提示词时也请避开这些词。- **开关打开时不再发首帧**：方舟禁止首帧/尾帧与参考素材混用，混发直接 400（`InvalidParameter`，原话 `first/last frame content cannot be mixed with reference media content`，2026-11-15 在 2.0-mini 上实测撞到）。上一版成片本身承载了画面，所以这一档只发参考视频，任务类型是纯「参考生视频」，`ratio` / `duration` 不受特殊限制；也因此不再要求这一镜的首帧已出图。参考图档的图片素材照旧保留——图片 + 视频的组合参考是允许的。
 - 参考视频规格：2.0 系单个时长 [2,15] 秒、最多 3 个且总时长 ≤15 秒（2.5 放宽到 [2,30] 秒 / 10 个 / 总 30 秒）；含人脸的视频要求是**本账号近 30 天内由 Seedance 2.5/2.0 系列生成的原始视频**——本功能喂的正是自己刚渲的那份，天然满足，但超过保留期（`VIDEO_RETENTION_DAYS`，30 天）的旧产物不要再指望能当参考。
 
 ### 短视频 TTS 配音
 
-成片合成可选叠 TTS 配音：工作台「渲染参数」里打开「TTS 配音」开关，合成时按每一镜的台词逐句调方舟 `/audio/speech`（用途 `tts` 的模型配置，与图片/视频同一张 `model_config` 表），再由本机 ffmpeg 按镜头时间轴混音封装。片段始终静音，`generate_audio` 保持关闭。零 DDL，开关关闭时链路与之前完全一致。详见 [video-tts.md](docs/features/video-tts.md)。
+成片合成可选叠 TTS 配音：工作台「渲染参数」里打开「TTS 配音」开关，合成时按每一镜的台词逐句调 TTS（用途 `tts` 的模型配置，与图片/视频同一张 `model_config` 表；支持 Agent Plan 的 openspeech 套餐端点与 OpenAI 兼容 `/audio/speech` 两种协议，按模型地址自动识别），再由本机 ffmpeg 按镜头时间轴混音封装。片段始终静音，`generate_audio` 保持关闭。零 DDL，开关关闭时链路与之前完全一致。详见 [video-tts.md](docs/features/video-tts.md)。
 
 - 音色取项目参数 `tts_voice`，留空退到环境变量 `TTS_DEFAULT_VOICE`；两者都空时入队被拒。
 - 台词比镜头槽位长时自动 `atempo` 加速，倍率超过 `TTS_MAX_ATEMPO`（默认 1.6）则作业失败、点名镜号，不产出加速怪声。
