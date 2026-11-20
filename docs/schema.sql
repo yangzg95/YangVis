@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS sys_user (
 CREATE TABLE IF NOT EXISTS model_config (
   id              BIGINT PRIMARY KEY AUTO_INCREMENT,
   owner_id        BIGINT        NOT NULL COMMENT 'sys_user.id',
-  purpose         VARCHAR(16)   NOT NULL COMMENT 'chat | embedding',
+  purpose         VARCHAR(16)   NOT NULL COMMENT 'chat | embedding | image | video | tts',
   title           VARCHAR(128)  NOT NULL,
   model_name      VARCHAR(128)  NOT NULL,
   base_url        VARCHAR(512)  NOT NULL,
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS model_config (
   last_test_ok    TINYINT(1)    NOT NULL DEFAULT 0,
   last_test_error VARCHAR(512)  NULL,
   reasoning_mode  VARCHAR(16)   NOT NULL DEFAULT 'auto' COMMENT '思维链：auto 上游发了才展示 | on 带 request_extra 并要求展示 | off 丢弃',
-  request_extra   JSON          NULL COMMENT '仅 reasoning_mode=on：原样并入请求体的私有参数（enable_thinking / thinking.type 等），代码不猜厂商',
+  request_extra   JSON          NULL COMMENT '原样并入请求体的厂商私有参数（chat 的 enable_thinking / thinking.type，tts 的资源 ID 等），代码不猜厂商',
   temperature     INT           NULL COMMENT '0-100，除以100传给模型；模型级硬约束，设了就盖过智能体；NULL=不设限，由智能体决定',
   supports_vision TINYINT(1)    NOT NULL DEFAULT 0 COMMENT '仅 chat：是否接受图片输入（由配置的人按服务商文档声明）',
   created_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -750,7 +750,7 @@ CREATE TABLE IF NOT EXISTS video_project (
   brief            JSON         NOT NULL COMMENT '创作卡：{hook, audience, structure, goal, duration_s}',
   script           MEDIUMTEXT   NOT NULL COMMENT '完整口播/剧情纯文本，供人通读与手改；分镜是它的切分',
   style            JSON         NOT NULL COMMENT '{visual_style, persona, palette}，逐镜提示词都要贴它',
-  params           JSON         NOT NULL COMMENT '渲染参数快照：{ratio, resolution, watermark, generate_audio, image_size}，发起渲染时抄下，改模型配置不影响已入队的作业；本镜时长取 video_shot.duration_s',
+  params           JSON         NOT NULL COMMENT '渲染参数快照：{ratio, resolution, watermark, generate_audio, image_size, tts_enabled, tts_voice}，发起渲染/合成时抄下，改模型配置不影响已入队的作业；本镜时长取 video_shot.duration_s',
   publish          JSON         NOT NULL COMMENT '{title_candidates, tags, cover_prompt}',
   created_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -923,7 +923,8 @@ CREATE TABLE IF NOT EXISTS media_job (
 --
 -- media_job 对接火山方舟、由常驻循环推进；publish_job 是本机 ffmpeg 的活，
 -- 跑在请求级后台任务里。request.sources 是发起时的片段 rel_path 顺序快照，
--- 成片落在 videos/<project_id>/ 下，删项目时跟着目录树一起清。
+-- request.tts（可选）是配音开关、音色与逐镜台词/时间轴快照，成片落在
+-- videos/<project_id>/ 下，删项目时跟着目录树一起清。
 -- channel 目前只有 manual；open_api / browser 是预留通道，不需要迁移。
 -- ---------------------------------------------------------------------------
 

@@ -43,6 +43,7 @@ from app.models.entities import (
 from app.models.schemas import (
     MediaCapacityItem,
     MediaJobOut,
+    ModelPurpose,
     PublishJobOut,
     VideoBrief,
     VideoParams,
@@ -80,6 +81,7 @@ from app.services.media import store
 from app.services.materials import KIND_IMAGE as MATERIAL_IMAGE
 from app.services.materials.service import MaterialService
 from app.services.materials.store import store_material
+from app.services.model_config import default_model_config
 from app.services.publish import (
     CHANNEL_MANUAL,
     PUBLISH_ACTIVE_STATES,
@@ -990,6 +992,17 @@ class VideoService:
         cover = self._cover_jobs([project_id]).get(str(project_id))
         publish = project.publish or {}
         candidates = list(publish.get("title_candidates") or [])
+        # 配音门槛放在片段闸门之后：先保证「有片可拼」，再谈声音配置。
+        tts_snapshot = self._tts_snapshot(project, rows)
+        request: Dict[str, Any] = {
+            "sources": sources,
+            "title": str(candidates[0] if candidates else project.title),
+            "tags": [str(tag) for tag in (publish.get("tags") or [])][:8],
+            "cover": cover.rel_path if cover else "",
+        }
+        if tts_snapshot:
+            # 不开配音时 request 里干脆不带这个键，runner 按缺失即无声处理。
+            request["tts"] = tts_snapshot
         job = PublishJob(
             owner_id=self._owner_id,
             project_id=project_id,
@@ -998,12 +1011,7 @@ class VideoService:
             status=PUBLISH_QUEUED,
             # 快照而不是指针：之后重渲片段、改文案都不影响这次合成要拼什么、
             # 发布包里带哪版标题——与 media_job.request 同一个理由。
-            request={
-                "sources": sources,
-                "title": str(candidates[0] if candidates else project.title),
-                "tags": [str(tag) for tag in (publish.get("tags") or [])][:8],
-                "cover": cover.rel_path if cover else "",
-            },
+            request=request,
         )
         self._db.add(job)
         self._db.commit()
@@ -1016,6 +1024,54 @@ class VideoService:
             len(sources),
         )
         return job
+
+    def _tts_snapshot(
+        self, project: VideoProject, rows: List[VideoShot]
+    ) -> Optional[Dict[str, Any]]:
+        """配音开启时组装入队快照；关闭返回 ``None``（作业请求里不带 tts 键）。
+
+        与 ``sources`` 同一取舍：台词、起点、槽位在这里快照写死，合成进行中改分镜
+        不影响这次作业。模型配置只快照 id/name 留痕，运行时由 runner 重新解析默认项。
+        """
+        params = project.params or {}
+        if not params.get("tts_enabled"):
+            return None
+
+        config = default_model_config(self._db, self._owner_id, ModelPurpose.TTS)
+        if config is None:
+            raise ValueError(
+                "已开启 TTS 配音，但还没有配置用途为「语音」的默认模型，"
+                "先到「模型与集成」添加 TTS 配置"
+            )
+        if not config.last_test_ok:
+            raise ValueError("语音模型还没通过连通性测试，先在「模型与集成」里测通再合成")
+
+        voice = (params.get("tts_voice") or "").strip() or settings.TTS_DEFAULT_VOICE.strip()
+        if not voice:
+            raise ValueError(
+                "没有可用的音色 ID：在渲染参数里填一个，或在服务端配置 TTS_DEFAULT_VOICE"
+            )
+
+        lines = [
+            {
+                "sort_order": row.sort_order,
+                "start_s": row.start_s,
+                "duration_s": row.duration_s,
+                "text": (row.dialogue or "").strip(),
+            }
+            for row in rows
+            if (row.dialogue or "").strip()
+        ]
+        if not lines:
+            raise ValueError("已开启 TTS 配音，但所有镜头的台词都是空的：先在分镜里写台词")
+
+        return {
+            "enabled": True,
+            "voice": voice,
+            "model_config_id": config.id,
+            "model_name": config.model_name,
+            "lines": lines,
+        }
 
     def latest_publish_job(self, project_id: int) -> Optional[PublishJob]:
         """项目最近一次发布作业（任何状态）；历史都留在表里。"""

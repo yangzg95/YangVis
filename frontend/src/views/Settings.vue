@@ -70,6 +70,7 @@
             <a-radio-button value="embedding">向量</a-radio-button>
             <a-radio-button value="image">图片</a-radio-button>
             <a-radio-button value="video">视频</a-radio-button>
+            <a-radio-button value="tts">语音</a-radio-button>
           </a-radio-group>
           <a-button type="primary" @click="openCreate()">
             <PlusOutlined /> 新增模型
@@ -497,15 +498,21 @@
             <a-radio-button value="embedding">向量</a-radio-button>
             <a-radio-button value="image">图片</a-radio-button>
             <a-radio-button value="video">视频</a-radio-button>
+            <a-radio-button value="tts">语音</a-radio-button>
           </a-radio-group>
           <div class="hint">
-            对话模型用于生成回答；向量模型用于知识库检索；图片与视频两档给短视频出首帧、出片。
-            四类各配各的，互不顶替。
-            <template v-if="isMediaPurpose">
+            对话模型用于生成回答；向量模型用于知识库检索；图片与视频两档给短视频出首帧、出片；
+            语音档给短视频成片做 TTS 配音。五类各配各的，互不顶替。
+            <template v-if="isImageVideoPurpose">
               它们走的不是 OpenAI 兼容接口，而是火山方舟自己的视觉模型端点，但地址 / 密钥的填法一样。
             </template>
+            <template v-if="modal.form.purpose === 'tts'">
+              语音给短视频成片做 TTS 配音，支持 Agent Plan 套餐的 openspeech 端点（X-Api-Key 鉴权、
+              JSON 行流）与 OpenAI 兼容的 /audio/speech 两种协议，按模型地址自动识别；
+              连通性测试会真合成一句两字短音频（极少量计费），同时验通密钥、资源与默认音色。
+            </template>
           </div>
-          <div v-if="isMediaPurpose" class="hint">
+          <div v-if="isImageVideoPurpose" class="hint">
             图片与视频各限 2 个在途作业：方舟个人用户账号级只有 3 个并发位子，两档共用，所以两边都留了余量。
           </div>
         </a-form-item>
@@ -521,10 +528,15 @@
           />
           <a-input v-else v-model:value="modal.form.model_name" placeholder="例如：gpt-4o-mini" />
           <div class="hint">
-            <template v-if="isMediaPurpose">
+            <template v-if="isImageVideoPurpose">
               下拉里是模型系列名，方舟实际要的是控制台里那条部署 / 接入点的 ID（模型名 ≠ Model ID，
               通常带日期后缀，如 doubao-seedance-2-0-fast-250115），选中后请把后缀补成自己账号里的真实值。
               「测试」验得出地址与密钥，验不出 Model ID——它要第一次真实生成时才校验。
+            </template>
+            <template v-else-if="modal.form.purpose === 'tts'">
+              Agent Plan 套餐协议下请求体没有 model 字段，模型由请求头 X-Api-Resource-Id 指定，
+              这里填资源 ID（seed-tts-2.0）仅作记录与日志展示。「测试」会真合成一句短音频，
+              密钥、资源与默认音色一次验全，但会产生极少量计费。
             </template>
             <template v-else>
               填服务商要求的模型标识。部分服务商此处要求填部署 / 接入点 ID 而非模型名，填错会导致调用全部失败，保存后请用「测试」验证。
@@ -534,10 +546,18 @@
         <a-form-item label="模型地址" required>
           <a-input
             v-model:value="modal.form.base_url"
-            :placeholder="isMediaPurpose ? ARK_BASE_URL : 'https://api.openai.com/v1'"
+            :placeholder="baseUrlPlaceholder"
           />
           <div class="hint">
-            <template v-if="isMediaPurpose">
+            <template v-if="modal.form.purpose === 'tts'">
+              语音有两种协议，按填入的地址自动识别：<br />
+              ① Agent Plan 套餐（推荐，文档 agent-plan-personal-voice-model）：填完整 HTTP 接口地址
+              https://openspeech.bytedance.com/api/v3/plan/tts/unidirectional，系统直接 POST 它、
+              不再拼接路径，鉴权用 X-Api-Key 头（即套餐专属 API Key）；<br />
+              ② OpenAI 兼容端点：只填到版本号那一层（如 https://ark.cn-beijing.volces.com/api/v3），
+              /audio/speech 由系统自己拼。
+            </template>
+            <template v-else-if="isImageVideoPurpose">
               填到版本号那一层为止，接口路径由系统自己拼（出图 /images/generations、出片
               /contents/generations/tasks）。方舟的公开端点是
               https://ark.cn-beijing.volces.com/api/v3；挂在套餐或网关下时前缀不同（例如
@@ -548,8 +568,11 @@
             </template>
             要从 https:// 开始写（漏了协议保存时自动补）；从控制台整段复制来的地址如果多带了接口路径，
             例如 /chat/completions，保存时也会去掉，只留到版本号那一层。
-            注意：Coding Plan、Agent Plan 等套餐仅限厂商官方工具内使用，其 key 不能在此配置
-            （API 调用有封号风险），请使用按量付费的 key。
+            <template v-if="modal.form.purpose !== 'tts'">
+              注意：Coding Plan、Agent Plan 等套餐仅限厂商官方工具内使用，其 key 不能在此配置
+              （API 调用有封号风险），请使用按量付费的 key。语音模型是例外：openspeech 套餐端点
+              官方就要求用 Agent Plan 专属 Key 调 HTTP 接口。
+            </template>
           </div>
         </a-form-item>
         <a-form-item label="密钥">
@@ -571,16 +594,25 @@
             普通模型（如各家 flash / turbo 档）本就不产出思维链。
           </div>
         </a-form-item>
-        <a-form-item v-if="modal.form.purpose === 'chat'" label="额外请求参数（JSON）">
+        <a-form-item
+          v-if="modal.form.purpose === 'chat' || modal.form.purpose === 'tts'"
+          label="额外请求参数（JSON）"
+        >
           <a-textarea
             v-model:value="modal.form.request_extra_text"
             :rows="2"
             :placeholder="EXTRA_PARAMS_PLACEHOLDER"
           />
           <div class="hint">
-            仅在「开启」时原样并入请求体。各家「开启思考」的字段名不一样
-            （enable_thinking / thinking / reasoning_effort），按服务商文档原样填写，
-            保存后用「测试」验证；填错会让这份配置直接调用失败。
+            <template v-if="modal.form.purpose === 'chat'">
+              仅在「开启」时原样并入请求体。各家「开启思考」的字段名不一样
+              （enable_thinking / thinking / reasoning_effort），按服务商文档原样填写，
+              保存后用「测试」验证；填错会让这份配置直接调用失败。
+            </template>
+            <template v-else>
+              原样并入 /audio/speech 请求体，用于该型号要求的厂商私有参数（如资源 ID、情感档）。
+              model / input / voice 等主参数不受影响；填错会让这份配置直接调用失败，保存后用「测试」验证。
+            </template>
           </div>
         </a-form-item>
         <a-form-item v-if="modal.form.purpose === 'chat'" label="采样温度">
@@ -658,6 +690,7 @@ const status = ref<ReadinessStatus>({
   embedding: { ready: false, model: null, config_id: null },
   image: { ready: false, model: null, config_id: null },
   video: { ready: false, model: null, config_id: null },
+  tts: { ready: false, model: null, config_id: null },
   kb: { status: 'uninitialized', doc_count: 0, chunk_count: 0, model_mismatch: false },
 })
 
@@ -666,6 +699,7 @@ const PURPOSE_LABELS: Record<ModelPurpose, string> = {
   embedding: '向量',
   image: '图片',
   video: '视频',
+  tts: '语音',
 }
 
 const PURPOSE_COLORS: Record<ModelPurpose, string> = {
@@ -673,6 +707,7 @@ const PURPOSE_COLORS: Record<ModelPurpose, string> = {
   embedding: 'purple',
   image: 'cyan',
   video: 'geekblue',
+  tts: 'orange',
 }
 
 /**
@@ -681,7 +716,7 @@ const PURPOSE_COLORS: Record<ModelPurpose, string> = {
  * 这里不能直接当默认值填：方舟要的是控制台里那条部署 / 接入点 ID（名字后面带日期
  * 后缀，且按账号不同），系列名填进去上游只会回一个找不到模型。
  */
-const ARK_MODEL_SERIES: Record<'image' | 'video', string[]> = {
+const ARK_MODEL_SERIES: Record<'image' | 'video' | 'tts', string[]> = {
   image: ['doubao-seedream-5.0-pro', 'doubao-seedream-5.0-flash'],
   video: [
     'doubao-seedance-2.5',
@@ -689,7 +724,12 @@ const ARK_MODEL_SERIES: Record<'image' | 'video', string[]> = {
     'doubao-seedance-2.0-fast',
     'doubao-seedance-2.0-mini',
   ],
+  // 语音合成：套餐协议下模型由 X-Api-Resource-Id 头指定，这里给资源 ID 而非模型名。
+  tts: ['seed-tts-2.0'],
 }
+
+/** 套餐语音端点的完整地址，单独成常量给占位符与文案复用。 */
+const OPENSPEECH_TTS_URL = 'https://openspeech.bytedance.com/api/v3/plan/tts/unidirectional'
 
 const ARK_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3'
 
@@ -742,16 +782,34 @@ const modal = reactive({
   form: emptyForm(),
 })
 
+/** 方舟系用途：共用 Ark base_url 与型号自动补全（图片/视频/语音）。 */
 const isMediaPurpose = computed(
+  () =>
+    modal.form.purpose === 'image' ||
+    modal.form.purpose === 'video' ||
+    modal.form.purpose === 'tts',
+)
+
+/** 只有图片/视频两档走方舟视觉任务端点并占在途并发，语音是同步 OpenAI 兼容接口。 */
+const isImageVideoPurpose = computed(
   () => modal.form.purpose === 'image' || modal.form.purpose === 'video',
 )
 
 const arkModelOptions = computed(() =>
-  (modal.form.purpose === 'image' || modal.form.purpose === 'video'
+  (modal.form.purpose === 'image' ||
+  modal.form.purpose === 'video' ||
+  modal.form.purpose === 'tts'
     ? ARK_MODEL_SERIES[modal.form.purpose]
     : []
   ).map((value) => ({ value })),
 )
+
+/** 语音档默认引导填套餐完整地址；图片/视频仍是方舟版本号层；其余是 OpenAI 通用占位。 */
+const baseUrlPlaceholder = computed(() => {
+  if (modal.form.purpose === 'tts') return OPENSPEECH_TTS_URL
+  if (modal.form.purpose === 'image' || modal.form.purpose === 'video') return ARK_BASE_URL
+  return 'https://api.openai.com/v1'
+})
 
 function testedAtText(record: ModelConfig): string {
   return record.last_tested_at
@@ -807,9 +865,9 @@ async function submit() {
   }
 
   // 额外参数是原样透传给服务商的，只能是 JSON 对象；填坏了在这里就拦掉，
-  // 而不是等调用时让上游报一个看不懂的 400。
+  // 而不是等调用时让上游报一个看不懂的 400。对话与语音两档有这个透传口。
   let requestExtra: Record<string, unknown> | null | undefined
-  if (modal.form.purpose === 'chat') {
+  if (modal.form.purpose === 'chat' || modal.form.purpose === 'tts') {
     const raw = modal.form.request_extra_text.trim()
     if (raw) {
       try {
@@ -846,6 +904,8 @@ async function submit() {
             supports_vision: modal.form.supports_vision,
           }
         : {}),
+      // 语音档只透传厂商私有参数，思维链/温度/视觉这几个对话专属字段不发。
+      ...(modal.form.purpose === 'tts' ? { request_extra: requestExtra } : {}),
     }
 
     if (modal.editing) {

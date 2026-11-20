@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import require_user
+from app.config import get_settings
 from app.models.schemas import (
     APIResponse,
     CurrentUser,
@@ -23,11 +24,13 @@ from app.models.schemas import (
     TestResult,
 )
 from app.services.knowledge import KnowledgeService
-from app.services.media import ark
+from app.services.media import ark, tts
 from app.services.model_config import ModelConfigService
 from app.services.providers import probe_embedding_dimension, test_chat_model
 
 logger = logging.getLogger("yangvis.settings")
+
+settings = get_settings()
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -112,6 +115,9 @@ async def test_model(
     一个**免费的只读请求**（任务列表）。它验得出 base_url 与 api_key，验不出
     Model ID——媒体调用一次就扣一次抵扣，没有「不花钱又能验证型号」的探测办法，
     探测通过的提示语里已经把这句说明白了。
+
+    TTS 没有只读接口可探，走的是真合成一句两字短音频：密钥、型号、音色一次验全，
+    成本可以忽略，提示语里同样如实写明会产生极少量计费。
     """
     try:
         config = service.get(config_id)
@@ -123,6 +129,8 @@ async def test_model(
         ok, message, vector_size = await probe_embedding_dimension(config)
     elif config.purpose in (ModelPurpose.IMAGE.value, ModelPurpose.VIDEO.value):
         ok, message = await ark.probe(config)
+    elif config.purpose == ModelPurpose.TTS.value:
+        ok, message = await tts.probe(config, settings.TTS_DEFAULT_VOICE)
     else:
         ok, message = await test_chat_model(config)
 
@@ -150,6 +158,7 @@ def readiness_status(
         (ModelPurpose.EMBEDDING, "embedding"),
         (ModelPurpose.IMAGE, "image"),
         (ModelPurpose.VIDEO, "video"),
+        (ModelPurpose.TTS, "tts"),
     ):
         config = service.get_default(purpose)
         if config is not None:

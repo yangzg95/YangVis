@@ -1,4 +1,4 @@
-"""发布作业的执行体：跑 ffmpeg、登记成片、把状态写回 ``publish_job``。
+"""发布作业的执行体：跑 TTS 与 ffmpeg、登记成片、把状态写回 ``publish_job``。
 
 形态与路由里的 ``_script_task`` 同一约定：请求级 ``BackgroundTasks`` 里跑，函数体内
 延迟导入 ``SessionLocal``（测试 monkeypatch 的是 ``app.database`` 上的名字，模块顶层
@@ -6,6 +6,10 @@ import 进来的副本替换不掉）。本地 ffmpeg 是秒级到几分钟的�
 几十分钟，所以不需要 media_job 那种常驻循环；但进程重启同样会把中途的任务丢下，
 :func:`reset_stale_publish_jobs` 在启动时把它们收成明确的失败，而不是留一条永远
 ``running``、把「这个项目正在合成」的位子永久占住的行。
+
+TTS 与 ffmpeg 同在这一个后台任务里顺序执行：配音句是入队时快照在 ``request.tts``
+里的（之后改台词不影响这次合成），运行时重新解析用途 ``tts`` 的默认模型配置——
+配置被删掉或测试状态失效时，让作业明确失败而不是偷偷退回无声片。
 """
 from __future__ import annotations
 
@@ -19,19 +23,90 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models.entities import PublishJob
-from app.services.media import store
+from app.models.schemas import ModelPurpose
+from app.services.media import store, tts
+from app.services.model_config import default_model_config
 from app.services.publish import (
     PUBLISH_ACTIVE_STATES,
     PUBLISH_FAILED,
     PUBLISH_RUNNING,
     PUBLISH_SUCCEEDED,
 )
-from app.services.publish.composer import PublishComposeError, compose
+from app.services.publish.composer import (
+    PublishComposeError,
+    VoiceoverLine,
+    VoiceoverPlan,
+    compose,
+)
 from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.publish.runner")
 
 settings = get_settings()
+
+
+async def _synthesize_voiceover(
+    db: Session, job: PublishJob, work_dir: Path
+) -> VoiceoverPlan | None:
+    """按作业快照逐句合成配音，返回 ffmpeg 用的时间轴计划；没开配音返回 None。
+
+    台词快照在入队时写定（``request.tts.lines``），运行时不回查镜头——合成进行中
+    用户改台词不该影响这次作业，与 ``sources`` 快照同一个理由。模型配置则相反，
+    必须运行时重新解析默认项并要求探测通过：配置被删/失效时让作业明确失败，而不是
+    拿一行历史 id 调一条已经不可用的密钥。
+    """
+    snapshot = (job.request or {}).get("tts")
+    if not snapshot or not snapshot.get("enabled"):
+        return None
+
+    raw_lines = snapshot.get("lines") or []
+    if not raw_lines:
+        raise PublishComposeError("配音开关已打开，但这次作业没有快照到任何台词")
+
+    config = default_model_config(db, job.owner_id, ModelPurpose.TTS)
+    if config is None:
+        raise PublishComposeError(
+            "还没有配置用途为「语音」的默认模型：先在「模型与集成」里添加 TTS 配置"
+        )
+    if not config.last_test_ok:
+        raise PublishComposeError(
+            "语音模型还没通过连通性测试：先在「模型与集成」里测通再发起合成"
+        )
+
+    voice = (snapshot.get("voice") or "").strip() or settings.TTS_DEFAULT_VOICE.strip()
+    if not voice:
+        raise PublishComposeError(
+            "没有可用的音色 ID：项目渲染参数与服务端 TTS_DEFAULT_VOICE 都为空"
+        )
+
+    plan_lines: list[VoiceoverLine] = []
+    for index, item in enumerate(raw_lines):
+        text = (item.get("text") or "").strip()
+        if not text:
+            # 无台词镜头不入计划，时间轴上它本就是一段静音。
+            continue
+        audio = await tts.synthesize(config, text=text, voice=voice)
+        audio_path = work_dir / f"line_{index:02d}.mp3"
+        audio_path.write_bytes(audio)
+        plan_lines.append(
+            VoiceoverLine(
+                path=audio_path,
+                sort_order=int(item.get("sort_order", index + 1)),
+                start_s=float(item.get("start_s", 0)),
+                slot_s=float(item.get("duration_s", 0)),
+            )
+        )
+
+    if not plan_lines:
+        raise PublishComposeError("配音开关已打开，但所有镜头的台词都是空的")
+    logger.info(
+        "voiceover synthesized: job=%s lines=%s voice=%s model=%s",
+        job.id,
+        len(plan_lines),
+        voice,
+        config.model_name,
+    )
+    return VoiceoverPlan(lines=plan_lines)
 
 
 async def run_publish_job(db: Session, job_id: int) -> None:
@@ -65,7 +140,9 @@ async def run_publish_job(db: Session, job_id: int) -> None:
         with TemporaryDirectory(dir=settings.upload_media_path) as tmp:
             work_dir = Path(tmp)
             out_path = work_dir / "final.mp4"
-            await compose(sources, out_path)
+            # 没有配音快照时返回 None，compose 走与以前完全一致的无声拼接路径。
+            voiceover = await _synthesize_voiceover(db, job, work_dir)
+            await compose(sources, out_path, voiceover=voiceover)
             # 登记这一步还要过文件头魔数与大小闸门：ffmpeg 真出了意外容器，
             # 这里会抛 MediaFileError，被下面同一档接住。
             stored = store.store_file(job.project_id, out_path)

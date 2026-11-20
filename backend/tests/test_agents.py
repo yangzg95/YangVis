@@ -182,8 +182,8 @@ def test_feature_owned_personas_stay_out_of_the_picker():
 
 
 def test_video_storyboarder_declares_silence_when_dialogue_is_empty():
-    """空对白镜头只有 BGM：渲染端只吃 video_prompt，人设里必须强制声明无对白，
-    否则视频模型会让人物凭空对口型。"""
+    """空对白镜头不进 TTS 配音、成片里没有人声：渲染端只吃 video_prompt，人设里必须
+    强制声明无对白，否则视频模型会让人物凭空对口型。"""
     prompt = next(a for a in BUILTIN_AGENTS if a.slug == "video-storyboarder").system_prompt
     assert "无对白" in prompt
     assert "嘴唇" in prompt

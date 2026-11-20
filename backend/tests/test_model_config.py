@@ -317,6 +317,12 @@ def test_create_strips_the_trailing_slash_off_the_base_url(db):
             "https://ark.cn-beijing.volces.com/api/v3/chat/completions/",
             "https://ark.cn-beijing.volces.com/api/v3",
         ),
+        # TTS 配置同样可能粘成带 /audio/speech 的完整地址，剥到版本号那一层，
+        # 否则 tts 客户端会拼出 /audio/speech/audio/speech。
+        (
+            "https://ark.cn-beijing.volces.com/api/v3/audio/speech",
+            "https://ark.cn-beijing.volces.com/api/v3",
+        ),
         # 忘了写协议：补上 https，别让人对着 InvalidURL 猜是哪一段错了。
         ("ark.cn-beijing.volces.com/api/v3", "https://ark.cn-beijing.volces.com/api/v3"),
         # 本地裸 HTTP 的服务照原样留着——协议只敢默认补 https，不敢反过来猜。

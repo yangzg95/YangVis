@@ -586,17 +586,19 @@ class LocalToolItem(BaseModel):
 # ---- 设置 / 模型配置 ------------------------------------------------
 
 class ModelPurpose(str, Enum):
-    """对话、向量、图片、视频四类模型是分开独立配置的。
+    """对话、向量、图片、视频、语音五类模型是分开独立配置的。
 
     ``image`` / ``video`` 不是 OpenAI 兼容的对话接口，走的是方舟自己的媒体端点，
     但凭证形状一模一样（base_url + model + api_key），所以复用同一张配置表，
-    由 ``services/media/ark.py`` 按用途挑客户端。
+    由 ``services/media/ark.py`` 按用途挑客户端。``tts`` 走方舟 OpenAI 兼容的
+    ``/audio/speech``，客户端在 ``services/media/tts.py``。
     """
 
     CHAT = "chat"
     EMBEDDING = "embedding"
     IMAGE = "image"
     VIDEO = "video"
+    TTS = "tts"
 
 
 class ReasoningMode(str, Enum):
@@ -710,6 +712,8 @@ class ReadinessStatus(BaseModel):
     # 缺哪个就在对应按钮上提示去配置，而不是等提交任务时上游报 401。
     image: PurposeStatus = Field(default_factory=PurposeStatus)
     video: PurposeStatus = Field(default_factory=PurposeStatus)
+    # 配音是可选能力：不参与短视频页面的准入，只在工作台的配音开关处给提示。
+    tts: PurposeStatus = Field(default_factory=PurposeStatus)
     kb: KnowledgeStatus = Field(default_factory=KnowledgeStatus)
 
 
@@ -3051,8 +3055,13 @@ class VideoParams(BaseModel):
     """一个项目的渲染参数。发起作业时抄进 ``media_job.request``，之后改这里不影响在跑的作业。
 
     ``generate_audio`` 默认**关**：方舟那一侧默认开，留着不动就会拿到一条模型自己
-    编的人声或背景乐，而这一期定的是「不做口播、只做字幕」。写在这里而不是靠上游
-    默认，是为了让「这条片子为什么没有声音」当场有据可查。
+    编的人声或背景乐——它不知道台词、也没有时间戳，与 TTS 配音轨会互相打架。人声
+    统一由 ``tts_enabled`` 控制的 TTS 链路在成片合成阶段装配，视频片段始终保持静音。
+    写在这里而不是靠上游默认，是为了让「这条片段为什么没有声音」当场有据可查。
+
+    ``tts_enabled`` / ``tts_voice`` 是**成片**参数而不是渲染参数：TTS 在发布作业里
+    按各镜台词逐句合成、按镜头时间轴混进成片，不碰任何 ``media_job``。``tts_voice``
+    留空时退到环境变量 ``TTS_DEFAULT_VOICE``。
 
     ``ratio`` 默认**显式 9:16** 而不是 ``adaptive``：出图那一档只带尺寸不带画幅，
     ``adaptive`` 是「跟着首帧走」，首帧出成方图就整条跟着方。竖屏产品不能把方向
@@ -3064,6 +3073,10 @@ class VideoParams(BaseModel):
     watermark: bool = False
     generate_audio: bool = False
     image_size: ImageSize = "2K"
+    # 成片时是否叠 TTS 配音。默认关：不配置语音模型的账号行为与之前完全一致。
+    tts_enabled: bool = False
+    # 音色 ID（各家模型的音色字表不同，代码不做枚举）；空串 = 用系统默认音色。
+    tts_voice: str = Field(default="", max_length=128)
 
 
 class VideoStyle(BaseModel):

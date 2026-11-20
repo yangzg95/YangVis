@@ -57,9 +57,13 @@ export interface VideoParams {
   ratio: VideoRatio
   resolution: VideoResolution
   watermark: boolean
-  /** 默认关：方舟那一侧默认开，留着就会拿到一条模型自己编的人声。 */
+  /** 默认关：方舟那一侧默认开，留着就会拿到一条模型自己编的人声。人声统一走 tts_enabled。 */
   generate_audio: boolean
   image_size: VideoImageSize
+  /** 成片时是否叠 TTS 配音：按各镜台词逐句合成、按镜头时间轴混进成片，片段始终静音。 */
+  tts_enabled: boolean
+  /** 音色 ID；空串表示用服务端 TTS_DEFAULT_VOICE。 */
+  tts_voice: string
 }
 
 /** 发布用的一包：标题候选、话题标签、封面描述。 */
@@ -200,7 +204,7 @@ export interface VideoProjectDetail extends VideoProjectItem {
   idea: string
   requirement: string
   brief: VideoBrief
-  /** 整条口播文案；这一期不配音，只作为内容与字幕的底稿。 */
+  /** 整条口播文案；TTS 配音读的是每镜 dialogue，这份只是供人通读的成稿记录。 */
   script: string
   style: VideoStyle
   params: VideoParams

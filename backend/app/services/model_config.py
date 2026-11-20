@@ -30,11 +30,12 @@ logger = logging.getLogger("yangvis.model_config")
 # 命中，剩下一个说不清是什么的 ``…/v3/chat``。
 _ENDPOINT_SUFFIXES = (
     "/chat/completions",
-    "/completions",
+    "/contents/generations/tasks",
+    "/images/generations",
+    "/audio/speech",
     "/embeddings",
     "/responses",
-    "/images/generations",
-    "/contents/generations/tasks",
+    "/completions",
 )
 
 

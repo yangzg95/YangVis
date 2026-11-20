@@ -457,7 +457,8 @@
                     @change="dirtyProject = true"
                   />
                   <div class="hint">
-                    这一期不做口播：这段是成稿记录，不会反向影响重新生成；字幕用每一镜的「屏幕文字」。
+                    这是整条口播的成稿记录，不会反向影响重新生成。TTS 配音读的是每一镜的「台词」，
+                    不是这一段；字幕导出仍用每一镜的「屏幕文字」。
                   </div>
                 </a-form-item>
                 <a-form-item label="画面风格">
@@ -539,15 +540,44 @@
                     </a-form-item>
                   </a-col>
                 </a-row>
-                <a-form-item label="生成音频">
+                <a-form-item label="片段自带音频">
                   <a-switch
                     v-model:checked="params.generate_audio"
                     @change="dirtyProject = true"
                   />
                   <div class="hint">
-                    默认关：方舟那一侧默认开，留着就会拿到一条模型自己编的人声或背景乐，
-                    而这一期定的是「不做口播、只做字幕」。
+                    默认关：方舟那一侧默认开，留着就会拿到一条模型自己编的人声或背景乐——它不知道
+                    台词也没有时间戳，会和下面的 TTS 配音打架。人声统一走「TTS 配音」，片段始终保持静音。
                   </div>
+                </a-form-item>
+                <a-form-item label="TTS 配音">
+                  <a-switch
+                    v-model:checked="params.tts_enabled"
+                    @change="dirtyProject = true"
+                  />
+                  <div class="hint">
+                    开启后，合成成片时按每一镜的「台词」逐句语音合成，按镜头时间轴混进成片；
+                    台词比镜头长会自动加速，超出上限则合成失败并提示改台词。无台词的镜头留静音。
+                  </div>
+                  <a-input
+                    v-if="params.tts_enabled"
+                    v-model:value="params.tts_voice"
+                    placeholder="音色 ID（套餐协议即 speaker，如 zh_female_vv_uranus_bigtts）；留空用服务端 TTS_DEFAULT_VOICE"
+                    style="margin-top: 8px"
+                    @change="dirtyProject = true"
+                  />
+                  <a-alert
+                    v-if="params.tts_enabled && !ttsReady"
+                    type="warning"
+                    show-icon
+                    style="margin-top: 8px"
+                    message="还没有可用的语音模型"
+                    description="在「模型与集成」添加用途为「语音」的配置（方舟 /audio/speech）并通过连通性测试，否则合成会被后端拒绝。"
+                  >
+                    <template #action>
+                      <a-button size="small" type="primary" @click="goToSettings">去配置</a-button>
+                    </template>
+                  </a-alert>
                 </a-form-item>
               </div>
 
@@ -1096,6 +1126,8 @@ const params = reactive<VideoParams>({
   watermark: false,
   generate_audio: false,
   image_size: '2K',
+  tts_enabled: false,
+  tts_voice: '',
 })
 const publish = reactive<VideoPublish>({ title_candidates: [], tags: [], cover_prompt: '' })
 
@@ -1125,6 +1157,8 @@ const saving = ref(false)
 const loadError = ref('')
 const imageReady = ref(true)
 const videoReady = ref(true)
+/** 配音是可选能力：默认可用（不拦页面），只有开了配音开关才拿它做前置提示。 */
+const ttsReady = ref(true)
 /** 默认视频模型的名字：确认屏上按它提示分辨率档位，认不出型号时以上游报错为准。 */
 const videoModel = ref('')
 
@@ -1263,6 +1297,7 @@ const composeProblem = computed(() => {
     .filter((shot) => shot.video_job?.status !== 'succeeded' || !shot.video_job?.url)
     .map((shot) => shot.sort_order)
   if (missing.length) return `第 ${missing.join('、')} 镜还没有可用的视频片段，先把片段渲完`
+  if (params.tts_enabled && !ttsReady.value) return '已开配音：先到「模型与集成」配好并测通用途为「语音」的模型'
   if (publishActive.value) return '成片正在合成中，等它结束再发起'
   return ''
 })
@@ -1398,10 +1433,12 @@ async function loadReadiness() {
     imageReady.value = status.image.ready
     videoReady.value = status.video.ready
     videoModel.value = status.video.model || ''
+    ttsReady.value = status.tts.ready
   } catch {
     // 取不到就不拦：真正的门槛在服务端入队那一步，这里只是提前说一句。
     imageReady.value = true
     videoReady.value = true
+    ttsReady.value = true
   }
 }
 

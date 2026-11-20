@@ -1,6 +1,6 @@
 /**
- * 模型配置域：chat / embedding / image / video 四种用途的模型条目、默认位、连通性
- * 测试与整体就绪状态。
+ * 模型配置域：chat / embedding / image / video / tts 五种用途的模型条目、默认位、
+ * 连通性测试与整体就绪状态。
  * TestResult 是通用的「测一下通不通」返回，ops.ts 的测试连接与测试库借用它。
  */
 import { request } from './http'
@@ -8,10 +8,10 @@ import { request } from './http'
 // ---- 设置 ------------------------------------------------------------------
 
 /**
- * 四类用途分开独立配置：image / video 走的不是 OpenAI 兼容的对话接口，而是火山方舟
- * 自己的媒体端点，但凭证形状一模一样（base_url + model + api_key），所以复用同一张表。
+ * 用途分开独立配置：image / video 走火山方舟自己的媒体端点；tts 走方舟 OpenAI 兼容
+ * 的 /audio/speech。凭证形状一模一样（base_url + model + api_key），复用同一张表。
  */
-export type ModelPurpose = 'chat' | 'embedding' | 'image' | 'video'
+export type ModelPurpose = 'chat' | 'embedding' | 'image' | 'video' | 'tts'
 
 /** 思维链：auto 上游发了才展示；on 带额外参数并要求展示；off 一律不展示。 */
 export type ReasoningMode = 'auto' | 'on' | 'off'
@@ -76,6 +76,8 @@ export interface ReadinessStatus {
   /** 短视频的两类生成模型分开报：「只配了出图、没配出片」是完全可能的状态。 */
   image: PurposeStatus
   video: PurposeStatus
+  /** 配音是可选能力，不参与短视频页面准入，只在工作台的配音开关处给提示。 */
+  tts: PurposeStatus
   kb: {
     status: string
     doc_count: number

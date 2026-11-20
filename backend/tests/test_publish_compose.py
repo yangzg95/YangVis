@@ -44,7 +44,13 @@ from app.services.publish import (
     PUBLISH_SUCCEEDED,
 )
 from app.services.publish import composer, runner
-from app.services.publish.composer import PublishComposeError, write_concat_list
+from app.services.publish.composer import (
+    PublishComposeError,
+    VoiceoverLine,
+    VoiceoverPlan,
+    write_concat_list,
+)
+from app.services.media.tts import TtsError
 from app.services.videos import service as video_service
 from app.services.videos.service import VideoService
 from app.services.workflows.builtin import seed_builtin_workflows
@@ -85,6 +91,11 @@ def media_dir(tmp_path, monkeypatch):
         PUBLISH_COMPOSE_TIMEOUT=30.0,
         VIDEO_MAX_SHOTS=real_settings.VIDEO_MAX_SHOTS,
         VIDEO_MAX_PROMPT_CHARS=real_settings.VIDEO_MAX_PROMPT_CHARS,
+        # 配音链路新读的几项：夹具里显式给值，缺一个就会把测试写进真实 uploads/
+        # 或在滤镜构建时 AttributeError。
+        TTS_DEFAULT_VOICE="",
+        TTS_MAX_ATEMPO=1.6,
+        TTS_SAMPLE_RATE=44100,
     )
     monkeypatch.setattr(media_store, "settings", fake)
     monkeypatch.setattr(material_store, "settings", fake)
@@ -289,9 +300,11 @@ def test_runner_composes_registers_and_succeeds(db, media_dir, monkeypatch):
     sources = [db.get(MediaJob, shot.video_job_id).rel_path for shot in rows]
     job = _service(db).compose_publish(project.id)
 
-    async def fake_compose(actual_sources, out_path: Path):
+    async def fake_compose(actual_sources, out_path: Path, voiceover=None):
         # 合成器收到的顺序要与入队快照一致；产物写到调用方给的临时路径。
         assert [p.name for p in actual_sources] == [Path(rel).name for rel in sources]
+        # 没开配音的既有链路：计划必须是 None，行为与配音功能上线前一致。
+        assert voiceover is None
         out_path.write_bytes(MP4 + b"x" * 64)
 
     monkeypatch.setattr(runner, "compose", fake_compose)
@@ -317,7 +330,7 @@ def test_runner_marks_failure_instead_of_raising(db, monkeypatch):
     _all_clips_ready(db, project.id)
     job = _service(db).compose_publish(project.id)
 
-    async def boom(sources, out_path):
+    async def boom(sources, out_path, voiceover=None):
         raise PublishComposeError("ffmpeg 合成失败：模拟故障")
 
     monkeypatch.setattr(runner, "compose", boom)
@@ -488,7 +501,7 @@ def test_compose_endpoint_runs_the_background_job(client, db, monkeypatch):
     project = _project(db)
     _all_clips_ready(db, project.id)
 
-    async def fake_compose(sources, out_path: Path):
+    async def fake_compose(sources, out_path: Path, voiceover=None):
         out_path.write_bytes(MP4)
 
     monkeypatch.setattr(runner, "compose", fake_compose)
@@ -518,3 +531,401 @@ def test_compose_endpoint_rejects_missing_clips_with_code_minus_one(client, db):
     assert body["code"] == -1
     assert "片段" in body["message"]
     assert db.scalar(select(func.count(PublishJob.id))) == 0
+
+
+# ---- TTS 入队门槛与快照 ------------------------------------------------------
+
+
+def _tts_config(db, *, tested: bool = True) -> ModelConfig:
+    config = ModelConfig(
+        owner_id=OWNER,
+        purpose=ModelPurpose.TTS.value,
+        title="测试语音模型",
+        model_name="tts-unit-test",
+        base_url="http://localhost:1/api/v3",
+        api_key_enc=encrypt("sk-tts"),
+        is_default=True,
+        last_test_ok=tested,
+    )
+    db.add(config)
+    db.commit()
+    return config
+
+
+def _shots_with_dialogue(db, project_id: int, texts: list[str]) -> list[VideoShot]:
+    overrides = []
+    for text in texts:
+        item = _shot_overrides()
+        item["dialogue"] = text
+        overrides.append(item)
+    _service(db).save_shots(project_id, overrides)
+    return _service(db).shots_of(project_id)
+
+
+def _enable_tts(db, project: VideoProject, voice: str = "zh_female_1") -> None:
+    project.params = {**project.params, "tts_enabled": True, "tts_voice": voice}
+    db.commit()
+
+
+def _all_clips_with_dialogue(db, project_id: int, texts: list[str]) -> list[VideoShot]:
+    rows = _shots_with_dialogue(db, project_id, texts)
+    for shot in rows:
+        _clip_ready(db, project_id, shot)
+    return rows
+
+
+def test_compose_tts_rejected_without_config(db):
+    project = _project(db)
+    _all_clips_with_dialogue(db, project.id, ["一句台词"])
+    _enable_tts(db, project)
+
+    with pytest.raises(ValueError, match="语音"):
+        _service(db).compose_publish(project.id)
+    assert db.scalar(select(func.count(PublishJob.id))) == 0
+
+
+def test_compose_tts_rejected_when_config_untested(db):
+    project = _project(db)
+    _all_clips_with_dialogue(db, project.id, ["一句台词"])
+    _tts_config(db, tested=False)
+    _enable_tts(db, project)
+
+    with pytest.raises(ValueError, match="连通性测试"):
+        _service(db).compose_publish(project.id)
+
+
+def test_compose_tts_rejected_without_any_voice(db):
+    project = _project(db)
+    _all_clips_with_dialogue(db, project.id, ["一句台词"])
+    _tts_config(db)
+    _enable_tts(db, project, voice="")  # 夹具里 TTS_DEFAULT_VOICE 也是空串
+
+    with pytest.raises(ValueError, match="音色"):
+        _service(db).compose_publish(project.id)
+
+
+def test_compose_tts_falls_back_to_server_default_voice(db):
+    project = _project(db)
+    _all_clips_with_dialogue(db, project.id, ["一句台词"])
+    _tts_config(db)
+    _enable_tts(db, project, voice="")
+    # 夹具给的是 SimpleNamespace，单测内改属性不影响别的用例。
+    video_service.settings.TTS_DEFAULT_VOICE = "zh_server_default"
+
+    job = _service(db).compose_publish(project.id)
+
+    assert job.request["tts"]["voice"] == "zh_server_default"
+
+
+def test_compose_tts_rejected_when_every_dialogue_empty(db):
+    project = _project(db)
+    _all_clips_ready(db, project.id)  # 默认 overrides 的 dialogue 全是空串
+    _tts_config(db)
+    _enable_tts(db, project)
+
+    with pytest.raises(ValueError, match="台词都是空的"):
+        _service(db).compose_publish(project.id)
+
+
+def test_compose_tts_snapshot_keeps_only_spoken_shots(db):
+    project = _project(db)
+    rows = _all_clips_with_dialogue(db, project.id, ["第一句", "", "第三句"])
+    assert [row.sort_order for row in rows] == [1, 2, 3]
+    _tts_config(db)
+    _enable_tts(db, project)
+
+    job = _service(db).compose_publish(project.id)
+
+    snapshot = job.request["tts"]
+    assert snapshot["enabled"] is True
+    assert snapshot["voice"] == "zh_female_1"
+    assert snapshot["model_name"] == "tts-unit-test"
+    # 无台词的第二镜不进快照；起点按镜头时间轴（每镜 5 秒）累加。
+    assert [line["sort_order"] for line in snapshot["lines"]] == [1, 3]
+    assert [line["start_s"] for line in snapshot["lines"]] == [0, 10]
+    assert [line["duration_s"] for line in snapshot["lines"]] == [5, 5]
+    assert [line["text"] for line in snapshot["lines"]] == ["第一句", "第三句"]
+
+
+def test_compose_without_tts_has_no_tts_key(db):
+    project = _project(db)
+    _all_clips_ready(db, project.id)
+
+    job = _service(db).compose_publish(project.id)
+
+    assert "tts" not in job.request
+
+
+# ---- TTS 执行体 --------------------------------------------------------------
+
+
+def test_runner_synthesizes_lines_and_passes_voiceover_plan(db, monkeypatch):
+    project = _project(db)
+    rows = _all_clips_with_dialogue(db, project.id, ["第一句", "", "第三句"])
+    _tts_config(db)
+    _enable_tts(db, project)
+    job = _service(db).compose_publish(project.id)
+
+    async def fake_synthesize(config, *, text, voice, **kwargs):
+        assert voice == "zh_female_1"
+        # 假音频字节即可：runner 只负责落盘，真正的 ffmpeg 在这一档被 mock 掉。
+        return MP4 + text.encode("utf-8")
+
+    captured: dict = {}
+
+    async def fake_compose(sources, out_path: Path, voiceover=None):
+        captured["plan"] = voiceover
+        # 临时目录在 with 块退出即删，音频文件存在性只能在这一档验。
+        assert all(line.path.is_file() for line in voiceover.lines)
+        out_path.write_bytes(MP4)
+
+    monkeypatch.setattr(runner.tts, "synthesize", fake_synthesize)
+    monkeypatch.setattr(runner, "compose", fake_compose)
+
+    asyncio.run(runner.run_publish_job(db, job.id))
+
+    db.expire_all()
+    done = db.get(PublishJob, job.id)
+    assert done.status == PUBLISH_SUCCEEDED
+    plan = captured["plan"]
+    assert isinstance(plan, VoiceoverPlan)
+    assert [line.sort_order for line in plan.lines] == [1, 3]
+    assert [line.start_s for line in plan.lines] == [0.0, 10.0]
+    assert [line.slot_s for line in plan.lines] == [5.0, 5.0]
+
+
+def test_runner_fails_when_tts_config_disappeared(db, monkeypatch):
+    project = _project(db)
+    _all_clips_with_dialogue(db, project.id, ["第一句"])
+    config = _tts_config(db)
+    _enable_tts(db, project)
+    job = _service(db).compose_publish(project.id)
+    # 入队后配置被删：运行时重新解析默认项，作业必须明确失败而不是退回无声片。
+    db.delete(config)
+    db.commit()
+
+    asyncio.run(runner.run_publish_job(db, job.id))
+
+    db.expire_all()
+    done = db.get(PublishJob, job.id)
+    assert done.status == PUBLISH_FAILED
+    assert "语音" in (done.error_msg or "")
+
+
+def test_runner_marks_tts_error_on_the_job(db, monkeypatch):
+    project = _project(db)
+    _all_clips_with_dialogue(db, project.id, ["第一句"])
+    _tts_config(db)
+    _enable_tts(db, project)
+    job = _service(db).compose_publish(project.id)
+
+    async def broken_synthesize(config, *, text, voice, **kwargs):
+        raise TtsError("上游服务异常（500），稍后重新发起")
+
+    monkeypatch.setattr(runner.tts, "synthesize", broken_synthesize)
+
+    asyncio.run(runner.run_publish_job(db, job.id))
+
+    db.expire_all()
+    done = db.get(PublishJob, job.id)
+    assert done.status == PUBLISH_FAILED
+    assert "500" in (done.error_msg or "")
+
+
+# ---- 合成器：时长探针与配音滤镜 ----------------------------------------------
+
+
+class _Proc:
+    """可定制 stderr 的假 ffmpeg 进程；探针靠 stderr 里的 Duration 行读数。"""
+
+    def __init__(self, code: int, stderr: bytes = b"fake ffmpeg stderr", action=None):
+        self._code = code
+        self._stderr = stderr
+        self._action = action
+
+    async def communicate(self):
+        if self._action:
+            self._action()
+        return b"", self._stderr
+
+    @property
+    def returncode(self):
+        return self._code
+
+    async def kill(self):
+        pass
+
+
+def _duration_stderr(seconds: float) -> bytes:
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = seconds % 60
+    return f"  Duration: {hours:02d}:{minutes:02d}:{secs:05.2f}, start: 0.000000".encode()
+
+
+def test_probe_duration_parses_ffmpeg_stderr(tmp_path, monkeypatch, fake_ffmpeg):
+    target = tmp_path / "a.mp3"
+    target.write_bytes(MP4)
+
+    def fake_exec(*args, **kwargs):
+        async def run():
+            return _Proc(1, _duration_stderr(62.5))  # 无输出文件时 ffmpeg 退出码就是 1
+
+        return run()
+
+    monkeypatch.setattr(composer.asyncio, "create_subprocess_exec", fake_exec)
+
+    assert asyncio.run(composer.probe_duration("ffmpeg", target)) == 62.5
+
+
+def test_probe_duration_raises_when_line_missing(tmp_path, monkeypatch, fake_ffmpeg):
+    target = tmp_path / "a.mp3"
+    target.write_bytes(MP4)
+
+    def fake_exec(*args, **kwargs):
+        async def run():
+            return _Proc(1, b"some unrelated stderr")
+
+        return run()
+
+    monkeypatch.setattr(composer.asyncio, "create_subprocess_exec", fake_exec)
+
+    with pytest.raises(PublishComposeError, match="读不到文件时长"):
+        asyncio.run(composer.probe_duration("ffmpeg", target))
+
+
+def _voice_lines(tmp_path: Path) -> list[VoiceoverLine]:
+    lines = []
+    for index, (start, slot) in enumerate(((0, 5), (5, 5))):
+        audio = tmp_path / f"line_{index}.mp3"
+        audio.write_bytes(MP4)
+        lines.append(
+            VoiceoverLine(audio, sort_order=index + 1, start_s=start, slot_s=slot)
+        )
+    return lines
+
+
+def _routing_exec(calls: list, durations: dict[str, float]):
+    """按调用形状路由的假 ffmpeg：探针回 Duration，其余落产物文件。"""
+
+    def fake_exec(*args, **kwargs):
+        argv = list(args)
+        calls.append(argv)
+
+        async def run():
+            if argv[-2] == "-i":  # 探针调用：[exe, -nostdin, -hide_banner, -i, path]
+                name = Path(argv[-1]).name
+                return _Proc(1, _duration_stderr(durations[name]))
+            Path(argv[-1]).write_bytes(MP4)
+            return _Proc(0)
+
+        return run()
+
+    return fake_exec
+
+
+def test_build_voiceover_places_lines_without_atempo_when_they_fit(
+    tmp_path, monkeypatch, fake_ffmpeg
+):
+    plan = VoiceoverPlan(_voice_lines(tmp_path))
+    out = tmp_path / "voiceover.m4a"
+    calls: list[list[str]] = []
+    durations = {"line_0.mp3": 3.0, "line_1.mp3": 4.0}
+    monkeypatch.setattr(
+        composer.asyncio,
+        "create_subprocess_exec",
+        _routing_exec(calls, durations),
+    )
+
+    asyncio.run(composer.build_voiceover("ffmpeg", plan, total_s=10.0, out_path=out))
+
+    assert out.is_file()
+    mix_call = next(argv for argv in calls if "-filter_complex" in argv)
+    graph = mix_call[mix_call.index("-filter_complex") + 1]
+    # 都放得进 5 秒槽位：不该出现加速；起点分别是 0ms 与 5000ms。
+    assert "atempo" not in graph
+    assert "adelay=0:all=1" in graph
+    assert "adelay=5000:all=1" in graph
+    assert "amix=inputs=2" in graph
+    assert "normalize=0" in graph
+    assert "atrim=0:10.000" in graph
+    assert "aresample=44100" in graph
+
+
+def test_build_voiceover_speeds_up_overflowing_line(tmp_path, monkeypatch, fake_ffmpeg):
+    plan = VoiceoverPlan(_voice_lines(tmp_path))
+    out = tmp_path / "voiceover.m4a"
+    calls: list[list[str]] = []
+    # 第一句 8 秒塞进 5 秒槽：倍率 1.6，恰好压在上限，允许；第二句正常。
+    durations = {"line_0.mp3": 8.0, "line_1.mp3": 4.0}
+    monkeypatch.setattr(
+        composer.asyncio,
+        "create_subprocess_exec",
+        _routing_exec(calls, durations),
+    )
+
+    asyncio.run(composer.build_voiceover("ffmpeg", plan, total_s=10.0, out_path=out))
+
+    graph = next(
+        argv[argv.index("-filter_complex") + 1]
+        for argv in calls
+        if "-filter_complex" in argv
+    )
+    # 顺序必须是先 atempo 再 adelay：反过来会把定位静音一起加速。
+    assert "[0:a]atempo=1.6000,adelay=0:all=1[a0]" in graph
+    assert "[1:a]adelay=5000:all=1[a1]" in graph
+
+
+def test_build_voiceover_fails_when_speedup_exceeds_cap(
+    tmp_path, monkeypatch, fake_ffmpeg
+):
+    plan = VoiceoverPlan(_voice_lines(tmp_path))
+    out = tmp_path / "voiceover.m4a"
+    calls: list[list[str]] = []
+    # 9 秒 / 5 秒 = 1.8x，超过 1.6 上限：明确失败，让人改台词而不是产出加速怪声。
+    durations = {"line_0.mp3": 9.0, "line_1.mp3": 4.0}
+    monkeypatch.setattr(
+        composer.asyncio,
+        "create_subprocess_exec",
+        _routing_exec(calls, durations),
+    )
+
+    with pytest.raises(PublishComposeError, match="第 1 镜台词太长"):
+        asyncio.run(composer.build_voiceover("ffmpeg", plan, total_s=10.0, out_path=out))
+    assert not out.exists()
+
+
+def test_compose_with_voiceover_runs_three_stage_pipeline(
+    tmp_path, monkeypatch, fake_ffmpeg
+):
+    sources = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
+    for path in sources:
+        path.write_bytes(MP4)
+    plan = VoiceoverPlan(_voice_lines(tmp_path))
+    out = tmp_path / "final.mp4"
+    calls: list[list[str]] = []
+    durations = {
+        "silent.mp4": 10.0,
+        "line_0.mp3": 3.0,
+        "line_1.mp3": 4.0,
+    }
+    monkeypatch.setattr(
+        composer.asyncio,
+        "create_subprocess_exec",
+        _routing_exec(calls, durations),
+    )
+
+    asyncio.run(composer.compose(sources, out, plan))
+
+    assert out.is_file()
+    # 六次调用：concat 直拼、无声片探针、两句探针、混音、封装。
+    assert len(calls) == 6
+    # 混音调用也带 -map（[aout]），用视频流选择器才能准确定位到封装那一次。
+    mux_call = next(argv for argv in calls if "0:v:0" in argv)
+    assert any(arg.endswith("silent.mp4") for arg in mux_call)
+    assert any(arg.endswith("voiceover.m4a") for arg in mux_call)
+    # 封装只做流拷贝，不再重编码视频或音频。
+    assert mux_call[mux_call.index("-c:v") + 1] == "copy"
+    assert mux_call[mux_call.index("-c:a") + 1] == "copy"
+    # 无声中间片与成片是两个文件，失败时能分清是拼接还是混音的锅。
+    assert (tmp_path / "silent.mp4").is_file()

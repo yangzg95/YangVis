@@ -289,6 +289,22 @@ class Settings(BaseSettings):
     # 直拼只要几秒；超时通常是回退重编码卡住，到点杀进程比留一条永远 running 的作业诚实。
     PUBLISH_COMPOSE_TIMEOUT: float = 300.0
 
+    # 智能应用 · 短视频 · TTS 配音（方舟 OpenAI 兼容 /audio/speech）
+    # 单句合成的 HTTP 超时。一次合成按镜头逐句调用，每句都是独立的短请求，
+    # 不沿用 MEDIA_HTTP_TIMEOUT 之外的长档。
+    TTS_HTTP_TIMEOUT: float = 60.0
+    # 项目参数没指定音色时用的默认音色 ID。留空且项目也没填 = 入队时直接拒绝，
+    # 不猜一个音色名写死在代码里——各家 TTS 模型的音色字表随型号不同。
+    TTS_DEFAULT_VOICE: str = ""
+    # 单句音频落盘前的大小闸门：一句十几秒的 mp3 通常不到百 KB，超 10MB 说明
+    # 返回的不是语音（错误页/别的文件），判失败比灌进 ffmpeg 再报玄学错诚实。
+    TTS_AUDIO_MAX_BYTES: int = 10 * 1024 * 1024
+    # 台词比镜头槽位长时，最多加速到几倍。atempo 单级支持 0.5-2.0，这里压在 1.6：
+    # 再快机器味盖过人声，不如明确失败让人删台词或加长镜头。
+    TTS_MAX_ATEMPO: float = 1.6
+    # 配音轨统一重采样到这个采样率再编码 AAC，避免各句 mp3 采样率不一致被 amix 拒绝。
+    TTS_SAMPLE_RATE: int = 44100
+
     @property
     def database_url(self) -> str:
         # 凭据做 percent-encode：密码里若包含 '@'、'/' 或 ':'，否则会被解析成
