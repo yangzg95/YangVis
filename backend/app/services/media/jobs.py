@@ -297,6 +297,27 @@ async def _store_artifact(db: Session, job: MediaJob, url: str) -> None:
     )
 
 
+async def _store_last_frame(db: Session, job: MediaJob, url: str) -> bool:
+    """转存视频任务随片返回的尾帧，写进 ``last_frame_rel_path``。
+
+    尾帧是链式渲染的衔接帧，与视频同生共死：同一个项目目录、同一套随机命名，
+    删项目时跟着目录树一起走。返回 ``False`` 表示上游没给或转存失败——普通作业
+    这不算失败，只有链式下游等它的时候才在依赖门里判死。
+    """
+    if not url:
+        return False
+    try:
+        raw = await ark.download(url, max_bytes=settings.MEDIA_IMAGE_MAX_BYTES)
+        blob = store.store_blob(_project_id_of(job), raw)
+    except Exception as exc:  # noqa: BLE001 - 尾帧失败不该把已经成功的视频打成失败
+        logger.warning("last frame store failed for job %s: %s", job.id, exc)
+        return False
+    job.last_frame_rel_path = blob.rel_path
+    db.commit()
+    logger.info("last frame stored: job=%s -> %s", job.id, blob.rel_path)
+    return True
+
+
 def _on_failure(db: Session, job: MediaJob, exc: Exception) -> None:
     """按 ``retriable`` 分流：可重试的回队列排队子，不可重试的直接判死。"""
     ark_error = exc if isinstance(exc, ark.ArkError) else None
@@ -360,6 +381,7 @@ async def _submit(db: Session, job: MediaJob, config: ModelConfig) -> None:
         await _store_artifact(db, job, result.url)
         return
 
+    await _inject_chain_frame(db, job)
     submission = await ark.submit_video(
         config, content=build_video_content(job.request or {}), params=_video_params(job)
     )
@@ -396,6 +418,10 @@ async def _poll(db: Session, job: MediaJob, config: ModelConfig) -> None:
             db.commit()
             return
         await _store_artifact(db, job, state.video_url)
+        # 尾帧与视频同一次 tick 转存：上游 URL 同样 24 小时失效，不能留到下游
+        # 真要衔接时才回来取。失败不影响视频本身的成功态（函数内部已兜异常）。
+        if state.last_frame_url:
+            await _store_last_frame(db, job, state.last_frame_url)
 
 
 async def _resume_download(db: Session, job: MediaJob) -> None:
@@ -536,6 +562,107 @@ def _due_submit_ids(db: Session) -> List[int]:
     return picked
 
 
+# ---- 尾帧链式渲染 ------------------------------------------------------------
+
+# 链式作业在 request 里的形状：
+# ``{"chain": {"enabled": True, "prev_job_id": 123, "prev_shot_order": 2,
+# "injected": False}}``。prev_job_id 是入队时快照的上一镜**视频作业 id**，
+# 之后上镜重做不影响本次衔接（与 publish_job 的 sources 快照同一哲学）。
+CHAIN_KEY = "chain"
+
+
+def _chain_spec(job: MediaJob) -> Optional[Dict[str, Any]]:
+    if job.kind != KIND_VIDEO:
+        return None
+    chain = (job.request or {}).get(CHAIN_KEY)
+    return chain if isinstance(chain, dict) and chain.get("enabled") else None
+
+
+def _apply_chain_gate(db: Session, submit_ids: List[int]) -> List[int]:
+    """从待提交名单里滤掉链式未就绪的作业，上游已死的当场判死。
+
+    三种结局：上游成功且尾帧落盘 → 放行；上游还在跑/尾帧还在转存 → 安静留在
+    队列（不占位子、不耗 attempts，下一轮 tick 再看）；上游失败/取消/过期或作业
+    行消失 → 本作业判终态失败，错误里点名镜号，让人按顺序重渲。
+    """
+    if not submit_ids:
+        return []
+    rows = db.scalars(select(MediaJob).where(MediaJob.id.in_(submit_ids))).all()
+    ready: List[int] = []
+    for job in rows:
+        chain = _chain_spec(job)
+        if chain is None:
+            ready.append(job.id)
+            continue
+        prev = db.get(MediaJob, int(chain.get("prev_job_id") or 0))
+        shot_order = chain.get("prev_shot_order")
+        if prev is None or prev.owner_id != job.owner_id:
+            _mark_terminal(
+                job,
+                JOB_FAILED,
+                code="ChainPrevMissing",
+                message=f"链式渲染的上游作业（第 {shot_order} 镜）已不存在，请重新渲染这一镜",
+            )
+            db.commit()
+            continue
+        if prev.status in JOB_FINAL_STATES and prev.status != JOB_SUCCEEDED:
+            _mark_terminal(
+                job,
+                JOB_FAILED,
+                code="ChainBroken",
+                message=(
+                    f"链式渲染中断：第 {shot_order} 镜的片段未成功（{prev.status}），"
+                    "请先重渲该镜，再重试后面的镜头"
+                ),
+            )
+            db.commit()
+            continue
+        if prev.status != JOB_SUCCEEDED or not prev.last_frame_rel_path:
+            # 上游在途，或视频成功了尾帧还在下载：这一轮不提交也不报错。
+            logger.info("chain job %s waiting for prev job %s", job.id, prev.id)
+            continue
+        ready.append(job.id)
+    return ready
+
+
+async def _inject_chain_frame(db: Session, job: MediaJob) -> None:
+    """提交前把上一镜尾帧换成本作业的首帧输入。
+
+    替换结果持久化进 ``request.images`` 并打 ``injected`` 标记：media_job.request
+    的职责就是「这次实际发了什么」，重启续跑时也不能把同一替换做两遍。原首帧引用
+    被覆盖是刻意的——链式模式下首帧的唯一合法来源就是上镜尾帧。
+    """
+    chain = _chain_spec(job)
+    if chain is None or chain.get("injected"):
+        return
+    prev = db.get(MediaJob, int(chain.get("prev_job_id") or 0))
+    if (
+        prev is None
+        or prev.owner_id != job.owner_id
+        or prev.status != JOB_SUCCEEDED
+        or not prev.last_frame_rel_path
+    ):
+        # gate 已挡过一轮，走到这里是竞态或尾帧被清：判死比重试安全，重试只会再撞一次。
+        raise MediaJobError(
+            f"第 {chain.get('prev_shot_order')} 镜的尾帧不可用，无法衔接，请重新渲染上一镜"
+        )
+    request = dict(job.request or {})
+    request["images"] = [
+        {"role": ROLE_FIRST_FRAME, "rel_path": prev.last_frame_rel_path}
+    ]
+    chain = dict(chain)
+    chain["injected"] = True
+    request[CHAIN_KEY] = chain
+    job.request = request
+    db.commit()
+    logger.info(
+        "chain frame injected: job=%s prev_job=%s frame=%s",
+        job.id,
+        prev.id,
+        prev.last_frame_rel_path,
+    )
+
+
 def _expire_stale(db: Session, now: datetime) -> int:
     """老到上游大概已经不收查询的作业，本地判死并让出并发位子。"""
     cutoff = now - timedelta(seconds=settings.MEDIA_JOB_STALE_SECONDS)
@@ -639,7 +766,7 @@ async def run_tick() -> int:
     try:
         _expire_stale(db, db_now())
         images = _due_image_ids(db)
-        submits = _due_submit_ids(db)
+        submits = _apply_chain_gate(db, _due_submit_ids(db))
         polls = _due_poll_ids(db)
         downloads = _due_download_ids(db)
     finally:

@@ -520,6 +520,21 @@ def _retire_project_assets(column_names) -> None:
             conn.execute(text("ALTER TABLE video_project DROP COLUMN assets"))
         logger.info("dropped video_project.assets")
 
+    # 人物库：项目角色组（video_character.id 的字符串列表）。新库随 create_all
+    # 已带此列，旧库在这儿补；JSON 不给 DB 默认值，存量行读到 NULL，服务层按空
+    # 角色组（[]）处理。video_character 表本身由 create_all 建，不在这儿补。
+    if project_cols and "character_ids" not in project_cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE video_project ADD COLUMN character_ids JSON NULL"))
+        logger.info("added video_project.character_ids")
+
+    # 尾帧链式渲染：视频作业成功时转存上游返回的 last_frame_url，供下一镜当首帧。
+    media_cols = column_names("media_job")
+    if media_cols and "last_frame_rel_path" not in media_cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE media_job ADD COLUMN last_frame_rel_path VARCHAR(512) NULL"))
+        logger.info("added media_job.last_frame_rel_path")
+
 
 def _backfill_default_projects() -> None:
     """给每一个没有归属的知识类型找一个项目安放。

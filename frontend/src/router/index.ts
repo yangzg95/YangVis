@@ -160,6 +160,14 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '短视频'},
     },
     {
+        // 人物库：账号级的角色档案与形象图。短视频通过项目角色组认领：脚本生成带档案、
+        // 首帧渲染注入形象图。紧跟短视频摆放，与素材库同级，都不属于任何一条片子。
+        path: '/office/characters',
+        name: 'Characters',
+        component: () => import('@/views/Characters.vue'),
+        meta: {title: '人物库'},
+    },
+    {
         // 素材库：账号级的图片/视频素材。放在短视频之后、与它同级，是因为目前只有
         // 短视频工作台的镜头会引用它；库里的人物形象图换一条选题还要接着用，所以它
         // 不属于任何一条片子。

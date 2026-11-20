@@ -1176,6 +1176,47 @@ class MaterialAsset(Base):
         return f"<MaterialAsset id={self.id} owner={self.owner_id} kind={self.kind!r}>"
 
 
+class VideoCharacter(Base):
+    """人物库里的一个角色：文字档案（人设/衣着/特色）+ 一张专属形象图。
+
+    与 :class:`MaterialAsset` 的分工：素材是无结构的图/视频文件，角色是**带档案的
+    人物**。档案在脚本生成时喂给策划师与分镜师（``video_project.character_ids``
+    认领角色组，服务层把档案拼成提示词段落）；形象图在渲染时作为参考图注入首帧与
+    参考图作业，保住跨镜头的人脸与衣着一致性。
+
+    文件存储与素材同一取舍：形象图在服务器本地磁盘的 ``characters/<owner_id>/``
+    树下，库里只存 ``rel_path``，URL 由 ``services/characters/store.py`` 现拼。
+    角色按账号归属、跨项目复用，删项目不碰它；删角色是硬删除，项目里残留的 id
+    由视频侧在读取/渲染时按「已不存在」跳过，与素材丢失同一降级口径。
+    """
+
+    __tablename__ = "video_character"
+    __table_args__ = (Index("idx_character_owner", "owner_id"),)
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 人设：身份、性格、背景、说话方式。空串 = 用户没填，拼提示词时整行不渲染。
+    persona: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    # 衣着：固定穿搭，渲染一致性主要靠它和形象图。
+    outfit: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    # 外形特色：发型、体型、标志物等一眼能认出的视觉特征。
+    features: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    mime: Mapped[str] = mapped_column(String(64), nullable=False)
+    size: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    rel_path: Mapped[str] = mapped_column(String(512), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<VideoCharacter id={self.id} owner={self.owner_id} name={self.name!r}>"
+
+
 class VideoProject(Base):
     """一个短视频项目：想法 + 创作卡 + 口播稿 + 渲染参数快照。
 
@@ -1216,6 +1257,10 @@ class VideoProject(Base):
     params: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     # 发布用：{title_candidates: [], tags: [], cover_prompt}
     publish: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # 项目角色组：video_character.id 的字符串形式，上限见 config.CHARACTER_MAX_PER_PROJECT。
+    # 档案在脚本生成时拼进提示词，形象图在渲染时并进每镜的参考图请求。旧库补列前读到
+    # NULL，服务层一律按空角色组处理。
+    character_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
@@ -1344,6 +1389,9 @@ class MediaJob(Base):
     rel_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     mime: Mapped[str | None] = mapped_column(String(64), nullable=True)
     file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # 视频任务成功时上游随片返回的**尾帧**转存路径（链式渲染的衔接帧）。图片作业
+    # 与未返回尾帧的型号恒为 NULL；与 rel_path 同一目录约定，删项目时跟着目录树清掉。
+    last_frame_rel_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

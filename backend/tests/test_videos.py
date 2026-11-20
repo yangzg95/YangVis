@@ -56,6 +56,10 @@ from app.services.media import (
     ROLE_REFERENCE_IMAGE,
     ROLE_REFERENCE_VIDEO,
 )
+from app.services.characters import service as character_service
+from app.services.characters import store as character_store
+from app.services.characters.service import CharacterService
+from app.services.characters.store import store_character_image
 from app.services.media import store as media_store
 from app.services.materials import KIND_IMAGE as MATERIAL_IMAGE
 from app.services.materials import service as material_service
@@ -114,9 +118,19 @@ def media_dir(tmp_path, monkeypatch):
         UPLOAD_MEDIA_URL="/uploads",
         MATERIAL_MAX_IMAGE_BYTES=settings.MATERIAL_MAX_IMAGE_BYTES,
         MATERIAL_MAX_VIDEO_BYTES=settings.MATERIAL_MAX_VIDEO_BYTES,
+        CHARACTER_MAX_PER_OWNER=settings.CHARACTER_MAX_PER_OWNER,
     )
     monkeypatch.setattr(media_store, "settings", fake)
     monkeypatch.setattr(material_store, "settings", fake)
+    # 人物库的形象图与配额闸门各读自己模块的 settings，要指到同一份临时盘配置。
+    monkeypatch.setattr(character_store, "settings", fake)
+    monkeypatch.setattr(character_service, "settings", fake)
+    # 视频服务模块直接读 settings.upload_media_path 做产物存在性检查（链式衔接、
+    # 成片合成）。它是 Settings 上的 property、实例没有 setter，所以在类上换一个
+    # 临时 property：只重定向落盘目录，其余配置仍走真实 settings，monkeypatch 自动还原。
+    monkeypatch.setattr(
+        type(settings), "upload_media_path", property(lambda self: tmp_path)
+    )
     return tmp_path
 
 
@@ -250,6 +264,18 @@ def _material(db, name: str = "主角形象.png", raw: bytes = PNG, owner_id: in
     return MaterialService(db, owner_id).add(store_material(owner_id, raw), name)
 
 
+def _character(db, name: str = "林小夏", owner_id: int = OWNER):
+    """人物库里的一个真实角色：走形象图落盘与建档，而不是手搓数据库行。"""
+    stored = store_character_image(owner_id, PNG)
+    return CharacterService(db, owner_id).create(
+        name=name,
+        persona="28 岁互联网运营，语速快",
+        outfit="米白色西装外套、牛仔裤",
+        features="齐肩短发、圆框眼镜",
+        stored=stored,
+    )
+
+
 def _shots(db, project_id: int, count: int = 2) -> list[VideoShot]:
     service = _service(db)
     service.save_shots(project_id, [_shot({}) for _ in range(count)])
@@ -352,11 +378,13 @@ def test_script_inputs_only_attach_the_sections_that_exist(db):
         "idea",
         "platform_note",
         "style_note",
+        "characters_note",
         "requirement_note",
         "brief_note",
         "max_shots",
     }
     assert plain["brief_note"] == "", "没改过的创作卡不该被当成用户前提带进去"
+    assert plain["characters_note"] == "", "没选角色的项目不该带出角色段落"
 
 
 def test_confirmed_brief_note_carries_the_card_the_user_edited(db):
@@ -786,6 +814,144 @@ def test_render_clips_seedance_25_reference_previous_uses_adaptive(db, monkeypat
     assert request["params"]["ratio"] == "adaptive"
 
 
+# ---- 尾帧链式渲染 ------------------------------------------------------------
+
+
+def _clip_with_last_frame(db, project_id: int, shot: VideoShot) -> MediaJob:
+    """给镜头挂一条带尾帧产物的成功视频作业（两个文件都真的落在临时盘上）。"""
+    video_stored = media_store.store_blob(project_id, MP4)
+    frame_stored = media_store.store_blob(project_id, PNG)
+    job = MediaJob(
+        owner_id=OWNER,
+        provider="ark",
+        kind=KIND_VIDEO,
+        biz_type=BIZ_VIDEO_SHOT,
+        biz_id=str(shot.id),
+        model_name="doubao-seedance-2-0-260128",
+        status=JOB_SUCCEEDED,
+        request={},
+        rel_path=video_stored.rel_path,
+        mime=video_stored.mime,
+        file_size=video_stored.size,
+        last_frame_rel_path=frame_stored.rel_path,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    shot.video_job_id = job.id
+    db.commit()
+    return job
+
+
+def _chain_project(db, **project_overrides):
+    params = {"chain_clips": True}
+    params.update(project_overrides.pop("params", {}))
+    return _project(db, params=params, **project_overrides)
+
+
+def test_chain_enqueue_snapshots_prev_job_and_keeps_head_unchained(db):
+    project = _chain_project(db)
+    service = _service(db)
+    rows, _ = _rendered(db, project.id, 3)  # 首帧全部就绪，片段作业另行挂
+    prev_first = _clip_with_last_frame(db, project.id, rows[0])
+    prev_second = _clip_with_last_frame(db, project.id, rows[1])
+    _video_model(db)
+
+    jobs = service.render_clips(project.id, [])
+
+    assert "chain" not in jobs[0].request, "项目第一镜是链头，用自己的首帧定调"
+    chain_2 = jobs[1].request["chain"]
+    chain_3 = jobs[2].request["chain"]
+    assert chain_2["enabled"] and chain_2["injected"] is False
+    assert chain_2["prev_job_id"] == prev_first.id and chain_2["prev_shot_order"] == 1
+    # 快照的是上镜**当时那条作业**：叙事顺序上的紧邻前镜，不是选中集合里的前一个。
+    assert chain_3["prev_job_id"] == prev_second.id and chain_3["prev_shot_order"] == 2
+    # 入队阶段不替换 images：尾帧注入发生在作业执行的提交前。
+    assert jobs[1].request["images"][0]["role"] == ROLE_FIRST_FRAME
+
+
+def test_chain_rejects_when_the_previous_shot_has_no_last_frame(db):
+    project = _chain_project(db)
+    service = _service(db)
+    rows = _shots(db, project.id, 2)
+    # 只有普通成功片段、没有尾帧：链式衔接缺素材，入队就要拒绝，不能等到执行期。
+    stored = media_store.store_blob(project.id, MP4)
+    job = MediaJob(
+        owner_id=OWNER, provider="ark", kind=KIND_VIDEO, biz_type=BIZ_VIDEO_SHOT,
+        biz_id=str(rows[0].id), model_name="m", status=JOB_SUCCEEDED, request={},
+        rel_path=stored.rel_path, mime=stored.mime, file_size=stored.size,
+    )
+    db.add(job)
+    db.commit()
+    rows[0].video_job_id = job.id
+    db.commit()
+    _video_model(db)
+
+    with pytest.raises(ValueError, match="第 2 镜"):
+        service.render_clips(project.id, [])
+
+
+def test_chain_strict_mode_rejects_t2v_and_reference_shots(db):
+    project = _chain_project(db)
+    service = _service(db)
+    rows = _shots(db, project.id, 2)
+    _clip_with_last_frame(db, project.id, rows[0])
+    service.save_shots(
+        project.id,
+        [_shot({"id": rows[0].id}), _shot({"id": rows[1].id, "gen_mode": MODE_T2V})],
+    )
+    _video_model(db)
+
+    with pytest.raises(ValueError, match="首帧模式"):
+        service.render_clips(project.id, [])
+
+
+def test_chain_off_writes_no_chain_block(db):
+    """开关默认关：入队形状与链式上线前一字不差。"""
+    project = _project(db)
+    service = _service(db)
+    rows, _ = _rendered(db, project.id, 2)
+    _video_model(db)
+
+    jobs = service.render_clips(project.id, [])
+
+    assert all("chain" not in job.request for job in jobs)
+
+
+def test_chain_yields_to_reference_previous(db, monkeypatch):
+    """两个开关同时存在时，显式重做动作优先：走参考视频，不写 chain 块。"""
+    monkeypatch.setattr(
+        video_service.settings, "PUBLIC_MEDIA_BASE_URL", "https://yangvis.example.com"
+    )
+    project = _chain_project(db)
+    service = _service(db)
+    _rendered(db, project.id, 1)
+    _video_model(db)
+    previous = _stored_clip(db, service, project.id)
+
+    request = service.render_clips(project.id, [], reference_previous=True)[0].request
+
+    assert "chain" not in request
+    assert request["images"] == [
+        {"role": ROLE_REFERENCE_VIDEO, "rel_path": previous.rel_path},
+    ]
+
+
+def test_chain_partial_render_follows_the_project_order(db):
+    """只渲镜 3：它接的是项目里的镜 2，而不是选中集合里的链头镜 3 自己。"""
+    project = _chain_project(db)
+    service = _service(db)
+    rows, _ = _rendered(db, project.id, 3)
+    _clip_with_last_frame(db, project.id, rows[1])  # 镜 2 就绪
+    _video_model(db)
+
+    jobs = service.render_clips(project.id, [rows[2].id])
+
+    assert len(jobs) == 1
+    chain = jobs[0].request["chain"]
+    assert chain["prev_shot_order"] == 2
+
+
 def test_render_clips_reference_sends_image_materials_only(db):
     """参考图档与首帧同一取舍：视频素材要公网地址，进不了 base64 那一档。"""
     project = _project(db)
@@ -1089,6 +1255,134 @@ def test_capacity_reports_whether_reference_video_is_usable(client, db, monkeypa
         video_service.settings, "PUBLIC_MEDIA_BASE_URL", "https://yangvis.example.com"
     )
     assert client.get(url).json()["data"]["video_reference_ready"] is True
+
+
+# ---- 人物库：角色组、档案段落与形象图注入 ------------------------------------
+
+
+def test_project_character_ids_keep_only_known_owned_ids(db):
+    """写入侧归一：别人的、已删除的、编出来的 id 一律丢，保序并截到项目上限。"""
+    first = _character(db, "林小夏")
+    second = _character(db, "老周")
+    foreign = _character(db, "别人的角色", owner_id=OTHER)
+
+    project = _project(
+        db,
+        character_ids=[str(first.id), "999999", str(foreign.id), str(second.id)],
+    )
+    assert project.character_ids == [str(first.id), str(second.id)]
+
+    # 角色被硬删除后，下一次保存把残留 id 自然清掉，读取侧不报错。
+    CharacterService(db, OWNER).remove(second.id)
+    service = _service(db)
+    saved = service.update_project(project.id, character_ids=project.character_ids)
+    assert saved.character_ids == [str(first.id)]
+
+    # 空列表是显式清空；None（没带字段）保持原样。
+    assert service.update_project(project.id, character_ids=[]).character_ids == []
+    assert service.update_project(project.id, title="换个标题").character_ids == []
+
+
+def test_project_character_ids_are_capped_per_project(db):
+    characters = [_character(db, f"角色 {index}") for index in range(4)]
+    project = _project(db, character_ids=[str(row.id) for row in characters])
+    # 项目角色组上限在 config（默认 3）：入参可以更宽，落库只留前三个。
+    assert project.character_ids == [str(row.id) for row in characters[:3]]
+
+
+def test_script_inputs_carry_character_profiles(db):
+    character = _character(db, "林小夏")
+    project = _project(db, character_ids=[str(character.id)])
+    service = _service(db)
+
+    note = service._characters_note(service.get_project(project.id))
+    assert "林小夏" in note
+    assert "人设：28 岁互联网运营，语速快" in note
+    assert "衣着：米白色西装外套、牛仔裤" in note
+    assert "外形特色：齐肩短发、圆框眼镜" in note
+
+    inputs = _script_inputs(service.get_project(project.id), "", note)
+    assert inputs["characters_note"] == note
+    # 没选角色的项目：键还在（流程声明要求闭合），值是空串，模板整段不渲染。
+    plain = _project(db)
+    assert _service(db)._characters_note(plain) == ""
+
+
+def test_render_frames_injects_character_portraits_before_materials(db):
+    """每镜的参考图 = 项目角色组形象图（在前）+ 本镜图片素材，角色缺失时自然跳过。"""
+    character = _character(db, "林小夏")
+    project = _project(db, character_ids=[str(character.id)])
+    service = _service(db)
+    _image_model(db)
+    image = _material(db)
+    service.save_shots(project.id, [_shot({"material_ids": [str(image.id)]})])
+
+    request = service.render_frames(project.id, [])[0].request
+    assert request["images"] == [character.rel_path, image.rel_path]
+
+    # 删掉角色后同一项目再渲：残留 id 被跳过，只剩素材，渲染不炸。
+    CharacterService(db, OWNER).remove(character.id)
+    request = service.render_frames(project.id, [])[0].request
+    assert request["images"] == [image.rel_path]
+
+
+def test_render_frames_caps_merged_references_at_the_budget(db):
+    """角色图 + 素材合计超预算时保角色：截断到 MAX_REFERENCE_IMAGES，不去碰用户的素材行。"""
+    cast = [_character(db, f"角色 {index}") for index in range(2)]
+    materials = [_material(db, f"素材 {index}.png") for index in range(3)]
+    project = _project(db, character_ids=[str(row.id) for row in cast])
+    service = _service(db)
+    _image_model(db)
+    service.save_shots(
+        project.id,
+        [_shot({"material_ids": [str(row.id) for row in materials]})],
+    )
+
+    request = service.render_frames(project.id, [])[0].request
+    assert len(request["images"]) == video_service.MAX_REFERENCE_IMAGES == 4
+    # 角色图两张排在最前，素材按顺序补到预算用完。
+    assert request["images"][:2] == [row.rel_path for row in cast]
+    assert request["images"][2:] == [row.rel_path for row in materials[:2]]
+    # 镜头上的引用原样保留：截断只发生在入队快照里。
+    assert service.shots_of(project.id)[0].material_ids == [str(row.id) for row in materials]
+
+
+def test_render_clips_reference_mode_uses_character_portraits(db):
+    """参考图生视频：角色形象图与图片素材一起挂 reference_image，角色在前。"""
+    character = _character(db, "林小夏")
+    project = _project(db, character_ids=[str(character.id)])
+    service = _service(db)
+    _video_model(db)
+    image = _material(db)
+    service.save_shots(
+        project.id,
+        [_shot({"gen_mode": MODE_REFERENCE, "material_ids": [str(image.id)]})],
+    )
+
+    request = service.render_clips(project.id, [])[0].request
+    assert request["images"] == [
+        {"role": ROLE_REFERENCE_IMAGE, "rel_path": character.rel_path},
+        {"role": ROLE_REFERENCE_IMAGE, "rel_path": image.rel_path},
+    ]
+
+
+def test_render_clips_first_frame_mode_never_mixes_portraits(db):
+    """首帧档只喂本镜首帧产物：角色形象已烤在首帧里，混挂参考图会撞方舟 400。"""
+    character = _character(db, "林小夏")
+    project = _project(db, character_ids=[str(character.id)])
+    service = _service(db)
+    _image_model(db)
+    service.save_shots(project.id, [_shot({})])
+    frames = service.render_frames(project.id, [])
+    for job in frames:
+        job.status = JOB_SUCCEEDED
+        job.rel_path = media_store.store_blob(project.id, PNG).rel_path
+    db.commit()
+    _video_model(db)
+
+    request = service.render_clips(project.id, [])[0].request
+    assert [item["role"] for item in request["images"]] == [ROLE_FIRST_FRAME]
+    assert character.rel_path not in [item["rel_path"] for item in request["images"]]
 
 
 # ---- 产物存为素材 ------------------------------------------------------------
@@ -1611,3 +1905,6 @@ def test_business_rows_still_carry_no_status_column(db):
         columns = {column.name for column in model.__table__.columns}
         assert not {"status", "error_msg"} & columns, model.__tablename__
     assert not {"rel_path", "image_url"} & {column.name for column in VideoShot.__table__.columns}
+
+
+

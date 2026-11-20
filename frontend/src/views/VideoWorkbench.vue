@@ -353,6 +353,53 @@
               </div>
 
               <div class="form-section">
+                <div class="form-section-title">出场角色</div>
+                <a-form-item>
+                  <div v-if="castChips.length" class="material-chips">
+                    <span
+                      v-for="item in castChips"
+                      :key="item.id"
+                      class="material-chip"
+                      :class="{ 'is-missing': item.missing }"
+                      :title="item.missing ? '人物库里已经没有这个角色' : item.name"
+                    >
+                      <img
+                        v-if="!item.missing && (item.thumb_url || item.url)"
+                        :src="item.thumb_url || item.url"
+                        :alt="item.name"
+                        loading="lazy"
+                      />
+                      <span class="chip-missing-avatar" v-else>?</span>
+                      <span class="chip-name">{{ item.name }}</span>
+                      <a-button
+                        size="small"
+                        type="text"
+                        class="chip-close"
+                        title="移出角色组（保存后生效）"
+                        @click="dropCharacter(item.id)"
+                      >
+                        <CloseOutlined />
+                      </a-button>
+                    </span>
+                  </div>
+                  <a-space :size="8" wrap>
+                    <a-button size="small" class="pick-material" @click="castPickerOpen = true">
+                      <TeamOutlined />
+                      {{ castIds.length ? '改选角色' : '从人物库选择' }}
+                    </a-button>
+                    <a-button size="small" type="text" @click="router.push('/office/characters')">
+                      管理人物库
+                    </a-button>
+                  </a-space>
+                  <div class="hint">
+                    最多 {{ MAX_CHARACTERS_PER_PROJECT }} 个。保存后下一次「重新生成脚本」会带上角色档案；
+                    渲染首帧/参考图时形象图自动作为参考图注入（角色图在前，与镜头素材合计最多
+                    {{ MAX_REFS_PER_SHOT }} 张）。已删除的角色会在下次保存时清掉。
+                  </div>
+                </a-form-item>
+              </div>
+
+              <div class="form-section">
                 <div class="form-section-title">创作卡</div>
                 <div class="hint section-hint">
                   保存后，下一次「重新生成脚本」会按这张卡切分镜；没保存的改动不参与。
@@ -541,6 +588,17 @@
                     </a-form-item>
                   </a-col>
                 </a-row>
+                <a-form-item label="尾帧链式衔接">
+                  <a-switch
+                    v-model:checked="params.chain_clips"
+                    @change="dirtyProject = true"
+                  />
+                  <div class="hint">
+                    开启后按镜头顺序渲染：上一镜片段的尾帧自动成为下一镜的首帧，人物与场景跨镜物理连续，
+                    不再每镜重新抽卡。代价是同项目片段从并发改为串行，总渲染时间变长；要求所有镜头都是
+                    「首帧生视频」，且要按顺序逐镜渲（上一镜没成功时下一镜会排队等待）。
+                  </div>
+                </a-form-item>
                 <a-form-item label="片段自带音频">
                   <a-switch
                     v-model:checked="params.generate_audio"
@@ -851,6 +909,13 @@
       @confirm="onPickMaterials"
     />
 
+    <!-- 项目角色组：同样只挑 id，角色的建档与形象图维护都在人物库页 -->
+    <CharacterPicker
+      v-model:open="castPickerOpen"
+      :selected="castIds"
+      @confirm="onPickCharacters"
+    />
+
     <!-- 渲染前那屏确认：这次发几条、账户里还有几个位子、有没有镜头缺提示词 -->
     <a-modal
       v-model:open="renderModal"
@@ -931,6 +996,14 @@
         class="render-alert"
         :message="`这次发 ${renderTargets.length} 条视频作业，一镜一段`"
         :description="clipCapacityHint"
+      />
+      <a-alert
+        v-if="params.chain_clips && !referencePrevious"
+        type="warning"
+        show-icon
+        class="render-alert"
+        message="尾帧链式衔接已开启：片段将按镜头顺序串行渲染"
+        description="上一镜成功并产出尾帧后下一镜才会提交，后面的镜头会停在「等待第 N 镜」；任一镜失败会阻断后续镜头，需按顺序重渲。"
       />
       <a-alert
         v-if="clipResolutionWarning"
@@ -1016,13 +1089,17 @@ import {
   PlusOutlined,
   ReloadOutlined,
   SaveOutlined,
+  TeamOutlined,
   VideoCameraOutlined,
 } from '@ant-design/icons-vue'
 import { Empty, Modal, message } from 'ant-design-vue'
 import {
+  charactersApi,
   materialsApi,
+  MAX_CHARACTERS_PER_PROJECT,
   settingsApi,
   videosApi,
+  type Character,
   type MaterialAsset,
   type MaterialKind,
   type MediaCapacityOut,
@@ -1045,6 +1122,7 @@ import {
   type VideoStyle,
 } from '@/api'
 import MaterialPicker from '@/components/videos/MaterialPicker.vue'
+import CharacterPicker from '@/components/videos/CharacterPicker.vue'
 import { copyText } from '@/utils/clipboard'
 import { saveTextFile } from '@/utils/download'
 import { errorText } from '@/utils/errors'
@@ -1129,6 +1207,7 @@ const params = reactive<VideoParams>({
   image_size: '2K',
   tts_enabled: false,
   tts_voice: '',
+  chain_clips: false,
 })
 const publish = reactive<VideoPublish>({ title_candidates: [], tags: [], cover_prompt: '' })
 
@@ -1136,6 +1215,12 @@ const shots = ref<VideoShot[]>([])
 // 素材库的本地缓存：镜头行上只有 id，这一份用来把 id 翻回缩略图与名字。
 // 详情接口几秒轮一次，所以它按项目取一次、选完素材再取一次，不跟着轮询走。
 const materials = ref<MaterialAsset[]>([])
+// 人物库的本地缓存：项目角色组上只有 id，这一份把 id 翻回头像与名字，
+// 加载时机与素材同一口径（进页面取一次、角色选择器确认后再取一次）。
+const characters = ref<Character[]>([])
+// 项目角色组（人物库 id 的字符串形式）：保存时随项目字段一起发，后端再校一遍。
+const castIds = ref<string[]>([])
+const castPickerOpen = ref(false)
 /** 封面无镜头行可挂：详情接口只把它作为「最新一次成功的封面作业」的 URL 带回来。 */
 const coverUrl = ref('')
 /** 最近一次脚本生成的现场：两步串行，各自的状态与耗时都由运行行给。 */
@@ -1338,6 +1423,31 @@ const currentMaterials = computed<MaterialChip[]>(() =>
     }
   }),
 )
+
+interface CastChip {
+  id: string
+  name: string
+  url: string
+  thumb_url: string
+  missing: boolean
+}
+
+const characterById = computed(
+  () => new Map(characters.value.map((item) => [String(item.id), item])),
+)
+/** 项目角色组的展示视图：库里还留着的给头像，删掉了的也占一个「已删除」位子。 */
+const castChips = computed<CastChip[]>(() =>
+  castIds.value.map((id) => {
+    const row = characterById.value.get(id)
+    return {
+      id,
+      name: row?.name ?? '人物已删除',
+      url: row?.url ?? '',
+      thumb_url: row?.thumb_url ?? '',
+      missing: !row,
+    }
+  }),
+)
 const canRenderOne = computed(
   () =>
     Boolean(current.value) &&
@@ -1409,6 +1519,9 @@ function applyDetail(detail: VideoProjectDetail) {
   Object.assign(style, detail.style)
   Object.assign(params, detail.params)
   Object.assign(publish, detail.publish)
+  // 角色组以详情为准：已删除角色的残留 id 保留展示（chip 显示「已删除」），
+  // 下次保存由后端归一化清掉，不在覆盖时悄悄改用户面前的数据。
+  castIds.value = Array.isArray(detail.character_ids) ? [...detail.character_ids] : []
   shots.value = detail.shots
   coverUrl.value = detail.cover_url
   scriptRun.value = detail.script_run
@@ -1612,6 +1725,8 @@ function projectPayload() {
       tags: publish.tags.slice(0, 8),
       cover_prompt: publish.cover_prompt,
     },
+    // 始终带上角色组（含空数组＝显式清空）：后端按 None 才是「保持原样」。
+    character_ids: [...castIds.value],
   }
 }
 
@@ -1898,6 +2013,30 @@ function dropMaterial(id: string) {
   markShotDirty()
 }
 
+// ---- 项目角色组 --------------------------------------------------------------
+
+// 人物本身归账号级的库，项目上只存 id：清单只用来把 id 翻回头像和名字。
+async function loadCharacters() {
+  try {
+    const result = await charactersApi.list({ limit: 200 })
+    characters.value = result.items
+  } catch {
+    // 保留上一份清单：取不到只是头像点不开，不该把已选角色说成「已删除」。
+  }
+}
+
+function onPickCharacters(ids: string[]) {
+  castIds.value = ids.slice(0, MAX_CHARACTERS_PER_PROJECT)
+  dirtyProject.value = true
+  // 选择器允许跳去人物库建档，回来后对一遍清单，新角色立刻能显示头像。
+  void loadCharacters()
+}
+
+function dropCharacter(id: string) {
+  castIds.value = castIds.value.filter((item) => item !== id)
+  dirtyProject.value = true
+}
+
 /**
  * 把这一镜的参考素材复制到全部镜头：跨镜人物/场景一致性的批量入口，免得一镜一镜挂。
  * 只动 material_ids，生成方式（首帧/参考图/t2v）不跟着改——那是每镜各自的取舍。
@@ -1999,7 +2138,12 @@ function jobColor(job?: MediaJob | null): string {
 }
 
 function jobTextOf(job: MediaJob | null | undefined, kind: MediaJobKind): string {
-  return job ? jobStatusText(job.status, kind) : '还没渲'
+  if (!job) return '还没渲'
+  // 链式下游在队列里等上一镜尾帧：干等的 queued 要说出在等谁，不然像卡死。
+  if (job.status === 'queued' && job.chain_wait_shot != null) {
+    return `等待第 ${job.chain_wait_shot} 镜`
+  }
+  return jobStatusText(job.status, kind)
 }
 
 function jobText(shot: VideoShot): string {
@@ -2009,7 +2153,7 @@ function jobText(shot: VideoShot): string {
 /** 分镜列表那行副标题：两类作业都报，没渲过片段就只报首帧。 */
 function shotJobsText(shot: VideoShot): string {
   const frame = `图 ${jobText(shot)}`
-  return shot.video_job ? `${frame} · 片 ${jobStatusText(shot.video_job.status, 'video')}` : frame
+  return shot.video_job ? `${frame} · 片 ${jobTextOf(shot.video_job, 'video')}` : frame
 }
 
 function frameUrlOf(shot?: VideoShot): string {
@@ -2073,7 +2217,13 @@ function goToScriptRun() {
 // ---- 生命周期 ----------------------------------------------------------------
 
 onMounted(async () => {
-  await Promise.all([load(), loadReadiness(), loadMaterials(), loadCapacity()])
+  await Promise.all([
+    load(),
+    loadReadiness(),
+    loadMaterials(),
+    loadCharacters(),
+    loadCapacity(),
+  ])
   syncPolling()
 })
 
@@ -2091,6 +2241,8 @@ onActivated(() => {
   void load(true)
   // 期间可能去过素材库页：那边的增删只有重新取一次清单才看得见。
   void loadMaterials()
+  // 同理，人物库页的建档/删除也要重新取一次才能体现在角色组里。
+  void loadCharacters()
   // 也可能去设置页配好了公网基址：「参考上一版」那个勾选框据此解禁。
   void loadCapacity()
   // 同样可能刚在「模型与集成」配好/测通了模型：就绪旗标只在 mounted 拉过，
@@ -2118,6 +2270,7 @@ watch(
     dirtyShots.value = false
     loadError.value = ''
     void loadMaterials()
+    void loadCharacters()
     void load().then(syncPolling)
   },
 )
@@ -2521,6 +2674,20 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   height: 26px;
   border-radius: 6px;
   object-fit: cover;
+}
+
+/* 角色被硬删除后，头像位置给一个占位格，和素材丢失的虚线框配套。 */
+.chip-missing-avatar {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  background: var(--surface-raised, rgba(0, 0, 0, 0.06));
+  color: var(--text-3);
+  font-size: var(--fs-xs);
 }
 
 .chip-name {

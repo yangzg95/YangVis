@@ -11,9 +11,11 @@
 2. **文件名是随机 id + 服务端给的扩展名**，上游 URL、镜头号、用户给的名字都只进
    数据库做展示，永远不参与路径拼接。
 3. **删除与读取都按 ``rel_path`` 重新解析一次**并校验仍在媒体目录内；形状不是
-   ``<videos|materials>/<数字 id>/<随机 id>.<扩展名>`` 的一律拒绝。``materials``
-   那一档是素材库的落盘目录（``services/materials/store.py`` 写入）：首帧渲染要把
-   选中的素材内联成 base64 送给方舟，读的一方不该只有产物目录能读。
+   ``<videos|materials|characters>/<数字 id>/<随机 id>.<扩展名>`` 的一律拒绝。
+   ``materials`` 是素材库的落盘目录（``services/materials/store.py`` 写入），
+   ``characters`` 是人物库形象图的落盘目录（``services/characters/store.py`` 写入）：
+   首帧渲染要把选中的素材/角色形象图内联成 base64 送给方舟，读的一方不该只有产物
+   目录能读。
 
 ``/uploads`` 不带鉴权（``<video>`` 和 ``<img>`` 发不出 Authorization 头），靠随机 id
 保证不可猜。要把 ``image_url`` 内联成 base64 送给方舟时走 :func:`read_blob`，
@@ -35,9 +37,9 @@ logger = logging.getLogger("yangvis.media.store")
 settings: Settings = get_settings()
 
 _DIR = "videos"
-# 媒体目录下的两种树：产物按项目分（删项目 = 删一棵目录树），素材按账号分
-# （跨项目复用，删项目不碰它）。两者的文件名规则完全相同。
-_ROOTS = (_DIR, "materials")
+# 媒体目录下的三种树：产物按项目分（删项目 = 删一棵目录树），素材与人物形象图
+# 按账号分（跨项目复用，删项目不碰它们）。三者的文件名规则完全相同。
+_ROOTS = (_DIR, "materials", "characters")
 
 # 每项是 (文件头所在偏移, 文件头, mime, 扩展名)。WebP 比 RIFF 容器的次级签名（偏移
 # 8），视频比 ISO BMFF 的 'ftyp'（前 4 字节是 box 长度，所以偏移 4）。
@@ -238,10 +240,12 @@ def delete_project_dir(project_id: int) -> None:
 
 
 def is_safe_rel_path(rel_path: str) -> bool:
-    """路径必须是 ``<videos|materials>/<数字 id>/<随机 id>.<白名单扩展名>`` 这一种形状。
+    """路径必须是 ``<videos|materials|characters>/<数字 id>/<随机 id>.<白名单扩展名>``
+    这一种形状。
 
-    写入方是本模块与 ``services/materials/store.py``，但这一列可能被任何途径改过
-    （手工修库、旧数据），读出来拼接 URL 或读磁盘的一方不该假设它干净。三段都单独验。
+    写入方是本模块、``services/materials/store.py`` 与 ``services/characters/store.py``，
+    但这一列可能被任何途径改过（手工修库、旧数据），读出来拼接 URL 或读磁盘的一方
+    不该假设它干净。三段都单独验。
     """
     parts = rel_path.split("/")
     if len(parts) != 3 or parts[0] not in _ROOTS:

@@ -38,6 +38,7 @@ from app.routers import (
     ai_gateway_openai,
     app_messages,
     auth,
+    characters,
     chat,
     dashboard,
     devtools,
@@ -267,6 +268,8 @@ app.include_router(notify.router, prefix=API_PREFIX)
 app.include_router(app_messages.router, prefix=API_PREFIX)
 app.include_router(slides.router, prefix=API_PREFIX)
 app.include_router(videos.router, prefix=API_PREFIX)
+# 人物库紧跟短视频：项目角色组只被短视频的脚本与渲染引用。
+app.include_router(characters.router, prefix=API_PREFIX)
 # 素材库紧跟短视频：库里这批素材目前只被镜头引用，注册顺序也就是它们的阅读顺序。
 app.include_router(materials.router, prefix=API_PREFIX)
 app.include_router(netdisk.router, prefix=API_PREFIX)

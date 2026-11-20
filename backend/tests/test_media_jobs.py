@@ -617,6 +617,201 @@ def test_only_the_slots_available_per_kind_are_submitted(db, fake_ark, monkeypat
     assert [states[job_id] for job_id in ids] == [JOB_SUCCEEDED, JOB_SUCCEEDED, JOB_QUEUED]
 
 
+# ---- 尾帧链式渲染 ------------------------------------------------------------
+
+
+def _success_state(task_id: str, *, with_last_frame: bool = True) -> ark.TaskState:
+    return ark.TaskState(
+        task_id=task_id,
+        status=JOB_SUCCEEDED,
+        video_url="https://ark.example.com/1.mp4",
+        last_frame_url="https://ark.example.com/last.png" if with_last_frame else "",
+        raw={"id": task_id, "status": "succeeded", "content": {"video_url": "x"}},
+    )
+
+
+def _upstream_clip(db, fake_ark: FakeArk, monkeypatch=None) -> MediaJob:
+    """造一条会成功并带尾帧的上游视频作业，跑到片段与尾帧都落盘。"""
+    fake_ark.poll_states = [
+        ark.TaskState(task_id="task-up", status=JOB_RUNNING),
+        _success_state("task-up"),
+    ]
+
+    async def smart_download(url, *, max_bytes, timeout=None):
+        # 按 URL 后缀给字节：视频存 mp4、尾帧存 png，sniff 才认得出各自的类型。
+        fake_ark.downloaded.append(url)
+        return MP4 if url.endswith(".mp4") else PNG
+
+    if monkeypatch is not None:
+        monkeypatch.setattr(ark, "download", smart_download)
+    upstream = _queued(
+        db,
+        KIND_VIDEO,
+        biz_id=101,
+        request={"project_id": 7, "prompt": "第一镜", "params": {"ratio": "adaptive", "duration": 5}},
+    )
+    _tick(db)  # 提交
+    _tick(db)  # 轮询：还在跑
+    _tick(db)  # 轮询：成功，转存片段与尾帧
+    db.refresh(upstream)
+    return upstream
+
+
+def _downstream(db, upstream: MediaJob) -> MediaJob:
+    return _queued(
+        db,
+        KIND_VIDEO,
+        biz_id=102,
+        request={
+            "project_id": 7,
+            "prompt": "第二镜",
+            "params": {"ratio": "adaptive", "duration": 5},
+            "images": [{"role": ROLE_FIRST_FRAME, "rel_path": "videos/7/own-frame.png"}],
+            "chain": {
+                "enabled": True,
+                "prev_job_id": upstream.id,
+                "prev_shot_order": 1,
+                "injected": False,
+            },
+        },
+    )
+
+
+def test_last_frame_is_stored_alongside_the_video(db, fake_ark, monkeypatch):
+    upstream = _upstream_clip(db, fake_ark, monkeypatch)
+
+    assert upstream.status == JOB_SUCCEEDED
+    assert upstream.rel_path and upstream.last_frame_rel_path
+    assert upstream.rel_path.endswith(".mp4")
+    assert upstream.last_frame_rel_path.endswith(".png")
+    assert upstream.last_frame_rel_path != upstream.rel_path
+    # 视频与尾帧各下载一次，尾帧走图片字节上限。
+    assert fake_ark.downloaded == [
+        "https://ark.example.com/1.mp4",
+        "https://ark.example.com/last.png",
+    ]
+
+
+def test_chain_downstream_waits_while_upstream_is_active(db, fake_ark):
+    upstream = _queued(
+        db,
+        KIND_VIDEO,
+        biz_id=101,
+        request={"project_id": 7, "prompt": "上镜", "params": {"duration": 5}},
+    )
+    downstream = _downstream(db, upstream)
+
+    _tick(db)  # 只有上游够格提交，下游被 gate 留在队列
+
+    db.refresh(downstream)
+    assert downstream.status == JOB_QUEUED and downstream.remote_task_id is None
+    # 这一轮只有上游那一条提交：等待中的链式下游不能占上游并发位子。
+    assert len(fake_ark.submits) == 1
+
+
+def test_chain_downstream_gets_the_upstream_last_frame(db, fake_ark, monkeypatch):
+    upstream = _upstream_clip(db, fake_ark, monkeypatch)
+    downstream = _downstream(db, upstream)
+
+    _tick(db)  # gate 放行：注入尾帧并提交
+
+    db.refresh(downstream)
+    # 上游提交占了 task-1，下游是这个假方舟接到的第二个视频任务。
+    assert downstream.status == JOB_RUNNING and downstream.remote_task_id == "task-2"
+    chain = downstream.request["chain"]
+    assert chain["injected"] is True
+    # 自己原来的首帧引用被上镜尾帧整体替换，这是链式衔接的唯一画面来源。
+    assert downstream.request["images"] == [
+        {"role": ROLE_FIRST_FRAME, "rel_path": upstream.last_frame_rel_path}
+    ]
+    # 真正发给方舟的 content 里内联的也是尾帧（data URL 前缀证明读的是那个文件）。
+    # submits[0] 是上游自己的提交（无图），下游是第二条。
+    sent = fake_ark.submits[1]["content"][1]
+    assert sent["role"] == ROLE_FIRST_FRAME
+    assert sent["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_chain_breaks_when_upstream_fails(db, fake_ark):
+    upstream = _queued(
+        db,
+        KIND_VIDEO,
+        biz_id=101,
+        status=JOB_FAILED,
+        error_msg="内容审核未过",
+        request={"project_id": 7, "prompt": "上镜", "params": {"duration": 5}},
+    )
+    downstream = _downstream(db, upstream)
+
+    _tick(db)
+
+    db.refresh(downstream)
+    assert downstream.status == JOB_FAILED
+    assert downstream.error_code == "ChainBroken"
+    assert "第 1 镜" in (downstream.error_msg or "")
+    assert fake_ark.submits == [], "上游已死，下游不许再发请求白烧额度"
+
+
+def test_chain_breaks_when_upstream_row_disappears(db, fake_ark):
+    downstream = _queued(
+        db,
+        KIND_VIDEO,
+        biz_id=102,
+        request={
+            "project_id": 7,
+            "prompt": "第二镜",
+            "params": {"duration": 5},
+            "chain": {"enabled": True, "prev_job_id": 999999, "prev_shot_order": 1},
+        },
+    )
+
+    _tick(db)
+
+    db.refresh(downstream)
+    assert downstream.status == JOB_FAILED and downstream.error_code == "ChainPrevMissing"
+
+
+def test_chain_keeps_waiting_when_upstream_has_no_last_frame(db, fake_ark):
+    # 上游视频成功但型号没回尾帧：下游继续等而不是判死，留给人工切换链式开关的余地。
+    fake_ark.artifact_bytes = MP4
+    fake_ark.poll_states = [
+        ark.TaskState(task_id="task-up", status=JOB_RUNNING),
+        _success_state("task-up", with_last_frame=False),
+    ]
+    upstream = _queued(
+        db,
+        KIND_VIDEO,
+        biz_id=101,
+        request={"project_id": 7, "prompt": "上镜", "params": {"duration": 5}},
+    )
+    _tick(db)
+    _tick(db)
+    _tick(db)
+    db.refresh(upstream)
+    assert upstream.status == JOB_SUCCEEDED and upstream.last_frame_rel_path is None
+
+    downstream = _downstream(db, upstream)
+    _tick(db)
+
+    db.refresh(downstream)
+    # 上游的提交占一条，下游没有尾帧可用，必须继续留在队列。
+    assert downstream.status == JOB_QUEUED and len(fake_ark.submits) == 1
+
+
+def test_non_chain_jobs_ignore_the_gate(db, fake_ark):
+    """没挂 chain 的普通作业行为与链式上线前完全一致。"""
+    job = _queued(
+        db,
+        KIND_VIDEO,
+        biz_id=201,
+        request={"project_id": 7, "prompt": "独立镜头", "params": {"duration": 5}},
+    )
+
+    _tick(db)
+
+    db.refresh(job)
+    assert job.status == JOB_RUNNING and job.remote_task_id == "task-1"
+
+
 def test_the_video_slots_do_not_borrow_from_the_image_slots(db, fake_ark, monkeypatch):
     monkeypatch.setattr(
         jobs, "settings", SimpleNamespace(**{**LIMITS.__dict__, "IMAGE_MAX_INFLIGHT": 2})

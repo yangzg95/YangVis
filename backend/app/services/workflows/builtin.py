@@ -311,6 +311,8 @@ BUILTIN_WORKFLOWS: tuple[BuiltinWorkflow, ...] = (
             # 条件段落由调用方拼好再传进来：没填的那些就是空串。
             BuiltinInput("platform_note", "平台与时长段落", required=False),
             BuiltinInput("style_note", "风格段落", required=False),
+            # 项目角色组的档案段落（人设/衣着/特色），空串 = 这条片子没选人物库角色。
+            BuiltinInput("characters_note", "角色段落", required=False),
             BuiltinInput("requirement_note", "补充要求段落", required=False),
             BuiltinInput("brief_note", "已确认的创作卡段落", required=False),
             BuiltinInput("max_shots", "镜头数上限"),
@@ -320,7 +322,8 @@ BUILTIN_WORKFLOWS: tuple[BuiltinWorkflow, ...] = (
                 key="brief",
                 agent_slug="video-briefer",
                 prompt_tpl=(
-                    "{{platform_note}}{{style_note}}{{requirement_note}}{{brief_note}}"
+                    "{{platform_note}}{{style_note}}{{characters_note}}"
+                    "{{requirement_note}}{{brief_note}}"
                     "想法：\n\"\"\"\n{{idea}}\n\"\"\"\n\n"
                     "请先定这条短视频的创作卡：把「凭什么让人看完」说清楚，产出 JSON。"
                 ),
@@ -347,6 +350,9 @@ BUILTIN_WORKFLOWS: tuple[BuiltinWorkflow, ...] = (
                     # 风格段（含人物设定）此前只喂给策划师：分镜师看不到它，各镜
                     # image_prompt 就会各画各的脸和衣服。空串时整段不渲染，与旧模板等价。
                     "{{style_note}}"
+                    # 角色段给出人物库角色的名字与形象档案：相关镜头的 image_prompt
+                    # 要写出角色名和衣着/特色，渲染时还会把形象图作为参考图注入。
+                    "{{characters_note}}"
                     "把它切成能直接送去生成的镜头：最多 {{max_shots}} 镜，产出分镜 JSON。"
                 ),
                 group_key="script",

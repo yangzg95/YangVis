@@ -209,6 +209,35 @@
           />
           <div class="hint">单位秒，5-60。定下来后分镜会按它分配每一镜的时长。</div>
         </a-form-item>
+        <a-form-item label="出场角色（可选）">
+          <a-select
+            v-model:value="createModal.characterIds"
+            mode="multiple"
+            :max-tag-count="3"
+            :options="characterOptions"
+            :placeholder="`从人物库选角色，最多 ${MAX_CHARACTERS_PER_PROJECT} 个`"
+            @change="onCastChange"
+            :not-found-content="characters.length ? '没有匹配的角色' : '人物库还是空的'"
+            option-filter-prop="label"
+            show-search
+            allow-clear
+          >
+            <template #option="opt">
+              <span class="cast-option">
+                <img v-if="opt.character?.thumb_url || opt.character?.url" class="cast-option-avatar"
+                  :src="opt.character.thumb_url || opt.character.url" :alt="opt.label" loading="lazy" />
+                <span class="cast-option-text">
+                  <span>{{ opt.label }}</span>
+                  <span class="cast-option-sub">{{ opt.character?.persona || '未填写人设' }}</span>
+                </span>
+              </span>
+            </template>
+          </a-select>
+          <div class="hint">
+            角色档案会喂给策划师与分镜师，形象图在渲染时自动注入每个镜头；最多
+            {{ MAX_CHARACTERS_PER_PROJECT }} 个，也可以建好项目后在工作台调整。
+          </div>
+        </a-form-item>
         <a-form-item label="补充要求（可选）">
           <a-input
             v-model:value="createModal.requirement"
@@ -235,8 +264,11 @@ import { useRouter } from 'vue-router'
 import { LoadingOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import { Button, Empty, message, notification } from 'ant-design-vue'
 import {
+  charactersApi,
+  MAX_CHARACTERS_PER_PROJECT,
   settingsApi,
   videosApi,
+  type Character,
   type VideoPlatform,
   type VideoProjectItem,
   type VideoProjectStatus,
@@ -305,6 +337,7 @@ const createModal = reactive<{
   platform: VideoPlatform
   durationS: number | null
   requirement: string
+  characterIds: string[]
 }>({
   open: false,
   submitting: false,
@@ -313,7 +346,38 @@ const createModal = reactive<{
   platform: 'douyin',
   durationS: null,
   requirement: '',
+  characterIds: [],
 })
+
+// 人物库清单只在打开新建弹窗时取一次：角色是低频变动数据，不值得跟列表轮询。
+const characters = ref<Character[]>([])
+const characterOptions = computed(() =>
+  characters.value.map((item) => ({
+    value: String(item.id),
+    label: item.name,
+    character: item,
+  })),
+)
+
+function onCastChange(ids: string[]) {
+  // 多选组件自身不卡上限：在变更处截断并提示，比静默选不上更好解释。
+  if (ids.length > MAX_CHARACTERS_PER_PROJECT) {
+    message.warning(`一条片子最多选 ${MAX_CHARACTERS_PER_PROJECT} 个出场角色`)
+    createModal.characterIds = ids.slice(0, MAX_CHARACTERS_PER_PROJECT)
+    return
+  }
+  createModal.characterIds = ids
+}
+
+async function loadCharacters() {
+  try {
+    const data = await charactersApi.list({ limit: 200 })
+    characters.value = data.items
+  } catch {
+    // 读不出来不阻断建档：角色本来就是可选项，提交时后端还会再校一遍。
+    characters.value = []
+  }
+}
 
 function openCreate() {
   createModal.open = true
@@ -323,6 +387,8 @@ function openCreate() {
   createModal.platform = 'douyin'
   createModal.durationS = null
   createModal.requirement = ''
+  createModal.characterIds = []
+  void loadCharacters()
 }
 
 // ---- 加载与轮询 --------------------------------------------------------------
@@ -414,6 +480,7 @@ async function onCreate() {
       platform: createModal.platform,
       duration_s: createModal.durationS ?? undefined,
       requirement: createModal.requirement.trim() || undefined,
+      character_ids: createModal.characterIds,
     })
     createModal.open = false
     message.success('已开始生成脚本，稍后在工作台里逐镜调整')
@@ -528,5 +595,33 @@ onUnmounted(() => pollLoop.stop())
 
 .create-form :deep(.ant-form-item) {
   margin-bottom: 14px;
+}
+
+.cast-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cast-option-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--surface-2);
+}
+
+.cast-option-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.cast-option-sub {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 </style>

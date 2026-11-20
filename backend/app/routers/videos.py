@@ -106,6 +106,7 @@ def create_project(
             requirement=payload.requirement,
             style=payload.style.model_dump() if payload.style else None,
             params=payload.params.model_dump() if payload.params else None,
+            character_ids=payload.character_ids,
         )
     except ValueError as exc:
         # MediaJobError 也在这一档：它是 ValueError 的子类，媒体门槛的拒绝与
@@ -150,6 +151,8 @@ def save_project(
             style=payload.style.model_dump() if payload.style is not None else None,
             params=payload.params.model_dump() if payload.params is not None else None,
             publish=payload.publish.model_dump() if payload.publish is not None else None,
+            # None（没带这个字段）保持原角色组；空列表是显式清空，服务层按 is not None 区分。
+            character_ids=payload.character_ids,
         )
     except LookupError as exc:
         raise _not_found(exc) from exc

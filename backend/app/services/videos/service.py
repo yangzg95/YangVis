@@ -57,6 +57,7 @@ from app.models.schemas import (
     VideoStyle,
 )
 from app.services.agent_run import model_error_text, require_chat_model
+from app.services.characters.service import CharacterService
 from app.services.media import (
     BIZ_VIDEO_COVER,
     BIZ_VIDEO_SHOT,
@@ -168,6 +169,31 @@ def _ready_rel_path(job: Optional[MediaJob]) -> str:
     return str(job.rel_path)
 
 
+# 一条作业带得走的参考图总数上限：方舟的 reference_image 到 4 张左右开始互相干扰，
+# 与镜头素材 material_ids 的上限（schema 上的 max_length=4）同口径。项目角色组的
+# 形象图与镜头自己挑的素材合并后共用这份预算，角色图在前——人脸/穿搭一致性优先。
+MAX_REFERENCE_IMAGES = 4
+
+
+def _merge_reference_images(*groups: Sequence[str]) -> List[str]:
+    """按入参顺序合并几组参考图 rel_path：保序去重，截断到参考图预算。
+
+    截断而不是报错：素材是用户逐镜挑的、角色是项目级选的，两边都合法，只是合计
+    超了预算。静默丢图会让人以为素材没生效，所以截断要打日志、界面也要写明预算。
+    """
+    merged: List[str] = []
+    for group in groups:
+        for path in group:
+            if path and path not in merged:
+                merged.append(path)
+    if len(merged) > MAX_REFERENCE_IMAGES:
+        logger.info(
+            "reference images truncated to %s: had %s", MAX_REFERENCE_IMAGES, len(merged)
+        )
+        return merged[:MAX_REFERENCE_IMAGES]
+    return merged
+
+
 def _style_note(style: Dict[str, Any]) -> str:
     parts = [
         f"{label}：{value}"
@@ -181,7 +207,9 @@ def _style_note(style: Dict[str, Any]) -> str:
     return f"全片风格（每一镜的提示词都要贴住它）：{'；'.join(parts)}\n\n" if parts else ""
 
 
-def _script_inputs(project: VideoProject, brief_note: str = "") -> Dict[str, str]:
+def _script_inputs(
+    project: VideoProject, brief_note: str = "", characters_note: str = ""
+) -> Dict[str, str]:
     """把一行项目整理成那条流程声明的输入变量。
 
     「有风格才附风格」这类条件拼装留在代码里，模板只做替换（与幻灯片同一约定）；
@@ -189,6 +217,7 @@ def _script_inputs(project: VideoProject, brief_note: str = "") -> Dict[str, str
 
     ``brief_note`` 只在创作卡被人改过时才有内容：把命题带进这一轮，才让「先改
     钩子再重新生成」真的按人定下来的方向切镜，而不是被模型再随机定一遍。
+    ``characters_note`` 是项目角色组的档案段落，没选角色时是空串，模板整段不渲染。
 
     键名必须与流程声明的一字不差：多一个少一个都在 ``create_run`` 那里当场报错，
     这是有意的——拼错的变量名静默消失，喂给模型的就是一段缺料的分镜。
@@ -201,6 +230,7 @@ def _script_inputs(project: VideoProject, brief_note: str = "") -> Dict[str, str
         "platform_note": f"发布平台：{PLATFORM_LABELS.get(project.platform, project.platform)}"
         f"{duration_note}\n\n",
         "style_note": _style_note(project.style or {}),
+        "characters_note": characters_note,
         "requirement_note": (
             f"用户的补充要求：{project.requirement}\n\n" if project.requirement else ""
         ),
@@ -250,6 +280,65 @@ class VideoService:
         """
         return MaterialService(self._db, self._owner_id)
 
+    def _characters(self) -> CharacterService:
+        """人物库那层的入口：角色组的校验、档案段落与形象图路径都从它取。"""
+        return CharacterService(self._db, self._owner_id)
+
+    def _normalize_character_ids(self, raw: Any) -> List[str]:
+        """项目角色组的写入侧归一：去重保序，只留本账号仍存在的 id，截到配置上限。
+
+        与 ``save_shots`` 校验素材引用同一口径：别人的 id、已删除的 id、模型编出来的
+        id 一律丢掉，留着它要到渲染那一刻才以「参考图路径不合法」炸出来。
+        """
+        ids: List[str] = []
+        for item in raw or []:
+            text = str(item)
+            if text and text not in ids:
+                ids.append(text)
+        if not ids:
+            return []
+        known = self._characters().characters_for(ids)
+        return [item for item in ids if item in known][: settings.CHARACTER_MAX_PER_PROJECT]
+
+    def _characters_note(self, project: VideoProject) -> str:
+        """把项目角色组渲染成给策划师/分镜师的角色段落；一个可用角色都没有就空串。
+
+        档案字段空着的整行不渲染；形象图不进这段（图走渲染时的参考图注入），这里
+        只负责让模型知道「是谁、穿什么、长什么样」。
+        """
+        ids = [str(item) for item in (project.character_ids or [])]
+        if not ids:
+            return ""
+        cast = self._characters().characters_for(ids)
+        lines = [
+            "本片角色（人物设定必须沿用，不得新造主角；相关镜头的画面提示词要写出"
+            "角色名与衣着/外形特色，保证跨镜头是同一个人）："
+        ]
+        index = 0
+        for ref in ids:
+            row = cast.get(ref)
+            if row is None:
+                continue
+            index += 1
+            lines.append(f"{index}. {row.name}")
+            if row.persona:
+                lines.append(f"   人设：{row.persona}")
+            if row.outfit:
+                lines.append(f"   衣着：{row.outfit}")
+            if row.features:
+                lines.append(f"   外形特色：{row.features}")
+        if index == 0:
+            return ""
+        return "\n".join(lines) + "\n\n"
+
+    def _character_portraits(self, project: VideoProject) -> List[str]:
+        """项目角色组里仍存在的形象图 rel_path，按角色组顺序；缺失 id 自然跳过。"""
+        ids = [str(item) for item in (project.character_ids or [])]
+        if not ids:
+            return []
+        cast = self._characters().characters_for(ids)
+        return [cast[ref].rel_path for ref in ids if ref in cast and cast[ref].rel_path]
+
     # -- 模型门槛 -------------------------------------------------------------
 
     def require_chat_config(self) -> ModelConfig:
@@ -297,6 +386,7 @@ class VideoService:
         requirement: Optional[str],
         style: Optional[Dict[str, Any]],
         params: Optional[Dict[str, Any]],
+        character_ids: Optional[List[str]] = None,
     ) -> VideoProject:
         """落一行项目并为它建一条脚本运行。
 
@@ -320,18 +410,21 @@ class VideoService:
             style=VideoStyle(**(style or {})).model_dump() if style else {},
             params=VideoParams(**(params or {})).model_dump(),
             publish={},
+            # 建档时就选好的项目角色组：未知 id 在归一阶段丢掉，脚本运行直接能用。
+            character_ids=self._normalize_character_ids(character_ids),
         )
         self._db.add(project)
         self._db.commit()
         self._db.refresh(project)
         self._start_script_run(project)
         logger.info(
-            "video project created: id=%s owner=%s title=%r idea_chars=%s duration=%s",
+            "video project created: id=%s owner=%s title=%r idea_chars=%s duration=%s characters=%s",
             project.id,
             self._owner_id,
             project.title,
             len(clean_idea),
             duration_s,
+            project.character_ids,
         )
         return project
 
@@ -363,10 +456,18 @@ class VideoService:
             project.params = VideoParams(**fields["params"]).model_dump()
         if fields.get("publish") is not None:
             project.publish = VideoPublish(**fields["publish"]).model_dump()
+        if fields.get("character_ids") is not None:
+            # 空列表也是显式语义（清空角色组），所以认 None 而不是 falsy。
+            project.character_ids = self._normalize_character_ids(fields["character_ids"])
 
         self._db.commit()
         self._db.refresh(project)
-        logger.info("video project saved: id=%s owner=%s", project_id, self._owner_id)
+        logger.info(
+            "video project saved: id=%s owner=%s characters=%s",
+            project_id,
+            self._owner_id,
+            project.character_ids,
+        )
         return project
 
     def delete_project(self, project_id: int) -> int:
@@ -441,7 +542,9 @@ class VideoService:
             self._db,
             self._owner_id,
             WORKFLOW_SCRIPT,
-            _script_inputs(project, brief_note),
+            # 角色段落在这里现拼：项目角色组可能在两次生成之间被改过，运行输入要
+            # 快照当次的档案，而不是引用项目行上随时会变的 id 列表。
+            _script_inputs(project, brief_note, self._characters_note(project)),
             subject=(SUBJECT_VIDEO_PROJECT, project.id),
             subject_label=project.title,
         )
@@ -685,18 +788,23 @@ class VideoService:
         materials = self._materials().materials_for(
             [str(ref) for row in picked for ref in (row.material_ids or [])]
         )
+        # 项目角色组的形象图对每镜都生效（跨镜头同一张脸），一次取齐；缺失角色
+        # 在 _character_portraits 里已按「id 不存在」跳过。
+        cast_paths = self._character_portraits(project)
         created: List[MediaJob] = []
         for row in picked:
             # 只有图片类素材进得了请求体：参考视频要公网可达的地址，而默认那一档
             # 是把本地文件内联成 base64。视频素材在镜头上是一条「已记录、暂未使用」
             # 的引用（片段渲染的参考图档同一取舍）。
-            refs = [
+            material_paths = [
                 materials[ref].rel_path
                 for ref in [str(item) for item in (row.material_ids or [])]
                 if ref in materials
                 and materials[ref].kind == MATERIAL_IMAGE
                 and materials[ref].rel_path
             ]
+            # 角色图在前、素材在后，合计超预算时保角色：人脸一致性比场景素材优先。
+            refs = _merge_reference_images(cast_paths, material_paths)
             job = media_jobs.enqueue(
                 self._db,
                 self._owner_id,
@@ -716,11 +824,12 @@ class VideoService:
             created.append(job)
         self._db.commit()
         logger.info(
-            "video frames enqueued: project=%s owner=%s jobs=%s materials=%s",
+            "video frames enqueued: project=%s owner=%s jobs=%s materials=%s characters=%s",
             project.id,
             self._owner_id,
             len(created),
             len(materials),
+            len(cast_paths),
         )
         return created
 
@@ -768,19 +877,38 @@ class VideoService:
             if reference_previous
             else {}
         )
+        params = project.params or {}
+        # 链式与「参考上一版」互斥：后者是显式重做动作，开启时链式让位。
+        chain_on = bool(params.get("chain_clips")) and not reference_previous
+        # 项目全量镜头的序号 → 行：链式找的是叙事意义上的紧邻前镜，不是本次选中集合
+        # 里的前一个（只选 3、5 两镜时，镜 5 要接的是镜 4 而不是镜 3）。
+        shot_by_order = {row.sort_order: row for row in rows}
+        prev_job_ids = [
+            shot_by_order[row.sort_order - 1].video_job_id
+            for row in picked
+            if row.sort_order - 1 in shot_by_order
+        ]
+        prev_jobs = self._latest_jobs(prev_job_ids) if chain_on else {}
         materials = self._materials().materials_for(
             [str(ref) for row in picked for ref in (row.material_ids or [])]
         )
+        # 项目角色组的形象图只在「参考图生视频」档进请求体：首帧档喂的是本镜首帧
+        # 产物（角色形象已经烤在首帧里，重复挂参考图会撞方舟「首帧禁混参考素材」
+        # 的 400），t2v 一档图都不给。
+        cast_paths = self._character_portraits(project)
         # 素材库里只有图片类进得了请求体：视频素材那一档还没接（它同样要公网地址，
         # 与下面「参考上一版」走的是同一条路），镜头上只留一条已记录、暂未使用的引用。
         refs = {
-            row.id: [
-                materials[ref].rel_path
-                for ref in [str(item) for item in (row.material_ids or [])]
-                if ref in materials
-                and materials[ref].kind == MATERIAL_IMAGE
-                and materials[ref].rel_path
-            ]
+            row.id: _merge_reference_images(
+                cast_paths,
+                [
+                    materials[ref].rel_path
+                    for ref in [str(item) for item in (row.material_ids or [])]
+                    if ref in materials
+                    and materials[ref].kind == MATERIAL_IMAGE
+                    and materials[ref].rel_path
+                ],
+            )
             for row in picked
         }
 
@@ -815,10 +943,53 @@ class VideoService:
                 problems.append(
                     f"第 {_shot_nums(no_clip)} 镜还没有可参考的上一版片段，先关掉「参考上一版」或把它们渲出来"
                 )
+        if chain_on:
+            # 严格模式：链式衔接只支持首帧模式，t2v/参考图没有可替换的首帧输入。
+            bad_mode = [
+                row.sort_order for row in picked if row.gen_mode != MODE_FIRST_FRAME
+            ]
+            if bad_mode:
+                problems.append(
+                    f"第 {_shot_nums(bad_mode)} 镜不是首帧模式：尾帧链式渲染要求所有镜头统一走"
+                    "「首帧生视频」，请改回后再渲染，或先关闭链式开关"
+                )
+            no_prev_frame: List[int] = []
+            for row in picked:
+                prev_shot = shot_by_order.get(row.sort_order - 1)
+                if prev_shot is None:
+                    continue  # 项目第一镜是链头，用它自己的首帧定调。
+                prev_job = prev_jobs.get(prev_shot.video_job_id or 0)
+                # 与本函数其他闸门同口径：只认作业行上的 rel_path 非空，不查盘——
+                # 文件真被清掉时，执行期 to_ark_image_url 的 read_blob 会抛可读错误。
+                frame_rel = getattr(prev_job, "last_frame_rel_path", None) if prev_job else None
+                if not frame_rel:
+                    no_prev_frame.append(row.sort_order)
+            if no_prev_frame:
+                problems.append(
+                    f"第 {_shot_nums(no_prev_frame)} 镜的上一镜还没有带尾帧的成功片段，"
+                    "链式渲染要按镜头顺序来：先把紧邻的前一镜渲成功，再渲这些镜头"
+                )
         if problems:
             raise ValueError("；".join(problems) + "。先补齐再渲染")
 
-        params = project.params or {}
+        # chain 快照必须在入队循环之前预算：循环里会把新作业 id 回写到
+        # row.video_job_id，而 shot_by_order 持有的是同一 session 的同一对象，
+        # 循环内再读前镜指针，读到的就是刚入队的新作业而不是它上一版成功片段。
+        chain_plans: Dict[int, Dict[str, Any]] = {}
+        if chain_on:
+            for row in picked:
+                prev_shot = shot_by_order.get(row.sort_order - 1)
+                if prev_shot is None:
+                    continue  # 项目第一镜是链头，用它自己的首帧定调。
+                prev_job = prev_jobs.get(prev_shot.video_job_id or 0)
+                if prev_job is not None:
+                    chain_plans[row.sort_order] = {
+                        "enabled": True,
+                        "prev_job_id": prev_job.id,
+                        "prev_shot_order": prev_shot.sort_order,
+                        "injected": False,
+                    }
+
         created: List[MediaJob] = []
         for row in picked:
             images: List[Dict[str, str]] = []
@@ -855,37 +1026,44 @@ class VideoService:
             )
             if frame_driven and _is_seedance_25(config.model_name):
                 ratio = "adaptive"
+            request_body: Dict[str, Any] = {
+                "project_id": project.id,
+                "prompt": prompt,
+                # 键名与方舟请求体同名，作业层原样透传（``jobs._video_params``
+                # 不兜默认值）。时长是**本镜**的，不是全片的：一镜一条任务。
+                "params": {
+                    "ratio": ratio,
+                    "resolution": str(params.get("resolution") or "720p"),
+                    "duration": int(row.duration_s),
+                    "watermark": bool(params.get("watermark")),
+                    "generate_audio": bool(params.get("generate_audio")),
+                },
+                "images": images,
+            }
+            if chain_on and row.sort_order in chain_plans:
+                # 快照上一镜的视频作业 id 而不是镜头 id：上镜之后重做产生新作业，
+                # 不影响这次已经入队的衔接，与 publish_job 的 sources 快照同哲学。
+                request_body["chain"] = chain_plans[row.sort_order]
             job = media_jobs.enqueue(
                 self._db,
                 self._owner_id,
                 kind=KIND_VIDEO,
                 biz_type=BIZ_VIDEO_SHOT,
                 biz_id=row.id,
-                request={
-                    "project_id": project.id,
-                    "prompt": prompt,
-                    # 键名与方舟请求体同名，作业层原样透传（``jobs._video_params``
-                    # 不兜默认值）。时长是**本镜**的，不是全片的：一镜一条任务。
-                    "params": {
-                        "ratio": ratio,
-                        "resolution": str(params.get("resolution") or "720p"),
-                        "duration": int(row.duration_s),
-                        "watermark": bool(params.get("watermark")),
-                        "generate_audio": bool(params.get("generate_audio")),
-                    },
-                    "images": images,
-                },
+                request=request_body,
                 config=config,
             )
             row.video_job_id = job.id
             created.append(job)
         self._db.commit()
         logger.info(
-            "video clips enqueued: project=%s owner=%s jobs=%s materials=%s reference_previous=%s",
+            "video clips enqueued: project=%s owner=%s jobs=%s materials=%s characters=%s "
+            "reference_previous=%s",
             project.id,
             self._owner_id,
             len(created),
             len(materials),
+            len(cast_paths),
             reference_previous,
         )
         return created
@@ -1309,6 +1487,9 @@ class VideoService:
             style=VideoStyle(**style),
             params=VideoParams(**params),
             publish=VideoPublish(**publish),
+            # 旧库补列前读到 NULL，按空角色组兜底；已删除角色的残留 id 原样带出，
+            # 前端按「人物已删除」占位，下一次保存经 _normalize_character_ids 清掉。
+            character_ids=[str(item) for item in (project.character_ids or [])],
             shots=[
                 VideoShotOut(
                     id=row.id,
@@ -1387,6 +1568,15 @@ def _job_out(job: Optional[MediaJob]) -> Optional[MediaJobOut]:
     """作业行的对外视图：产物只给本站地址，上游那条 24 小时链接不出门。"""
     if job is None:
         return None
+    chain = (job.request or {}).get("chain") if job.kind == KIND_VIDEO else None
+    chain_wait_shot = None
+    if (
+        isinstance(chain, dict)
+        and chain.get("enabled")
+        and job.status not in JOB_FINAL_STATES
+    ):
+        # 只有还在等的作业才透出：成功/失败后这个数字没有意义，错误原因走 error_msg。
+        chain_wait_shot = chain.get("prev_shot_order")
     return MediaJobOut(
         id=job.id,
         kind=job.kind,
@@ -1397,6 +1587,7 @@ def _job_out(job: Optional[MediaJob]) -> Optional[MediaJobOut]:
         file_size=job.file_size,
         error_msg=job.error_msg,
         elapsed_ms=job.elapsed_ms,
+        chain_wait_shot=chain_wait_shot,
         created_at=job.created_at,
         finished_at=job.finished_at,
     )

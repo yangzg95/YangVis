@@ -740,6 +740,30 @@ CREATE TABLE IF NOT EXISTS material_asset (
   KEY idx_material_owner_kind (owner_id, kind)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='素材库条目；视频素材这一期只记录引用，参考视频进模型要公网可达的地址';
 
+-- ---------------------------------------------------------------------------
+-- 智能应用 · 人物库（跨项目复用的角色档案与形象图）
+--
+-- 与 material_asset 的分工：素材是无结构的图/视频文件，人物是带文字档案的角色。
+-- 档案（人设/衣着/特色）在脚本生成时拼进提示词，形象图在渲染时作为参考图注入。
+-- 文件在服务器本地磁盘的 characters/<owner_id>/ 下，库里只存 rel_path；
+-- 删除是硬删除，video_project.character_ids 里的残留 id 由视频侧按「已不存在」跳过。
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS video_character (
+  id         BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id   BIGINT       NOT NULL,
+  name       VARCHAR(64)  NOT NULL COMMENT '角色名，脚本提示词与界面展示都用它',
+  persona    VARCHAR(512) NOT NULL DEFAULT '' COMMENT '人设：身份、性格、背景、说话方式',
+  outfit     VARCHAR(512) NOT NULL DEFAULT '' COMMENT '衣着：固定穿搭，渲染一致性主要靠它和形象图',
+  features   VARCHAR(512) NOT NULL DEFAULT '' COMMENT '外形特色：发型、体型、标志物等视觉特征',
+  mime       VARCHAR(64)  NOT NULL COMMENT '形象图的 MIME，只收图片，视频在写入前就被拒',
+  size       BIGINT       NOT NULL DEFAULT 0,
+  rel_path   VARCHAR(512) NOT NULL COMMENT '相对 UPLOAD_MEDIA_DIR 的 characters/<owner_id>/<随机 id>.<扩展名>',
+  created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_character_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='人物库条目：角色档案 + 专属形象图，被 video_project.character_ids 认领';
+
 CREATE TABLE IF NOT EXISTS video_project (
   id               BIGINT PRIMARY KEY AUTO_INCREMENT,
   owner_id         BIGINT       NOT NULL,
@@ -752,6 +776,7 @@ CREATE TABLE IF NOT EXISTS video_project (
   style            JSON         NOT NULL COMMENT '{visual_style, persona, palette}，逐镜提示词都要贴它',
   params           JSON         NOT NULL COMMENT '渲染参数快照：{ratio, resolution, watermark, generate_audio, image_size, tts_enabled, tts_voice}，发起渲染/合成时抄下，改模型配置不影响已入队的作业；本镜时长取 video_shot.duration_s',
   publish          JSON         NOT NULL COMMENT '{title_candidates, tags, cover_prompt}',
+  character_ids    JSON         NULL     COMMENT '项目角色组：video_character.id 的字符串列表，上限 CHARACTER_MAX_PER_PROJECT（3）；旧库补列前为 NULL，服务层按空角色组处理',
   created_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_owner (owner_id)
@@ -799,6 +824,7 @@ CREATE TABLE IF NOT EXISTS media_job (
   rel_path        VARCHAR(512) NULL     COMMENT '转存后的本地产物相对路径；上游 URL 24 小时失效，所以这一列才是产物',
   mime            VARCHAR(64)  NULL,
   file_size       BIGINT       NULL,
+  last_frame_rel_path VARCHAR(512) NULL COMMENT '视频成功时上游随片返回的尾帧转存路径；链式渲染里下一镜拿它当首帧，图片作业恒为 NULL',
   usage           JSON         NULL     COMMENT '上游用量（token/张数），用量统计与成本核算按它',
   attempts        INT          NOT NULL DEFAULT 0 COMMENT '只数可重试的失败（限流/5xx/网络/下载超时）',
   submitted_at    DATETIME     NULL     COMMENT '是不是空 = 有没有提交给上游；这个区分不能用 remote_task_id 做（图片没有任务 id）',

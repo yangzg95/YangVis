@@ -231,6 +231,8 @@ const MENU: MenuNode[] = [
       { path: '/office/interviews', title: '面试', icon: SolutionOutlined },
       { path: '/office/slides', title: '幻灯片', icon: FundProjectionScreenOutlined },
       { path: '/office/videos', title: '短视频', icon: VideoCameraOutlined },
+      // 人物库是账号级的角色档案：短视频选了角色组，脚本带档案、渲染注入形象图。
+      { path: '/office/characters', title: '人物库', icon: TeamOutlined },
       // 库是账号级的，但今天只有短视频的镜头会引用它，所以紧跟在短视频后面同级摆放。
       { path: '/office/materials', title: '素材库', icon: FolderOpenOutlined },
     ],

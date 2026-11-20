@@ -3081,6 +3081,10 @@ class VideoParams(BaseModel):
     tts_enabled: bool = False
     # 音色 ID（各家模型的音色字表不同，代码不做枚举）；空串 = 用系统默认音色。
     tts_voice: str = Field(default="", max_length=128)
+    # 尾帧链式渲染：上一镜片段的尾帧作为下一镜的首帧输入，镜间画面物理连续。
+    # 开了它片段就从并发变串行（同项目内一次只跑一条），严格模式下非首帧模式的
+    # 镜头入队即拒。默认关，关掉时每条片段仍是互相独立的一次生成。
+    chain_clips: bool = False
 
 
 class VideoStyle(BaseModel):
@@ -3222,6 +3226,70 @@ class MaterialListOut(BaseModel):
     trash_ttl_seconds: int = 0
 
 
+# ---- 人物库 -----------------------------------------------------------------
+
+
+class CharacterOut(BaseModel):
+    """人物库里的一个角色：文字档案 + 一张专属形象图。
+
+    ``url`` / ``thumb_url`` 都由 ``rel_path`` 现拼（不入库）：拼不出给空串，界面
+    按「形象图已丢失」处理而不是塞一个会 404 的地址。
+    """
+
+    id: int
+    name: str
+    persona: str = ""
+    outfit: str = ""
+    features: str = ""
+    mime: str = ""
+    size: int = 0
+    url: str = ""
+    thumb_url: str = ""
+    created_at: Optional[datetime] = None
+
+
+class CharacterListOut(BaseModel):
+    """一屏角色 + 筛选后的总数与账号条数上限。"""
+
+    items: List[CharacterOut] = Field(default_factory=list)
+    total: int = 0
+    max_per_owner: int = 0
+
+
+class CharacterUpdateIn(BaseModel):
+    """改角色档案：给了才改，``name`` 给了就不能是空白（服务层再兜一次）。"""
+
+    name: Optional[str] = Field(default=None, max_length=64)
+    persona: Optional[str] = Field(default=None, max_length=512)
+    outfit: Optional[str] = Field(default=None, max_length=512)
+    features: Optional[str] = Field(default=None, max_length=512)
+
+
+class CharacterIdsIn(BaseModel):
+    """删除前查引用影响的一批 id；条数随账号上限走，这里只挡「一次请求塞爆」。"""
+
+    ids: List[int] = Field(default_factory=list, max_length=50)
+
+
+class CharacterUsageProject(BaseModel):
+    project_id: int
+    title: str
+
+
+class CharacterUsageOut(BaseModel):
+    """一个角色被哪些短视频项目选进了角色组。"""
+
+    character_id: int
+    projects: List[CharacterUsageProject] = Field(default_factory=list)
+
+
+class CharacterDeleteOut(BaseModel):
+    """硬删除回执：``references`` 是仍引用该角色的项目数，仅用于界面提示。"""
+
+    id: int
+    references: int = 0
+
+
 class MediaJobOut(BaseModel):
     """一条媒体作业的对外形状。
 
@@ -3238,6 +3306,9 @@ class MediaJobOut(BaseModel):
     file_size: Optional[int] = None
     error_msg: Optional[str] = None
     elapsed_ms: Optional[int] = None
+    # 链式渲染：非空表示这条片段作业在等同一项目的上一镜尾帧。前端据此把干等的
+    # queued 显示成「等待第 N 镜」而不是干巴巴的排队中。
+    chain_wait_shot: Optional[int] = None
     created_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
 
@@ -3355,6 +3426,9 @@ class VideoProjectDetail(VideoProjectItem):
     style: VideoStyle = Field(default_factory=VideoStyle)
     params: VideoParams = Field(default_factory=VideoParams)
     publish: VideoPublish = Field(default_factory=VideoPublish)
+    # 项目角色组（video_character.id 的字符串形式）。有效条数上限由服务层按
+    # config.CHARACTER_MAX_PER_PROJECT 裁，这里只挡「一次请求塞爆」。
+    character_ids: List[str] = Field(default_factory=list, max_length=10)
     shots: List[VideoShotOut] = Field(default_factory=list)
     # 最近一次脚本生成的现场；还没生成过（老项目直接改分镜）时为 None。
     script_run: Optional[VideoScriptRunOut] = None
@@ -3371,6 +3445,8 @@ class VideoProjectCreate(BaseModel):
     requirement: Optional[str] = Field(default=None, max_length=512)
     style: Optional[VideoStyle] = None
     params: Optional[VideoParams] = None
+    # 出场角色：建档时就选好，脚本生成会带上角色档案。未知 id 由服务层丢弃。
+    character_ids: List[str] = Field(default_factory=list, max_length=10)
 
 
 class VideoProjectUpdate(BaseModel):
@@ -3385,6 +3461,7 @@ class VideoProjectUpdate(BaseModel):
     style: Optional[VideoStyle] = None
     params: Optional[VideoParams] = None
     publish: Optional[VideoPublish] = None
+    character_ids: Optional[List[str]] = Field(default=None, max_length=10)
 
 
 class VideoShotsSave(BaseModel):

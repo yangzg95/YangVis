@@ -64,6 +64,8 @@ export interface VideoParams {
   tts_enabled: boolean
   /** 音色 ID；空串表示用服务端 TTS_DEFAULT_VOICE。 */
   tts_voice: string
+  /** 尾帧链式渲染：上一镜尾帧作为下一镜首帧，镜间画面物理连续；开启后同项目片段串行渲染。 */
+  chain_clips: boolean
 }
 
 /** 发布用的一包：标题候选、话题标签、封面描述。 */
@@ -88,6 +90,8 @@ export interface MediaJob {
   error_msg: string | null
   /** 从提交算到产物落盘，含上游排队时间。未跑完为 null。 */
   elapsed_ms: number | null
+  /** 链式渲染里这条作业在等第几镜的尾帧；非空时 queued 应显示「等待第 N 镜」。 */
+  chain_wait_shot: number | null
   created_at: string | null
   finished_at: string | null
 }
@@ -209,6 +213,8 @@ export interface VideoProjectDetail extends VideoProjectItem {
   style: VideoStyle
   params: VideoParams
   publish: VideoPublish
+  /** 项目角色组：人物库 id（字符串形式），上限见 MAX_CHARACTERS_PER_PROJECT。 */
+  character_ids: string[]
   shots: VideoShot[]
   /** 最近一次脚本生成的现场；运行记录被留存清理删掉后为 null。 */
   script_run: VideoScriptRun | null
@@ -223,6 +229,8 @@ export interface VideoProjectCreate {
   requirement?: string
   style?: VideoStyle
   params?: VideoParams
+  /** 出场角色：建档时就选好，脚本生成会带上角色档案，渲染会注入形象图。 */
+  character_ids?: string[]
 }
 
 /** 整包保存：给了才改，undefined 保持原样。镜头走 saveShots，不塞在这里。 */
@@ -236,6 +244,8 @@ export interface VideoProjectSave {
   style?: VideoStyle
   params?: VideoParams
   publish?: VideoPublish
+  /** 空数组是显式清空角色组；undefined 保持原样。 */
+  character_ids?: string[]
 }
 
 /** 一类作业的并发现状：渲染前那屏「现在有几个在跑、还能塞几个」。 */
