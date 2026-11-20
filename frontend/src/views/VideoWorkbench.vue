@@ -2093,6 +2093,9 @@ onActivated(() => {
   void loadMaterials()
   // 也可能去设置页配好了公网基址：「参考上一版」那个勾选框据此解禁。
   void loadCapacity()
+  // 同样可能刚在「模型与集成」配好/测通了模型：就绪旗标只在 mounted 拉过，
+  // keep-alive 复活不补拉的话，图片/视频/TTS 的缺模型告警会一直挂旧状态。
+  void loadReadiness()
   syncPolling()
   syncClock()
 })
