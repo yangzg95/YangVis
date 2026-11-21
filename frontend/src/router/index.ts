@@ -186,6 +186,22 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '短视频工作台'},
     },
     {
+        // 创作列表：一个菜单叶子，页内两 tab（写小说 / 写文章），tab 态走 query。
+        path: '/studio',
+        name: 'Writing',
+        component: () => import('@/views/Writing.vue'),
+        meta: {title: '创作'},
+    },
+    {
+        // 创作工作台：左大纲树、中正文编辑、右 Markdown 预览。与短视频工作台同模式：
+        // 不挂 bare，顶栏按作品 id 占动态标签（见 utils/appTabs.ts），keep-alive 保草稿，
+        // 页面自己 watch 路由参数换作品。
+        path: '/studio/works/:id(\\d+)/workbench',
+        name: 'WritingWorkbench',
+        component: () => import('@/views/WritingWorkbench.vue'),
+        meta: {title: '创作工作台'},
+    },
+    {
         // 报告整页展示：列表页「查看报告」新开标签页进这里，bare 跳过主布局外壳，
         // 与全屏终端页同一模式。不加 public，未登录照样被守卫拦下。
         path: '/office/report/:kind(resume|comparison|toolkit)/:id(\\d+)',

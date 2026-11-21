@@ -94,4 +94,21 @@ describe('leafForPath', () => {
     expect(leafForPath('/office/videos/abc/workbench', staticLeaves)).toBeUndefined()
     expect(leafForPath('/office/videos/7/show', staticLeaves)).toBeUndefined()
   })
+
+  it('创作工作台按作品 id 展开成动态标签', () => {
+    const leaf = leafForPath('/studio/works/7/workbench', staticLeaves)
+    expect(leaf).toEqual({
+      path: '/studio/works/7/workbench',
+      title: '创作 #7',
+      icon: expect.anything(),
+    })
+    expect(leafForPath('/studio/works/8/workbench', [])?.title).toBe('创作 #8')
+  })
+
+  it('创作列表静态叶与非法工作台路径不认动态规则', () => {
+    expect(leafForPath('/studio', staticLeaves)).toBeUndefined()
+    expect(leafForPath('/studio/works/abc/workbench', staticLeaves)).toBeUndefined()
+    expect(leafForPath('/studio/works/7', staticLeaves)).toBeUndefined()
+    expect(leafForPath('/studio/works/7/workbench/extra', staticLeaves)).toBeUndefined()
+  })
 })

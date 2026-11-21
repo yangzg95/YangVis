@@ -3532,3 +3532,134 @@ class PublishJobOut(BaseModel):
     elapsed_ms: Optional[int] = None
     created_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
+
+
+# ---- 智能应用 · 创作（写小说 / 写文章）-----------------------------------------
+
+# 裸字符串词表，与现有状态字段同一约定（不用 Enum 落库）。
+WritingKind = Literal["novel", "article"]
+# 大纲节点：小说有卷/章两种，文章只有段落。允许的层级关系由 service 按 kind 校验。
+WritingNodeKind = Literal["volume", "chapter", "section"]
+WritingExportFormat = Literal["md", "txt"]
+
+# 与 config.WRITING_* 同值的 schema 级闸门：Pydantic 不读 Settings，这里写字面量。
+_WRITING_BRIEF_MAX = 20_000
+_WRITING_CONTENT_MAX = 30_000
+_WRITING_OUTLINE_MAX = 120
+
+
+def _clean_writing_title(value: Optional[str]) -> Optional[str]:
+    """标题 strip 后必须非空：min_length 只数字符数，挡不住纯空格（同笔记标题）。"""
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        raise ValueError("标题不能为空")
+    return value
+
+
+class WritingWorkCreate(BaseModel):
+    """新建作品：只建行不触发生成，参数先落库，生成动作在工作台显式触发。"""
+
+    kind: WritingKind
+    title: str = Field(..., min_length=1, max_length=128)
+    brief: Optional[str] = Field(default=None, max_length=_WRITING_BRIEF_MAX)
+    requirement: Optional[str] = Field(default=None, max_length=512)
+    # 白名单在 service 里按 kind 清洗，这里只挡明显越界的整包请求。
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+    _clean_title = field_validator("title")(_clean_writing_title)
+
+
+class WritingWorkUpdate(BaseModel):
+    """作品元数据的部分更新；显式传 null 的 requirement 会被清空（同笔记正文约定）。"""
+
+    title: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    brief: Optional[str] = Field(default=None, max_length=_WRITING_BRIEF_MAX)
+    requirement: Optional[str] = Field(default=None, max_length=512)
+    params: Optional[Dict[str, Any]] = None
+
+    _clean_title = field_validator("title")(_clean_writing_title)
+
+
+class OutlineNodeIn(BaseModel):
+    """前端提交的大纲节点。``cid`` 可选：新加的节点还没有，由服务端发放。"""
+
+    cid: Optional[str] = Field(default=None, max_length=32)
+    # 词表在 service 按作品 kind 校验，这里先收字符串以便回清晰的中文错误。
+    kind: str = "chapter"
+    title: str = Field(default="", max_length=128)
+    synopsis: str = Field(default="", max_length=2000)
+    target_words: Optional[int] = Field(default=None, ge=0)
+    children: Optional[List["OutlineNodeIn"]] = None
+
+
+class WritingOutlineSave(BaseModel):
+    """整棵大纲的保存请求；service 清洗后用它对账 writing_part 行。"""
+
+    nodes: List[OutlineNodeIn] = Field(default_factory=list, max_length=_WRITING_OUTLINE_MAX)
+
+
+class WritingPartCreate(BaseModel):
+    """手工加章/加段：标题可空，服务端回落「未命名章节/段落」。"""
+
+    title: str = Field(default="", max_length=128)
+    # 插在哪个叶子之后；不传 = 追加到末尾。
+    after_cid: Optional[str] = Field(default=None, max_length=32)
+
+
+class WritingPartSave(BaseModel):
+    """正文块的自动保存：两字段都可选，没传的保持不动。"""
+
+    title: Optional[str] = Field(default=None, max_length=128)
+    content: Optional[str] = Field(default=None, max_length=_WRITING_CONTENT_MAX)
+
+
+class OutlineNode(BaseModel):
+    """落库后的大纲节点：cid 一定有值，children 只在卷节点上出现。"""
+
+    cid: str
+    kind: str
+    title: str
+    synopsis: str = ""
+    target_words: Optional[int] = None
+    children: List["OutlineNode"] = Field(default_factory=list)
+
+
+class WritingPartOut(BaseModel):
+    """一个正文块的对外形状。"""
+
+    cid: str
+    sort_order: int
+    title: str
+    content: str
+    word_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class WritingWorkItem(BaseModel):
+    """列表里的一行作品：不带 brief/outline/正文这类大字段。"""
+
+    id: int
+    kind: WritingKind
+    title: str
+    params: Dict[str, Any] = Field(default_factory=dict)
+    part_count: int = 0
+    word_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class WritingWorkDetail(WritingWorkItem):
+    """工作台要的完整数据：大纲树 + 全部正文块（按 sort_order 排好）。"""
+
+    brief: str = ""
+    requirement: Optional[str] = None
+    outline: List[OutlineNode] = Field(default_factory=list)
+    meta: Dict[str, Any] = Field(default_factory=dict)
+    parts: List[WritingPartOut] = Field(default_factory=list)
+
+
+OutlineNodeIn.model_rebuild()
+OutlineNode.model_rebuild()

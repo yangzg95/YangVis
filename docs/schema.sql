@@ -973,3 +973,44 @@ CREATE TABLE IF NOT EXISTS publish_job (
   KEY idx_publish_project (project_id, id),
   KEY idx_publish_owner_status (owner_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='短视频发布作业：成片合成与发布包';
+
+-- ---------------------------------------------------------------------------
+-- 智能应用 · 创作（写小说 / 写文章，由 create_all 自动建表）
+--
+-- writing_work 一行是一部小说或一篇文章（kind 区分），outline JSON 是大纲树的
+-- 唯一事实源：小说为「卷 → 章」两级（也允许章直接挂顶层），文章为扁平段落；
+-- 叶子 cid 与 writing_part 一行 1:1 对齐。行上不存生成状态——M2 起进度在
+-- workflow_run（subject_kind = writing-work / writing-part），同 slide_deck。
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS writing_work (
+  id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id    BIGINT       NOT NULL,
+  kind        VARCHAR(8)   NOT NULL COMMENT 'novel | article，服务端白名单',
+  title       VARCHAR(128) NOT NULL,
+  brief       MEDIUMTEXT   NOT NULL COMMENT '灵感/主题原文，AI 生成的输入快照',
+  requirement VARCHAR(512) NULL COMMENT '补充要求，重新生成时仍生效',
+  params      JSON         NOT NULL COMMENT '按 kind 白名单清洗过的创作参数',
+  outline     JSON         NOT NULL COMMENT '大纲树 [{cid,kind,title,synopsis,target_words,children?}]',
+  meta        JSON         NOT NULL COMMENT '副产物：标题候选、标签等',
+  created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_writing_work_owner (owner_id),
+  KEY idx_writing_work_owner_kind (owner_id, kind)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='创作作品：小说/文章';
+
+CREATE TABLE IF NOT EXISTS writing_part (
+  id         BIGINT PRIMARY KEY AUTO_INCREMENT,
+  owner_id   BIGINT       NOT NULL,
+  work_id    BIGINT       NOT NULL,
+  cid        VARCHAR(32)  NOT NULL COMMENT 'p + 16 位 hex，与幻灯片 sid 同形，数组下标永不参与寻址',
+  sort_order INT          NOT NULL DEFAULT 0 COMMENT '大纲叶子展平后的序号',
+  title      VARCHAR(128) NOT NULL DEFAULT '',
+  content    MEDIUMTEXT   NOT NULL COMMENT 'markdown 正文',
+  word_count INT          NOT NULL DEFAULT 0 COMMENT '服务端统计：CJK 字 + 拉丁词',
+  created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_writing_part_cid (work_id, cid),
+  KEY idx_writing_part_owner (owner_id),
+  KEY idx_writing_part_work (owner_id, work_id, sort_order)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='创作正文块：小说章节 / 文章段落';

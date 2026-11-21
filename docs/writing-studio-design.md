@@ -1,0 +1,243 @@
+# 「创作」模块设计（写小说 / 写文章）
+
+> 状态：已评审，决策已锁定（见文末「锁定决策」）。M1 骨架实现按本文档执行。
+> 代码约定参照：幻灯片（`slide_deck` + 后台生成 + 轮询）、求职笔记（CRUD/owner 隔离）、
+> 短视频工作台（in-shell 动态标签 + keep-alive）。
+
+## 1. 总体形态
+
+一个菜单叶子 + 页内两个 tab（与 `Tools.vue` 两页签同模式），不拆两个菜单：
+
+| 项 | 方案 |
+|---|---|
+| 菜单位置 | 「AI 应用」组内、素材库之后，标题「创作」，图标 `EditOutlined` |
+| 列表路由 | `/studio`，页内 `a-tabs`，tab 同步 query（`/studio?tab=novel`），刷新/分享不丢态 |
+| 工作台路由 | `/studio/works/:id(\d+)/workbench`，不挂 bare，仿 `VideoWorkbench`：顶栏按作品 id 占动态标签，keep-alive 保草稿 |
+| 动态标签 | `utils/appTabs.ts` 加 `STUDIO_WORKBENCH_RE`，标题「创作 #id」，配套补 appTabs 单测 |
+| 涉及壳文件 | `router/index.ts`、`App.vue`（MENU 叶子）、`utils/appTabs.ts`、`main.py`（路由注册） |
+
+两个 tab 共用一套「作品列表 → 工作台」骨架，差异只在参数表单、大纲形状和生成流程；
+后端一张作品表 + `kind` 区分，避免两套 CRUD。
+
+## 2. 两个 tab 的功能差异
+
+| 维度 | 写小说（novel） | 写文章（article） |
+|---|---|---|
+| 作品含义 | 一本书 | 一篇文 |
+| 创作参数 `params` | 题材、风格、基调、视角、主角、世界观、目标字数 | 文章类型（公众号/知乎/小红书/技术博客/公文/软文）、平台、受众、语气、核心观点、目标字数 |
+| 大纲形状 | 两级树：卷 → 章，章节点带 synopsis、目标字数 | 一级列表：段落 section，带观点 point、目标字数 |
+| 正文载体 | 每章一个 part，独立生成/续写/重写 | 可整篇一次生成（按 `##` 标题切回各 section），也可逐段生成 |
+| AI 操作 | 生成大纲、章节起草、续写、重写、润色 | 生成大纲（含标题候选）、全文起草、段落重写、润色/扩写/缩写/换语气 |
+| 导出 | 拼接整本 Markdown/TXT（卷章标题自动分级） | 整篇 Markdown/TXT |
+
+## 3. 数据模型（两张新表）
+
+实体约定：`owner_id` 隔离、JSON 列存结构、**行上不存 status**（状态从 `workflow_run`
+翻译，与 `slide_deck` 同一取舍）、`docs/schema.sql` 与 `entities.py` 双写。
+
+### 3.1 `writing_work`（作品）
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| id | BIGINT PK AUTO_INCREMENT | |
+| owner_id | BIGINT NOT NULL, index | |
+| kind | VARCHAR(8) NOT NULL | `novel` / `article`，服务端白名单 |
+| title | VARCHAR(128) NOT NULL | |
+| brief | LONGTEXT NOT NULL | 灵感/主题原文，生成输入的快照 |
+| requirement | VARCHAR(512) NULL | 补充要求，重生成时仍生效（同 deck.requirement） |
+| params | JSON NOT NULL | 创作参数，服务端按 kind 白名单清洗，未知键丢弃 |
+| outline | JSON NOT NULL | 大纲树（形状见 3.3），cid 服务端发放 |
+| meta | JSON NOT NULL | 副产物：`{title_candidates, tags}` |
+| created_at / updated_at | DATETIME | 同款 server_default / onupdate |
+
+索引：`idx_writing_work_owner_kind (owner_id, kind)`。
+
+### 3.2 `writing_part`（章节/段落正文）
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| id | BIGINT PK AUTO_INCREMENT | |
+| owner_id | BIGINT NOT NULL, index | |
+| work_id | BIGINT NOT NULL, index | |
+| cid | VARCHAR(32) NOT NULL | `p` + uuid4().hex[:16]，与 slides 的 sid 同形同约定；数组下标永不参与寻址 |
+| sort_order | INT NOT NULL | 拖拽排序落这里 |
+| title | VARCHAR(128) NOT NULL | 章节名/段落名 |
+| content | LONGTEXT NOT NULL | markdown 纯文本 |
+| word_count | INT NOT NULL DEFAULT 0 | 服务端统计（CJK 字符 + 英文词，剥离 markdown 符号），不信前端报数 |
+| created_at / updated_at | DATETIME | |
+
+约束：`UNIQUE(work_id, cid)`，索引 `(owner_id, work_id, sort_order)`。
+
+### 3.3 大纲节点统一形状
+
+小说卷节点不建 part，叶子节点与 part 按 cid 1:1 对齐：
+
+```json
+[
+  {"cid": "p3f9…", "kind": "volume", "title": "第一卷", "synopsis": "", "children": [
+    {"cid": "pa12…", "kind": "chapter", "title": "第一章 雨夜", "synopsis": "…", "target_words": 3000}
+  ]}
+]
+```
+
+文章是 `kind: "section"` 的扁平一级（字段同义，`point` 复用 synopsis 字段承载）。
+所有 cid 在服务端 sanitize 时补齐（仿 `sanitize_pages`），模型与前端发的非法 cid 一律重发。
+
+## 4. 后端设计
+
+### 4.1 目录与接口
+
+新增 `services/writing/`：
+
+- `service.py`：CRUD、序列化、导出拼装
+- `outline.py`：大纲白名单清洗、cid 发放、part 对账
+- `words.py`：字数统计纯函数
+- `generate.py`：M2/M3 的后台任务体（M1 不建）
+
+新增 `routers/writing.py`（prefix `/studio`，`main.py` 注册，tags=["studio"]）。
+
+| 方法/路径 | 作用 | 里程碑 |
+|---|---|---|
+| GET `/studio/works?kind=&keyword=` | 列表，不含正文（item/detail 分离，同 note） | M1 |
+| POST `/studio/works` | 只建行，不自动触发生成；参数先落库，工作台里手动点生成 | M1 |
+| GET `/studio/works/{id}` | 详情：作品 + 大纲 + parts | M1 |
+| PUT `/studio/works/{id}` | 改标题/要求/params | M1 |
+| DELETE `/studio/works/{id}` | 有运行中任务时拒绝（`running_subjects` 闸门，同 deck 删除） | M1 |
+| PUT `/studio/works/{id}/outline` | 保存大纲树；清洗后对账 part 行（新节点建空 part，删节点连带删 part，前端二次确认） | M1 |
+| POST `/studio/works/{id}/parts` | 手工加章：同一事务补大纲叶子 + 空 part | M1 |
+| PUT `/studio/works/{id}/parts/{cid}` | 自动保存（title/content），服务端重算 word_count | M1 |
+| DELETE `/studio/works/{id}/parts/{cid}` | 同时摘掉大纲节点 | M1 |
+| GET `/studio/works/{id}/export?format=md\|txt` | 导出，仿 slides export 的 no-store/attachment 头 | M1 |
+| POST `/studio/works/{id}/outline/generate` | 起大纲运行，body 可带 requirement 覆盖 | M2 |
+| POST `/studio/works/{id}/parts/{cid}/generate` | 正文生成，body `{action, instruction?, tone?}` | M3 |
+| POST `/studio/works/{id}/draft/generate` | 文章整篇生成（小说批量章节生成留 backlog） | M3 |
+
+### 4.2 两个新 subject 常量（`services/workflows/__init__.py`，M2 启用）
+
+- `SUBJECT_WRITING_WORK = "writing-work"`：大纲运行，ref=作品 id
+- `SUBJECT_WRITING_PART = "writing-part"`：正文运行，ref=part id
+
+列表/工作台状态全部经 `subject_state(latest_run(...))` 翻译；失败原因点 tag 进
+`WorkflowRunsDrawer`，与幻灯片列表完全一致。
+
+### 4.3 五个内置智能体 + 五条内置工作流（M2/M3）
+
+随启动 seed（`chat_visible=False`，不进对话页人设选择）：
+
+| slug | 人设 | 温度 | 输出 | 里程碑 |
+|---|---|---|---|---|
+| novel-architect | 小说架构师：灵感+设定 → 卷章大纲 JSON | 45 | JSON | M2 |
+| article-architect | 文章架构师：主题+类型+受众 → 段落大纲 + 标题候选 | 35 | JSON | M2 |
+| novel-writer | 小说写手：设定+前情+本章 synopsis → 章节 markdown | 55 | markdown | M3 |
+| article-writer | 文章写手：大纲 → 整篇 markdown | 40 | markdown | M3 |
+| writing-editor | 文字编辑：润色/扩写/缩写/换语气/重写 | 25 | markdown | M3 |
+
+工作流 slug：`novel-outline`、`article-outline`、`novel-chapter`、`article-draft`、
+`writing-polish`（两个 kind 共用，action 段落由调用方拼好传变量，与 builtin.py
+现有条件段落拼装法一致）。JSON 解析复用 `strip_json_fence` / `json_span`，
+错误文案复用 `model_error_text`，模型门槛复用 `require_chat_model`
+（前端复用 `settingsApi.status().chat.ready` 告警条）。
+
+### 4.4 正文生成的上下文策略（M3，长篇关键）
+
+`novel-chapter` 输入拼装：
+
+1. 作品卡（params 关键字段）+ 完整大纲（只含 synopsis，很短）
+2. 前情：最近一章结尾 1500 字；更早章节只给「标题 + synopsis」清单
+3. 本章 synopsis、目标字数、用户 instruction
+4. 总量过 `WRITING_CONTEXT_MAX_CHARS` 时同 slides `_truncate` 截断并标注
+
+七个 action：`draft`（首写）/ `continue`（带本章已有内容尾部续写）/
+`rewrite`（带全文重写，前端 popconfirm 覆盖）/ `polish` / `expand` /
+`condense` / `retone`（带 tone 参数）。
+
+**生成中该 part 锁定编辑**（textarea disabled），完成后服务端写回、前端拉新详情——
+天然避开自动保存与 AI 回写的冲突，不做三方合并。
+
+文章整篇生成后按 `/^## /m` 切分，与大纲叶子数量对得上就 1:1 写回；对不上则整篇落第一个
+section 并记 warning（不静默丢内容）。空输出等后处理失败统一 `fail_run` 降级，
+不允许「succeeded 但没产物」。
+
+后台任务体照抄 slides `_generate_task`：函数内延迟 import `SessionLocal`，
+新开会话、异常只落 run 不抛出，保证测试可 monkeypatch。
+
+### 4.5 config.py 限制项
+
+```python
+WRITING_MAX_WORKS_PER_OWNER       = 100
+WRITING_MAX_PARTS_PER_WORK        = 200
+WRITING_OUTLINE_MAX_NODES         = 120
+WRITING_BRIEF_MAX_CHARS           = 20000
+WRITING_PART_TARGET_MAX_WORDS     = 6000   # 单章目标上限，防 token 爆炸
+WRITING_PART_CONTENT_MAX_CHARS    = 30000  # 入库闸门
+WRITING_CONTEXT_MAX_CHARS         = 12000  # 喂模型的上下文窗口闸门（M3）
+```
+
+## 5. 前端设计
+
+### 5.1 新增文件
+
+- `api/writing.ts`（信封协议同 notes.ts）+ `api/index.ts` barrel 导出
+- `views/Writing.vue`：两 tab 列表页
+- `views/WritingWorkbench.vue`：三栏工作台
+- `components/writing/`：`WorkCreateModal.vue`（novel/article 两套参数表单）、
+  `OutlineTree.vue`（a-tree 可拖拽）、`PartEditor.vue`、`AiActionMenu.vue`（M3）
+- `utils/writingWords.ts`、`utils/writingOutline.ts`（各带 `.test.ts`）
+
+### 5.2 列表页
+
+tab 由 route query 驱动；表格列 = 标题（副标题带题材/类型）、状态 tag
+（M2 起 analyzing/ready/error，点击开运行抽屉）、总字数、更新时间、操作
+（工作台/删除/导出）；`createPollLoop` 仅在有 analyzing 行时轮询，
+`onDeactivated` 停表；完成跃迁发带「打开工作台」按钮的 notification。
+全部复用 Slides.vue 已验证写法。
+
+### 5.3 工作台三栏
+
+- 左栏（260px）：大纲树，节点显示状态点 + 字数，hover 出增删/拖拽，底部「+ 章节」；
+  窄屏收成抽屉
+- 中栏：part 标题输入 + 等宽大字框（IBM Plex Mono 已是依赖），工具条放 AI 操作组（M3）、
+  本 part 字数、保存状态
+- 右栏：`utils/markdown.ts` 基座实时预览（`html:false` 安全底线现成）；
+  < lg 断点改成「编辑/预览」分段切换
+- 顶栏：作品名、kind 标签、全书总字数、导出下拉、空大纲时的「生成大纲」主按钮（M2）
+
+### 5.4 自动保存
+
+停笔 2.5s debounce PUT，Ctrl+S 立即 flush，`onDeactivated` 兜底 flush；
+状态文案「未保存 / 保存中 / 已保存 HH:mm:ss」。M3 起生成中的 part 走锁定态，
+失败保留旧内容 + 错误 tag + 重试入口。
+
+## 6. 测试与里程碑
+
+后端 `tests/test_writing.py` + `tests/test_writing_api.py`（仿 test_slides.py）：
+owner 隔离 404、cid 发放与大纲清洗、字数统计、运行中拦截删除/重复触发（M2）、
+任务成功写回/失败 `fail_run`/空产物降级（M3）、文章切分（M3）、导出拼接。
+前端：appTabs 新正则单测、字数与大纲清洗纯函数单测。
+
+| 里程碑 | 范围 | 交付后状态 |
+|---|---|---|
+| M1 骨架 | 两表+DDL+CRUD+列表两 tab+工作台手工写作+自动保存+导出 | 不接 AI 已可当纯写作工具用 |
+| M2 大纲 | 两个 architect + 两条 outline 工作流 + 后台生成 + 轮询 + 运行抽屉 | AI 出大纲 |
+| M3 正文 | 三个写手/编辑工作流 + 七个 action + 生成锁定 + 整篇切分 | 全链路可用 |
+| M4 打磨 | 标题候选、a-tree 拖拽排序、窄屏实测收口、测试全绿、交接文档收口 | 收口 |
+
+> M1 实现备注（2026-11）：大纲树的排序用 hover 上移/下移按钮落地（同层相邻交换，
+> 卷内章不跨容器），a-tree 拖拽排序按上表移到 M4——拖拽的跨卷落点规则需要单独的
+> 单测与实测，按钮已覆盖 M1 全部排序场景。窄屏已做基础适配（大纲抽屉 + 编辑/预览分段），
+> 实测留 M4。M1 测试：后端 33 个（test_writing.py + test_writing_api.py），
+> 前端新增 writingWords/writingOutline/appTabs 共 19 个用例。
+
+v1 backlog（明确不做）：SSE 逐字流式、知识库 RAG 喂设定、小说批量章节生成、
+作品回收站（v1 同 slides 硬删除）、与短视频人物库联动。
+
+## 7. 锁定决策
+
+1. **生成形态 = 后台运行 + 轮询**：与幻灯片/短视频/简历同构，`workflow_run` 单一状态源、
+   运行抽屉可回看、断网切页不影响任务、测试模式现成；不引入 SSE 逐字流式。
+2. **一个菜单叶子 + 页内两 tab**：路由 `/studio`，不拆两个菜单。
+3. **正文统一落 `writing_part`**：小说章节与文章段落同表，靠 work.kind 区分语义，
+   编辑器与导出只有一条代码路径。
+4. **创建只建行不自动生成**：参数先落库，生成动作在工作台由用户显式触发。
+5. **生成中锁定 part 编辑**：不做自动保存与 AI 回写的三方合并。
+6. **v1 硬删除**：不做回收站，与幻灯片/笔记一致。

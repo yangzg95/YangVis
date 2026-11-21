@@ -2178,3 +2178,84 @@ class PublishJob(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<PublishJob id={self.id} project={self.project_id} status={self.status!r}>"
+
+
+class WritingWork(Base):
+    """创作模块的一部小说或一篇文章（``kind`` 区分）。
+
+    与 :class:`SlideDeck` 同一取舍：这一行只存产物，不放 status。M2 起大纲与正文
+    的生成进度都在认领它的 ``workflow_run`` 上（``subject_kind`` 为 writing-work /
+    writing-part），界面状态由 ``subject_state`` 翻译，重启收尾只有运行表一处。
+
+    ``outline`` 是大纲树的唯一事实源：小说是「卷 → 章」两级（也允许章直接挂顶层），
+    文章是扁平的段落列表；叶子节点的 ``cid`` 与 :class:`WritingPart` 一行对齐。
+    ``params`` / ``meta`` 都是 JSON：前者装按 kind 清洗过的创作参数，后者装标题候选
+    这类副产物，模型产出的新副产物不用每次都迁库。
+    """
+
+    __tablename__ = "writing_work"
+    __table_args__ = (Index("idx_writing_work_owner_kind", "owner_id", "kind"),)
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    # novel | article：取值见 services/writing 的 KIND_*，服务端白名单校验。
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    title: Mapped[str] = mapped_column(String(128), nullable=False)
+    # 用户的灵感/主题原文，是后续 AI 生成的输入快照（同 slide_deck.source_text 的角色）。
+    brief: Mapped[str] = mapped_column(_LONG_TEXT, nullable=False, default="")
+    # 补充要求：重新生成时还要按它跑，所以得存下来而不是只当一次的输入。
+    requirement: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # 小说：{genre, style, tone, viewpoint, lead, worldview, word_target}
+    # 文章：{article_type, platform, audience, tone, viewpoint, core_points, word_target}
+    # 合法键见 services/writing/outline.py 的白名单，未知键入库前丢弃。
+    params: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # [{cid, kind, title, synopsis, target_words, children?}]，cid 服务端发放。
+    outline: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # 副产物：{title_candidates: [], tags: []}，M2 大纲生成开始写入。
+    meta: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<WritingWork id={self.id} owner={self.owner_id} kind={self.kind!r}>"
+
+
+class WritingPart(Base):
+    """作品里一个可独立编辑/生成的正文块：小说的章节、文章的段落。
+
+    与大纲叶子节点按 ``cid`` 1:1 对齐（卷这种分组节点没有对应行）。寻址用 cid 而不是
+    数组下标，与幻灯片的 sid、面试题的 qid 同一个理由：增删和拖拽排序时下标会漂移。
+    正文统一是 markdown 纯文本；``word_count`` 在服务端统计，不信前端报数。
+    """
+
+    __tablename__ = "writing_part"
+    __table_args__ = (
+        UniqueConstraint("work_id", "cid", name="uk_writing_part_cid"),
+        Index("idx_writing_part_work", "owner_id", "work_id", "sort_order"),
+    )
+
+    id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    work_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # p + uuid4().hex[:16]，与 slides 的 sid 同形；由大纲清洗层统一发放。
+    cid: Mapped[str] = mapped_column(String(32), nullable=False)
+    # 叶子在大纲展平后的序号，拖拽排序落这里，列表读它就不用递归 JSON。
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    title: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    content: Mapped[str] = mapped_column(_LONG_TEXT, nullable=False, default="")
+    word_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<WritingPart id={self.id} work={self.work_id} cid={self.cid!r}>"

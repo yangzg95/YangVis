@@ -309,6 +309,20 @@ class Settings(BaseSettings):
     # 配音轨统一重采样到这个采样率再编码 AAC，避免各句 mp3 采样率不一致被 amix 拒绝。
     TTS_SAMPLE_RATE: int = 44100
 
+    # 智能应用 · 创作（写小说 / 写文章）
+    # 一个账号能建多少部作品，以及一部作品最多多少个正文块（小说章节 / 文章段落）。
+    WRITING_MAX_WORKS_PER_OWNER: int = 100
+    WRITING_MAX_PARTS_PER_WORK: int = 200
+    # 大纲节点总数上限（卷 + 章 / 段落一起算），既是内存闸门也防模型失控输出。
+    WRITING_OUTLINE_MAX_NODES: int = 120
+    # 灵感/主题原文的入库上限。
+    WRITING_BRIEF_MAX_CHARS: int = 20000
+    # 单章/单段目标字数上限，防生成请求把 token 预算撑爆；正文入库的硬闸门另设一个。
+    WRITING_PART_TARGET_MAX_WORDS: int = 6000
+    WRITING_PART_CONTENT_MAX_CHARS: int = 30000
+    # 喂给模型的上下文窗口闸门（M3 章节生成用），M1 先登记常量。
+    WRITING_CONTEXT_MAX_CHARS: int = 12000
+
     @property
     def database_url(self) -> str:
         # 凭据做 percent-encode：密码里若包含 '@'、'/' 或 ':'，否则会被解析成

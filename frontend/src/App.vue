@@ -160,6 +160,7 @@ import {
   CodeOutlined,
   DatabaseOutlined,
   DesktopOutlined,
+  EditOutlined,
   FolderOpenOutlined,
   FundProjectionScreenOutlined,
   HomeOutlined,
@@ -235,6 +236,8 @@ const MENU: MenuNode[] = [
       { path: '/office/characters', title: '人物库', icon: TeamOutlined },
       // 库是账号级的，但今天只有短视频的镜头会引用它，所以紧跟在短视频后面同级摆放。
       { path: '/office/materials', title: '素材库', icon: FolderOpenOutlined },
+      // 创作（写小说 / 写文章）：一个菜单叶子，页内两 tab；工作台按作品 id 占动态标签。
+      { path: '/studio', title: '创作', icon: EditOutlined },
     ],
   },
   {
