@@ -24,13 +24,17 @@ OTHER = 2
 
 
 @pytest.fixture()
-def db(tmp_path):
+def db(tmp_path, monkeypatch):
     engine = create_engine(
         f"sqlite:///{tmp_path / 'writing_api.db'}",
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
-    session = sessionmaker(bind=engine, future=True)()
+    maker = sessionmaker(bind=engine, future=True)
+    # 生成接口的 BackgroundTasks 自开 session：指到同一文件库，请求与任务才看得见彼此；
+    # M1 用例没有后台任务，这个替换对它们是空操作。
+    monkeypatch.setattr("app.database.SessionLocal", maker)
+    session = maker()
     try:
         yield session
     finally:
@@ -219,3 +223,216 @@ def test_delete_work_http(client):
     message = client.delete(f"/api/studio/works/{work['id']}").json()["message"]
     assert message == "deleted"
     assert client.get(f"/api/studio/works/{work['id']}").status_code == 404
+
+
+# ---- M2：后台大纲生成的 HTTP 链路 ----------------------------------------------
+
+
+NOVEL_OUTPUT = (
+    '{"outline":[{"title":"第一卷 出山","chapters":['
+    '{"title":"第一章 雨夜下山","synopsis":"少年奉师命下山","target_words":3000},'
+    '{"title":"第二章 初入州城","synopsis":"城里的第一夜","target_words":2500}]},'
+    '{"title":"第三章 独行","synopsis":"顶层章","target_words":2000}]}'
+)
+
+ARTICLE_OUTPUT = (
+    '{"title_candidates":["标题甲","标题乙"],'
+    '"sections":[{"title":"开篇","point":"立论","target_words":800}]}'
+)
+
+
+@pytest.fixture()
+def generation_env(db, monkeypatch):
+    """生成接口专用环境：seed 内置工作流 + 一份测通的对话模型 + 可换装的假模型调用。"""
+    from app.models.entities import ModelConfig
+    from app.models.schemas import ModelPurpose
+    from app.services.notify import app_inbox
+    from app.services.workflows import exec as workflow_exec
+    from app.services.workflows.builtin import seed_builtin_workflows
+
+    # 站内信锁可能绑在别的用例的事件循环上，清掉避免噪音日志。
+    app_inbox._owner_locks.clear()
+    seed_builtin_workflows(db)
+    db.add(
+        ModelConfig(
+            owner_id=OWNER,
+            purpose=ModelPurpose.CHAT.value,
+            title="测试对话模型",
+            model_name="unit-test",
+            base_url="http://localhost:1/v1",
+            is_default=True,
+            last_test_ok=True,
+        )
+    )
+    db.commit()
+
+    def install(reply):
+        async def fake_run_agent(
+            session,
+            owner_id,
+            agent_slug,
+            user_prompt,
+            *,
+            agent=None,
+            config_id=None,
+            timeout=None,
+            tools=None,
+            on_event=None,
+        ):
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        monkeypatch.setattr(workflow_exec, "run_agent", fake_run_agent)
+
+    return install
+
+
+def _fresh(db):
+    """后台任务在另一条连接上提交：本会话先结束旧事务再读，否则拿旧快照。"""
+    db.rollback()
+
+
+def test_generate_outline_returns_analyzing_then_ready(client, db, generation_env):
+    from app.services.workflows import SUBJECT_ANALYZING, SUBJECT_READY
+
+    generation_env(NOVEL_OUTPUT)
+    work = _create(client, "novel", "雨夜书")
+
+    # TestClient 会在响应返回后把 BackgroundTasks 跑完，但响应体本身是排队时序列化的。
+    resp = client.post(f"/api/studio/works/{work['id']}/outline/generate", json={})
+    body = resp.json()
+    assert body["code"] == 0 and body["message"] == "已开始生成大纲"
+    assert body["data"]["status"] == SUBJECT_ANALYZING
+
+    detail = client.get(f"/api/studio/works/{work['id']}").json()["data"]
+    assert detail["status"] == SUBJECT_READY and detail["error_msg"] is None
+    assert detail["part_count"] == 3
+    assert detail["outline"][0]["kind"] == "volume"
+    assert [c["title"] for c in detail["outline"][0]["children"]] == [
+        "第一章 雨夜下山",
+        "第二章 初入州城",
+    ]
+
+
+def test_generate_article_outline_records_title_candidates(client, generation_env):
+    generation_env(ARTICLE_OUTPUT)
+    work = _create(client, "article", "增长手记")
+
+    client.post(f"/api/studio/works/{work['id']}/outline/generate", json={})
+    detail = client.get(f"/api/studio/works/{work['id']}").json()["data"]
+    assert [node["kind"] for node in detail["outline"]] == ["section"]
+    assert detail["outline"][0]["synopsis"] == "立论"
+    assert detail["meta"]["title_candidates"] == ["标题甲", "标题乙"]
+
+
+def test_generate_failure_surfaces_error_status(client, generation_env):
+    from app.services.workflows import SUBJECT_ERROR
+
+    generation_env(RuntimeError("上游 502"))
+    work = _create(client, "novel", "雨夜书")
+
+    client.post(f"/api/studio/works/{work['id']}/outline/generate", json={})
+    detail = client.get(f"/api/studio/works/{work['id']}").json()["data"]
+    assert detail["status"] == SUBJECT_ERROR and "上游 502" in (detail["error_msg"] or "")
+
+
+def test_generate_without_chat_model_is_4004(client, db):
+    from app.errors import CODE_CHAT_NOT_READY
+    from app.models.entities import WorkflowRun
+    from sqlalchemy import select as sa_select
+
+    work = _create(client, "novel", "没配模型的书")
+    body = client.post(
+        f"/api/studio/works/{work['id']}/outline/generate", json={}
+    ).json()
+    # 全局 BusinessError 处理器：HTTP 200 + 信封 code=4004，驱动前端的「去配置」引导。
+    assert body["code"] == CODE_CHAT_NOT_READY and body["data"] is None
+    _fresh(db)
+    assert db.scalar(sa_select(WorkflowRun)) is None
+    assert client.get(f"/api/studio/works/{work['id']}").json()["data"]["status"] == "uploaded"
+
+
+def test_generate_unknown_work_is_404(client, generation_env):
+    generation_env(NOVEL_OUTPUT)
+    assert client.post("/api/studio/works/999999/outline/generate", json={}).status_code == 404
+
+
+def test_generate_other_owner_gets_404(client_for, generation_env):
+    generation_env(NOVEL_OUTPUT)
+    owner = client_for(OWNER)
+    work = _create(owner, "novel", "私密书稿")
+    other = client_for(OTHER)
+    assert other.post(
+        f"/api/studio/works/{work['id']}/outline/generate", json={}
+    ).status_code == 404
+
+
+def test_running_gates_return_business_envelope(client, db, generation_env):
+    from app.services.writing import WritingService
+
+    generation_env(NOVEL_OUTPUT)
+    work = _create(client, "novel", "写作中的书")
+    # 直接调 service 建一条运行中的 run（不经过 HTTP，也就没有后台任务执行它）。
+    WritingService(db, OWNER).start_outline_generation(work["id"])
+
+    again = client.post(f"/api/studio/works/{work['id']}/outline/generate", json={}).json()
+    assert again["code"] == -1 and "重复触发" in again["message"]
+    delete = client.delete(f"/api/studio/works/{work['id']}").json()
+    assert delete["code"] == -1 and "正在生成" in delete["message"]
+
+
+def test_generate_payload_validation_is_422(client, generation_env):
+    generation_env(NOVEL_OUTPUT)
+    work = _create(client, "novel", "雨夜书")
+    url = f"/api/studio/works/{work['id']}/outline/generate"
+    assert client.post(url, json={"model_config_id": 0}).status_code == 422
+    assert client.post(url, json={"requirement": "x" * 513}).status_code == 422
+
+
+def test_generate_with_chosen_model_stamps_steps(client, db, generation_env):
+    from app.models.entities import ModelConfig, WorkflowRun, WorkflowRunStep
+    from app.models.schemas import ModelPurpose
+    from sqlalchemy import select as sa_select
+
+    generation_env(NOVEL_OUTPUT)
+    chosen = ModelConfig(
+        owner_id=OWNER,
+        purpose=ModelPurpose.CHAT.value,
+        title="另一个对话模型",
+        model_name="unit-test-pro",
+        base_url="http://localhost:2/v1",
+        is_default=False,
+        last_test_ok=True,
+    )
+    db.add(chosen)
+    db.commit()
+    work = _create(client, "novel", "雨夜书")
+
+    ok = client.post(
+        f"/api/studio/works/{work['id']}/outline/generate",
+        json={"model_config_id": chosen.id},
+    ).json()
+    assert ok["code"] == 0
+    _fresh(db)
+    run = db.scalar(sa_select(WorkflowRun))
+    steps = list(db.scalars(
+        sa_select(WorkflowRunStep).where(WorkflowRunStep.run_id == run.id)
+    ).all())
+    assert steps and all(step.model_config_id == chosen.id for step in steps)
+
+    # 别人的模型 id 读作不存在：LookupError → 404，而不是越权使用。
+    stranger = ModelConfig(
+        owner_id=OTHER,
+        purpose=ModelPurpose.CHAT.value,
+        title="外人的模型",
+        model_name="stranger",
+        base_url="http://localhost:3/v1",
+        last_test_ok=True,
+    )
+    db.add(stranger)
+    db.commit()
+    assert client.post(
+        f"/api/studio/works/{work['id']}/outline/generate",
+        json={"model_config_id": stranger.id},
+    ).status_code == 404

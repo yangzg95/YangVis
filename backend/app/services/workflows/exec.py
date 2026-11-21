@@ -178,10 +178,12 @@ async def _execute_step(
 
         model_name: Optional[str] = None
         try:
-            # 落这一步**实际**用的模型：定义里的 model_config_id 只写按步骤的覆盖，
-            # 空着的是运行时的默认对话模型。历史行只存前者的话，绝大多数运行在
-            # 界面上就是「没用什么模型」。
-            config = require_chat_model(db, owner_id, step.model_config_id)
+            # 落这一步**实际**用的模型：功能侧可在发起时把按次选择预盖到运行行上
+            # （优先级最高），其次才是流程定义里的按步骤覆盖；两者都空着就是运行时
+            # 的默认对话模型。历史行只存定义覆盖的话，绝大多数运行在界面上就是
+            # 「没用什么模型」，所以这里把实际配置回写到行上。
+            chosen = row.model_config_id or step.model_config_id
+            config = require_chat_model(db, owner_id, chosen)
             row.model_config_id = config.id
             model_name = config.model_name
             # 绑定开跑这一刻的人设版本：以后智能体再怎么改，这次运行对的是当时的

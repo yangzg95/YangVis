@@ -7,8 +7,8 @@
 按 cid 1:1 对账：保存大纲时新叶子建空块、被删的叶子连带删块、顺序变化改
 ``sort_order``。标题在两边同步——大纲改名与正文块改名走的是同一棵树。
 
-M1 没有 AI 生成，所以这里还没有运行态；M2 起状态由认领作品/正文块的
-``workflow_run`` 翻译，本表仍只存产物（同 slide_deck 的取舍）。
+M2 起大纲生成走内置工作流 + 后台任务：本表仍只存产物，进度与失败原因只有
+``workflow_run`` 一份事实源，序列化时由 :func:`subject_state` 翻译（同 slide_deck）。
 """
 from __future__ import annotations
 
@@ -20,7 +20,13 @@ from sqlalchemy import Select, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models.entities import WritingPart, WritingWork
+from app.models.entities import (
+    ModelConfig,
+    WorkflowRun,
+    WorkflowRunStep,
+    WritingPart,
+    WritingWork,
+)
 from app.models.schemas import (
     OutlineNode,
     WritingPartOut,
@@ -29,7 +35,23 @@ from app.models.schemas import (
     WritingWorkItem,
     WritingWorkUpdate,
 )
+from app.services.agent_run import model_error_text, require_chat_model
+from app.services.workflows.builtin import builtin_output, start_builtin
+from app.services.workflows.runs import (
+    fail_run,
+    latest_run,
+    latest_runs,
+    running_subjects,
+    subject_state,
+)
+from app.services.workflows import (
+    RUN_SUCCEEDED,
+    SUBJECT_UPLOADED,
+    SUBJECT_WRITING_WORK,
+)
+from app.services.writing import generate
 from app.services.writing.outline import (
+    KIND_ARTICLE,
     KIND_NOVEL,
     KINDS,
     LEAF_KIND,
@@ -50,7 +72,6 @@ settings = get_settings()
 
 # LIKE 通配符转义（同笔记服务）：用户搜的 % / _ 是普通字符。
 _LIKE_ESCAPE = str.maketrans({"/": "//", "%": "/%", "_": "/_"})
-_WS_RE = re.compile(r"\s+")
 
 
 def _like_term(keyword: str) -> str:
@@ -64,10 +85,31 @@ class WritingService:
         self._db = db
         self._owner_id = owner_id
 
+    @property
+    def owner_id(self) -> int:
+        # 路由把 owner 传给后台任务用（同 SlideDeckService 的暴露方式）。
+        return self._owner_id
+
     # -- 作用域 -------------------------------------------------------------
 
     def _scope(self, stmt: Select) -> Select:
         return stmt.where(WritingWork.owner_id == self._owner_id)
+
+    def _assert_not_generating(self, work: WritingWork) -> None:
+        """大纲运行期间冻结所有会改大纲/正文的手工操作。
+
+        生成落库是整棵树覆盖 + part 对账（模型产物不带 cid，旧叶子会被当成孤儿
+        删掉），运行中允许手改等于让用户白写：请求直接挡在门外，比静默覆盖友好。
+        后台任务自己的 save_outline 在运行 succeeded 之后才执行，不在此列。
+        """
+        if running_subjects(self._db, self._owner_id, SUBJECT_WRITING_WORK, [work.id]):
+            raise ValueError("大纲正在生成中，请稍后再编辑")
+
+    # -- 模型门槛（与幻灯片同一份共用实现）-------------------------------------
+
+    def require_chat_config(self) -> ModelConfig:
+        """生成门槛：用户得先有一份验证过的默认对话模型。"""
+        return require_chat_model(self._db, self._owner_id)
 
     # -- 作品查询 -----------------------------------------------------------
 
@@ -151,6 +193,9 @@ class WritingService:
 
     def delete_work(self, work_id: int) -> None:
         work = self.get_work(work_id)
+        # 大纲还在后台生成时连作品一起删，任务回来就找不到认领对象了——同 deck 闸门。
+        if running_subjects(self._db, self._owner_id, SUBJECT_WRITING_WORK, [work.id]):
+            raise ValueError("作品正在生成大纲，请稍后再删")
         # 正文块是作品的从属行，同事务一起删，不留孤儿。
         self._db.execute(
             delete(WritingPart).where(
@@ -165,6 +210,86 @@ class WritingService:
             self._owner_id,
             work.title,
         )
+
+    # -- AI 大纲生成（M2）----------------------------------------------------
+
+    def start_outline_generation(
+        self,
+        work_id: int,
+        requirement: Optional[str] = None,
+        model_config_id: Optional[int] = None,
+    ) -> WritingWork:
+        """建一条认领该作品的大纲运行。
+
+        ``model_config_id`` 给了就把这次运行的步骤行盖成指定模型（必须是本人的、
+        对话用途且测通的配置）；不传则步骤行为空，执行时回落默认对话模型。
+        """
+        work = self.get_work(work_id)
+        if running_subjects(self._db, self._owner_id, SUBJECT_WRITING_WORK, [work.id]):
+            raise ValueError("大纲正在生成中，请勿重复触发")
+        # 门槛在请求里先过：没测通的配置直接 BusinessError（4004），不留下排队中的运行。
+        config = require_chat_model(self._db, self._owner_id, model_config_id)
+        if requirement is not None:
+            work.requirement = requirement.strip()[:512] or None
+            self._db.commit()
+            self._db.refresh(work)
+        run = start_builtin(
+            self._db,
+            self._owner_id,
+            generate.workflow_slug_for(work.kind),
+            generate.outline_inputs(work),
+            subject=(SUBJECT_WRITING_WORK, work.id),
+            subject_label=work.title,
+        )
+        if model_config_id is not None:
+            # 运行步骤在建运行时一次性建齐（pending）：把选择的模型盖到每一步上，
+            # 引擎执行时读行上的 model_config_id，空着才回落默认。
+            for step in self._db.scalars(
+                select(WorkflowRunStep).where(WorkflowRunStep.run_id == run.id)
+            ).all():
+                step.model_config_id = config.id
+            self._db.commit()
+        logger.info(
+            "writing outline run started: id=%s owner=%s kind=%s model=%s",
+            work.id,
+            self._owner_id,
+            work.kind,
+            config.id,
+        )
+        return work
+
+    async def run_outline_generation(self, work_id: int) -> None:
+        """后台任务体：跑完发起时建好的运行，解析产物并按手工保存同一套闸门落库。
+
+        解析不出结构、一个合法叶子都没有、节点超上限这类**后处理**失败，统一用
+        :func:`fail_run` 把运行降级——不允许「succeeded 但没有大纲」。
+        """
+        work = self.get_work(work_id)
+        run = latest_run(self._db, self._owner_id, SUBJECT_WRITING_WORK, work.id)
+        if run is None:
+            logger.error("writing work has no run to execute: id=%s", work_id)
+            return
+        try:
+            text = await builtin_output(self._db, self._owner_id, run.id)
+            title_candidates: List[str] = []
+            if work.kind == KIND_ARTICLE:
+                nodes, title_candidates = generate.parse_article_outline(text)
+            else:
+                nodes = generate.parse_novel_outline(text)
+            # save_outline 内部发 cid、收层级、卡节点上限并对账 part 行（覆盖旧大纲）。
+            saved = self.save_outline(work_id, nodes)
+            if not flatten_leaves(saved.outline or []):
+                raise ValueError("模型返回的大纲里没有任何合法章节/段落")
+            if title_candidates:
+                meta = dict(work.meta or {})
+                meta["title_candidates"] = title_candidates
+                work.meta = meta
+                self._db.commit()
+        except Exception as exc:  # noqa: BLE001 - 失败写在运行上，不抛给后台调度器
+            logger.warning(
+                "writing outline generation failed: id=%s error=%s", work_id, exc, exc_info=True
+            )
+            fail_run(self._db, self._owner_id, run.id, model_error_text(exc))
 
     # -- 大纲与正文块 -------------------------------------------------------
 
@@ -195,6 +320,7 @@ class WritingService:
     def save_outline(self, work_id: int, nodes: List[Any]) -> WritingWork:
         """清洗大纲并对账正文块：新叶子建空块、删掉的叶子连带删块、顺序/标题同步。"""
         work = self.get_work(work_id)
+        self._assert_not_generating(work)
         tree = sanitize_outline(work.kind, nodes)
         leaves = flatten_leaves(tree)
         if len(leaves) > settings.WRITING_MAX_PARTS_PER_WORK:
@@ -235,6 +361,7 @@ class WritingService:
     def add_part(self, work_id: int, title: str, after_cid: Optional[str]) -> Tuple[WritingWork, str]:
         """手工加章/加段：大纲补一个叶子并建空块，返回 ``(作品, 新 cid)``。"""
         work = self.get_work(work_id)
+        self._assert_not_generating(work)
         tree = sanitize_outline(work.kind, work.outline or [])
         leaf_count = len(flatten_leaves(tree))
         if leaf_count >= settings.WRITING_MAX_PARTS_PER_WORK:
@@ -265,6 +392,7 @@ class WritingService:
     ) -> WritingPart:
         """正文块自动保存。改名同步大纲叶子，改正文重算字数。"""
         work = self.get_work(work_id)
+        self._assert_not_generating(work)
         part = self._get_part(work, cid)
         if title is not None:
             clean = title.strip()[:128]
@@ -287,6 +415,7 @@ class WritingService:
 
     def delete_part(self, work_id: int, cid: str) -> WritingWork:
         work = self.get_work(work_id)
+        self._assert_not_generating(work)
         part = self._get_part(work, cid)
         tree = sanitize_outline(work.kind, work.outline or [])
         if not remove_leaf(tree, cid):
@@ -371,8 +500,24 @@ class WritingService:
         ).all()
         return {row[0]: (row[1], int(row[2])) for row in rows}
 
-    def to_item(self, work: WritingWork, counts: Optional[Tuple[int, int]] = None) -> WritingWorkItem:
+    def _item_of(
+        self,
+        work: WritingWork,
+        run: Optional[WorkflowRun],
+        counts: Optional[Tuple[int, int]] = None,
+    ) -> WritingWorkItem:
         part_count, word_count = counts or (0, 0)
+        has_outline = bool(flatten_leaves(work.outline or []))
+        # 产物 = 大纲里有叶子；没有运行又没有大纲的新作就是「待生成」（uploaded）。
+        status, error_msg = subject_state(
+            run, has_product=has_outline, idle=SUBJECT_UPLOADED
+        )
+        # 通用契约里「succeeded 但无产物」判失败，是给步骤重跑那种后处理缺失兜底的；
+        # 创作侧的空产物在任务里已被 fail_run 降级成 failed 运行，能走到这里的
+        # succeeded + 空大纲只可能是生成成功后被手工清空——按「待生成」呈现，
+        # 不该给用户亮一条「结果没有写回，请重新发起」的红色失败。
+        if run is not None and run.status == RUN_SUCCEEDED and not has_outline:
+            status, error_msg = SUBJECT_UPLOADED, None
         return WritingWorkItem(
             id=work.id,
             kind=work.kind,
@@ -380,27 +525,31 @@ class WritingService:
             params=dict(work.params or {}),
             part_count=part_count,
             word_count=word_count,
+            status=status,
+            error_msg=error_msg,
             created_at=work.created_at,
             updated_at=work.updated_at,
         )
 
+    def to_item(self, work: WritingWork, counts: Optional[Tuple[int, int]] = None) -> WritingWorkItem:
+        run = latest_run(self._db, self._owner_id, SUBJECT_WRITING_WORK, work.id)
+        return self._item_of(work, run, counts)
+
     def to_items(self, works: List[WritingWork]) -> List[WritingWorkItem]:
         counts = self._counts_map([work.id for work in works])
-        return [self.to_item(work, counts.get(work.id, (0, 0))) for work in works]
+        runs = latest_runs(
+            self._db, self._owner_id, SUBJECT_WRITING_WORK, [work.id for work in works]
+        )
+        return [
+            self._item_of(work, runs.get(str(work.id)), counts.get(work.id, (0, 0)))
+            for work in works
+        ]
 
     def to_detail(self, work: WritingWork) -> WritingWorkDetail:
         parts = self.list_parts(work)
         tree = sanitize_outline(work.kind, work.outline or [])
-        total_words = sum(part.word_count for part in parts)
         return WritingWorkDetail(
-            id=work.id,
-            kind=work.kind,
-            title=work.title,
-            params=dict(work.params or {}),
-            part_count=len(parts),
-            word_count=total_words,
-            created_at=work.created_at,
-            updated_at=work.updated_at,
+            **self.to_item(work, counts=(len(parts), sum(p.word_count for p in parts))).model_dump(),
             brief=work.brief or "",
             requirement=work.requirement,
             outline=[OutlineNode(**node) for node in tree],
@@ -418,15 +567,3 @@ class WritingService:
                 for part in parts
             ],
         )
-
-    # 供路由复用的小工具 -----------------------------------------------------
-
-    @staticmethod
-    def snippet(text: Optional[str], limit: int = 140) -> Optional[str]:
-        """折叠空白后的一行摘要（列表副标题预留，M1 暂未挂出）。"""
-        if not text:
-            return None
-        flat = _WS_RE.sub(" ", text).strip()
-        if not flat:
-            return None
-        return flat if len(flat) <= limit else flat[:limit].rstrip() + "…"

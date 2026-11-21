@@ -28,6 +28,8 @@ export function subjectLink(
       return open('看助手', { name: 'ReportView', params: { kind: 'toolkit', id } })
     case 'slide-deck':
       return open('开工作台', { name: 'SlideWorkbench', params: { id } })
+    case 'writing-work':
+      return open('开工作台', { name: 'WritingWorkbench', params: { id } })
     default:
       return null
   }

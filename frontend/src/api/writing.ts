@@ -40,6 +40,12 @@ export interface WritingPart {
   updated_at: string
 }
 
+/**
+ * 作品状态不在业务行上存储，由后端把最近一次 workflow_run 翻译过来：
+ * uploaded=还没生成过、analyzing=后台生成中、ready=有大纲产物、error=最近一次运行失败。
+ */
+export type WritingWorkStatus = 'uploaded' | 'analyzing' | 'ready' | 'error'
+
 export interface WritingWorkItem {
   id: number
   kind: WritingKind
@@ -47,8 +53,16 @@ export interface WritingWorkItem {
   params: Record<string, string | number>
   part_count: number
   word_count: number
+  status: WritingWorkStatus
+  error_msg: string | null
   created_at: string
   updated_at: string
+}
+
+/** 大纲生成请求：requirement 不传就用作品已存的补充要求；模型不传走默认对话模型。 */
+export interface WritingOutlineGeneratePayload {
+  requirement?: string | null
+  model_config_id?: number | null
 }
 
 export interface WritingWorkDetail extends WritingWorkItem {
@@ -115,6 +129,13 @@ export const writingApi = {
   remove: (id: number) =>
     request<null>({ url: `/studio/works/${id}`, method: 'DELETE' }),
 
+  /** 后台生成大纲：响应回来时作品已是 analyzing，进度靠列表/工作台轮询跟随。 */
+  generateOutline: (id: number, payload: WritingOutlineGeneratePayload = {}) =>
+    request<WritingWorkItem>({
+      url: `/studio/works/${id}/outline/generate`,
+      method: 'POST',
+      data: payload,
+    }),
   saveOutline: (id: number, nodes: OutlineNodeInput[]) =>
     request<WritingWorkDetail>({
       url: `/studio/works/${id}/outline`,

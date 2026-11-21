@@ -16,8 +16,8 @@
             <span class="node-label" :title="dataRef.title">{{ dataRef.title }}</span>
             <span class="node-count">{{ dataRef.children?.length ?? 0 }} 章</span>
             <span class="node-actions" @click.stop>
-              <a-tooltip title="在此卷末尾加章">
-                <a-button type="text" size="small" @click="emit('add', lastChapterCid(dataRef))">
+              <a-tooltip :title="locked ? '大纲生成中，暂时不能编辑' : '在此卷末尾加章'">
+                <a-button type="text" size="small" :disabled="locked" @click="emit('add', lastChapterCid(dataRef))">
                   <PlusOutlined />
                 </a-button>
               </a-tooltip>
@@ -36,7 +36,7 @@
                 cancel-text="取消"
                 @confirm="emit('removeVolume', dataRef)"
               >
-                <a-button type="text" size="small" danger>
+                <a-button type="text" size="small" danger :disabled="locked">
                   <DeleteOutlined />
                 </a-button>
               </a-popconfirm>
@@ -47,18 +47,18 @@
             <span class="node-label" :title="dataRef.title">{{ dataRef.title }}</span>
             <span class="node-words">{{ wordsOf(dataRef.cid) }} 字</span>
             <span class="node-actions" @click.stop>
-              <a-tooltip :title="work.kind === 'novel' ? '在后面加一章' : '在后面加一段'">
-                <a-button type="text" size="small" @click="emit('add', dataRef.cid)">
+              <a-tooltip :title="locked ? '大纲生成中，暂时不能编辑' : work.kind === 'novel' ? '在后面加一章' : '在后面加一段'">
+                <a-button type="text" size="small" :disabled="locked" @click="emit('add', dataRef.cid)">
                   <PlusOutlined />
                 </a-button>
               </a-tooltip>
-              <a-tooltip title="上移">
-                <a-button type="text" size="small" @click="emit('move', dataRef.cid, -1)">
+              <a-tooltip :title="locked ? '大纲生成中，暂时不能编辑' : '上移'">
+                <a-button type="text" size="small" :disabled="locked" @click="emit('move', dataRef.cid, -1)">
                   <ArrowUpOutlined />
                 </a-button>
               </a-tooltip>
-              <a-tooltip title="下移">
-                <a-button type="text" size="small" @click="emit('move', dataRef.cid, 1)">
+              <a-tooltip :title="locked ? '大纲生成中，暂时不能编辑' : '下移'">
+                <a-button type="text" size="small" :disabled="locked" @click="emit('move', dataRef.cid, 1)">
                   <ArrowDownOutlined />
                 </a-button>
               </a-tooltip>
@@ -68,7 +68,7 @@
                 cancel-text="取消"
                 @confirm="emit('remove', dataRef.cid)"
               >
-                <a-button type="text" size="small" danger>
+                <a-button type="text" size="small" danger :disabled="locked">
                   <DeleteOutlined />
                 </a-button>
               </a-popconfirm>
@@ -79,12 +79,13 @@
     </a-tree>
 
     <div class="tree-footer">
-      <a-button block @click="emit('add', null)">
+      <a-button block :disabled="locked" @click="emit('add', null)">
         <PlusOutlined /> {{ work.kind === 'novel' ? '加章节' : '加段落' }}
       </a-button>
-      <a-button v-if="work.kind === 'novel'" block @click="emit('addVolume')">
+      <a-button v-if="work.kind === 'novel'" block :disabled="locked" @click="emit('addVolume')">
         <FolderAddOutlined /> 加卷
       </a-button>
+      <div v-if="locked" class="locked-hint">大纲生成中，结构编辑已锁定</div>
     </div>
   </div>
 </template>
@@ -101,7 +102,12 @@ import {
 } from '@ant-design/icons-vue'
 import type { OutlineNode, WritingWorkDetail } from '@/api'
 
-const props = defineProps<{ work: WritingWorkDetail; selectedCid: string | null }>()
+const props = defineProps<{
+  work: WritingWorkDetail
+  selectedCid: string | null
+  /** 大纲后台生成期间冻结一切结构编辑：产物落地会整树覆盖，手改只会白写。 */
+  locked?: boolean
+}>()
 const emit = defineEmits<{
   select: [cid: string]
   add: [afterCid: string | null]
@@ -218,8 +224,16 @@ function onSelect(keys: (string | number)[]) {
 .tree-footer {
   display: flex;
   flex: none;
+  flex-wrap: wrap;
   gap: 8px;
   padding-top: 12px;
   border-top: 1px solid var(--hairline);
+}
+
+.locked-hint {
+  flex-basis: 100%;
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: center;
 }
 </style>

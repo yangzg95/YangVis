@@ -364,6 +364,60 @@ BUILTIN_WORKFLOWS: tuple[BuiltinWorkflow, ...] = (
         ),
         sort_order=80,
     ),
+    BuiltinWorkflow(
+        slug="novel-outline",
+        name="小说大纲生成",
+        description="「智能应用 · 创作」按灵感与设定产出卷章大纲 JSON（写小说的生成大纲）",
+        inputs=(
+            BuiltinInput("title", "作品名"),
+            BuiltinInput("brief_block", "灵感梗概段落", required=False),
+            BuiltinInput("params_block", "创作参数段落", required=False),
+            BuiltinInput("requirement_note", "用户要求段落", required=False),
+            BuiltinInput("max_nodes", "节点上限"),
+        ),
+        steps=(
+            BuiltinStep(
+                key="outline",
+                agent_slug="novel-architect",
+                prompt_tpl=(
+                    "作品名：{{title}}\n\n"
+                    "{{brief_block}}{{params_block}}{{requirement_note}}"
+                    "请按人设里的 JSON 契约产出这部小说的卷章大纲，"
+                    "节点总数不要超过 {{max_nodes}} 个（卷与章合计）。"
+                ),
+                group_key="outline",
+                sort_order=10,
+            ),
+        ),
+        sort_order=90,
+    ),
+    BuiltinWorkflow(
+        slug="article-outline",
+        name="文章大纲生成",
+        description="「智能应用 · 创作」按主题与素材产出段落大纲与标题候选 JSON（写文章的生成大纲）",
+        inputs=(
+            BuiltinInput("title", "作品名"),
+            BuiltinInput("brief_block", "主题素材段落", required=False),
+            BuiltinInput("params_block", "创作参数段落", required=False),
+            BuiltinInput("requirement_note", "用户要求段落", required=False),
+            BuiltinInput("max_nodes", "节点上限"),
+        ),
+        steps=(
+            BuiltinStep(
+                key="outline",
+                agent_slug="article-architect",
+                prompt_tpl=(
+                    "作品名：{{title}}\n\n"
+                    "{{brief_block}}{{params_block}}{{requirement_note}}"
+                    "请按人设里的 JSON 契约产出标题候选与段落大纲，"
+                    "段落总数不要超过 {{max_nodes}} 个。"
+                ),
+                group_key="outline",
+                sort_order=10,
+            ),
+        ),
+        sort_order=100,
+    ),
 )
 
 

@@ -390,3 +390,107 @@ def test_count_words_handles_cjk_latin_and_blank():
     assert count_words("## 标题 **加粗**") == 4  # 标题加粗四个 CJK，标记不计
     assert count_words("hello world2 v2") == 3
     assert count_words("你好 world") == 3
+
+
+# ---- M2：大纲生成的输入拼装与产物解析（纯函数，不碰库）---------------------------
+
+from app.models.entities import WritingWork as _WritingWork  # noqa: E402
+from app.services.writing import generate as gen  # noqa: E402
+
+
+def _detached_work(kind: str = "novel", **kw) -> _WritingWork:
+    return _WritingWork(
+        kind=kind,
+        title=kw.get("title", "雨夜书"),
+        brief=kw.get("brief", ""),
+        requirement=kw.get("requirement"),
+        params=kw.get("params", {}),
+        outline=[],
+        meta={},
+    )
+
+
+def test_workflow_slug_follows_kind():
+    assert gen.workflow_slug_for("novel") == "novel-outline"
+    assert gen.workflow_slug_for("article") == "article-outline"
+
+
+def test_outline_inputs_omit_empty_optional_blocks():
+    inputs = gen.outline_inputs(_detached_work())
+    assert inputs["title"] == "雨夜书"
+    assert inputs["brief_block"] == ""
+    assert inputs["params_block"] == ""
+    assert inputs["requirement_note"] == ""
+    assert inputs["max_nodes"] == str(get_settings().WRITING_OUTLINE_MAX_NODES)
+
+
+def test_outline_inputs_render_labeled_blocks():
+    # 落库参数已由写入侧 sanitize_params 白名单洗过（见 test_create_sanitizes_params_by_kind），
+    # generate 只负责把白名单键说成人话，不再做二次过滤。
+    work = _detached_work(
+        brief=" 少年下山 ",
+        requirement="别写感情戏",
+        params={"genre": "玄幻", "word_target": 3000},
+    )
+    inputs = gen.outline_inputs(work)
+    assert "灵感 / 梗概" in inputs["brief_block"] and "少年下山" in inputs["brief_block"]
+    assert "题材：玄幻" in inputs["params_block"]
+    assert "目标总字数：3000" in inputs["params_block"]
+    assert "补充要求：别写感情戏" in inputs["requirement_note"]
+
+
+def test_article_inputs_use_article_param_labels():
+    work = _detached_work("article", title="一篇文", params={"article_type": "知乎", "audience": "产品经理"})
+    inputs = gen.outline_inputs(work)
+    assert "文章类型：知乎" in inputs["params_block"]
+    assert "目标受众：产品经理" in inputs["params_block"]
+    assert "主题 / 素材" in gen.outline_inputs(_detached_work("article", brief="x"))["brief_block"]
+
+
+def test_parse_novel_outline_accepts_fenced_json_and_volumes():
+    raw = (
+        '```json\n{"outline":[{"title":"第一卷","chapters":['
+        '{"title":"第一章","synopsis":"下山","target_words":3000}]},'
+        '{"title":"第二章","synopsis":"独行"}]}\n```'
+    )
+    nodes = gen.parse_novel_outline(raw)
+    assert nodes[0]["kind"] == "volume" and nodes[0]["title"] == "第一卷"
+    assert nodes[0]["children"][0] == {
+        "kind": "chapter",
+        "title": "第一章",
+        "synopsis": "下山",
+        "target_words": 3000,
+    }
+    # 裸章节收成顶层章，缺字段回落空值而不是报错。
+    assert nodes[1]["kind"] == "chapter" and nodes[1]["target_words"] is None
+
+
+def test_parse_novel_outline_tolerates_bare_array():
+    nodes = gen.parse_novel_outline('[{"title":"第一章","synopsis":"x"}]')
+    assert len(nodes) == 1 and nodes[0]["kind"] == "chapter"
+
+
+def test_parse_novel_outline_rejects_text_without_json():
+    with pytest.raises(ValueError, match="可解析"):
+        gen.parse_novel_outline("没有结构的寒暄文本")
+    # 括号平衡但语法非法：截得出跨度、json.loads 失败，走「无法解析」分支。
+    with pytest.raises(ValueError, match="无法解析"):
+        gen.parse_novel_outline('{"outline": [}')
+
+
+def test_parse_article_outline_keeps_sections_and_candidates():
+    sections, candidates = gen.parse_article_outline(
+        '{"title_candidates":["甲","甲","乙","丙","丁","戊"],'
+        '"sections":[{"title":"开篇","point":"立论","target_words":800},'
+        '{"title":"次段","synopsis":"用 synopsis 兜底"}]}'
+    )
+    assert [s["kind"] for s in sections] == ["section", "section"]
+    assert sections[0]["synopsis"] == "立论" and sections[0]["target_words"] == 800
+    assert sections[1]["synopsis"] == "用 synopsis 兜底"
+    # 去重且最多 5 条。
+    assert candidates == ["甲", "乙", "丙", "丁", "戊"]
+
+
+def test_parse_article_outline_without_candidates_returns_empty_list():
+    sections, candidates = gen.parse_article_outline('{"sections":[{"title":"开篇"}]}')
+    assert len(sections) == 1 and candidates == []

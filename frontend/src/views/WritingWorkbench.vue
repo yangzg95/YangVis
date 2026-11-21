@@ -11,10 +11,27 @@
           :editable="{ onChange: onTitleChange, tooltip: '点击重命名' }"
         >{{ detail.title }}</a-typography-text>
         <a-tag v-if="detail" color="blue">{{ detail.kind === 'novel' ? '小说' : '文章' }}</a-tag>
+        <a-tooltip v-if="detail && detail.status !== 'uploaded'" :title="statusHint(detail.status, detail.error_msg)">
+          <a-tag :color="statusColor(detail.status)" class="run-tag" @click="openRuns">
+            <LoadingOutlined v-if="detail.status === 'analyzing'" />
+            {{ statusText(detail.status) }}
+          </a-tag>
+        </a-tooltip>
         <span v-if="detail" class="wb-total muted">{{ detail.word_count }} 字 · {{ detail.part_count }} 个{{ detail.kind === 'novel' ? '章节' : '段落' }}</span>
       </div>
       <div class="wb-actions">
+        <a-button @click="openRuns"><HistoryOutlined /> 运行记录</a-button>
         <a-button @click="infoOpen = true"><InfoCircleOutlined /> 作品信息</a-button>
+        <a-popconfirm
+          v-if="hasOutline"
+          title="重新生成将重建大纲结构，被移除章节的正文会一并删除，确认继续？"
+          ok-text="重新生成"
+          cancel-text="取消"
+          @confirm="openGenerate"
+        >
+          <a-button :disabled="!chatReady || isAnalyzing">重新生成</a-button>
+        </a-popconfirm>
+        <a-button v-else type="primary" :disabled="!chatReady" @click="openGenerate">生成大纲</a-button>
         <a-dropdown>
           <a-button type="primary">导出 <DownOutlined /></a-button>
           <template #overlay>
@@ -26,6 +43,19 @@
         </a-dropdown>
       </div>
     </header>
+
+    <a-alert
+      v-if="!chatReady"
+      type="warning"
+      show-icon
+      class="wb-alert"
+      message="未配置可用的对话模型"
+      description="AI 生成大纲需要一个用途为「对话」且测通的模型；手工写作与导出不受影响。"
+    >
+      <template #action>
+        <a-button size="small" type="primary" @click="goToSettings">去配置</a-button>
+      </template>
+    </a-alert>
 
     <a-alert
       v-if="loadError"
@@ -52,6 +82,7 @@
           <OutlineTree
             :work="detail"
             :selected-cid="selectedCid"
+            :locked="isAnalyzing"
             @select="onSelectCid"
             @add="onAddPart"
             @remove="onRemovePart"
@@ -66,6 +97,7 @@
           <OutlineTree
             :work="detail"
             :selected-cid="selectedCid"
+            :locked="isAnalyzing"
             @select="onSelectCid"
             @add="onAddPart"
             @remove="onRemovePart"
@@ -91,6 +123,7 @@
               :synopsis="currentSynopsis"
               :save-state="saveState"
               :saved-at="savedAt"
+              :locked="isAnalyzing"
               @save="onSavePart"
               @save-synopsis="onSaveSynopsis"
               @add-first="onAddPart(null)"
@@ -125,6 +158,21 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <OutlineGenerateModal
+      v-model:open="genOpen"
+      :kind="detail?.kind ?? 'novel'"
+      :requirement="detail?.requirement"
+      :submitting="genSubmitting"
+      @submit="onGenerateSubmit"
+    />
+
+    <WorkflowRunsDrawer
+      v-model:open="runsOpen"
+      :workflow="null"
+      :subject="runsSubject"
+      @changed="load(false)"
+    />
   </div>
 </template>
 
@@ -134,20 +182,27 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeftOutlined,
   DownOutlined,
+  HistoryOutlined,
   InfoCircleOutlined,
+  LoadingOutlined,
   MenuOutlined,
 } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import {
   ARTICLE_PARAM_FIELDS,
   NOVEL_PARAM_FIELDS,
+  settingsApi,
   writingApi,
   type OutlineNode,
+  type WorkflowRunSubject,
+  type WritingOutlineGeneratePayload,
   type WritingWorkDetail,
+  type WritingWorkStatus,
 } from '@/api'
 import { saveBlobResponse } from '@/utils/download'
 import { errorText } from '@/utils/errors'
 import { createMarkdown } from '@/utils/markdown'
+import { createPollLoop } from '@/utils/polling'
 import { useIsMobile } from '@/utils/useIsMobile'
 import {
   appendVolume,
@@ -159,6 +214,8 @@ import {
 } from '@/utils/writingOutline'
 import OutlineTree from '@/components/writing/OutlineTree.vue'
 import PartEditor from '@/components/writing/PartEditor.vue'
+import OutlineGenerateModal from '@/components/writing/OutlineGenerateModal.vue'
+import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
 
 type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'error'
 
@@ -179,6 +236,13 @@ const mobileMode = ref('编辑')
 const infoOpen = ref(false)
 const infoDraft = ref({ brief: '', requirement: '' })
 const editorRef = ref<InstanceType<typeof PartEditor> | null>(null)
+
+// M2：AI 大纲生成（后台任务 + 轮询）与运行记录抽屉。
+const chatReady = ref(true)
+const genOpen = ref(false)
+const genSubmitting = ref(false)
+const runsOpen = ref(false)
+const runsSubject = ref<WorkflowRunSubject | null>(null)
 
 // 并发响应只接受最新一次：旧快照晚回来不能盖掉新结果。
 let requestSeq = 0
@@ -234,6 +298,83 @@ async function mutate(fn: () => Promise<WritingWorkDetail>): Promise<WritingWork
   }
   return next
 }
+
+// ---- AI 大纲生成（M2）----------------------------------------------------------
+
+const hasOutline = computed(() => (detail.value ? flattenLeaves(detail.value.outline).length > 0 : false))
+const isAnalyzing = computed(() => detail.value?.status === 'analyzing')
+
+function statusText(status: WritingWorkStatus | string): string {
+  return { analyzing: '生成中', ready: '已生成', error: '失败' }[status] || status
+}
+
+function statusColor(status: WritingWorkStatus | string): string {
+  return { analyzing: 'processing', ready: 'success', error: 'error' }[status] || 'default'
+}
+
+function statusHint(status: WritingWorkStatus, errorMsg: string | null): string {
+  return status === 'error' && errorMsg ? `${errorMsg} · 点击查看运行记录` : '点击查看运行记录'
+}
+
+function openRuns() {
+  if (!detail.value) return
+  runsSubject.value = { kind: 'writing-work', ref: detail.value.id, label: detail.value.title }
+  runsOpen.value = true
+}
+
+function openGenerate() {
+  if (!chatReady.value || isAnalyzing.value) return
+  genOpen.value = true
+}
+
+async function onGenerateSubmit(payload: WritingOutlineGeneratePayload) {
+  genSubmitting.value = true
+  try {
+    await writingApi.generateOutline(workId.value, payload)
+    genOpen.value = false
+    message.success('已开始生成大纲，完成后会自动刷新')
+    await load(false)
+  } catch (err) {
+    message.error(errorText(err, '生成失败'))
+  } finally {
+    genSubmitting.value = false
+  }
+}
+
+async function loadReadiness() {
+  try {
+    const status = await settingsApi.status()
+    chatReady.value = status.chat.ready
+  } catch {
+    // 状态接口失败时按可用处理，真正的报错会在生成时冒出来。
+    chatReady.value = true
+  }
+}
+
+function goToSettings() {
+  void router.push('/system/settings')
+}
+
+// 轮询只在 analyzing 时转；失败退避、页面隐藏暂停见 utils/polling.ts。
+const pollLoop = createPollLoop(() => load(false), {
+  shouldContinue: () => detail.value?.status === 'analyzing',
+})
+
+function syncPolling() {
+  if (detail.value?.status === 'analyzing') pollLoop.start()
+  else pollLoop.stop()
+}
+
+// 识别「刚生成完」的跃迁给一条现场提示；列表页同时有带按钮的系统通知。
+watch(
+  () => detail.value?.status,
+  (next, previous) => {
+    syncPolling()
+    if (previous !== 'analyzing' || !next || next === 'analyzing') return
+    if (next === 'ready') message.success('大纲已生成，可以开始正文了')
+    else if (next === 'error') message.error(detail.value?.error_msg || '大纲生成失败，可重新生成')
+  },
+)
 
 // ---- 大纲与正文块 --------------------------------------------------------------
 
@@ -404,7 +545,9 @@ watch(infoOpen, (open) => {
 
 // keep-alive 首挂载会先 onMounted 再 onActivated，挡掉第一次激活的重复请求。
 let firstActivate = true
-onMounted(() => void load())
+onMounted(() => {
+  void Promise.all([loadReadiness(), load()])
+})
 onActivated(() => {
   if (firstActivate) {
     firstActivate = false
@@ -413,9 +556,16 @@ onActivated(() => {
   // 从列表/别的标签切回：补拉一次，字数与外部改动都是新的。
   // PartEditor 只在 cid 变化时重载本地草稿，正在输入的字不会被覆盖。
   void load(false)
+  syncPolling()
 })
-onDeactivated(() => editorRef.value?.flush())
-onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
+onDeactivated(() => {
+  editorRef.value?.flush()
+  pollLoop.stop()
+})
+onBeforeUnmount(() => {
+  pollLoop.stop()
+  window.removeEventListener('beforeunload', beforeUnload)
+})
 window.addEventListener('beforeunload', beforeUnload)
 </script>
 
@@ -465,6 +615,10 @@ window.addEventListener('beforeunload', beforeUnload)
 
 .wb-alert {
   margin: 12px 0;
+}
+
+.run-tag {
+  cursor: pointer;
 }
 
 .wb-body {

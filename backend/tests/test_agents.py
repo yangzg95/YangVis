@@ -149,6 +149,8 @@ def test_builtin_slugs_are_the_ones_the_module_documents():
         "resume-polisher",
         "resume-checker",
         "slide-architect",
+        "novel-architect",
+        "article-architect",
         "video-briefer",
         "video-storyboarder",
     }
@@ -173,6 +175,8 @@ def test_feature_owned_personas_stay_out_of_the_picker():
         "resume-polisher",
         "resume-checker",
         "slide-architect",
+        "novel-architect",
+        "article-architect",
         "video-briefer",
         "video-storyboarder",
     }

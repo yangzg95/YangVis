@@ -227,6 +227,50 @@ owner 隔离 404、cid 发放与大纲清洗、字数统计、运行中拦截删
 > 单测与实测，按钮已覆盖 M1 全部排序场景。窄屏已做基础适配（大纲抽屉 + 编辑/预览分段），
 > 实测留 M4。M1 测试：后端 33 个（test_writing.py + test_writing_api.py），
 > 前端新增 writingWords/writingOutline/appTabs 共 19 个用例。
+>
+> M2 实现备注（2026-11）：
+> - 两个 architect 内置智能体（novel-architect / article-architect，chat_visible=False）
+>   与两条单步内置工作流（novel-outline / article-outline）随启动 seed，prompt 走
+>   条件段落拼装（brief/params/requirement 空则整段不出现），max_nodes 传 120。
+> - 生成链路与幻灯片同构：请求里 `start_builtin` 建认领作品的 `workflow_run`
+>   （subject=`writing-work`），`BackgroundTasks` 跑模型；本表不存状态，序列化由
+>   `subject_state(latest_run(...), has_product=大纲有叶子, idle=uploaded)` 翻译；
+>   解析不出结构 / 一个合法叶子都没有 → `fail_run` 降级，不允许「succeeded 但没产物」。
+>   模型产物不带 cid，cid 发放、层级收窄、节点上限、part 对账全部复用手工 `save_outline`
+>   同一道闸门；文章标题候选（去重、≤5 条、每条 ≤128 字）落 `meta.title_candidates`。
+> - **按次选模型（评审后追加）**：请求体 `model_config_id` 可指定本次运行的对话模型，
+>   不传 = 默认对话模型。请求时 `require_chat_model` 先验归属/用途/测通，再把 id 盖到
+>   该运行预建的 pending 步骤行上；执行器（exec.py）的解析优先级改为
+>   「运行行预盖 > 流程定义按步覆盖 > 默认模型」，行上最终落实际使用的配置 id。
+> - 前端：列表加状态列（analyzing 转圈 / ready / error，点 tag 开 WorkflowRunsDrawer）、
+>   就绪告警条、仅在有 analyzing 行时跑 createPollLoop、完成跃迁发带「打开工作台」的
+>   通知、生成中禁删；工作台顶栏加「生成大纲 / 重新生成」（后者 popconfirm 警示结构
+>   重建会删孤儿正文）与运行记录入口，生成弹窗含模型下拉（只列本人测通的 chat 配置，
+>   allow-clear，占位「默认对话模型」）+ 本次补充要求。
+> - **生成中编辑冻结（走查后补强）**：大纲落库是整树覆盖 + part 对账（模型产物不带
+>   cid，旧叶子按孤儿删除），运行中允许手改等于让用户白写。后端在 save_outline /
+>   add_part / update_part / delete_part 四个写入口前统一加 `_assert_not_generating`
+>   闸门（running_subjects 判定，路由翻译成 code=-1 业务信封）；后台任务自己的
+>   save_outline 发生在运行 succeeded 之后，不会被挡。前端 OutlineTree 与 PartEditor
+>   新增 `locked` 入参，analyzing 时按钮/输入框全部禁用并给出锁定提示，与幻灯片
+>   工作台的 generating 禁用同模式。
+> - **状态翻译特判**：通用 `subject_state` 把「succeeded 但无产物」判失败（为步骤
+>   重跑兜底）；创作侧的空产物在任务里已被 fail_run 降级成 failed 运行，所以序列化时
+>   对「succeeded 运行 + 空大纲」特判回 uploaded——生成成功后手工清空大纲不再亮红色
+>   「失败」标签，而是回到「待生成」。
+> - M2 测试：后端 65 个——test_writing.py 33（generate.py 纯函数 9 个，含栅栏
+>   JSON / 裸数组 / 非法 JSON / 候选去重截断）、test_writing_api.py 18（HTTP 链路
+>   9 个，含 4004 引导信封、跨账号 404、运行闸门 code=-1、模型盖戳与越权 404）、
+>   test_writing_flows.py 14（工作流集成：成功/失败/空产物降级/重复触发/删除闸门/
+>   模型选择/要求快照/运行中编辑冻结/手工清空的状态翻译）；test_agents.py 的内置
+>   人设两份硬编码清单同步两个 architect（33 个全绿）。全量回归 1951 passed，
+>   仅清单测试在同步前失败过 2 个。前端 151 个用例全绿（新增 runLinks 深链 4 个，
+>   其余 147 个既有），vue-tsc 与生产构建通过。
+> - 实现中修掉的真实缺口：执行器原先只读流程定义步骤的 model_config_id，运行行
+>   预盖值会被默认模型覆盖；`_json_candidate` 先找对象跨度导致裸数组输出被内层对象
+>   截胡（改为按开括号先后取最外层跨度）；走查还清掉了两个弹窗里不产生提示的
+>   `void errorText(...)` 死代码、未挂出的 `WritingService.snippet` 与 popconfirm
+>   上无效的 disabled 属性。
 
 v1 backlog（明确不做）：SSE 逐字流式、知识库 RAG 喂设定、小说批量章节生成、
 作品回收站（v1 同 slides 硬删除）、与短视频人物库联动。

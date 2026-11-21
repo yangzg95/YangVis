@@ -5,6 +5,7 @@
       class="title-input"
       :maxlength="128"
       :bordered="false"
+      :disabled="locked"
       placeholder="章节/段落标题"
       @input="markDirty('title')"
     />
@@ -22,6 +23,7 @@
           :rows="3"
           :maxlength="2000"
           :bordered="false"
+          :disabled="locked"
           placeholder="这一段要写什么、结论是什么"
           @input="scheduleSynopsisSave"
         />
@@ -32,6 +34,7 @@
       v-model="content"
       class="content-area mono"
       maxlength="30000"
+      :disabled="locked"
       placeholder="开始写作，支持 Markdown；停笔 2.5 秒自动保存，Ctrl+S 立即保存"
       @input="markDirty('content')"
       @keydown="onKeydown"
@@ -39,6 +42,7 @@
 
     <div class="status-bar">
       <span :class="['save-status', `save-status--${saveState}`]">{{ statusText }}</span>
+      <span v-if="locked" class="locked-hint">大纲生成中，编辑已锁定，完成后自动恢复</span>
       <span class="word-count">本机统计 {{ localWords }} 字 · 已存 {{ part.word_count }} 字</span>
     </div>
   </div>
@@ -67,6 +71,8 @@ const props = defineProps<{
   synopsis: string
   saveState: SaveState
   savedAt: string
+  /** 大纲后台生成期间锁定：落库会整树重建，避免自动保存与 AI 回写互相覆盖。 */
+  locked?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -257,6 +263,10 @@ defineExpose({ flush })
 
 .save-status--error {
   color: var(--error, #cf1322);
+}
+
+.locked-hint {
+  color: var(--signal-text);
 }
 
 .part-empty {

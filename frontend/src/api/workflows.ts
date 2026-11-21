@@ -79,6 +79,7 @@ export type WorkflowSubjectKind =
   | 'slide-deck'
   | 'interview-question'
   | 'video-project'
+  | 'writing-work'
 
 /** 抽屉按业务对象过滤时的一次入参；label 是列表标题用的名字。 */
 export interface WorkflowRunSubject {

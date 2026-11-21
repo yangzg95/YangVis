@@ -86,7 +86,6 @@ import {
   type WritingKind,
   type WritingWorkDetail,
 } from '@/api'
-import { errorText } from '@/utils/errors'
 
 const props = defineProps<{ open: boolean; kind: WritingKind }>()
 const emit = defineEmits<{
@@ -152,9 +151,8 @@ async function onSubmit() {
     })
     emit('created', work)
     emit('update:open', false)
-  } catch (err) {
-    // 信封错误拦截器已弹全局提示，这里只兜网络层以外的兜底文案。
-    void errorText(err, '创建失败，请稍后重试')
+  } catch {
+    // 信封错误与网络错误都由 http 拦截器统一弹提示，弹窗保持打开让用户改完重试。
   } finally {
     submitting.value = false
   }

@@ -50,6 +50,10 @@ SUBJECT_RESUME_TOOLKIT = "resume-toolkit"
 SUBJECT_SLIDE_DECK = "slide-deck"
 SUBJECT_INTERVIEW_QUESTION = "interview-question"
 SUBJECT_VIDEO_PROJECT = "video-project"
+# 创作模块：作品级运行（M2 大纲生成；ref=作品 id）。正文块级运行（M3）先把词位占住，
+# 让前后端的 subject 词表一次对齐，省得 M3 再改一轮联合类型。
+SUBJECT_WRITING_WORK = "writing-work"
+SUBJECT_WRITING_PART = "writing-part"
 
 # 业务行的状态词表：以前直接长在业务表上，现在由最近一次运行翻译出来。
 # 取值一个都没改——前端那几套 statusText 映射不用跟着动。

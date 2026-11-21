@@ -3600,6 +3600,14 @@ class WritingOutlineSave(BaseModel):
     nodes: List[OutlineNodeIn] = Field(default_factory=list, max_length=_WRITING_OUTLINE_MAX)
 
 
+class WritingOutlineGenerate(BaseModel):
+    """后台生成大纲的请求；requirement 给了就覆盖作品当时的补充要求（同 deck 重生成）。"""
+
+    requirement: Optional[str] = Field(default=None, max_length=512)
+    # 指定本次运行用哪份对话模型配置；不传/None = 系统默认对话模型。
+    model_config_id: Optional[int] = Field(default=None, ge=1)
+
+
 class WritingPartCreate(BaseModel):
     """手工加章/加段：标题可空，服务端回落「未命名章节/段落」。"""
 
@@ -3639,7 +3647,11 @@ class WritingPartOut(BaseModel):
 
 
 class WritingWorkItem(BaseModel):
-    """列表里的一行作品：不带 brief/outline/正文这类大字段。"""
+    """列表里的一行作品：不带 brief/outline/正文这类大字段。
+
+    ``status`` / ``error_msg`` 不在行上存储，序列化时由认领该作品的最近一次
+    ``workflow_run`` 翻译（M2 起的大纲生成状态，同 slide_deck 的取舍）。
+    """
 
     id: int
     kind: WritingKind
@@ -3647,6 +3659,9 @@ class WritingWorkItem(BaseModel):
     params: Dict[str, Any] = Field(default_factory=dict)
     part_count: int = 0
     word_count: int = 0
+    # 词表与 workflows 包的 SUBJECT_* 同形：uploaded=还没跑过，analyzing/ready/error。
+    status: str = "uploaded"
+    error_msg: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
