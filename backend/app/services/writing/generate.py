@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import get_settings
-from app.models.entities import WritingWork
+from app.models.entities import WritingPart, WritingWork
 from app.services.agent_run import json_span, labeled_section, strip_json_fence
 from app.services.writing.outline import (
     KIND_ARTICLE,
@@ -23,6 +24,7 @@ from app.services.writing.outline import (
     NODE_CHAPTER,
     NODE_SECTION,
     NODE_VOLUME,
+    flatten_leaves,
 )
 
 logger = logging.getLogger("yangvis.writing")
@@ -79,19 +81,25 @@ def _params_block(work: WritingWork) -> str:
     return "创作参数：\n" + "\n".join(lines) + "\n\n"
 
 
-def outline_inputs(work: WritingWork) -> Dict[str, str]:
-    """把一份作品整理成大纲工作流声明的输入变量（条件段落整块传，模板只做替换）。"""
+def _brief_block(work: WritingWork) -> str:
+    """灵感/主题段落：作品间共用的条件块，没填就是空串。"""
     brief_label = "灵感 / 梗概" if work.kind == KIND_NOVEL else "主题 / 素材"
     brief = (work.brief or "").strip()
+    return f"{labeled_section(brief_label, _truncate(brief))}\n\n" if brief else ""
+
+
+def _requirement_note(work: WritingWork) -> str:
+    requirement = (work.requirement or "").strip()
+    return f"补充要求：{requirement}\n\n" if requirement else ""
+
+
+def outline_inputs(work: WritingWork) -> Dict[str, str]:
+    """把一份作品整理成大纲工作流声明的输入变量（条件段落整块传，模板只做替换）。"""
     return {
         "title": work.title,
-        "brief_block": (
-            f"{labeled_section(brief_label, _truncate(brief))}\n\n" if brief else ""
-        ),
+        "brief_block": _brief_block(work),
         "params_block": _params_block(work),
-        "requirement_note": (
-            f"补充要求：{work.requirement.strip()}\n\n" if work.requirement else ""
-        ),
+        "requirement_note": _requirement_note(work),
         "max_nodes": str(settings.WRITING_OUTLINE_MAX_NODES),
     }
 
@@ -224,3 +232,245 @@ def parse_article_outline(raw_text: str) -> Tuple[List[Dict[str, Any]], List[str
             if len(candidates) >= MAX_TITLE_CANDIDATES:
                 break
     return sections, candidates
+
+
+# ---- M3：正文生成的动作、输入拼装与整篇切分 -------------------------------------
+
+WORKFLOW_NOVEL_CHAPTER = "novel-chapter"
+WORKFLOW_ARTICLE_DRAFT = "article-draft"
+WORKFLOW_POLISH = "writing-polish"
+
+ACTION_DRAFT = "draft"
+ACTION_CONTINUE = "continue"
+ACTION_REWRITE = "rewrite"
+ACTION_POLISH = "polish"
+ACTION_EXPAND = "expand"
+ACTION_CONDENSE = "condense"
+ACTION_RETONE = "retone"
+
+# 小说支持全部七个动作；文章段落只走编辑类动作，整篇起草是另一条 draft 流程。
+NOVEL_ACTIONS: Tuple[str, ...] = (
+    ACTION_DRAFT,
+    ACTION_CONTINUE,
+    ACTION_REWRITE,
+    ACTION_POLISH,
+    ACTION_EXPAND,
+    ACTION_CONDENSE,
+    ACTION_RETONE,
+)
+ARTICLE_ACTIONS: Tuple[str, ...] = (
+    ACTION_REWRITE,
+    ACTION_POLISH,
+    ACTION_EXPAND,
+    ACTION_CONDENSE,
+    ACTION_RETONE,
+)
+EDITOR_ACTIONS = ARTICLE_ACTIONS
+WRITER_ACTIONS: Tuple[str, ...] = (ACTION_DRAFT, ACTION_CONTINUE)
+
+# 前情只带最近一章的结尾（设计文档 4.4 的 1500 字闸门）。
+HISTORY_TAIL_CHARS = 1500
+
+_ACTION_NOTES: Dict[str, str] = {
+    ACTION_DRAFT: "任务：首次起草这一章，按本章要求从零写出完整正文。",
+    ACTION_CONTINUE: (
+        "任务：顺着「本章已有正文」往下续写，不要回抄或重复已有内容，"
+        "直接输出续写的新增部分。"
+    ),
+    ACTION_REWRITE: "任务：重写下面的正文，保留主线与关键信息，改善结构、节奏与表达。",
+    ACTION_POLISH: "任务：润色下面的正文，不改变立意，只优化措辞、语序与可读性。",
+    ACTION_EXPAND: "任务：扩写下面的正文，在不灌水、不编造事实的前提下补充细节与论证。",
+    ACTION_CONDENSE: "任务：缩写下面的正文，压缩冗余，保留全部关键信息与论证链条。",
+}
+
+
+def actions_for_kind(kind: str) -> Tuple[str, ...]:
+    return NOVEL_ACTIONS if kind == KIND_NOVEL else ARTICLE_ACTIONS
+
+
+def workflow_slug_for_action(action: str) -> str:
+    """起草/续写走小说写手流程；五个编辑动作两个 kind 共用文字编辑流程。"""
+    if action in WRITER_ACTIONS:
+        return WORKFLOW_NOVEL_CHAPTER
+    if action in EDITOR_ACTIONS:
+        return WORKFLOW_POLISH
+    raise ValueError(f"未知的生成动作：{action}")
+
+
+def action_note(
+    action: str, *, tone: Optional[str] = None, instruction: Optional[str] = None
+) -> str:
+    """把动作说成人话指令；换语气的目标语气必填，用户补充要求追加在后面。"""
+    if action == ACTION_RETONE:
+        base = f"任务：把正文的语气改成「{(tone or '').strip()}」，观点与事实保持不变。"
+    else:
+        base = _ACTION_NOTES[action]
+    extra = instruction.strip() if isinstance(instruction, str) else ""
+    if extra:
+        base = f"{base}\n用户的额外要求：\n{extra[:512]}"
+    return base + "\n\n"
+
+
+def _leaf_line(leaf: Dict[str, Any], current_cid: Optional[str]) -> str:
+    head = "【本章】" if leaf.get("cid") == current_cid else ""
+    bits = [f"{head}{leaf.get('title', '')}"]
+    synopsis = _text(leaf.get("synopsis"))
+    if synopsis:
+        bits.append(synopsis)
+    target = leaf.get("target_words")
+    if target:
+        bits.append(f"目标 {target} 字")
+    return "- " + " — ".join(bits)
+
+
+def _outline_block(work: WritingWork, current_cid: Optional[str] = None) -> str:
+    """完整大纲只含摘要（很短）；小说保留卷层级，当前章打标记方便写手定位。"""
+    tree = work.outline or []
+    if not tree:
+        return ""
+    lines: List[str] = []
+    for node in tree:
+        if node.get("kind") == NODE_VOLUME:
+            lines.append(f"卷：{node.get('title', '')}")
+            for child in node.get("children") or []:
+                lines.append("  " + _leaf_line(child, current_cid))
+        else:
+            lines.append(_leaf_line(node, current_cid))
+    return labeled_section("完整大纲（只含章节/段落摘要）", "\n".join(lines)) + "\n\n"
+
+
+def _history_block(
+    work: WritingWork, parts: List[WritingPart], current_cid: str
+) -> str:
+    """前情：更早章节只给标题+摘要清单，最近有正文的一章附 1500 字结尾。"""
+    leaves = flatten_leaves(work.outline or [])
+    cids = [str(leaf["cid"]) for leaf in leaves]
+    if current_cid not in cids or cids.index(current_cid) == 0:
+        return ""
+    earlier = leaves[: cids.index(current_cid)]
+    summary_lines = [
+        "- " + " — ".join(
+            bit for bit in (str(leaf.get("title", "")), _text(leaf.get("synopsis"))) if bit
+        )
+        for leaf in earlier
+    ]
+    blocks = ["前情脉络：\n" + "\n".join(summary_lines)]
+
+    content_map = {part.cid: part.content or "" for part in parts}
+    for leaf in reversed(earlier):
+        tail_text = content_map.get(str(leaf.get("cid")), "").strip()
+        if tail_text:
+            blocks.append(
+                labeled_section(
+                    f"前一章《{leaf.get('title', '')}》正文结尾",
+                    tail_text[-HISTORY_TAIL_CHARS:],
+                )
+            )
+            break
+    return "\n\n".join(blocks) + "\n\n"
+
+
+def _chapter_block(leaf: Dict[str, Any]) -> str:
+    lines = [f"章节名：{leaf.get('title', '')}"]
+    synopsis = _text(leaf.get("synopsis"))
+    if synopsis:
+        lines.append(f"章节摘要：{synopsis}")
+    lines.append(f"目标字数：{leaf.get('target_words') or '随情节需要'}")
+    return labeled_section("本章要求", "\n".join(lines)) + "\n\n"
+
+
+def novel_chapter_inputs(
+    work: WritingWork,
+    parts: List[WritingPart],
+    leaf: Dict[str, Any],
+    part: WritingPart,
+    action: str,
+    instruction: Optional[str],
+) -> Dict[str, str]:
+    """小说起草/续写（novel-chapter）的输入变量；续写才带本章已有正文。"""
+    cid = str(leaf["cid"])
+    existing = ""
+    if action == ACTION_CONTINUE and (part.content or "").strip():
+        existing = labeled_section("本章已有正文", part.content.strip()) + "\n\n"
+    return {
+        "title": work.title,
+        "work_card_block": _params_block(work),
+        "outline_block": _outline_block(work, cid),
+        "history_block": _history_block(work, parts, cid),
+        "chapter_block": _chapter_block(leaf),
+        "existing_block": existing,
+        "instruction_note": action_note(action, instruction=instruction),
+    }
+
+
+def polish_inputs(
+    work: WritingWork,
+    leaf: Dict[str, Any],
+    part: WritingPart,
+    action: str,
+    instruction: Optional[str],
+    tone: Optional[str],
+) -> Dict[str, str]:
+    """五个编辑动作共用的 writing-polish 输入（小说与文章同形）。"""
+    context_label = "章节摘要" if work.kind == KIND_NOVEL else "段落观点"
+    context_text = f"标题：{leaf.get('title', '')}"
+    synopsis = _text(leaf.get("synopsis"))
+    if synopsis:
+        context_text += f"\n{context_label}：{synopsis}"
+    return {
+        "context_block": labeled_section(context_label, context_text) + "\n\n",
+        "content_block": labeled_section("待处理正文", part.content.strip()) + "\n\n",
+        "instruction_note": action_note(action, tone=tone, instruction=instruction),
+    }
+
+
+def article_draft_inputs(work: WritingWork) -> Dict[str, str]:
+    """文章整篇起草（article-draft）：大纲带段落观点与目标字数。"""
+    lines = []
+    for index, leaf in enumerate(flatten_leaves(work.outline or []), start=1):
+        bits = [f"{index}. {leaf.get('title', '')}"]
+        synopsis = _text(leaf.get("synopsis"))
+        if synopsis:
+            bits.append(synopsis)
+        if leaf.get("target_words"):
+            bits.append(f"目标 {leaf['target_words']} 字")
+        lines.append(" — ".join(bits))
+    return {
+        "title": work.title,
+        "brief_block": _brief_block(work),
+        "params_block": _params_block(work),
+        "requirement_note": _requirement_note(work),
+        "outline_block": labeled_section("段落大纲", "\n".join(lines)) + "\n\n",
+    }
+
+
+_DRAFT_SPLIT_RE = re.compile(r"(?m)^##[ \t]+.*(?:\r?\n|$)")
+
+# markdown 成稿常被 ```md / ```markdown 栅栏整段裹住；共享的 strip_json_fence
+# 只认裸栅栏与 json，这里按 markdown 域的实际输出放宽语言标识。
+_MD_FENCE = re.compile(r"^```[^\s`]*\s*\n(.*?)\n?```$", re.DOTALL)
+
+
+def _strip_markdown_fence(raw_text: str) -> str:
+    text = (raw_text or "").strip()
+    fence = _MD_FENCE.match(text)
+    return fence.group(1).strip() if fence else text
+
+
+def split_article_draft(
+    raw_text: str, expected_count: int
+) -> Tuple[List[str], Optional[str]]:
+    """整篇成稿按二级标题切回各段落。
+
+    切出的块数与大纲叶子数对得上就 1:1 返回；对不上（模型漏标题/合并段落）不静默
+    丢内容——整篇落第一个段落并附 warning，由用户在工作台手工拆。
+    """
+    text = _strip_markdown_fence(raw_text)
+    chunks = [chunk.strip() for chunk in _DRAFT_SPLIT_RE.split(text) if chunk.strip()]
+    if expected_count > 0 and len(chunks) == expected_count:
+        return chunks, None
+    warning = (
+        f"模型返回了 {len(chunks)} 个二级标题段落，与大纲的 {expected_count} 个段落"
+        "对不上，整篇成稿已放入第一个段落，请手工拆分调整。"
+    )
+    return [text], warning

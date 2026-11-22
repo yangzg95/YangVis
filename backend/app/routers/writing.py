@@ -19,9 +19,11 @@ from app.models.schemas import (
     APIResponse,
     CurrentUser,
     ListResponse,
+    WritingDraftGenerate,
     WritingOutlineGenerate,
     WritingOutlineSave,
     WritingPartCreate,
+    WritingPartGenerate,
     WritingPartSave,
     WritingWorkCreate,
     WritingWorkDetail,
@@ -141,6 +143,53 @@ def generate_outline(
     return APIResponse(data=service.to_item(work), message="已开始生成大纲")
 
 
+@router.post(
+    "/works/{work_id}/parts/{cid}/generate",
+    response_model=APIResponse[WritingWorkDetail],
+)
+def generate_part(
+    work_id: int,
+    cid: str,
+    background: BackgroundTasks,
+    payload: WritingPartGenerate,
+    service: WritingService = Depends(get_service),
+) -> APIResponse[WritingWorkDetail]:
+    """单个章节/段落的 AI 生成（七个动作之一）：请求只建运行，模型调用跑后台。"""
+    try:
+        work = service.start_part_generation(
+            work_id,
+            cid,
+            payload.action,
+            payload.instruction,
+            payload.tone,
+            payload.model_config_id,
+        )
+    except LookupError as exc:
+        raise _not_found(exc) from exc
+    except ValueError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    background.add_task(_part_task, service.owner_id, work.id, cid)
+    return APIResponse(data=service.to_detail(work), message="已开始生成")
+
+
+@router.post("/works/{work_id}/draft/generate", response_model=APIResponse[WritingWorkItem])
+def generate_draft(
+    work_id: int,
+    background: BackgroundTasks,
+    payload: WritingDraftGenerate,
+    service: WritingService = Depends(get_service),
+) -> APIResponse[WritingWorkItem]:
+    """文章整篇起草：作品级运行，成稿按二级标题切回各段落（仅 article）。"""
+    try:
+        work = service.start_draft_generation(work_id, payload.model_config_id)
+    except LookupError as exc:
+        raise _not_found(exc) from exc
+    except ValueError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    background.add_task(_draft_task, service.owner_id, work.id)
+    return APIResponse(data=service.to_item(work), message="已开始整篇起草")
+
+
 @router.put("/works/{work_id}/outline", response_model=APIResponse[WritingWorkDetail])
 def save_outline(
     work_id: int,
@@ -247,5 +296,33 @@ async def _outline_task(owner_id: int, work_id: int) -> None:
         service = WritingService(db, owner_id)
         try:
             await service.run_outline_generation(work_id)
-        except Exception:  # noqa: BLE001 - run_outline_generation 内部已带堆栈记录
+        except Exception:  # noqa: BLE001 - run_* 内部已带堆栈记录
             logger.warning("writing outline task crashed: owner=%s work=%s", owner_id, work_id, exc_info=True)
+
+
+async def _part_task(owner_id: int, work_id: int, cid: str) -> None:
+    from app.database import SessionLocal
+
+    with SessionLocal() as db:
+        service = WritingService(db, owner_id)
+        try:
+            await service.run_part_generation(work_id, cid)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "writing part task crashed: owner=%s work=%s cid=%s",
+                owner_id,
+                work_id,
+                cid,
+                exc_info=True,
+            )
+
+
+async def _draft_task(owner_id: int, work_id: int) -> None:
+    from app.database import SessionLocal
+
+    with SessionLocal() as db:
+        service = WritingService(db, owner_id)
+        try:
+            await service.run_draft_generation(work_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("writing draft task crashed: owner=%s work=%s", owner_id, work_id, exc_info=True)

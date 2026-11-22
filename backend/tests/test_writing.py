@@ -494,3 +494,134 @@ def test_parse_article_outline_keeps_sections_and_candidates():
 def test_parse_article_outline_without_candidates_returns_empty_list():
     sections, candidates = gen.parse_article_outline('{"sections":[{"title":"开篇"}]}')
     assert len(sections) == 1 and candidates == []
+
+
+# ---- M3：正文生成的输入拼装与整篇切分（纯函数，不碰库）---------------------------
+
+
+def _part(cid: str, title: str = "", content: str = "", sort_order: int = 0) -> WritingPart:
+    # 不挂会话的瞬时行，owner/work 留空无所谓：纯函数只读 cid/title/content。
+    return WritingPart(
+        cid=cid, title=title, content=content, sort_order=sort_order, word_count=0
+    )
+
+
+def _novel_work_with_outline() -> _WritingWork:
+    work = _detached_work(params={"genre": "玄幻"}, requirement="别写感情戏")
+    work.outline = [
+        {"cid": "pa", "kind": "chapter", "title": "第一章 下山",
+         "synopsis": "奉师命下山", "target_words": 3000},
+        {"cid": "pb", "kind": "chapter", "title": "第二章 入城",
+         "synopsis": "州城冲突", "target_words": 2500},
+    ]
+    return work
+
+
+def test_action_table_and_workflow_routing():
+    assert gen.actions_for_kind("novel") == gen.NOVEL_ACTIONS
+    assert gen.actions_for_kind("article") == gen.ARTICLE_ACTIONS
+    assert gen.workflow_slug_for_action("draft") == "novel-chapter"
+    assert gen.workflow_slug_for_action("continue") == "novel-chapter"
+    for action in gen.ARTICLE_ACTIONS:
+        assert gen.workflow_slug_for_action(action) == "writing-polish"
+    with pytest.raises(ValueError, match="未知"):
+        gen.workflow_slug_for_action("nope")
+
+
+def test_action_note_covers_every_action_and_carries_tone_or_instruction():
+    for action in gen.NOVEL_ACTIONS:
+        note = gen.action_note(action, tone="轻松幽默" if action == "retone" else None)
+        assert note.strip()
+    assert "轻松幽默" in gen.action_note("retone", tone="轻松幽默")
+    assert "少用长句" in gen.action_note("polish", instruction=" 少用长句 ")
+
+
+def test_novel_draft_inputs_assemble_context_without_existing():
+    work = _novel_work_with_outline()
+    parts = [_part("pa", "第一章 下山"), _part("pb", "第二章 入城")]
+    inputs = gen.novel_chapter_inputs(work, parts, work.outline[1], parts[1], "draft", None)
+    assert inputs["title"] == "雨夜书"
+    assert "题材：玄幻" in inputs["work_card_block"]
+    assert "【本章】" in inputs["outline_block"] and "第二章 入城" in inputs["outline_block"]
+    # 前情：更早章节的标题+摘要清单在；没有正文就不附结尾段。
+    assert "前情脉络" in inputs["history_block"] and "第一章 下山" in inputs["history_block"]
+    assert "正文结尾" not in inputs["history_block"]
+    assert inputs["existing_block"] == ""
+    assert "首次起草" in inputs["instruction_note"]
+    assert "目标字数：2500" in inputs["chapter_block"]
+
+
+def test_novel_continue_inputs_include_existing_and_tail_cut_to_1500():
+    work = _novel_work_with_outline()
+    prior_content = "前章正文。" * 500  # 2000 字，超过前情结尾闸门
+    parts = [
+        _part("pa", "第一章 下山", content=prior_content),
+        _part("pb", "第二章 入城", content="已写了一半"),
+    ]
+    inputs = gen.novel_chapter_inputs(work, parts, work.outline[1], parts[1], "continue", "节奏快些")
+    assert "本章已有正文" in inputs["existing_block"] and "已写了一半" in inputs["existing_block"]
+    assert "前一章《第一章 下山》正文结尾" in inputs["history_block"]
+    tail = inputs["history_block"].split("正文结尾", 1)[1]
+    # 三引号包裹之外，正文本身不超过 1500 字闸门。
+    assert len(tail) <= gen.HISTORY_TAIL_CHARS + 12
+    assert "节奏快些" in inputs["instruction_note"] and "续写" in inputs["instruction_note"]
+
+
+def test_first_chapter_has_no_history_block():
+    work = _novel_work_with_outline()
+    parts = [_part("pa"), _part("pb")]
+    inputs = gen.novel_chapter_inputs(work, parts, work.outline[0], parts[0], "draft", None)
+    assert inputs["history_block"] == ""
+
+
+def test_polish_inputs_shape_for_both_kinds():
+    novel = _novel_work_with_outline()
+    inputs = gen.polish_inputs(novel, novel.outline[0], _part("pa", content="原稿"), "polish", None, None)
+    assert set(inputs) == {"context_block", "content_block", "instruction_note"}
+    assert "章节摘要" in inputs["context_block"] and "原稿" in inputs["content_block"]
+
+    article = _detached_work("article", title="一篇文")
+    article.outline = [
+        {"cid": "s1", "kind": "section", "title": "开篇", "synopsis": "立论", "target_words": None}
+    ]
+    a_inputs = gen.polish_inputs(
+        article, article.outline[0], _part("s1", content="稿"), "retone", None, "犀利"
+    )
+    assert "段落观点" in a_inputs["context_block"] and "犀利" in a_inputs["instruction_note"]
+
+
+def test_article_draft_inputs_render_outline():
+    work = _detached_work("article", brief="主题素材", params={"audience": "产品经理"})
+    work.outline = [
+        {"cid": "s1", "kind": "section", "title": "开篇", "synopsis": "立论", "target_words": 800},
+        {"cid": "s2", "kind": "section", "title": "收尾", "synopsis": "行动建议", "target_words": 600},
+    ]
+    inputs = gen.article_draft_inputs(work)
+    assert set(inputs) == {"title", "brief_block", "params_block", "requirement_note", "outline_block"}
+    assert "主题素材" in inputs["brief_block"] and "目标受众：产品经理" in inputs["params_block"]
+    assert "1. 开篇" in inputs["outline_block"] and "目标 800 字" in inputs["outline_block"]
+
+
+def test_split_article_draft_matches_sections_one_to_one():
+    raw = "## 开篇\n\n第一段正文\n\n## 收尾\n\n第二段正文"
+    sections, warning = gen.split_article_draft(raw, 2)
+    assert warning is None
+    assert sections == ["第一段正文", "第二段正文"]
+
+
+def test_split_article_draft_tolerates_fence_and_single_section():
+    sections, warning = gen.split_article_draft("```md\n## 开篇\n\n正文甲\n```", 1)
+    assert warning is None and sections == ["正文甲"]
+
+
+def test_split_article_draft_mismatch_returns_full_text_and_warning():
+    raw = "## 开篇\n\n甲\n\n## 多余段\n\n乙"
+    sections, warning = gen.split_article_draft(raw, 3)
+    assert len(sections) == 1 and "甲" in sections[0] and "乙" in sections[0]
+    assert warning and "对不上" in warning
+
+
+def test_split_article_draft_without_any_header_falls_back_to_first_section():
+    sections, warning = gen.split_article_draft("整篇没有标题的成稿", 2)
+    assert len(sections) == 1 and sections[0] == "整篇没有标题的成稿"
+    assert warning is not None

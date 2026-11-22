@@ -3608,6 +3608,23 @@ class WritingOutlineGenerate(BaseModel):
     model_config_id: Optional[int] = Field(default=None, ge=1)
 
 
+class WritingPartGenerate(BaseModel):
+    """正文块的 AI 生成请求：七个动作之一（draft/continue/rewrite/polish/expand/condense/retone）。"""
+
+    action: str = Field(..., min_length=1, max_length=32)
+    instruction: Optional[str] = Field(default=None, max_length=512)
+    # 仅 retone 用，服务端校验非空。
+    tone: Optional[str] = Field(default=None, max_length=64)
+    # 指定本次运行用哪份对话模型配置；不传/None = 默认对话模型（同大纲生成）。
+    model_config_id: Optional[int] = Field(default=None, ge=1)
+
+
+class WritingDraftGenerate(BaseModel):
+    """文章整篇起草请求（小说没有整篇生成，按章节逐章写）。"""
+
+    model_config_id: Optional[int] = Field(default=None, ge=1)
+
+
 class WritingPartCreate(BaseModel):
     """手工加章/加段：标题可空，服务端回落「未命名章节/段落」。"""
 
@@ -3642,6 +3659,9 @@ class WritingPartOut(BaseModel):
     title: str
     content: str
     word_count: int
+    # 由认领该 part 的最近一次 writing-part 运行翻译：idle/analyzing/ready/error。
+    status: str = "idle"
+    error_msg: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

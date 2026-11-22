@@ -22,6 +22,13 @@
       <div class="wb-actions">
         <a-button @click="openRuns"><HistoryOutlined /> 运行记录</a-button>
         <a-button @click="infoOpen = true"><InfoCircleOutlined /> 作品信息</a-button>
+        <a-button
+          v-if="detail && detail.kind === 'article' && hasOutline"
+          :disabled="!chatReady || treeLocked"
+          @click="openDraft"
+        >
+          <EditOutlined /> 整篇起草
+        </a-button>
         <a-popconfirm
           v-if="hasOutline"
           title="重新生成将重建大纲结构，被移除章节的正文会一并删除，确认继续？"
@@ -29,9 +36,9 @@
           cancel-text="取消"
           @confirm="openGenerate"
         >
-          <a-button :disabled="!chatReady || isAnalyzing">重新生成</a-button>
+          <a-button :disabled="!chatReady || treeLocked">重新生成</a-button>
         </a-popconfirm>
-        <a-button v-else type="primary" :disabled="!chatReady" @click="openGenerate">生成大纲</a-button>
+        <a-button v-else type="primary" :disabled="!chatReady || treeLocked" @click="openGenerate">生成大纲</a-button>
         <a-dropdown>
           <a-button type="primary">导出 <DownOutlined /></a-button>
           <template #overlay>
@@ -50,7 +57,7 @@
       show-icon
       class="wb-alert"
       message="未配置可用的对话模型"
-      description="AI 生成大纲需要一个用途为「对话」且测通的模型；手工写作与导出不受影响。"
+      description="AI 生成大纲与正文需要一个用途为「对话」且测通的模型；手工写作与导出不受影响。"
     >
       <template #action>
         <a-button size="small" type="primary" @click="goToSettings">去配置</a-button>
@@ -68,6 +75,17 @@
       <template #action><a-button size="small" danger @click="load(true)">重试</a-button></template>
     </a-alert>
 
+    <a-alert
+      v-if="draftWarning"
+      type="warning"
+      show-icon
+      closable
+      class="wb-alert"
+      message="整篇成稿未能按大纲自动拆分"
+      :description="draftWarning"
+      @close="dismissDraftWarning"
+    />
+
     <a-spin :spinning="loading">
       <div v-if="detail" class="wb-body">
         <!-- 窄屏大纲收成抽屉 -->
@@ -82,13 +100,14 @@
           <OutlineTree
             :work="detail"
             :selected-cid="selectedCid"
-            :locked="isAnalyzing"
+            :locked="treeLocked"
             @select="onSelectCid"
             @add="onAddPart"
             @remove="onRemovePart"
             @remove-volume="onRemoveVolume"
             @move="onMoveLeaf"
             @add-volume="onAddVolume"
+            @runs="openPartRuns"
           />
         </a-drawer>
 
@@ -97,13 +116,14 @@
           <OutlineTree
             :work="detail"
             :selected-cid="selectedCid"
-            :locked="isAnalyzing"
+            :locked="treeLocked"
             @select="onSelectCid"
             @add="onAddPart"
             @remove="onRemovePart"
             @remove-volume="onRemoveVolume"
             @move="onMoveLeaf"
             @add-volume="onAddVolume"
+            @runs="openPartRuns"
           />
         </aside>
 
@@ -123,11 +143,13 @@
               :synopsis="currentSynopsis"
               :save-state="saveState"
               :saved-at="savedAt"
-              :locked="isAnalyzing"
+              :locked="editorLocked"
               @save="onSavePart"
               @save-synopsis="onSaveSynopsis"
               @add-first="onAddPart(null)"
               @dirty="saveState = 'dirty'"
+              @generate="openPartGenerate"
+              @show-runs="openCurrentPartRuns"
             />
           </div>
 
@@ -167,6 +189,22 @@
       @submit="onGenerateSubmit"
     />
 
+    <PartGenerateModal
+      v-if="detail && currentPart"
+      v-model:open="partGenOpen"
+      :kind="detail.kind"
+      :has-content="hasCurrentContent"
+      :submitting="partGenSubmitting"
+      @submit="onPartGenerateSubmit"
+    />
+
+    <DraftGenerateModal
+      v-if="detail"
+      v-model:open="draftOpen"
+      :submitting="draftSubmitting"
+      @submit="onDraftSubmit"
+    />
+
     <WorkflowRunsDrawer
       v-model:open="runsOpen"
       :workflow="null"
@@ -182,6 +220,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeftOutlined,
   DownOutlined,
+  EditOutlined,
   HistoryOutlined,
   InfoCircleOutlined,
   LoadingOutlined,
@@ -195,7 +234,9 @@ import {
   writingApi,
   type OutlineNode,
   type WorkflowRunSubject,
+  type WritingDraftGeneratePayload,
   type WritingOutlineGeneratePayload,
+  type WritingPartGeneratePayload,
   type WritingWorkDetail,
   type WritingWorkStatus,
 } from '@/api'
@@ -215,6 +256,8 @@ import {
 import OutlineTree from '@/components/writing/OutlineTree.vue'
 import PartEditor from '@/components/writing/PartEditor.vue'
 import OutlineGenerateModal from '@/components/writing/OutlineGenerateModal.vue'
+import PartGenerateModal from '@/components/writing/PartGenerateModal.vue'
+import DraftGenerateModal from '@/components/writing/DraftGenerateModal.vue'
 import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
 
 type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'error'
@@ -243,6 +286,15 @@ const genOpen = ref(false)
 const genSubmitting = ref(false)
 const runsOpen = ref(false)
 const runsSubject = ref<WorkflowRunSubject | null>(null)
+
+// M3：单块生成与文章整篇起草的弹窗状态；draftWarning 只在本机关，服务端由下次成功起草清。
+const partGenOpen = ref(false)
+const partGenSubmitting = ref(false)
+const draftOpen = ref(false)
+const draftSubmitting = ref(false)
+const dismissedWarnings = ref(new Set<number>())
+// 作品级运行有大纲/整篇起草两种，跃迁提示按最近一次发起的类型措辞。
+const lastWorkRunKind = ref<'outline' | 'draft'>('outline')
 
 // 并发响应只接受最新一次：旧快照晚回来不能盖掉新结果。
 let requestSeq = 0
@@ -303,6 +355,23 @@ async function mutate(fn: () => Promise<WritingWorkDetail>): Promise<WritingWork
 
 const hasOutline = computed(() => (detail.value ? flattenLeaves(detail.value.outline).length > 0 : false))
 const isAnalyzing = computed(() => detail.value?.status === 'analyzing')
+const anyPartRunning = computed(() =>
+  (detail.value?.parts ?? []).some((part) => part.status === 'analyzing'),
+)
+// 作品级运行或任一块在跑：结构类入口全冻；编辑器只冻当前块，别的章节照常写。
+const treeLocked = computed(() => isAnalyzing.value || anyPartRunning.value)
+const editorLocked = computed(
+  () => isAnalyzing.value || currentPart.value?.status === 'analyzing',
+)
+const hasCurrentContent = computed(() => Boolean(currentPart.value?.content.trim()))
+const draftWarning = computed(() => {
+  const warning = detail.value?.meta?.draft_warning
+  return typeof warning === 'string' && !dismissedWarnings.value.has(workId.value) ? warning : ''
+})
+
+function dismissDraftWarning() {
+  dismissedWarnings.value.add(workId.value)
+}
 
 function statusText(status: WritingWorkStatus | string): string {
   return { analyzing: '生成中', ready: '已生成', error: '失败' }[status] || status
@@ -322,9 +391,32 @@ function openRuns() {
   runsOpen.value = true
 }
 
+/** 单块的运行记录：ref 是 cid，抽屉按 writing-part + cid 收敛，与作品级互不相混。 */
+function openPartRuns(cid: string) {
+  if (!detail.value) return
+  const part = detail.value.parts.find((item) => item.cid === cid)
+  runsSubject.value = { kind: 'writing-part', ref: cid, label: part?.title ?? cid }
+  runsOpen.value = true
+}
+
+function openCurrentPartRuns() {
+  if (selectedCid.value) openPartRuns(selectedCid.value)
+}
+
 function openGenerate() {
-  if (!chatReady.value || isAnalyzing.value) return
+  if (!chatReady.value || treeLocked.value) return
   genOpen.value = true
+}
+
+function openDraft() {
+  if (!chatReady.value || treeLocked.value) return
+  draftOpen.value = true
+}
+
+function openPartGenerate() {
+  // 后端允许不同 cid 并行生成：只在作品级运行或当前块自己在跑时拦，别的章节在跑不影响。
+  if (editorLocked.value || !currentPart.value) return
+  partGenOpen.value = true
 }
 
 async function onGenerateSubmit(payload: WritingOutlineGeneratePayload) {
@@ -332,12 +424,43 @@ async function onGenerateSubmit(payload: WritingOutlineGeneratePayload) {
   try {
     await writingApi.generateOutline(workId.value, payload)
     genOpen.value = false
+    lastWorkRunKind.value = 'outline'
     message.success('已开始生成大纲，完成后会自动刷新')
     await load(false)
   } catch (err) {
     message.error(errorText(err, '生成失败'))
   } finally {
     genSubmitting.value = false
+  }
+}
+
+async function onPartGenerateSubmit(payload: WritingPartGeneratePayload) {
+  const cid = selectedCid.value
+  if (!cid) return
+  partGenSubmitting.value = true
+  try {
+    await mutate(() => writingApi.generatePart(workId.value, cid, payload))
+    partGenOpen.value = false
+    message.success('已开始生成，完成后会自动刷新')
+  } catch (err) {
+    message.error(errorText(err, '生成失败'))
+  } finally {
+    partGenSubmitting.value = false
+  }
+}
+
+async function onDraftSubmit(payload: WritingDraftGeneratePayload) {
+  draftSubmitting.value = true
+  try {
+    await writingApi.generateDraft(workId.value, payload)
+    draftOpen.value = false
+    lastWorkRunKind.value = 'draft'
+    message.success('已开始整篇起草，完成后会自动刷新')
+    await load(false)
+  } catch (err) {
+    message.error(errorText(err, '起草失败'))
+  } finally {
+    draftSubmitting.value = false
   }
 }
 
@@ -355,13 +478,13 @@ function goToSettings() {
   void router.push('/system/settings')
 }
 
-// 轮询只在 analyzing 时转；失败退避、页面隐藏暂停见 utils/polling.ts。
+// 作品级（大纲/整篇起草）或任一块在跑都要轮询；失败退避、页面隐藏暂停见 utils/polling.ts。
 const pollLoop = createPollLoop(() => load(false), {
-  shouldContinue: () => detail.value?.status === 'analyzing',
+  shouldContinue: () => isAnalyzing.value || anyPartRunning.value,
 })
 
 function syncPolling() {
-  if (detail.value?.status === 'analyzing') pollLoop.start()
+  if (isAnalyzing.value || anyPartRunning.value) pollLoop.start()
   else pollLoop.stop()
 }
 
@@ -371,8 +494,32 @@ watch(
   (next, previous) => {
     syncPolling()
     if (previous !== 'analyzing' || !next || next === 'analyzing') return
-    if (next === 'ready') message.success('大纲已生成，可以开始正文了')
-    else if (next === 'error') message.error(detail.value?.error_msg || '大纲生成失败，可重新生成')
+    if (lastWorkRunKind.value === 'draft') {
+      if (next === 'ready') message.success('整篇成稿已写回各段落')
+      else if (next === 'error') message.error(detail.value?.error_msg || '整篇起草失败，可重新发起')
+    } else if (next === 'ready') {
+      message.success('大纲已生成，可以开始正文了')
+    } else if (next === 'error') {
+      message.error(detail.value?.error_msg || '大纲生成失败，可重新生成')
+    }
+  },
+)
+
+// 块级跃迁按 cid 对账：轮询快照整体替换，只有同 cid 从 analyzing 翻走才提示，
+// 切换选中章节造成的状态变化不会误报。
+watch(
+  () => detail.value?.parts.map((part) => [part.cid, part.status, part.error_msg ?? ''] as const),
+  (next, previous) => {
+    syncPolling()
+    if (!next || !previous) return
+    const before = new Map(previous.map((row) => [row[0], row]))
+    for (const [cid, status, errorMsg] of next) {
+      const old = before.get(cid)
+      if (!old || old[1] !== 'analyzing' || status === 'analyzing') continue
+      const title = detail.value?.parts.find((part) => part.cid === cid)?.title ?? cid
+      if (status === 'ready') message.success(`「${title}」正文已生成`)
+      else if (status === 'error') message.error(errorMsg || `「${title}」生成失败`)
+    }
   },
 )
 

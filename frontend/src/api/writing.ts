@@ -30,14 +30,74 @@ export interface OutlineNodeInput {
   children?: OutlineNodeInput[] | null
 }
 
+/**
+ * 正文块状态同样由最近一次 writing-part 运行翻译：
+ * idle=没跑过、analyzing=该块 AI 生成中、ready=已有 AI 产物、error=最近一次运行失败。
+ */
+export type WritingPartStatus = 'idle' | 'analyzing' | 'ready' | 'error'
+
 export interface WritingPart {
   cid: string
   sort_order: number
   title: string
   content: string
   word_count: number
+  status: WritingPartStatus
+  error_msg: string | null
   created_at: string
   updated_at: string
+}
+
+/** 七个正文动作：小说全量支持；文章段落只有五个编辑动作，整篇起草走作品级流程。 */
+export type WritingPartAction =
+  | 'draft'
+  | 'continue'
+  | 'rewrite'
+  | 'polish'
+  | 'expand'
+  | 'condense'
+  | 'retone'
+
+export const NOVEL_ACTIONS: WritingPartAction[] = [
+  'draft',
+  'continue',
+  'rewrite',
+  'polish',
+  'expand',
+  'condense',
+  'retone',
+]
+
+export const ARTICLE_ACTIONS: WritingPartAction[] = [
+  'rewrite',
+  'polish',
+  'expand',
+  'condense',
+  'retone',
+]
+
+/** 编辑类动作要求块里已有正文；起草/续写是空块也能发起的写手动作。 */
+export const WRITER_ACTIONS: WritingPartAction[] = ['draft', 'continue']
+
+export const ACTION_LABELS: Record<WritingPartAction, string> = {
+  draft: '起草',
+  continue: '续写',
+  rewrite: '重写',
+  polish: '润色',
+  expand: '扩写',
+  condense: '缩写',
+  retone: '换语气',
+}
+
+export interface WritingPartGeneratePayload {
+  action: WritingPartAction
+  instruction?: string | null
+  tone?: string | null
+  model_config_id?: number | null
+}
+
+export interface WritingDraftGeneratePayload {
+  model_config_id?: number | null
 }
 
 /**
@@ -158,6 +218,22 @@ export const writingApi = {
     request<WritingWorkDetail>({
       url: `/studio/works/${id}/parts/${cid}`,
       method: 'DELETE',
+    }),
+
+  /** 单块 AI 生成（七个动作之一）：响应是排队瞬间的详情快照，进度靠轮询跟随。 */
+  generatePart: (id: number, cid: string, payload: WritingPartGeneratePayload) =>
+    request<WritingWorkDetail>({
+      url: `/studio/works/${id}/parts/${cid}/generate`,
+      method: 'POST',
+      data: payload,
+    }),
+
+  /** 文章整篇起草：作品级运行，成稿按二级标题切回各段落。 */
+  generateDraft: (id: number, payload: WritingDraftGeneratePayload = {}) =>
+    request<WritingWorkItem>({
+      url: `/studio/works/${id}/draft/generate`,
+      method: 'POST',
+      data: payload,
     }),
 
   exportWork: (id: number, format: WritingExportFormat) =>

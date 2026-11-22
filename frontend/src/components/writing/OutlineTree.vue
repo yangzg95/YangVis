@@ -16,7 +16,7 @@
             <span class="node-label" :title="dataRef.title">{{ dataRef.title }}</span>
             <span class="node-count">{{ dataRef.children?.length ?? 0 }} 章</span>
             <span class="node-actions" @click.stop>
-              <a-tooltip :title="locked ? '大纲生成中，暂时不能编辑' : '在此卷末尾加章'">
+              <a-tooltip :title="locked ? '生成中，暂时不能编辑' : '在此卷末尾加章'">
                 <a-button type="text" size="small" :disabled="locked" @click="emit('add', lastChapterCid(dataRef))">
                   <PlusOutlined />
                 </a-button>
@@ -44,21 +44,28 @@
           </template>
 
           <template v-else>
+            <LoadingOutlined v-if="statusOf(dataRef.cid) === 'analyzing'" class="status-dot status-dot--running" />
+            <a-tooltip v-else-if="statusOf(dataRef.cid) === 'error'" :title="errorOf(dataRef.cid) || '生成失败，点击查看运行记录'">
+              <CloseCircleOutlined
+                class="status-dot status-dot--error"
+                @click.stop="emit('runs', dataRef.cid)"
+              />
+            </a-tooltip>
             <span class="node-label" :title="dataRef.title">{{ dataRef.title }}</span>
             <span class="node-words">{{ wordsOf(dataRef.cid) }} 字</span>
             <span class="node-actions" @click.stop>
-              <a-tooltip :title="locked ? '大纲生成中，暂时不能编辑' : work.kind === 'novel' ? '在后面加一章' : '在后面加一段'">
-                <a-button type="text" size="small" :disabled="locked" @click="emit('add', dataRef.cid)">
+              <a-tooltip :title="actionTip(dataRef.cid, work.kind === 'novel' ? '在后面加一章' : '在后面加一段')">
+                <a-button type="text" size="small" :disabled="cidLocked(dataRef.cid)" @click="emit('add', dataRef.cid)">
                   <PlusOutlined />
                 </a-button>
               </a-tooltip>
-              <a-tooltip :title="locked ? '大纲生成中，暂时不能编辑' : '上移'">
-                <a-button type="text" size="small" :disabled="locked" @click="emit('move', dataRef.cid, -1)">
+              <a-tooltip :title="actionTip(dataRef.cid, '上移')">
+                <a-button type="text" size="small" :disabled="cidLocked(dataRef.cid)" @click="emit('move', dataRef.cid, -1)">
                   <ArrowUpOutlined />
                 </a-button>
               </a-tooltip>
-              <a-tooltip :title="locked ? '大纲生成中，暂时不能编辑' : '下移'">
-                <a-button type="text" size="small" :disabled="locked" @click="emit('move', dataRef.cid, 1)">
+              <a-tooltip :title="actionTip(dataRef.cid, '下移')">
+                <a-button type="text" size="small" :disabled="cidLocked(dataRef.cid)" @click="emit('move', dataRef.cid, 1)">
                   <ArrowDownOutlined />
                 </a-button>
               </a-tooltip>
@@ -68,7 +75,7 @@
                 cancel-text="取消"
                 @confirm="emit('remove', dataRef.cid)"
               >
-                <a-button type="text" size="small" danger :disabled="locked">
+                <a-button type="text" size="small" danger :disabled="cidLocked(dataRef.cid)">
                   <DeleteOutlined />
                 </a-button>
               </a-popconfirm>
@@ -85,7 +92,7 @@
       <a-button v-if="work.kind === 'novel'" block :disabled="locked" @click="emit('addVolume')">
         <FolderAddOutlined /> 加卷
       </a-button>
-      <div v-if="locked" class="locked-hint">大纲生成中，结构编辑已锁定</div>
+      <div v-if="locked" class="locked-hint">生成中，结构编辑已锁定</div>
     </div>
   </div>
 </template>
@@ -95,17 +102,19 @@ import { computed, ref, watch } from 'vue'
 import {
   ArrowDownOutlined,
   ArrowUpOutlined,
+  CloseCircleOutlined,
   DeleteOutlined,
   FolderAddOutlined,
   FolderOpenOutlined,
+  LoadingOutlined,
   PlusOutlined,
 } from '@ant-design/icons-vue'
-import type { OutlineNode, WritingWorkDetail } from '@/api'
+import type { OutlineNode, WritingPart, WritingPartStatus, WritingWorkDetail } from '@/api'
 
 const props = defineProps<{
   work: WritingWorkDetail
   selectedCid: string | null
-  /** 大纲后台生成期间冻结一切结构编辑：产物落地会整树覆盖，手改只会白写。 */
+  /** 作品级运行或任一块生成期间冻结一切结构编辑：产物落地会整树覆盖，手改只会白写。 */
   locked?: boolean
 }>()
 const emit = defineEmits<{
@@ -115,6 +124,8 @@ const emit = defineEmits<{
   removeVolume: [node: OutlineNode]
   move: [cid: string, dir: -1 | 1]
   addVolume: []
+  /** 失败状态点被点击：打开该块的运行记录抽屉。 */
+  runs: [cid: string]
 }>()
 
 // 新卷默认展开，否则加完卷看不到它的空 children 槽位。
@@ -144,8 +155,33 @@ const partWords = computed(() => {
   return map
 })
 
+const partState = computed(() => {
+  const map = new Map<string, WritingPart>()
+  for (const part of props.work.parts) map.set(part.cid, part)
+  return map
+})
+
 function wordsOf(cid: string): number {
   return partWords.value.get(cid) ?? 0
+}
+
+function statusOf(cid: string): WritingPartStatus | undefined {
+  return partState.value.get(cid)?.status
+}
+
+function errorOf(cid: string): string | null {
+  return partState.value.get(cid)?.error_msg ?? null
+}
+
+/** 单块生成只锁自己那一行；作品级运行或别的块在跑时，其余行照常可操作。 */
+function cidLocked(cid: string): boolean {
+  return props.locked || statusOf(cid) === 'analyzing'
+}
+
+function actionTip(cid: string, base: string): string {
+  if (statusOf(cid) === 'analyzing') return '该章节/段落正在生成，暂时不能编辑'
+  if (props.locked) return '生成中，暂时不能编辑'
+  return base
 }
 
 function lastChapterCid(volume: OutlineNode): string | null {
@@ -202,6 +238,20 @@ function onSelect(keys: (string | number)[]) {
   flex: none;
   color: var(--text-3);
   font-size: 12px;
+}
+
+.status-dot {
+  flex: none;
+  font-size: 13px;
+}
+
+.status-dot--running {
+  color: var(--signal-text);
+}
+
+.status-dot--error {
+  color: var(--error, #cf1322);
+  cursor: pointer;
 }
 
 .node-actions {

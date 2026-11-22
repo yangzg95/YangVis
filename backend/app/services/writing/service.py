@@ -47,6 +47,7 @@ from app.services.workflows.runs import (
 from app.services.workflows import (
     RUN_SUCCEEDED,
     SUBJECT_UPLOADED,
+    SUBJECT_WRITING_PART,
     SUBJECT_WRITING_WORK,
 )
 from app.services.writing import generate
@@ -56,6 +57,7 @@ from app.services.writing.outline import (
     KINDS,
     LEAF_KIND,
     NODE_VOLUME,
+    find_leaf,
     flatten_leaves,
     insert_leaf,
     new_cid,
@@ -95,15 +97,32 @@ class WritingService:
     def _scope(self, stmt: Select) -> Select:
         return stmt.where(WritingWork.owner_id == self._owner_id)
 
-    def _assert_not_generating(self, work: WritingWork) -> None:
-        """大纲运行期间冻结所有会改大纲/正文的手工操作。
+    def _assert_work_idle(self, work: WritingWork) -> None:
+        """作品级运行（大纲生成 / 文章整篇起草）期间冻结手工操作。
 
-        生成落库是整棵树覆盖 + part 对账（模型产物不带 cid，旧叶子会被当成孤儿
+        大纲落库是整棵树覆盖 + part 对账（模型产物不带 cid，旧叶子会被当成孤儿
         删掉），运行中允许手改等于让用户白写：请求直接挡在门外，比静默覆盖友好。
         后台任务自己的 save_outline 在运行 succeeded 之后才执行，不在此列。
         """
         if running_subjects(self._db, self._owner_id, SUBJECT_WRITING_WORK, [work.id]):
-            raise ValueError("大纲正在生成中，请稍后再编辑")
+            raise ValueError("作品正在生成中，请稍后再编辑")
+
+    def _running_part_cids(self, work: WritingWork) -> List[str]:
+        """该作品下还在跑正文生成的叶子 cid。"""
+        cids = [part.cid for part in self.list_parts(work)]
+        if not cids:
+            return []
+        return running_subjects(self._db, self._owner_id, SUBJECT_WRITING_PART, cids)
+
+    def _assert_parts_idle(self, work: WritingWork) -> None:
+        """结构类操作（整树保存/加叶子/删作品）要求没有任何正文块在跑。"""
+        if self._running_part_cids(work):
+            raise ValueError("有章节/段落正在生成，请稍后再调整结构")
+
+    def _assert_part_idle(self, work: WritingWork, cid: str) -> None:
+        """单块编辑/删除只挡自己那一个 cid，别的章节照常写。"""
+        if running_subjects(self._db, self._owner_id, SUBJECT_WRITING_PART, [cid]):
+            raise ValueError("该章节/段落正在生成中，请稍后再编辑")
 
     # -- 模型门槛（与幻灯片同一份共用实现）-------------------------------------
 
@@ -196,6 +215,7 @@ class WritingService:
         # 大纲还在后台生成时连作品一起删，任务回来就找不到认领对象了——同 deck 闸门。
         if running_subjects(self._db, self._owner_id, SUBJECT_WRITING_WORK, [work.id]):
             raise ValueError("作品正在生成大纲，请稍后再删")
+        self._assert_parts_idle(work)
         # 正文块是作品的从属行，同事务一起删，不留孤儿。
         self._db.execute(
             delete(WritingPart).where(
@@ -227,6 +247,7 @@ class WritingService:
         work = self.get_work(work_id)
         if running_subjects(self._db, self._owner_id, SUBJECT_WRITING_WORK, [work.id]):
             raise ValueError("大纲正在生成中，请勿重复触发")
+        self._assert_parts_idle(work)
         # 门槛在请求里先过：没测通的配置直接 BusinessError（4004），不留下排队中的运行。
         config = require_chat_model(self._db, self._owner_id, model_config_id)
         if requirement is not None:
@@ -241,14 +262,7 @@ class WritingService:
             subject=(SUBJECT_WRITING_WORK, work.id),
             subject_label=work.title,
         )
-        if model_config_id is not None:
-            # 运行步骤在建运行时一次性建齐（pending）：把选择的模型盖到每一步上，
-            # 引擎执行时读行上的 model_config_id，空着才回落默认。
-            for step in self._db.scalars(
-                select(WorkflowRunStep).where(WorkflowRunStep.run_id == run.id)
-            ).all():
-                step.model_config_id = config.id
-            self._db.commit()
+        self._stamp_run_model(run.id, model_config_id)
         logger.info(
             "writing outline run started: id=%s owner=%s kind=%s model=%s",
             work.id,
@@ -291,6 +305,173 @@ class WritingService:
             )
             fail_run(self._db, self._owner_id, run.id, model_error_text(exc))
 
+    def _stamp_run_model(self, run_id: int, model_config_id: Optional[int]) -> None:
+        """按次选模型：把配置 id 盖到该运行预建的 pending 步骤行上（不传则留空回落默认）。"""
+        if model_config_id is None:
+            return
+        for step in self._db.scalars(
+            select(WorkflowRunStep).where(WorkflowRunStep.run_id == run_id)
+        ).all():
+            step.model_config_id = model_config_id
+        self._db.commit()
+
+    # -- AI 正文生成（M3）----------------------------------------------------
+
+    def start_part_generation(
+        self,
+        work_id: int,
+        cid: str,
+        action: str,
+        instruction: Optional[str] = None,
+        tone: Optional[str] = None,
+        model_config_id: Optional[int] = None,
+    ) -> WritingWork:
+        """建一条认领单个正文块的运行（subject=writing-part，ref=cid）。"""
+        work = self.get_work(work_id)
+        self._assert_work_idle(work)
+        allowed = generate.actions_for_kind(work.kind)
+        if action not in allowed:
+            raise ValueError(f"该作品类型不支持动作：{action}")
+        if action == generate.ACTION_RETONE and not (tone or "").strip():
+            raise ValueError("换语气需要指定目标语气")
+        part = self._get_part(work, cid)
+        if action in generate.EDITOR_ACTIONS and not (part.content or "").strip():
+            raise ValueError("这个章节/段落还是空的，请先起草再做编辑加工")
+        self._assert_part_idle(work, cid)
+        leaf = find_leaf(work.outline or [], cid)
+        if leaf is None:
+            # 块行还在、大纲叶子却没了：数据不一致，按不存在处理，不发运行。
+            raise LookupError("章节不存在")
+        # 门槛在请求里先过：没测通的配置直接 BusinessError（4004），不留下排队中的运行。
+        config = require_chat_model(self._db, self._owner_id, model_config_id)
+        clean_instruction = (
+            instruction.strip()[:512] if instruction and instruction.strip() else None
+        )
+        clean_tone = tone.strip()[:64] if tone and tone.strip() else None
+        parts = self.list_parts(work)
+        if action in generate.WRITER_ACTIONS:
+            inputs = generate.novel_chapter_inputs(
+                work, parts, leaf, part, action, clean_instruction
+            )
+        else:
+            inputs = generate.polish_inputs(
+                work, leaf, part, action, clean_instruction, clean_tone
+            )
+        run = start_builtin(
+            self._db,
+            self._owner_id,
+            generate.workflow_slug_for_action(action),
+            inputs,
+            subject=(SUBJECT_WRITING_PART, cid),
+            subject_label=part.title,
+        )
+        self._stamp_run_model(run.id, model_config_id)
+        logger.info(
+            "writing part run started: work=%s cid=%s action=%s model=%s",
+            work.id,
+            cid,
+            action,
+            config.id,
+        )
+        return work
+
+    async def run_part_generation(self, work_id: int, cid: str) -> None:
+        """后台任务体：跑块级运行，把成稿写回那一个 part（失败只落运行，不抛给调度器）。"""
+        work = self.get_work(work_id)
+        run = latest_run(self._db, self._owner_id, SUBJECT_WRITING_PART, cid)
+        if run is None:
+            logger.error("writing part has no run to execute: work=%s cid=%s", work_id, cid)
+            return
+        try:
+            part = self._get_part(work, cid)
+            text = (await builtin_output(self._db, self._owner_id, run.id)).strip()
+            if not text:
+                raise ValueError("模型没有返回正文内容")
+            if len(text) > settings.WRITING_PART_CONTENT_MAX_CHARS:
+                raise ValueError(
+                    f"模型返回的正文超过 {settings.WRITING_PART_CONTENT_MAX_CHARS} 字符上限，"
+                    "请调小目标字数后重试"
+                )
+            part.content = text
+            part.word_count = count_words(text)
+            self._db.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "writing part generation failed: work=%s cid=%s error=%s",
+                work_id,
+                cid,
+                exc,
+                exc_info=True,
+            )
+            fail_run(self._db, self._owner_id, run.id, model_error_text(exc))
+
+    def start_draft_generation(
+        self, work_id: int, model_config_id: Optional[int] = None
+    ) -> WritingWork:
+        """文章整篇起草：一条作品级运行，成稿回来后按二级标题切回各段落。"""
+        work = self.get_work(work_id)
+        if work.kind != KIND_ARTICLE:
+            raise ValueError("小说请按章节逐章生成，没有整篇起草")
+        if running_subjects(self._db, self._owner_id, SUBJECT_WRITING_WORK, [work.id]):
+            raise ValueError("作品正在生成中，请勿重复触发")
+        self._assert_parts_idle(work)
+        leaves = flatten_leaves(work.outline or [])
+        if not leaves:
+            raise ValueError("还没有段落大纲，请先生成大纲")
+        config = require_chat_model(self._db, self._owner_id, model_config_id)
+        run = start_builtin(
+            self._db,
+            self._owner_id,
+            generate.WORKFLOW_ARTICLE_DRAFT,
+            generate.article_draft_inputs(work),
+            subject=(SUBJECT_WRITING_WORK, work.id),
+            subject_label=work.title,
+        )
+        self._stamp_run_model(run.id, model_config_id)
+        logger.info("writing draft run started: work=%s model=%s", work.id, config.id)
+        return work
+
+    async def run_draft_generation(self, work_id: int) -> None:
+        """后台任务体：整篇成稿按 ``##`` 切分，数量对得上 1:1 写回；对不上整篇落首段 + warning。"""
+        work = self.get_work(work_id)
+        run = latest_run(self._db, self._owner_id, SUBJECT_WRITING_WORK, work.id)
+        if run is None:
+            logger.error("writing work has no draft run to execute: id=%s", work_id)
+            return
+        try:
+            text = (await builtin_output(self._db, self._owner_id, run.id)).strip()
+            if not text:
+                raise ValueError("模型没有返回正文内容")
+            leaves = flatten_leaves(work.outline or [])
+            sections, warning = generate.split_article_draft(text, len(leaves))
+            parts = {part.cid: part for part in self.list_parts(work)}
+            if warning is None:
+                for leaf, section in zip(leaves, sections):
+                    part = parts.get(str(leaf["cid"]))
+                    if part is None:
+                        raise ValueError("大纲段落与正文块对不上，请刷新后重试")
+                    part.content = section
+                    part.word_count = count_words(section)
+            else:
+                # 不静默丢内容：整篇塞进第一个段落，warning 落 meta 由前端告警。
+                first = parts.get(str(leaves[0]["cid"]))
+                if first is None:
+                    raise ValueError("找不到承接成稿的第一个段落")
+                first.content = sections[0]
+                first.word_count = count_words(sections[0])
+            meta = dict(work.meta or {})
+            if warning:
+                meta["draft_warning"] = warning
+            else:
+                meta.pop("draft_warning", None)
+            work.meta = meta
+            self._db.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "writing draft generation failed: id=%s error=%s", work_id, exc, exc_info=True
+            )
+            fail_run(self._db, self._owner_id, run.id, model_error_text(exc))
+
     # -- 大纲与正文块 -------------------------------------------------------
 
     def list_parts(self, work: WritingWork) -> List[WritingPart]:
@@ -320,7 +501,8 @@ class WritingService:
     def save_outline(self, work_id: int, nodes: List[Any]) -> WritingWork:
         """清洗大纲并对账正文块：新叶子建空块、删掉的叶子连带删块、顺序/标题同步。"""
         work = self.get_work(work_id)
-        self._assert_not_generating(work)
+        self._assert_work_idle(work)
+        self._assert_parts_idle(work)
         tree = sanitize_outline(work.kind, nodes)
         leaves = flatten_leaves(tree)
         if len(leaves) > settings.WRITING_MAX_PARTS_PER_WORK:
@@ -361,7 +543,8 @@ class WritingService:
     def add_part(self, work_id: int, title: str, after_cid: Optional[str]) -> Tuple[WritingWork, str]:
         """手工加章/加段：大纲补一个叶子并建空块，返回 ``(作品, 新 cid)``。"""
         work = self.get_work(work_id)
-        self._assert_not_generating(work)
+        self._assert_work_idle(work)
+        self._assert_parts_idle(work)
         tree = sanitize_outline(work.kind, work.outline or [])
         leaf_count = len(flatten_leaves(tree))
         if leaf_count >= settings.WRITING_MAX_PARTS_PER_WORK:
@@ -392,7 +575,8 @@ class WritingService:
     ) -> WritingPart:
         """正文块自动保存。改名同步大纲叶子，改正文重算字数。"""
         work = self.get_work(work_id)
-        self._assert_not_generating(work)
+        self._assert_work_idle(work)
+        self._assert_part_idle(work, cid)
         part = self._get_part(work, cid)
         if title is not None:
             clean = title.strip()[:128]
@@ -415,7 +599,8 @@ class WritingService:
 
     def delete_part(self, work_id: int, cid: str) -> WritingWork:
         work = self.get_work(work_id)
-        self._assert_not_generating(work)
+        self._assert_work_idle(work)
+        self._assert_part_idle(work, cid)
         part = self._get_part(work, cid)
         tree = sanitize_outline(work.kind, work.outline or [])
         if not remove_leaf(tree, cid):
@@ -548,22 +733,40 @@ class WritingService:
     def to_detail(self, work: WritingWork) -> WritingWorkDetail:
         parts = self.list_parts(work)
         tree = sanitize_outline(work.kind, work.outline or [])
-        return WritingWorkDetail(
-            **self.to_item(work, counts=(len(parts), sum(p.word_count for p in parts))).model_dump(),
-            brief=work.brief or "",
-            requirement=work.requirement,
-            outline=[OutlineNode(**node) for node in tree],
-            meta=dict(work.meta or {}),
-            parts=[
+        # 每个 part 的状态由认领它（subject_ref=cid）的最近一次 writing-part 运行翻译。
+        part_runs = latest_runs(
+            self._db, self._owner_id, SUBJECT_WRITING_PART, [part.cid for part in parts]
+        )
+        part_outs: List[WritingPartOut] = []
+        for part in parts:
+            part_run = part_runs.get(part.cid)
+            part_status, part_error = subject_state(
+                part_run,
+                has_product=bool((part.content or "").strip()),
+                idle="idle",
+            )
+            # 与作品级同口径：成功运行的产物只会在任务里非空落库，succeeded + 空正文
+            # 只可能是生成后被手工清空——回到 idle，不亮「结果没有写回」的红色失败。
+            if part_run is not None and part_run.status == RUN_SUCCEEDED and not (part.content or "").strip():
+                part_status, part_error = "idle", None
+            part_outs.append(
                 WritingPartOut(
                     cid=part.cid,
                     sort_order=part.sort_order,
                     title=part.title,
                     content=part.content or "",
                     word_count=part.word_count,
+                    status=part_status,
+                    error_msg=part_error,
                     created_at=part.created_at,
                     updated_at=part.updated_at,
                 )
-                for part in parts
-            ],
+            )
+        return WritingWorkDetail(
+            **self.to_item(work, counts=(len(parts), sum(p.word_count for p in parts))).model_dump(),
+            brief=work.brief or "",
+            requirement=work.requirement,
+            outline=[OutlineNode(**node) for node in tree],
+            meta=dict(work.meta or {}),
+            parts=part_outs,
         )

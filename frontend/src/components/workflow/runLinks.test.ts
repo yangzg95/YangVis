@@ -32,6 +32,10 @@ describe('subjectLink', () => {
     expect(
       subjectLink(routerStub(), run({ subject_kind: 'interview-question', subject_ref: 'q-3' })),
     ).toBeNull()
+    // writing-part 的 ref 是章节 cid（p 开头随机串），无法反查作品，只留快照名。
+    expect(
+      subjectLink(routerStub(), run({ subject_kind: 'writing-part', subject_ref: 'p829b729d39454dc3' })),
+    ).toBeNull()
   })
 
   it('未登记的 subject 类型返回 null，而不是猜一个链接', () => {

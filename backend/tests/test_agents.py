@@ -151,6 +151,9 @@ def test_builtin_slugs_are_the_ones_the_module_documents():
         "slide-architect",
         "novel-architect",
         "article-architect",
+        "novel-writer",
+        "article-writer",
+        "writing-editor",
         "video-briefer",
         "video-storyboarder",
     }
@@ -177,6 +180,9 @@ def test_feature_owned_personas_stay_out_of_the_picker():
         "slide-architect",
         "novel-architect",
         "article-architect",
+        "novel-writer",
+        "article-writer",
+        "writing-editor",
         "video-briefer",
         "video-storyboarder",
     }

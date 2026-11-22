@@ -1,14 +1,19 @@
 <template>
   <div v-if="part" class="part-editor">
-    <a-input
-      v-model:value="title"
-      class="title-input"
-      :maxlength="128"
-      :bordered="false"
-      :disabled="locked"
-      placeholder="章节/段落标题"
-      @input="markDirty('title')"
-    />
+    <div class="title-row">
+      <a-input
+        v-model:value="title"
+        class="title-input"
+        :maxlength="128"
+        :bordered="false"
+        :disabled="locked"
+        placeholder="章节/段落标题"
+        @input="markDirty('title')"
+      />
+      <a-button type="primary" ghost size="small" class="ai-btn" :disabled="locked" @click="emit('generate')">
+        <RobotOutlined /> AI 写作
+      </a-button>
+    </div>
 
     <a-collapse v-model:active-key="synopsisOpen" ghost class="synopsis-collapse">
       <a-collapse-panel key="synopsis">
@@ -42,7 +47,15 @@
 
     <div class="status-bar">
       <span :class="['save-status', `save-status--${saveState}`]">{{ statusText }}</span>
-      <span v-if="locked" class="locked-hint">大纲生成中，编辑已锁定，完成后自动恢复</span>
+      <span v-if="part.status === 'analyzing'" class="part-status part-status--running">
+        <LoadingOutlined /> AI 生成中…
+      </span>
+      <a-tooltip v-else-if="part.status === 'error'" :title="part.error_msg || '生成失败'">
+        <span class="part-status part-status--error" @click="emit('showRuns')">
+          <CloseCircleOutlined /> AI 生成失败，点击查看运行记录
+        </span>
+      </a-tooltip>
+      <span v-if="locked" class="locked-hint">{{ lockedHint }}</span>
       <span class="word-count">本机统计 {{ localWords }} 字 · 已存 {{ part.word_count }} 字</span>
     </div>
   </div>
@@ -58,7 +71,13 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
-import { EditOutlined, PlusOutlined } from '@ant-design/icons-vue'
+import {
+  CloseCircleOutlined,
+  EditOutlined,
+  LoadingOutlined,
+  PlusOutlined,
+  RobotOutlined,
+} from '@ant-design/icons-vue'
 import type { WritingPart, WritingWorkDetail } from '@/api'
 import { countWords } from '@/utils/writingWords'
 import { fmtShortDateTime } from '@/utils/format'
@@ -71,7 +90,7 @@ const props = defineProps<{
   synopsis: string
   saveState: SaveState
   savedAt: string
-  /** 大纲后台生成期间锁定：落库会整树重建，避免自动保存与 AI 回写互相覆盖。 */
+  /** 作品级运行或当前块生成期间锁定，避免自动保存与 AI 回写互相覆盖。 */
   locked?: boolean
 }>()
 
@@ -80,6 +99,10 @@ const emit = defineEmits<{
   saveSynopsis: [synopsis: string]
   addFirst: []
   dirty: []
+  /** 打开 AI 动作弹窗。 */
+  generate: []
+  /** 块级运行失败时点开该块的运行记录。 */
+  showRuns: []
 }>()
 
 const AUTOSAVE_MS = 2500
@@ -118,6 +141,26 @@ watch(
 const localWords = computed(() => countWords(content.value))
 const emptyText = computed(() =>
   props.work.kind === 'novel' ? '还没有章节，先加第一章开始写' : '还没有段落，先加第一段开始写',
+)
+
+// 块级 AI 生成期间输入框是禁用的，本机不可能有未落盘的字；运行一结束就把成稿装回本地，
+// 不经过 cid 切换也能看到新内容。失败时同样同步一次（后端保留原正文，不会把本地稿冲没）。
+watch(
+  () => props.part?.status,
+  (next, previous) => {
+    if (previous !== 'analyzing' || !props.part || next === 'analyzing') return
+    title.value = props.part.title
+    content.value = props.part.content
+    synopsisDraft.value = props.synopsis ?? ''
+    dirtyTitle.value = false
+    dirtyContent.value = false
+  },
+)
+
+const lockedHint = computed(() =>
+  props.part?.status === 'analyzing'
+    ? 'AI 正文生成中，编辑已锁定，完成后自动恢复'
+    : '作品正在生成中，编辑已锁定，完成后自动恢复',
 )
 
 const statusText = computed(() => {
@@ -203,14 +246,41 @@ defineExpose({ flush })
   flex-direction: column;
 }
 
-.title-input {
+.title-row {
+  display: flex;
   flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.title-input {
+  flex: 1;
+  min-width: 0;
   font-size: 18px;
   font-weight: 600;
 }
 
 .title-input :deep(input) {
   font-weight: 600;
+}
+
+.ai-btn {
+  flex: none;
+}
+
+.part-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.part-status--running {
+  color: var(--signal-text);
+}
+
+.part-status--error {
+  color: var(--error, #cf1322);
+  cursor: pointer;
 }
 
 .synopsis-collapse {

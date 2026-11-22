@@ -418,6 +418,84 @@ BUILTIN_WORKFLOWS: tuple[BuiltinWorkflow, ...] = (
         ),
         sort_order=100,
     ),
+    BuiltinWorkflow(
+        slug="novel-chapter",
+        name="小说章节起草",
+        description="「智能应用 · 创作」按设定、前情与章节摘要起草或续写单章正文（写小说的章节生成）",
+        inputs=(
+            BuiltinInput("title", "作品名"),
+            BuiltinInput("work_card_block", "作品卡段落", required=False),
+            BuiltinInput("outline_block", "完整大纲段落", required=False),
+            BuiltinInput("history_block", "前情段落", required=False),
+            BuiltinInput("chapter_block", "本章要求段落"),
+            BuiltinInput("existing_block", "本章已有正文段落", required=False),
+            BuiltinInput("instruction_note", "动作与用户要求段落"),
+        ),
+        steps=(
+            BuiltinStep(
+                key="draft",
+                agent_slug="novel-writer",
+                prompt_tpl=(
+                    "作品名：{{title}}\n\n"
+                    "{{work_card_block}}{{outline_block}}{{history_block}}"
+                    "{{chapter_block}}{{existing_block}}{{instruction_note}}"
+                    "请按人设要求直接输出本章正文。"
+                ),
+                group_key="draft",
+                sort_order=10,
+            ),
+        ),
+        sort_order=110,
+    ),
+    BuiltinWorkflow(
+        slug="article-draft",
+        name="文章整篇起草",
+        description="「智能应用 · 创作」按段落大纲一次性生成整篇文章，按二级标题切回各段落",
+        inputs=(
+            BuiltinInput("title", "作品名"),
+            BuiltinInput("brief_block", "主题素材段落", required=False),
+            BuiltinInput("params_block", "创作参数段落", required=False),
+            BuiltinInput("requirement_note", "用户要求段落", required=False),
+            BuiltinInput("outline_block", "段落大纲"),
+        ),
+        steps=(
+            BuiltinStep(
+                key="draft",
+                agent_slug="article-writer",
+                prompt_tpl=(
+                    "作品名：{{title}}\n\n"
+                    "{{brief_block}}{{params_block}}{{requirement_note}}{{outline_block}}"
+                    "请按人设要求输出整篇文章，每个大纲段落对应一个二级标题。"
+                ),
+                group_key="draft",
+                sort_order=10,
+            ),
+        ),
+        sort_order=120,
+    ),
+    BuiltinWorkflow(
+        slug="writing-polish",
+        name="正文编辑加工",
+        description="「智能应用 · 创作」对已有章节/段落做重写、润色、扩写、缩写、换语气（小说与文章共用）",
+        inputs=(
+            BuiltinInput("context_block", "章节摘要/段落观点段落", required=False),
+            BuiltinInput("content_block", "待处理正文"),
+            BuiltinInput("instruction_note", "动作与用户要求段落"),
+        ),
+        steps=(
+            BuiltinStep(
+                key="polish",
+                agent_slug="writing-editor",
+                prompt_tpl=(
+                    "{{context_block}}{{content_block}}{{instruction_note}}"
+                    "请按人设要求输出处理后的完整正文。"
+                ),
+                group_key="polish",
+                sort_order=10,
+            ),
+        ),
+        sort_order=130,
+    ),
 )
 
 

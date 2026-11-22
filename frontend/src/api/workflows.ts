@@ -80,6 +80,7 @@ export type WorkflowSubjectKind =
   | 'interview-question'
   | 'video-project'
   | 'writing-work'
+  | 'writing-part'
 
 /** 抽屉按业务对象过滤时的一次入参；label 是列表标题用的名字。 */
 export interface WorkflowRunSubject {

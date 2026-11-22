@@ -114,8 +114,9 @@
 
 ### 4.2 两个新 subject 常量（`services/workflows/__init__.py`，M2 启用）
 
-- `SUBJECT_WRITING_WORK = "writing-work"`：大纲运行，ref=作品 id
-- `SUBJECT_WRITING_PART = "writing-part"`：正文运行，ref=part id
+- `SUBJECT_WRITING_WORK = "writing-work"`：作品级运行（大纲 / 文章整篇起草），ref=作品 id
+- `SUBJECT_WRITING_PART = "writing-part"`：单块正文运行，ref=part 的 cid 字符串
+  （不用数字 id，避免在接口里暴露内部主键）
 
 列表/工作台状态全部经 `subject_state(latest_run(...))` 翻译；失败原因点 tag 进
 `WorkflowRunsDrawer`，与幻灯片列表完全一致。
@@ -181,7 +182,8 @@ WRITING_CONTEXT_MAX_CHARS         = 12000  # 喂模型的上下文窗口闸门�
 - `views/Writing.vue`：两 tab 列表页
 - `views/WritingWorkbench.vue`：三栏工作台
 - `components/writing/`：`WorkCreateModal.vue`（novel/article 两套参数表单）、
-  `OutlineTree.vue`（a-tree 可拖拽）、`PartEditor.vue`、`AiActionMenu.vue`（M3）
+  `OutlineTree.vue`（hover 上移/下移，拖拽留 M4）、`PartEditor.vue`、
+  `OutlineGenerateModal.vue`（M2）、`PartGenerateModal.vue` / `DraftGenerateModal.vue`（M3）
 - `utils/writingWords.ts`、`utils/writingOutline.ts`（各带 `.test.ts`）
 
 ### 5.2 列表页
@@ -194,10 +196,10 @@ tab 由 route query 驱动；表格列 = 标题（副标题带题材/类型）�
 
 ### 5.3 工作台三栏
 
-- 左栏（260px）：大纲树，节点显示状态点 + 字数，hover 出增删/拖拽，底部「+ 章节」；
-  窄屏收成抽屉
-- 中栏：part 标题输入 + 等宽大字框（IBM Plex Mono 已是依赖），工具条放 AI 操作组（M3）、
-  本 part 字数、保存状态
+- 左栏（260px）：大纲树，节点显示生成状态点（M3：analyzing 转圈 / error 红点，
+  点红点开该块运行记录）+ 字数，hover 出增删/上下移，底部「+ 章节」；窄屏收成抽屉
+- 中栏：part 标题输入（M3 起标题行右侧带「AI 写作」入口）+ 等宽大字框
+  （IBM Plex Mono 已是依赖），状态条放块级生成状态、本 part 字数、保存状态
 - 右栏：`utils/markdown.ts` 基座实时预览（`html:false` 安全底线现成）；
   < lg 断点改成「编辑/预览」分段切换
 - 顶栏：作品名、kind 标签、全书总字数、导出下拉、空大纲时的「生成大纲」主按钮（M2）
@@ -271,6 +273,43 @@ owner 隔离 404、cid 发放与大纲清洗、字数统计、运行中拦截删
 >   截胡（改为按开括号先后取最外层跨度）；走查还清掉了两个弹窗里不产生提示的
 >   `void errorText(...)` 死代码、未挂出的 `WritingService.snippet` 与 popconfirm
 >   上无效的 disabled 属性。
+>
+> M3 实现备注（2026-11）：
+> - 三个内置智能体（novel-writer 55 / article-writer 40 / writing-editor 25，
+>   均 chat_visible=False）与三条单步 markdown 工作流（novel-chapter / article-draft /
+>   writing-polish）随启动 seed，test_agents.py 两份硬编码清单同步到 33 个全绿。
+>   七个 action 中 draft/continue 走 novel-chapter（小说专属），五个编辑动作两个
+>   kind 共用 writing-polish，动作指令由 `action_note` 拼好以变量传入；文章没有
+>   单块起草，整篇走作品级 article-draft。
+> - **两级生成锁定**：作品级运行（大纲/整篇起草，subject=writing-work）冻结全部
+>   手工入口；块级运行（subject=writing-part，ref=cid）只锁自己那一行的编辑/删除与
+>   重复触发，别的章节照写、不同 cid 允许并行起运行；任一单块在跑时结构类操作
+>   （save_outline/add_part/delete_work/重发大纲）统一拒绝。M2 的单闸门拆成
+>   `_assert_work_idle` / `_assert_parts_idle` / `_assert_part_idle` 三道，后台任务
+>   自身的写库发生在运行 succeeded 之后，不会被闸门误伤。
+> - **块状态翻译**：`to_detail` 批量取 `latest_runs(writing-part, cids)`，每块经
+>   `subject_state(has_product=正文非空, idle="idle")` 翻成 idle/analyzing/ready/error；
+>   与 M2 作品级同口径，「succeeded 运行 + 手工清空正文」特判回 idle，不亮红色失败。
+> - **整篇切分**：`split_article_draft` 先剥 markdown 栅栏（共享的 strip_json_fence
+>   只认裸栅栏/json，创作侧本地放宽到任意语言标识，如 ```md），再按 `^## ` 切；
+>   块数与大纲叶子 1:1 才逐段落写回，对不上不静默丢内容——整篇落第一个段落，
+>   warning 落 `meta.draft_warning` 由工作台告警条展示（本机可关，下次成功起草由
+>   服务端清除），运行仍记 succeeded。
+> - 前端：PartGenerateModal（动作下拉按 kind/是否有正文置空块编辑动作，retone 显
+>   语气必填项，可选额外要求 + 按次选模型）、DraftGenerateModal（模型选择 + 切分
+>   规则说明）；PartEditor 标题行加「AI 写作」入口与块级状态（转圈/红色失败点，
+>   失败点开该块运行记录抽屉），analyzing 结束的跃迁把成稿装回本机草稿；
+>   OutlineTree 每行状态点与 cid 级禁用，失败点点击开 writing-part 运行抽屉；
+>   轮询条件扩成「作品 analyzing 或任一块 analyzing」，跃迁提示按 cid 对账，
+>   切换选中章节不会误报。设计稿里 rewrite 的二次确认未单独做——动作弹窗本身就是
+>   显式手势，且五个编辑动作都是整文替换，逐个 popconfirm 只会添堵。
+> - M3 测试：后端写作三套共 99 个——test_writing.py 44（新增 11 个 generate.py
+>   纯函数：动作路由/action_note/小说输入拼装/前情 1500 字闸门/整篇切分含栅栏与
+>   对不上回退）、test_writing_flows.py 28（集成：起草写回/失败保原稿/空产物降级/
+>   续写带原文/动作闸门/两级锁定/整篇 1:1 切分与对不上 warning/按次选模型盖戳/
+>   手工清空回 idle）、test_writing_api.py 27（新增 9 个 HTTP 用例：422/业务信封/
+>   4004/跨账号 404）。前端 156 个全绿（新增 writingActions 5 个、runLinks 补
+>   writing-part 无深链断言），vue-tsc 与生产构建通过。
 
 v1 backlog（明确不做）：SSE 逐字流式、知识库 RAG 喂设定、小说批量章节生成、
 作品回收站（v1 同 slides 硬删除）、与短视频人物库联动。

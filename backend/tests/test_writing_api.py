@@ -436,3 +436,155 @@ def test_generate_with_chosen_model_stamps_steps(client, db, generation_env):
         f"/api/studio/works/{work['id']}/outline/generate",
         json={"model_config_id": stranger.id},
     ).status_code == 404
+
+
+# ---- M3：正文生成的 HTTP 链路 ---------------------------------------------------
+
+
+def _outline_cids(client, work_id: int, *, kind: str) -> list[str]:
+    node_kind = "chapter" if kind == "novel" else "section"
+    detail = client.put(
+        f"/api/studio/works/{work_id}/outline",
+        json={"nodes": [
+            {"kind": node_kind, "title": "第一段"},
+            {"kind": node_kind, "title": "第二段"},
+        ]},
+    ).json()["data"]
+    return [part["cid"] for part in detail["parts"]]
+
+
+def test_part_generate_returns_analyzing_then_writes_content(client, generation_env):
+    generation_env("夜色压着山脊，少年一步踏入雨幕。" * 10)
+    work = _create(client, "novel", "雨夜书")
+    cid = _outline_cids(client, work["id"], kind="novel")[0]
+
+    resp = client.post(
+        f"/api/studio/works/{work['id']}/parts/{cid}/generate",
+        json={"action": "draft", "instruction": " 节奏快一点 ", "model_config_id": None},
+    ).json()
+    assert resp["code"] == 0 and resp["message"] == "已开始生成"
+    # 响应体是排队瞬间的快照：该块 analyzing，别的块仍是 idle。
+    parts = {part["cid"]: part for part in resp["data"]["parts"]}
+    assert parts[cid]["status"] == "analyzing"
+
+    detail = client.get(f"/api/studio/works/{work['id']}").json()["data"]
+    target = next(part for part in detail["parts"] if part["cid"] == cid)
+    assert target["status"] == "ready" and target["error_msg"] is None
+    assert target["word_count"] > 0 and "少年一步踏入雨幕" in target["content"]
+
+
+def test_part_generate_business_rejections_are_envelopes(client, generation_env):
+    generation_env("成稿")
+    novel = _create(client, "novel", "我的书")
+    novel_cid = _outline_cids(client, novel["id"], kind="novel")[0]
+    article = _create(client, "article", "一篇文")
+    article_cid = _outline_cids(client, article["id"], kind="article")[0]
+
+    def post(work_id, cid, payload):
+        return client.post(
+            f"/api/studio/works/{work_id}/parts/{cid}/generate", json=payload
+        ).json()
+
+    # 文章不支持起草；空块不能编辑加工；换语气缺 tone；未知 cid 是 404 而不是信封。
+    assert post(article["id"], article_cid, {"action": "draft"})["code"] == -1
+    assert post(novel["id"], novel_cid, {"action": "polish"})["code"] == -1
+    assert post(novel["id"], novel_cid, {"action": "retone"})["code"] == -1
+    assert client.post(
+        f"/api/studio/works/{novel['id']}/parts/nope/generate", json={"action": "draft"}
+    ).status_code == 404
+
+
+def test_part_generate_payload_validation_is_422(client, generation_env):
+    generation_env("成稿")
+    work = _create(client, "novel", "我的书")
+    cid = _outline_cids(client, work["id"], kind="novel")[0]
+    url = f"/api/studio/works/{work['id']}/parts/{cid}/generate"
+    assert client.post(url, json={}).status_code == 422
+    assert client.post(url, json={"action": "x" * 33}).status_code == 422
+    assert client.post(url, json={"action": "draft", "instruction": "x" * 513}).status_code == 422
+    assert client.post(url, json={"action": "retone", "tone": "x" * 65}).status_code == 422
+    assert client.post(url, json={"action": "draft", "model_config_id": 0}).status_code == 422
+
+
+def test_part_generate_without_chat_model_is_4004(client, db):
+    from app.errors import CODE_CHAT_NOT_READY
+    from app.models.entities import WorkflowRun
+    from sqlalchemy import select as sa_select
+
+    work = _create(client, "novel", "没配模型的书")
+    cid = _outline_cids(client, work["id"], kind="novel")[0]
+    body = client.post(
+        f"/api/studio/works/{work['id']}/parts/{cid}/generate", json={"action": "draft"}
+    ).json()
+    assert body["code"] == CODE_CHAT_NOT_READY and body["data"] is None
+    _fresh(db)
+    assert db.scalar(sa_select(WorkflowRun)) is None
+
+
+def test_part_generate_other_owner_gets_404(client_for, generation_env):
+    generation_env("成稿")
+    owner = client_for(OWNER)
+    work = _create(owner, "novel", "私密书稿")
+    cid = _outline_cids(owner, work["id"], kind="novel")[0]
+    other = client_for(OTHER)
+    assert other.post(
+        f"/api/studio/works/{work['id']}/parts/{cid}/generate", json={"action": "draft"}
+    ).status_code == 404
+
+
+def test_article_draft_generate_splits_and_warns_over_http(client, generation_env):
+    generation_env("## 开篇\n\n只有一段标题的成稿，模型漏了第二段。")
+    work = _create(client, "article", "一篇文")
+    cids = _outline_cids(client, work["id"], kind="article")
+
+    resp = client.post(
+        f"/api/studio/works/{work['id']}/draft/generate", json={}
+    ).json()
+    assert resp["code"] == 0 and resp["data"]["status"] == "analyzing"
+
+    detail = client.get(f"/api/studio/works/{work['id']}").json()["data"]
+    first = next(part for part in detail["parts"] if part["cid"] == cids[0])
+    second = next(part for part in detail["parts"] if part["cid"] == cids[1])
+    assert "模型漏了第二段" in first["content"] and second["content"] == ""
+    assert "对不上" in detail["meta"]["draft_warning"]
+
+
+def test_draft_generate_rejections(client, generation_env):
+    generation_env("成稿")
+    # 小说没有整篇起草；没有大纲的文章要求先生成大纲。
+    novel = _create(client, "novel", "我的书")
+    _outline_cids(client, novel["id"], kind="novel")
+    assert client.post(
+        f"/api/studio/works/{novel['id']}/draft/generate", json={}
+    ).json()["code"] == -1
+
+    bare = _create(client, "article", "空文")
+    assert client.post(
+        f"/api/studio/works/{bare['id']}/draft/generate", json={}
+    ).json()["code"] == -1
+    assert client.post("/api/studio/works/999999/draft/generate", json={}).status_code == 404
+    assert client.post(
+        f"/api/studio/works/{bare['id']}/draft/generate", json={"model_config_id": 0}
+    ).status_code == 422
+
+
+def test_draft_generate_without_chat_model_is_4004(client, db):
+    from app.errors import CODE_CHAT_NOT_READY
+
+    work = _create(client, "article", "没配模型的文")
+    _outline_cids(client, work["id"], kind="article")
+    body = client.post(
+        f"/api/studio/works/{work['id']}/draft/generate", json={}
+    ).json()
+    assert body["code"] == CODE_CHAT_NOT_READY
+
+
+def test_draft_generate_other_owner_gets_404(client_for, generation_env):
+    generation_env("成稿")
+    owner = client_for(OWNER)
+    work = _create(owner, "article", "私密文章")
+    _outline_cids(owner, work["id"], kind="article")
+    other = client_for(OTHER)
+    assert other.post(
+        f"/api/studio/works/{work['id']}/draft/generate", json={}
+    ).status_code == 404
