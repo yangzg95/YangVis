@@ -31,6 +31,15 @@
       description="成稿按二级标题（##）切回各个段落；若模型给出的段落数与大纲对不上，整篇会落进第一个段落并给出提示，由你手工拆分。"
     />
 
+    <a-alert
+      v-if="hasContent"
+      type="warning"
+      show-icon
+      class="gate-alert"
+      message="将覆盖已有正文"
+      description="当前段落里已经有正文，整篇起草会逐段替换全部现有内容，且不会保留历史版本。需要保留请先导出。"
+    />
+
     <a-form layout="vertical" class="generate-form">
       <a-form-item label="生成模型">
         <a-select
@@ -56,6 +65,8 @@ import { settingsApi, type WritingDraftGeneratePayload } from '@/api'
 const props = defineProps<{
   open: boolean
   submitting: boolean
+  /** 任一段落已有正文：弹窗显式警示整篇起草会覆盖现有内容。 */
+  hasContent: boolean
 }>()
 
 const emit = defineEmits<{
@@ -68,15 +79,14 @@ const router = useRouter()
 const modelConfigId = ref<number | undefined>(undefined)
 const modelOptions = ref<{ value: number; label: string }[]>([])
 const loadingModels = ref(false)
-let modelsLoaded = false
 
-// 每次打开重置：模型选择不跨作品记忆。
+// 每次打开都重置并重拉：用户可能刚从「去配置」跳设置配好模型，缓存会让新配置不出现。
 watch(
   () => props.open,
   (open) => {
     if (!open) return
     modelConfigId.value = undefined
-    if (!modelsLoaded) void loadModels()
+    void loadModels()
   },
 )
 
@@ -91,7 +101,6 @@ async function loadModels() {
         value: item.id,
         label: item.is_default ? `${item.title}（默认）` : item.title,
       }))
-    modelsLoaded = true
   } catch {
     // 信封/网络错误已由 http 拦截器统一弹提示；下拉留空，弹窗的告警条会引导去配置。
   } finally {

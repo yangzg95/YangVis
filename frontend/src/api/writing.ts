@@ -115,6 +115,8 @@ export interface WritingWorkItem {
   word_count: number
   status: WritingWorkStatus
   error_msg: string | null
+  /** 任一正文块正在生成（writing-part 运行中）：列表页据此禁用删除等结构操作。 */
+  part_running: boolean
   created_at: string
   updated_at: string
 }

@@ -88,12 +88,17 @@
               :title="`确认删除《${record.title}》？全部章节与正文都会删除。`"
               ok-text="删除"
               cancel-text="取消"
-              :disabled="record.status === 'analyzing'"
+              :disabled="deleteDisabled(record)"
               @confirm="onRemove(record)"
             >
-              <a-button size="small" type="link" danger :disabled="record.status === 'analyzing'">
-                删除
-              </a-button>
+              <!-- disabled 按钮不响应鼠标事件，套 span 才能让置灰原因的 tooltip 生效 -->
+              <a-tooltip :title="deleteDisabled(record) ? '有生成任务在跑，请完成后再删' : ''">
+                <span class="delete-cell">
+                  <a-button size="small" type="link" danger :disabled="deleteDisabled(record)">
+                    删除
+                  </a-button>
+                </span>
+              </a-tooltip>
             </a-popconfirm>
           </a-space>
         </template>
@@ -177,6 +182,11 @@ const columns = [
 function openRuns(record: WritingWorkItem) {
   runsSubject.value = { kind: 'writing-work', ref: record.id, label: record.title }
   runsOpen.value = true
+}
+
+/** 作品级运行或任一正文块在跑都不能删：后端有同一道闸门，前端先置灰少一次被拒。 */
+function deleteDisabled(record: WritingWorkItem): boolean {
+  return record.status === 'analyzing' || record.part_running
 }
 
 function statusHint(status: WritingWorkStatus, errorMsg: string | null): string {
@@ -340,6 +350,10 @@ onUnmounted(() => pollLoop.stop())
 
 .run-tag {
   cursor: pointer;
+}
+
+.delete-cell {
+  display: inline-block;
 }
 
 .search-input {

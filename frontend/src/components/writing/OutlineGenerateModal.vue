@@ -77,16 +77,15 @@ interface GenerateForm {
 const form = reactive<GenerateForm>({ model_config_id: undefined, requirement: '' })
 const modelOptions = ref<{ value: number; label: string }[]>([])
 const loadingModels = ref(false)
-let modelsLoaded = false
 
-// 每次打开重置：要求回填作品现值，模型选择不跨作品记忆。
+// 每次打开都重置并重拉：要求回填作品现值；模型列表不缓存，配置变更即时可见。
 watch(
   () => props.open,
   (open) => {
     if (!open) return
     form.model_config_id = undefined
     form.requirement = props.requirement ?? ''
-    if (!modelsLoaded) void loadModels()
+    void loadModels()
   },
 )
 
@@ -101,7 +100,6 @@ async function loadModels() {
         value: item.id,
         label: item.is_default ? `${item.title}（默认）` : item.title,
       }))
-    modelsLoaded = true
   } catch {
     // 信封/网络错误已由 http 拦截器统一弹提示；下拉留空，弹窗的告警条会引导去配置。
   } finally {

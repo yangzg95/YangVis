@@ -588,3 +588,124 @@ def test_draft_generate_other_owner_gets_404(client_for, generation_env):
     assert other.post(
         f"/api/studio/works/{work['id']}/draft/generate", json={}
     ).status_code == 404
+
+
+# ---- 块级运行的 part_running 标志（列表删除闸门的后端事实源）----------------------
+
+
+def test_part_running_flag_in_queue_snapshot_then_clears(client, generation_env):
+    generation_env("夜色压着山脊，少年一步踏入雨幕。" * 10)
+    work = _create(client, "novel", "雨夜书")
+    cid = _outline_cids(client, work["id"], kind="novel")[0]
+
+    resp = client.post(
+        f"/api/studio/works/{work['id']}/parts/{cid}/generate",
+        json={"action": "draft"},
+    ).json()
+    # 响应体是排队瞬间的 to_detail 快照：块级运行已建，part_running 立刻置位。
+    assert resp["code"] == 0 and resp["data"]["part_running"] is True
+    target = next(part for part in resp["data"]["parts"] if part["cid"] == cid)
+    assert target["status"] == "analyzing"
+
+    # TestClient 返回前 BackgroundTasks 已跑完：列表（批量路径）与详情都回落到 False。
+    listed = client.get("/api/studio/works", params={"kind": "novel"}).json()["data"]["items"]
+    assert next(item for item in listed if item["id"] == work["id"])["part_running"] is False
+    detail = client.get(f"/api/studio/works/{work['id']}").json()["data"]
+    assert detail["part_running"] is False
+
+
+def test_list_part_running_flag_and_delete_gate_while_part_in_flight(
+    client, client_for, db, generation_env, monkeypatch
+):
+    import threading
+    import time
+
+    from sqlalchemy import select as sa_select
+
+    from app.database import SessionLocal
+    from app.models.entities import WorkflowRun
+    from app.services.workflows import RUN_RUNNING, SUBJECT_WRITING_PART
+    from app.services.workflows import exec as workflow_exec
+
+    # 先借 fixture 完成内置工作流/模型 seed，再把 run_agent 换成会堵在闸门上的假调用。
+    generation_env("占位回复")
+    gate = threading.Event()
+
+    async def blocking_run_agent(
+        session,
+        owner_id,
+        agent_slug,
+        user_prompt,
+        *,
+        agent=None,
+        config_id=None,
+        timeout=None,
+        tools=None,
+        on_event=None,
+    ):
+        # 执行器在调用前已 commit，阻塞期间不持 sqlite 写锁，第二条连接照样能读。
+        gate.wait(timeout=15)
+        return "闸门放行后的成稿。"
+
+    monkeypatch.setattr(workflow_exec, "run_agent", blocking_run_agent)
+
+    work = _create(client, "novel", "在写的书")
+    cid = _outline_cids(client, work["id"], kind="novel")[0]
+    url = f"/api/studio/works/{work['id']}/parts/{cid}/generate"
+
+    response_holder: dict = {}
+
+    def fire() -> None:
+        response_holder["resp"] = client.post(url, json={"action": "draft"})
+
+    worker = threading.Thread(target=fire)
+    worker.start()
+    # 轮询专用连接：请求阶段与 viewer 请求都复用 fixture 会话 db，主线程不能在
+    # 它们事务进行中 rollback 同一个会话，否则会把人家的事务关掉。
+    inspector = SessionLocal()
+    try:
+        # 只认 RUN_RUNNING：它由后台会话提交（exec 在调模型前 commit），
+        # 看到它就说明请求阶段已结束、共享会话 db 已空闲，POST 正堵在闸门上。
+        deadline = time.monotonic() + 10
+        while True:
+            run = inspector.scalar(
+                sa_select(WorkflowRun).where(
+                    WorkflowRun.subject_kind == SUBJECT_WRITING_PART
+                )
+            )
+            # sqlite 读事务会冻结快照：每轮结束事务，下一轮 SELECT 才看得见后台的提交。
+            inspector.rollback()
+            if run is not None and run.status == RUN_RUNNING:
+                break
+            if time.monotonic() > deadline:
+                raise AssertionError("后台块级任务没有进入运行态")
+            time.sleep(0.02)
+        # 及早关连接：别让这里的读事务挡住放行后后台任务的写提交（sqlite 写锁）。
+        inspector.close()
+
+        # 第二个 TestClient 走独立 portal，复用全局依赖覆盖（仍是同一个 owner）。
+        viewer = client_for(OWNER)
+        listed = viewer.get("/api/studio/works", params={"kind": "novel"}).json()["data"]["items"]
+        row = next(item for item in listed if item["id"] == work["id"])
+        assert row["part_running"] is True
+        # 作品级状态只翻译 writing-work 运行：块级在跑不该把列表行也染成「生成中」。
+        # 没有作品级运行、大纲已存在，按 subject_state 仍是 ready。
+        assert row["status"] == "ready"
+        detail = viewer.get(f"/api/studio/works/{work['id']}").json()["data"]
+        assert detail["part_running"] is True
+
+        # 删除闸门：前端置灰之外后端同一道墙，返回业务信封而不是 500。
+        blocked = viewer.delete(f"/api/studio/works/{work['id']}").json()
+        assert blocked["code"] == -1 and "生成" in blocked["message"]
+    finally:
+        gate.set()
+        worker.join(timeout=10)
+        assert not worker.is_alive()
+        inspector.close()  # 正常路径已关过一次，close 幂等，这里兜断言失败的分支。
+
+    # 排队快照与放行后的回落各钉一次。
+    resp = response_holder["resp"].json()
+    assert resp["code"] == 0 and resp["data"]["part_running"] is True
+    db.rollback()
+    listed = client.get("/api/studio/works", params={"kind": "novel"}).json()["data"]["items"]
+    assert next(item for item in listed if item["id"] == work["id"])["part_running"] is False

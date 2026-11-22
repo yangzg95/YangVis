@@ -46,6 +46,7 @@ from app.services.workflows.runs import (
 )
 from app.services.workflows import (
     RUN_SUCCEEDED,
+    SUBJECT_ANALYZING,
     SUBJECT_UPLOADED,
     SUBJECT_WRITING_PART,
     SUBJECT_WRITING_WORK,
@@ -212,9 +213,10 @@ class WritingService:
 
     def delete_work(self, work_id: int) -> None:
         work = self.get_work(work_id)
-        # 大纲还在后台生成时连作品一起删，任务回来就找不到认领对象了——同 deck 闸门。
+        # 作品级运行（大纲生成 / 文章整篇起草）还在后台时连作品一起删，任务回来就
+        # 找不到认领对象了——同 deck 闸门，文案不绑定具体运行类型。
         if running_subjects(self._db, self._owner_id, SUBJECT_WRITING_WORK, [work.id]):
-            raise ValueError("作品正在生成大纲，请稍后再删")
+            raise ValueError("作品正在生成中，请稍后再删")
         self._assert_parts_idle(work)
         # 正文块是作品的从属行，同事务一起删，不留孤儿。
         self._db.execute(
@@ -290,10 +292,13 @@ class WritingService:
                 nodes, title_candidates = generate.parse_article_outline(text)
             else:
                 nodes = generate.parse_novel_outline(text)
-            # save_outline 内部发 cid、收层级、卡节点上限并对账 part 行（覆盖旧大纲）。
-            saved = self.save_outline(work_id, nodes)
-            if not flatten_leaves(saved.outline or []):
+            # 先清洗并校验非空，再走 save_outline 的覆盖式对账：空产物直接降级，
+            # 绝不能让 save_outline([]) 先把旧大纲与全部正文块当孤儿删掉（失败保原稿）。
+            tree = sanitize_outline(work.kind, nodes)
+            if not flatten_leaves(tree):
                 raise ValueError("模型返回的大纲里没有任何合法章节/段落")
+            # save_outline 内部会再清洗一次（幂等：首次发放的 cid 合法且不重名，原样保留）。
+            saved = self.save_outline(work_id, nodes)
             if title_candidates:
                 meta = dict(work.meta or {})
                 meta["title_candidates"] = title_candidates
@@ -685,11 +690,31 @@ class WritingService:
         ).all()
         return {row[0]: (row[1], int(row[2])) for row in rows}
 
+    def _part_running_work_ids(self, works: List[WritingWork]) -> set:
+        """整页列表里「有正文块正在生成」的作品 id，两条查询取回、不是每行一次。"""
+        work_ids = [work.id for work in works]
+        if not work_ids:
+            return set()
+        rows = self._db.execute(
+            select(WritingPart.work_id, WritingPart.cid).where(
+                WritingPart.owner_id == self._owner_id,
+                WritingPart.work_id.in_(work_ids),
+            )
+        ).all()
+        if not rows:
+            return set()
+        cid_to_work = {cid: work_id for work_id, cid in rows}
+        running_cids = running_subjects(
+            self._db, self._owner_id, SUBJECT_WRITING_PART, list(cid_to_work)
+        )
+        return {cid_to_work[cid] for cid in running_cids}
+
     def _item_of(
         self,
         work: WritingWork,
         run: Optional[WorkflowRun],
         counts: Optional[Tuple[int, int]] = None,
+        part_running: bool = False,
     ) -> WritingWorkItem:
         part_count, word_count = counts or (0, 0)
         has_outline = bool(flatten_leaves(work.outline or []))
@@ -712,21 +737,31 @@ class WritingService:
             word_count=word_count,
             status=status,
             error_msg=error_msg,
+            part_running=part_running,
             created_at=work.created_at,
             updated_at=work.updated_at,
         )
 
     def to_item(self, work: WritingWork, counts: Optional[Tuple[int, int]] = None) -> WritingWorkItem:
         run = latest_run(self._db, self._owner_id, SUBJECT_WRITING_WORK, work.id)
-        return self._item_of(work, run, counts)
+        # 单对象路径（生成接口的排队快照等）：直接查该作品的块级运行。
+        return self._item_of(
+            work, run, counts, part_running=bool(self._running_part_cids(work))
+        )
 
     def to_items(self, works: List[WritingWork]) -> List[WritingWorkItem]:
         counts = self._counts_map([work.id for work in works])
         runs = latest_runs(
             self._db, self._owner_id, SUBJECT_WRITING_WORK, [work.id for work in works]
         )
+        running_work_ids = self._part_running_work_ids(works)
         return [
-            self._item_of(work, runs.get(str(work.id)), counts.get(work.id, (0, 0)))
+            self._item_of(
+                work,
+                runs.get(str(work.id)),
+                counts.get(work.id, (0, 0)),
+                part_running=work.id in running_work_ids,
+            )
             for work in works
         ]
 
@@ -762,8 +797,11 @@ class WritingService:
                     updated_at=part.updated_at,
                 )
             )
+        item = self.to_item(work, counts=(len(parts), sum(p.word_count for p in parts)))
+        # 块状态刚在上面逐块翻译过，part_running 直接复用，不再多发一次运行查询。
+        item.part_running = any(part.status == SUBJECT_ANALYZING for part in part_outs)
         return WritingWorkDetail(
-            **self.to_item(work, counts=(len(parts), sum(p.word_count for p in parts))).model_dump(),
+            **item.model_dump(),
             brief=work.brief or "",
             requirement=work.requirement,
             outline=[OutlineNode(**node) for node in tree],

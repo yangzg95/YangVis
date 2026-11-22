@@ -182,7 +182,7 @@ WRITING_CONTEXT_MAX_CHARS         = 12000  # 喂模型的上下文窗口闸门�
 - `views/Writing.vue`：两 tab 列表页
 - `views/WritingWorkbench.vue`：三栏工作台
 - `components/writing/`：`WorkCreateModal.vue`（novel/article 两套参数表单）、
-  `OutlineTree.vue`（hover 上移/下移，拖拽留 M4）、`PartEditor.vue`、
+  `OutlineTree.vue`（hover 上移/下移 + M4 起 a-tree 拖拽，触屏保留按钮）、`PartEditor.vue`、
   `OutlineGenerateModal.vue`（M2）、`PartGenerateModal.vue` / `DraftGenerateModal.vue`（M3）
 - `utils/writingWords.ts`、`utils/writingOutline.ts`（各带 `.test.ts`）
 
@@ -197,12 +197,15 @@ tab 由 route query 驱动；表格列 = 标题（副标题带题材/类型）�
 ### 5.3 工作台三栏
 
 - 左栏（260px）：大纲树，节点显示生成状态点（M3：analyzing 转圈 / error 红点，
-  点红点开该块运行记录）+ 字数，hover 出增删/上下移，底部「+ 章节」；窄屏收成抽屉
+  点红点开该块运行记录）+ 字数，hover 出增删/上下移，底部「+ 章节」；窄屏收成抽屉。
+  M4 起 a-tree 支持拖拽排序（含小说跨卷移动，落点规则见 M4 实现备注），触屏无
+  HTML5 拖拽，上移/下移按钮在窄屏常显作为触摸排序手段
 - 中栏：part 标题输入（M3 起标题行右侧带「AI 写作」入口）+ 等宽大字框
   （IBM Plex Mono 已是依赖），状态条放块级生成状态、本 part 字数、保存状态
 - 右栏：`utils/markdown.ts` 基座实时预览（`html:false` 安全底线现成）；
   < lg 断点改成「编辑/预览」分段切换
-- 顶栏：作品名、kind 标签、全书总字数、导出下拉、空大纲时的「生成大纲」主按钮（M2）
+- 顶栏：作品名、kind 标签、全书总字数、导出下拉、空大纲时的「生成大纲」主按钮（M2）；
+  文章在大纲生成后出现「标题候选」下拉（M4，读 `meta.title_candidates`，点选即改名）
 
 ### 5.4 自动保存
 
@@ -310,6 +313,63 @@ owner 隔离 404、cid 发放与大纲清洗、字数统计、运行中拦截删
 >   手工清空回 idle）、test_writing_api.py 27（新增 9 个 HTTP 用例：422/业务信封/
 >   4004/跨账号 404）。前端 156 个全绿（新增 writingActions 5 个、runLinks 补
 >   writing-part 无深链断言），vue-tsc 与生产构建通过。
+>
+> M4 实现备注（2026-11，收口）：
+> - **标题候选**：数据在 M2 已落 `meta.title_candidates`（文章专属，去重 ≤5 条、
+>   每条 ≤128 字），M4 只补 UI——工作台顶栏文章且有候选时出现「标题候选」下拉，
+>   点选即走既有 `writingApi.update` 改名，当前标题置灰标「当前」；小说不产生候选，
+>   入口不渲染。候选只在重新生成大纲时由后端刷新，改名不删候选、不写 meta。
+> - **a-tree 拖拽排序**：落点规则全部收在 `utils/writingOutline.ts` 的纯函数里
+>   （`planDrop` 出「摘除容器+目标容器+下标」计划，`canDropNode` 给 allowDrop、
+>   `applyNodeDrop` 落地，no-op/非法返回 false 不发请求），规则与后端
+>   sanitize_outline 的两层树形状对齐：文章只接受根层缝隙（inside 非法）；卷只能
+>   根层重排、禁止嵌套（嵌套卷会被后端清洗成章，前置拦掉）；章可同卷/跨卷挪、
+>   落卷上=入卷、落根层缝隙=提为顶层章、章对章 inside 非法。组件侧 allowDrop 收
+>   -1/0/1 三态，drop 事件用 rc-tree 的 `dropPosition - pos 末段下标` 反推方向
+>   （Tree.js 抛出值就是相对三态加兄弟下标，与 antd 官方拖拽示例同款算法）。
+>   hover 上移/下移按钮保留：触屏没有 HTML5 拖拽，窄屏按钮常显作为触摸排序手段。
+>   拖拽保存复用既有 PUT outline，后端按 cid 对账只改 sort_order，跨卷移动正文
+>   随行，无后端改动。
+> - **窄屏收口**：大纲抽屉宽度改 `min(300, 100vw-24px)`，320px 屏不再贴边；
+>   ≤768px 树行操作按钮常显（触屏无 hover）、PartEditor 状态条允许换行、顶栏操作
+>   组换行且长标题 46vw 省略；弹窗靠 antd 自带 ≤575px `max-width:calc(100vw-16px)`
+>   响应式，不另写。真机手势/视觉实测仍需人工过一遍。
+> - M4 测试：前端 170 个全绿（writingOutline 新增 14 个拖拽用例：文章缝隙/inside
+>   拦截、小说同卷/跨卷/入卷/提顶层/卷重排/卷嵌套与卷入卷拦截/章 inside 拦截/
+>   no-op 与未知 cid），vue-tsc 与生产构建通过；后端无代码改动，全量回归
+>   pytest-xdist `-n auto`：1989 passed in 206s（81 个既有 warning，零失败）。
+>
+> 走查后补强（2026-11，M4 收口后的全链路交互走查，七项）：
+> - **修掉一个真实数据丢失缺口**：`run_outline_generation` 原先先 `save_outline`
+>   （内部提交并按 cid 对账、删孤儿正文块）再检查叶子，模型回一个合法但为空的
+>   `{"outline": []}` 就会把既有大纲和全部正文清空、只把运行标失败。改为先
+>   `sanitize_outline` + `flatten_leaves` 非空校验，空结果直接抛错、完全不触库，
+>   旧大纲与正文原样保留；新增回归测试钉死（运行 failed、块数/cid/标题/正文全等）。
+> - **列表页补「有块在跑」事实源**：作品级 `status` 只翻译 writing-work 运行，
+>   章节正文生成（writing-part）在跑时列表行没有任何信号，删除按钮可点（被后端
+>   结构闸门拒回，体验是一次无谓报错）。`WritingWorkItem` 新增 `part_running`：
+>   `to_item` 直查该作品块级运行；`to_items` 批量路径两条查询取回（work_id→cid
+>   映射 + running_subjects），不是每行一次；`to_detail` 复用已翻译的块状态、零额外
+>   查询。前端列表删除按钮在 `status==='analyzing' || part_running` 时置灰并给
+>   tooltip（disabled 按钮不发鼠标事件，外套 span 才挂得上提示），后端删除闸门
+>   （`_assert_parts_idle`，code=-1 信封）保持不动并由 HTTP 测试钉死。
+> - **整篇起草覆盖告警**：DraftGenerateModal 在任一段落已有正文时显示 warning
+>   a-alert——整篇起草逐段替换全部现有内容、不保留历史版本，需要保留请先导出；
+>   弹窗同时改为每次打开重拉模型列表。
+> - **摘要框的结构锁**：摘要保存走整树 PUT outline，任一正文块在跑就会被结构闸门
+>   拒；PartEditor 新增 `structureLocked`（接工作台 treeLocked），只禁用摘要框并
+>   提示原因，标题/正文仍可写——块级锁只挡自己那个 cid，兄弟章节生成时本块照常写作。
+> - **三个生成弹窗每次打开重置表单并重拉模型列表**：去掉 modelsLoaded 缓存，
+>   「去配置」配好模型回来立即可见，语气/要求/模型选择不跨次记忆。
+> - **删除文案解绑运行类型**：`delete_work` 拦截文案从「正在生成大纲」改为
+>   「作品正在生成中，请稍后再删」（块级/整篇起草在跑时同走这道闸门）。
+> - **窄屏补漏**：PartEditor 状态条允许换行（四项不再挤爆），与 M4 窄屏收口同断点。
+> - 测试：后端写作三套共 103 个——test_writing.py 44、test_writing_flows.py 30
+>   （新增空响应保数据、part_running 三序列化路径跟随 2 个）、test_writing_api.py
+>   29（新增排队快照 part_running 与阻塞式在途用例 2 个：独立 inspector 连接轮询
+>   RUN_RUNNING、第二 TestClient 验列表/详情/删除闸门）；全量回归 1993 passed
+>   in 331s（81 个既有 warning，零失败）。前端保持 170 个用例全绿，vue-tsc 与
+>   生产构建通过。
 
 v1 backlog（明确不做）：SSE 逐字流式、知识库 RAG 喂设定、小说批量章节生成、
 作品回收站（v1 同 slides 硬删除）、与短视频人物库联动。

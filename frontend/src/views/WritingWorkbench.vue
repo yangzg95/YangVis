@@ -11,6 +11,24 @@
           :editable="{ onChange: onTitleChange, tooltip: '点击重命名' }"
         >{{ detail.title }}</a-typography-text>
         <a-tag v-if="detail" color="blue">{{ detail.kind === 'novel' ? '小说' : '文章' }}</a-tag>
+        <!-- 文章大纲生成的副产物 meta.title_candidates（去重 ≤5 条），点一下直接改名 -->
+        <a-dropdown v-if="titleCandidates.length" :trigger="['click']">
+          <a-button type="text" size="small" class="candidate-btn">
+            <BulbOutlined /> 标题候选 <DownOutlined />
+          </a-button>
+          <template #overlay>
+            <a-menu @click="onPickTitle">
+              <a-menu-item
+                v-for="candidate in titleCandidates"
+                :key="candidate"
+                :disabled="detail?.title === candidate"
+              >
+                <span class="candidate-text" :title="candidate">{{ candidate }}</span>
+                <span v-if="detail?.title === candidate" class="candidate-current">当前</span>
+              </a-menu-item>
+            </a-menu>
+          </template>
+        </a-dropdown>
         <a-tooltip v-if="detail && detail.status !== 'uploaded'" :title="statusHint(detail.status, detail.error_msg)">
           <a-tag :color="statusColor(detail.status)" class="run-tag" @click="openRuns">
             <LoadingOutlined v-if="detail.status === 'analyzing'" />
@@ -94,7 +112,7 @@
           v-model:open="outlineDrawerOpen"
           :title="detail.kind === 'novel' ? '大纲' : '段落'"
           placement="left"
-          width="300"
+          :width="drawerWidth"
           :body-style="{ display: 'flex', flexDirection: 'column', minHeight: '0' }"
         >
           <OutlineTree
@@ -106,6 +124,7 @@
             @remove="onRemovePart"
             @remove-volume="onRemoveVolume"
             @move="onMoveLeaf"
+            @drop="onDropLeaf"
             @add-volume="onAddVolume"
             @runs="openPartRuns"
           />
@@ -122,6 +141,7 @@
             @remove="onRemovePart"
             @remove-volume="onRemoveVolume"
             @move="onMoveLeaf"
+            @drop="onDropLeaf"
             @add-volume="onAddVolume"
             @runs="openPartRuns"
           />
@@ -144,6 +164,7 @@
               :save-state="saveState"
               :saved-at="savedAt"
               :locked="editorLocked"
+              :structure-locked="treeLocked"
               @save="onSavePart"
               @save-synopsis="onSaveSynopsis"
               @add-first="onAddPart(null)"
@@ -202,6 +223,7 @@
       v-if="detail"
       v-model:open="draftOpen"
       :submitting="draftSubmitting"
+      :has-content="hasAnyPartContent"
       @submit="onDraftSubmit"
     />
 
@@ -219,6 +241,7 @@ import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, 
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeftOutlined,
+  BulbOutlined,
   DownOutlined,
   EditOutlined,
   HistoryOutlined,
@@ -247,11 +270,13 @@ import { createPollLoop } from '@/utils/polling'
 import { useIsMobile } from '@/utils/useIsMobile'
 import {
   appendVolume,
+  applyNodeDrop,
   cloneOutline,
   findLeaf,
   flattenLeaves,
   isCid,
   moveLeaf,
+  type TreeDrop,
 } from '@/utils/writingOutline'
 import OutlineTree from '@/components/writing/OutlineTree.vue'
 import PartEditor from '@/components/writing/PartEditor.vue'
@@ -276,6 +301,9 @@ const saveState = ref<SaveState>('idle')
 const savedAt = ref('')
 const outlineDrawerOpen = ref(false)
 const mobileMode = ref('编辑')
+// 320px 窄屏上 300px 抽屉会贴边，留 24px 呼吸位；用 CSS 表达式而非一次性
+// computed，横竖屏旋转后宽度自动跟随，不用重开抽屉。
+const drawerWidth = 'min(300px, calc(100vw - 24px))'
 const infoOpen = ref(false)
 const infoDraft = ref({ brief: '', requirement: '' })
 const editorRef = ref<InstanceType<typeof PartEditor> | null>(null)
@@ -364,10 +392,34 @@ const editorLocked = computed(
   () => isAnalyzing.value || currentPart.value?.status === 'analyzing',
 )
 const hasCurrentContent = computed(() => Boolean(currentPart.value?.content.trim()))
+/** 整篇起草会逐段覆写：任一段落有正文，弹窗里就要显式警示覆盖。 */
+const hasAnyPartContent = computed(() => (detail.value?.parts ?? []).some((part) => part.content.trim()))
 const draftWarning = computed(() => {
   const warning = detail.value?.meta?.draft_warning
   return typeof warning === 'string' && !dismissedWarnings.value.has(workId.value) ? warning : ''
 })
+
+/** 文章大纲副产物 meta.title_candidates：后端已去重/限 5 条/每条 ≤128 字，前端再兜类型。 */
+const titleCandidates = computed<string[]>(() => {
+  const work = detail.value
+  if (!work || work.kind !== 'article') return []
+  const raw = work.meta?.title_candidates
+  if (!Array.isArray(raw)) return []
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const item of raw) {
+    if (typeof item !== 'string') continue
+    const title = item.trim()
+    if (!title || seen.has(title)) continue
+    seen.add(title)
+    result.push(title.slice(0, 128))
+  }
+  return result.slice(0, 5)
+})
+
+function onPickTitle(info: { key: string }) {
+  void onTitleChange(info.key)
+}
 
 function dismissDraftWarning() {
   dismissedWarnings.value.add(workId.value)
@@ -555,6 +607,19 @@ async function onMoveLeaf(cid: string, dir: -1 | 1) {
   if (!detail.value) return
   const tree = cloneOutline(detail.value.outline)
   if (!moveLeaf(tree, cid, dir)) return
+  try {
+    await mutate(() => writingApi.saveOutline(workId.value, tree))
+  } catch (err) {
+    message.error(errorText(err, '排序失败'))
+    void load(false)
+  }
+}
+
+/** M4：拖拽排序（含跨卷）。落点合法性已在树组件里挡过，这里再兜一道 no-op。 */
+async function onDropLeaf(drop: TreeDrop) {
+  if (!detail.value) return
+  const tree = cloneOutline(detail.value.outline)
+  if (!applyNodeDrop(tree, detail.value.kind, drop)) return
   try {
     await mutate(() => writingApi.saveOutline(workId.value, tree))
   } catch (err) {
@@ -768,6 +833,25 @@ window.addEventListener('beforeunload', beforeUnload)
   cursor: pointer;
 }
 
+.candidate-btn {
+  flex: none;
+}
+
+.candidate-text {
+  display: inline-block;
+  max-width: 60vw;
+  margin-right: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.candidate-current {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
 .wb-body {
   display: flex;
   min-height: 0;
@@ -834,6 +918,26 @@ window.addEventListener('beforeunload', beforeUnload)
 @media (max-width: 768px) {
   .wb-topbar {
     flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* 超窄屏标题行（候选按钮 + 状态 tag + 字数）允许换行，不再互相挤压。 */
+  .wb-title-row {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .wb-actions {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  /* 长标题在窄屏让出空间，编辑能力靠 typography 的 tooltip 保留。 */
+  .wb-title {
+    max-width: 46vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .wb-body {

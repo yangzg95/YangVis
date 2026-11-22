@@ -28,10 +28,13 @@
           :rows="3"
           :maxlength="2000"
           :bordered="false"
-          :disabled="locked"
+          :disabled="locked || structureLocked"
           placeholder="这一段要写什么、结论是什么"
           @input="scheduleSynopsisSave"
         />
+        <div v-if="structureLocked && !locked" class="synopsis-locked-hint">
+          有章节/段落正在生成，摘要保存会调整大纲结构，暂时锁定
+        </div>
       </a-collapse-panel>
     </a-collapse>
 
@@ -92,6 +95,8 @@ const props = defineProps<{
   savedAt: string
   /** 作品级运行或当前块生成期间锁定，避免自动保存与 AI 回写互相覆盖。 */
   locked?: boolean
+  /** 任一正文块在跑：摘要保存走整树 PUT 会被结构闸门拒，只锁摘要框，标题/正文不受影响。 */
+  structureLocked?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -297,6 +302,12 @@ defineExpose({ flush })
   padding: 4px 0 !important;
 }
 
+.synopsis-locked-hint {
+  margin-top: 4px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
 .content-area {
   flex: 1;
   min-height: 240px;
@@ -344,5 +355,13 @@ defineExpose({ flush })
   flex: 1;
   align-items: center;
   justify-content: center;
+}
+
+@media (max-width: 768px) {
+  /* 窄屏状态条四项会挤爆，允许换行并保持行距。 */
+  .status-bar {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
 }
 </style>

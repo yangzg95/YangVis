@@ -104,7 +104,6 @@ const form = reactive<PartForm>({
 })
 const modelOptions = ref<{ value: number; label: string }[]>([])
 const loadingModels = ref(false)
-let modelsLoaded = false
 
 const actionOptions = computed(() =>
   partActionsFor(props.kind, props.hasContent).map((choice) => ({
@@ -122,7 +121,8 @@ const actionDisabledNow = computed(
   () => actionOptions.value.find((option) => option.value === form.action)?.disabled ?? false,
 )
 
-// 每次打开重置：动作按作品 kind 给默认值，模型选择与语气/要求不跨块记忆。
+// 每次打开都重置并重拉：动作按作品 kind 给默认值，模型/语气/要求不跨块记忆，
+// 模型列表不缓存——用户可能刚从「去配置」跳设置配好模型。
 watch(
   () => props.open,
   (open) => {
@@ -131,7 +131,7 @@ watch(
     form.tone = ''
     form.instruction = ''
     form.model_config_id = undefined
-    if (!modelsLoaded) void loadModels()
+    void loadModels()
   },
 )
 
@@ -146,7 +146,6 @@ async function loadModels() {
         value: item.id,
         label: item.is_default ? `${item.title}（默认）` : item.title,
       }))
-    modelsLoaded = true
   } catch {
     // 信封/网络错误已由 http 拦截器统一弹提示；下拉留空，弹窗的告警条会引导去配置。
   } finally {

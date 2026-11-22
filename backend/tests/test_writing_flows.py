@@ -224,6 +224,32 @@ def test_unparseable_output_is_downgraded(db, model_call):
     assert item.status == SUBJECT_ERROR and "可解析" in (item.error_msg or "")
 
 
+def test_empty_regeneration_preserves_existing_outline_and_content(db, model_call):
+    """重生成返回零节点：运行降级，但旧大纲、cid 与正文必须原样保留（失败保原稿）。"""
+    model_call('{"outline": []}')
+    service = _service(db)
+    work = _work(db)
+    cid = _outline(service, work, "novel")[0]
+    service.update_part(work.id, cid, title=None, content="已经写好的章节正文")
+    before = service.to_detail(service.get_work(work.id))
+    assert before.part_count == 2
+
+    service.start_outline_generation(work.id)
+    asyncio.run(service.run_outline_generation(work.id))
+    _read_after_engine_writes(db)
+
+    item = service.to_item(service.get_work(work.id))
+    assert item.status == SUBJECT_ERROR and "合法" in (item.error_msg or "")
+    assert _run(db).status == RUN_FAILED
+
+    after = service.to_detail(service.get_work(work.id))
+    assert after.part_count == 2
+    assert [p.cid for p in after.parts] == [p.cid for p in before.parts]
+    assert [p.title for p in after.parts] == [p.title for p in before.parts]
+    target = next(p for p in after.parts if p.cid == cid)
+    assert target.content == "已经写好的章节正文"
+
+
 # ---- 文章 ---------------------------------------------------------------------
 
 
@@ -420,6 +446,29 @@ def test_novel_chapter_draft_runs_and_writes_content_back(db, model_call):
     prompt = calls[0][1]
     assert "【本章】" in prompt and "第二章 初入州城" in prompt
     assert "第一章 雨夜下山" in prompt and "节奏快一点" in prompt
+
+
+def test_part_running_flag_follows_part_runs(db, model_call):
+    """列表/详情的 part_running：块级运行排队中为 True，跑完翻回 False。"""
+    model_call("新写的正文。")
+    service = _service(db)
+    work = _work(db)
+    cid = _outline(service, work, "novel")[0]
+
+    assert service.to_item(work).part_running is False
+    assert service.to_items(service.list_works())[0].part_running is False
+
+    service.start_part_generation(work.id, cid, "draft")
+    _read_after_engine_writes(db)
+    assert service.to_item(service.get_work(work.id)).part_running is True
+    assert service.to_items(service.list_works())[0].part_running is True
+    assert service.to_detail(service.get_work(work.id)).part_running is True
+
+    asyncio.run(service.run_part_generation(work.id, cid))
+    _read_after_engine_writes(db)
+    assert service.to_item(service.get_work(work.id)).part_running is False
+    assert service.to_items(service.list_works())[0].part_running is False
+    assert service.to_detail(service.get_work(work.id)).part_running is False
 
 
 def test_part_generation_failure_marks_error_and_keeps_old_content(db, model_call):

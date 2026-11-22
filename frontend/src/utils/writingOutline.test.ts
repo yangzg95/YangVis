@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import type { OutlineNode } from '@/api/writing'
 import {
   appendVolume,
+  applyNodeDrop,
+  canDropNode,
   cloneOutline,
   countNodes,
   findLeaf,
@@ -11,6 +13,7 @@ import {
   leafTitles,
   moveLeaf,
   removeLeaf,
+  type TreeDrop,
 } from '@/utils/writingOutline'
 
 function leaf(cid: string, title = cid, kind: 'chapter' | 'section' = 'chapter'): OutlineNode {
@@ -124,5 +127,132 @@ describe('appendVolume / cloneOutline', () => {
     removeLeaf(copy, 'c1')
     expect(findLeaf(tree, 'c1')).toBeDefined()
     expect(findLeaf(copy, 'c1')).toBeUndefined()
+  })
+})
+
+describe('applyNodeDrop / canDropNode（文章）', () => {
+  const articleTree = (): OutlineNode[] => [
+    leaf('s1', '开头', 'section'),
+    leaf('s2', '正文', 'section'),
+    leaf('s3', '结尾', 'section'),
+  ]
+
+  it('根层缝隙重排段落', () => {
+    const tree = articleTree()
+    const drop: TreeDrop = { dragCid: 's3', dropCid: 's1', placement: 'before' }
+    expect(canDropNode(tree, 'article', drop)).toBe(true)
+    expect(applyNodeDrop(tree, 'article', drop)).toBe(true)
+    expect(tree.map((n) => n.cid)).toEqual(['s3', 's1', 's2'])
+  })
+
+  it('inside 落点对扁平段落非法，树不动', () => {
+    const tree = articleTree()
+    const drop: TreeDrop = { dragCid: 's1', dropCid: 's2', placement: 'inside' }
+    expect(canDropNode(tree, 'article', drop)).toBe(false)
+    expect(applyNodeDrop(tree, 'article', drop)).toBe(false)
+    expect(tree.map((n) => n.cid)).toEqual(['s1', 's2', 's3'])
+  })
+})
+
+describe('applyNodeDrop / canDropNode（小说）', () => {
+  // 两卷 + 一个顶层章，覆盖全部容器组合。
+  const fullTree = (): OutlineNode[] => [
+    volume('v1', [leaf('c1'), leaf('c2')]),
+    volume('v2', [leaf('c3'), leaf('c4')]),
+    leaf('c5'),
+  ]
+
+  const rootIds = (tree: OutlineNode[]) => tree.map((n) => n.cid)
+  const childIds = (tree: OutlineNode[], volumeCid: string) =>
+    (tree.find((n) => n.cid === volumeCid) as OutlineNode).children?.map((n) => n.cid)
+
+  it('同卷内缝隙重排', () => {
+    const tree = fullTree()
+    expect(applyNodeDrop(tree, 'novel', { dragCid: 'c1', dropCid: 'c2', placement: 'after' })).toBe(true)
+    expect(childIds(tree, 'v1')).toEqual(['c2', 'c1'])
+  })
+
+  it('跨卷移动：卷一章落进卷二的缝隙', () => {
+    const tree = fullTree()
+    const drop: TreeDrop = { dragCid: 'c1', dropCid: 'c3', placement: 'after' }
+    expect(canDropNode(tree, 'novel', drop)).toBe(true)
+    expect(applyNodeDrop(tree, 'novel', drop)).toBe(true)
+    expect(childIds(tree, 'v1')).toEqual(['c2'])
+    expect(childIds(tree, 'v2')).toEqual(['c3', 'c1', 'c4'])
+  })
+
+  it('章落到卷上=入卷，挂到该卷末尾', () => {
+    const tree = fullTree()
+    expect(applyNodeDrop(tree, 'novel', { dragCid: 'c5', dropCid: 'v2', placement: 'inside' })).toBe(true)
+    expect(rootIds(tree)).toEqual(['v1', 'v2'])
+    expect(childIds(tree, 'v2')).toEqual(['c3', 'c4', 'c5'])
+  })
+
+  it('卷内章落到根层卷缝隙=提为顶层章', () => {
+    const tree = fullTree()
+    expect(applyNodeDrop(tree, 'novel', { dragCid: 'c1', dropCid: 'v2', placement: 'before' })).toBe(true)
+    expect(rootIds(tree)).toEqual(['v1', 'c1', 'v2', 'c5'])
+    expect(childIds(tree, 'v1')).toEqual(['c2'])
+  })
+
+  it('顶层章落到另一顶层章缝隙，根层重排', () => {
+    const tree = fullTree()
+    expect(applyNodeDrop(tree, 'novel', { dragCid: 'c5', dropCid: 'v1', placement: 'before' })).toBe(true)
+    expect(rootIds(tree)).toEqual(['c5', 'v1', 'v2'])
+  })
+
+  it('卷在根层重排', () => {
+    const tree = fullTree()
+    expect(applyNodeDrop(tree, 'novel', { dragCid: 'v2', dropCid: 'v1', placement: 'before' })).toBe(true)
+    expect(rootIds(tree)).toEqual(['v2', 'v1', 'c5'])
+    // 卷内顺序原样跟着走
+    expect(childIds(tree, 'v2')).toEqual(['c3', 'c4'])
+  })
+
+  it('卷不能嵌套：inside 任何节点都非法', () => {
+    const tree = fullTree()
+    expect(canDropNode(tree, 'novel', { dragCid: 'v1', dropCid: 'v2', placement: 'inside' })).toBe(false)
+    expect(applyNodeDrop(tree, 'novel', { dragCid: 'v1', dropCid: 'v2', placement: 'inside' })).toBe(false)
+    expect(canDropNode(tree, 'novel', { dragCid: 'v1', dropCid: 'c1', placement: 'inside' })).toBe(false)
+    expect(rootIds(tree)).toEqual(['v1', 'v2', 'c5'])
+  })
+
+  it('卷不能挪进卷内：对卷内章的缝隙落点非法', () => {
+    const tree = fullTree()
+    const drop: TreeDrop = { dragCid: 'v1', dropCid: 'c3', placement: 'after' }
+    expect(canDropNode(tree, 'novel', drop)).toBe(false)
+    expect(applyNodeDrop(tree, 'novel', drop)).toBe(false)
+    expect(rootIds(tree)).toEqual(['v1', 'v2', 'c5'])
+  })
+
+  it('章没有 children：章对章 inside 非法', () => {
+    const tree = fullTree()
+    const drop: TreeDrop = { dragCid: 'c1', dropCid: 'c3', placement: 'inside' }
+    expect(canDropNode(tree, 'novel', drop)).toBe(false)
+    expect(applyNodeDrop(tree, 'novel', drop)).toBe(false)
+    expect(childIds(tree, 'v1')).toEqual(['c1', 'c2'])
+  })
+
+  it('原地不动判 no-op：拖自己、末章入本卷、未知 cid', () => {
+    const tree = fullTree()
+    expect(applyNodeDrop(tree, 'novel', { dragCid: 'c1', dropCid: 'c1', placement: 'before' })).toBe(false)
+    // c4 是 v2 最后一个孩子，入本卷末尾等于原位
+    expect(applyNodeDrop(tree, 'novel', { dragCid: 'c4', dropCid: 'v2', placement: 'inside' })).toBe(false)
+    expect(applyNodeDrop(tree, 'novel', { dragCid: 'nope', dropCid: 'c1', placement: 'before' })).toBe(false)
+    expect(rootIds(tree)).toEqual(['v1', 'v2', 'c5'])
+    expect(childIds(tree, 'v1')).toEqual(['c1', 'c2'])
+    expect(childIds(tree, 'v2')).toEqual(['c3', 'c4'])
+  })
+
+  it('非末位章入本卷 = 挪到卷末，不是 no-op', () => {
+    const tree = fullTree()
+    expect(applyNodeDrop(tree, 'novel', { dragCid: 'c3', dropCid: 'v2', placement: 'inside' })).toBe(true)
+    expect(childIds(tree, 'v2')).toEqual(['c4', 'c3'])
+  })
+
+  it('树上找不到的 cid 一律拒绝', () => {
+    const tree = fullTree()
+    expect(canDropNode(tree, 'novel', { dragCid: 'garbage', dropCid: 'c1', placement: 'before' })).toBe(false)
+    expect(canDropNode(tree, 'novel', { dragCid: 'c1', dropCid: '', placement: 'before' })).toBe(false)
   })
 })

@@ -3682,6 +3682,9 @@ class WritingWorkItem(BaseModel):
     # 词表与 workflows 包的 SUBJECT_* 同形：uploaded=还没跑过，analyzing/ready/error。
     status: str = "uploaded"
     error_msg: Optional[str] = None
+    # 作品级 status 只翻译 writing-work 运行；任一正文块在跑（writing-part）由此标志
+    # 单独带出，列表页据此禁用删除等结构操作。
+    part_running: bool = False
     created_at: datetime
     updated_at: datetime
 
