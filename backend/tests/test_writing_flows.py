@@ -471,6 +471,44 @@ def test_part_running_flag_follows_part_runs(db, model_call):
     assert service.to_detail(service.get_work(work.id)).part_running is False
 
 
+def test_written_count_follows_parts_with_real_content(db, model_call):
+    """written_count 只数 word_count>0 的块（纯空白不计），批量列表与详情同口径。"""
+    model_call("AI 补写的正文。")
+    service = _service(db)
+    work = _work(db)
+    cids = _outline(service, work, "novel")
+
+    def snapshot():
+        listed = service.to_items(service.list_works())[0]
+        detail = service.to_detail(service.get_work(work.id))
+        return listed, detail
+
+    listed, detail = snapshot()
+    assert listed.part_count == 2 and listed.written_count == 0 and listed.word_count == 0
+    assert detail.written_count == 0
+
+    # 一块写上正文：成稿数 1/2，字数跟着涨。
+    service.update_part(work.id, cids[0], title=None, content="第一章的手写正文，足足几十个字。" * 2)
+    listed, detail = snapshot()
+    assert listed.written_count == 1 and listed.word_count > 0
+    assert detail.written_count == 1
+
+    # 纯空白不算成稿（与编辑器空块同口径），第二块仍不计入。
+    service.update_part(work.id, cids[1], title=None, content="   \n\t ")
+    assert service.to_items(service.list_works())[0].written_count == 1
+
+    # AI 把第二块也写出来：2/2 全部成稿。
+    service.start_part_generation(work.id, cids[1], "draft")
+    asyncio.run(service.run_part_generation(work.id, cids[1]))
+    _read_after_engine_writes(db)
+    listed = service.to_items(service.list_works())[0]
+    assert listed.part_count == 2 and listed.written_count == 2
+
+    # 手工清空一块后回落到 1/2。
+    service.update_part(work.id, cids[0], title=None, content="")
+    assert service.to_items(service.list_works())[0].written_count == 1
+
+
 def test_part_generation_failure_marks_error_and_keeps_old_content(db, model_call):
     model_call(RuntimeError("上游 502"))
     service = _service(db)

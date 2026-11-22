@@ -16,7 +16,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import Select, delete, func, or_, select
+from sqlalchemy import Select, case, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -672,8 +672,13 @@ class WritingService:
 
     # -- 序列化 -------------------------------------------------------------
 
-    def _counts_map(self, work_ids: List[int]) -> Dict[int, Tuple[int, int]]:
-        """一次查询取回每部作品的 ``(块数, 总字数)``，列表页不是每行一次查询。"""
+    def _counts_map(self, work_ids: List[int]) -> Dict[int, Tuple[int, int, int]]:
+        """一次分组查询取回每部作品的 ``(块数, 总字数, 已成稿块数)``。
+
+        「成稿」按 ``word_count > 0`` 判定：word_count 在每次写入时由 count_words
+        重算（纯空白/标点为 0），与列表展示的字数同源，且避开 sqlite trim 只去
+        0x20、不去 ``\\n\\t`` 的跨库口径差异。一条 SQL 取回，不是每行一次查询。
+        """
         if not work_ids:
             return {}
         rows = self._db.execute(
@@ -681,6 +686,10 @@ class WritingService:
                 WritingPart.work_id,
                 func.count(WritingPart.id),
                 func.coalesce(func.sum(WritingPart.word_count), 0),
+                func.coalesce(
+                    func.sum(case((WritingPart.word_count > 0, 1), else_=0)),
+                    0,
+                ),
             )
             .where(
                 WritingPart.owner_id == self._owner_id,
@@ -688,7 +697,7 @@ class WritingService:
             )
             .group_by(WritingPart.work_id)
         ).all()
-        return {row[0]: (row[1], int(row[2])) for row in rows}
+        return {row[0]: (row[1], int(row[2]), int(row[3])) for row in rows}
 
     def _part_running_work_ids(self, works: List[WritingWork]) -> set:
         """整页列表里「有正文块正在生成」的作品 id，两条查询取回、不是每行一次。"""
@@ -713,10 +722,10 @@ class WritingService:
         self,
         work: WritingWork,
         run: Optional[WorkflowRun],
-        counts: Optional[Tuple[int, int]] = None,
+        counts: Optional[Tuple[int, int, int]] = None,
         part_running: bool = False,
     ) -> WritingWorkItem:
-        part_count, word_count = counts or (0, 0)
+        part_count, word_count, written_count = counts or (0, 0, 0)
         has_outline = bool(flatten_leaves(work.outline or []))
         # 产物 = 大纲里有叶子；没有运行又没有大纲的新作就是「待生成」（uploaded）。
         status, error_msg = subject_state(
@@ -735,6 +744,7 @@ class WritingService:
             params=dict(work.params or {}),
             part_count=part_count,
             word_count=word_count,
+            written_count=written_count,
             status=status,
             error_msg=error_msg,
             part_running=part_running,
@@ -742,7 +752,9 @@ class WritingService:
             updated_at=work.updated_at,
         )
 
-    def to_item(self, work: WritingWork, counts: Optional[Tuple[int, int]] = None) -> WritingWorkItem:
+    def to_item(
+        self, work: WritingWork, counts: Optional[Tuple[int, int, int]] = None
+    ) -> WritingWorkItem:
         run = latest_run(self._db, self._owner_id, SUBJECT_WRITING_WORK, work.id)
         # 单对象路径（生成接口的排队快照等）：直接查该作品的块级运行。
         return self._item_of(
@@ -759,7 +771,7 @@ class WritingService:
             self._item_of(
                 work,
                 runs.get(str(work.id)),
-                counts.get(work.id, (0, 0)),
+                counts.get(work.id, (0, 0, 0)),
                 part_running=work.id in running_work_ids,
             )
             for work in works
@@ -797,7 +809,15 @@ class WritingService:
                     updated_at=part.updated_at,
                 )
             )
-        item = self.to_item(work, counts=(len(parts), sum(p.word_count for p in parts)))
+        item = self.to_item(
+            work,
+            counts=(
+                len(parts),
+                sum(p.word_count for p in parts),
+                # 与 _counts_map 严格同口径：认 word_count，不认 strip，避免双份真理。
+                sum(1 for p in parts if p.word_count > 0),
+            ),
+        )
         # 块状态刚在上面逐块翻译过，part_running 直接复用，不再多发一次运行查询。
         item.part_running = any(part.status == SUBJECT_ANALYZING for part in part_outs)
         return WritingWorkDetail(

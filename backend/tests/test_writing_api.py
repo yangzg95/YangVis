@@ -97,6 +97,7 @@ def test_create_and_kind_filter_and_list_shape(client):
 
     row = novel_rows["items"][0]
     assert row["part_count"] == 0 and row["word_count"] == 0
+    assert row["written_count"] == 0 and row["part_running"] is False
     # 列表行不拖长字段：brief/outline/parts 只在详情里出现。
     assert "brief" not in row and "outline" not in row and "parts" not in row
 
@@ -471,6 +472,12 @@ def test_part_generate_returns_analyzing_then_writes_content(client, generation_
     target = next(part for part in detail["parts"] if part["cid"] == cid)
     assert target["status"] == "ready" and target["error_msg"] is None
     assert target["word_count"] > 0 and "少年一步踏入雨幕" in target["content"]
+
+    # 两块大纲只成稿一块：列表与详情的 written_count 都翻到 1，part_count 仍是 2。
+    listed = client.get("/api/studio/works", params={"kind": "novel"}).json()["data"]["items"]
+    row = next(item for item in listed if item["id"] == work["id"])
+    assert row["part_count"] == 2 and row["written_count"] == 1
+    assert detail["written_count"] == 1
 
 
 def test_part_generate_business_rejections_are_envelopes(client, generation_env):

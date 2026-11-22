@@ -784,7 +784,22 @@ window.addEventListener('beforeunload', beforeUnload)
 <style scoped>
 .studio-workbench {
   display: flex;
-  min-height: calc(100vh - 120px);
+  /* 填满 dashboard-main 的内容盒并自己收口滚动：原先的 min-height+自然高度会被
+     长正文撑破，让外层 .dashboard-main 多出一条整页滚动条，与栏内滚动并存，
+     滚到底再拉就露出外壳灰底（双滚动条/页面空白）。 */
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* wb-body 外包了 a-spin，它的两层容器默认是 block，会截断 flex 高度链：
+   穿透补成 flex 列容器，wb-body 的 flex:1 才有着力点。 */
+.studio-workbench :deep(.ant-spin-nested-loading),
+.studio-workbench :deep(.ant-spin-container) {
+  display: flex;
+  flex: 1;
+  min-height: 0;
   flex-direction: column;
 }
 
@@ -881,6 +896,7 @@ window.addEventListener('beforeunload', beforeUnload)
 .wb-main {
   display: flex;
   min-width: 0;
+  min-height: 0;
   flex: 1;
   gap: 16px;
 }
@@ -888,6 +904,9 @@ window.addEventListener('beforeunload', beforeUnload)
 .pane {
   display: flex;
   min-width: 0;
+  /* 缺了它，flex 子项默认 min-height:auto 会被长正文/长预览撑到自然高度，
+     层层向上撑破工作台，overflow:auto 永远不触发。 */
+  min-height: 0;
   flex: 1;
   flex-direction: column;
 }

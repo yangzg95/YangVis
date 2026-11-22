@@ -113,6 +113,8 @@ export interface WritingWorkItem {
   params: Record<string, string | number>
   part_count: number
   word_count: number
+  /** 已成稿（word_count>0，纯空白/标点不计）的块数，列表页展示「已写 x/y」的写作进度。 */
+  written_count: number
   status: WritingWorkStatus
   error_msg: string | null
   /** 任一正文块正在生成（writing-part 运行中）：列表页据此禁用删除等结构操作。 */

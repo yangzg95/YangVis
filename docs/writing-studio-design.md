@@ -189,10 +189,12 @@ WRITING_CONTEXT_MAX_CHARS         = 12000  # 喂模型的上下文窗口闸门�
 ### 5.2 列表页
 
 tab 由 route query 驱动；表格列 = 标题（副标题带题材/类型）、状态 tag
-（M2 起 analyzing/ready/error，点击开运行抽屉）、总字数、更新时间、操作
-（工作台/删除/导出）；`createPollLoop` 仅在有 analyzing 行时轮询，
-`onDeactivated` 停表；完成跃迁发带「打开工作台」按钮的 notification。
-全部复用 Slides.vue 已验证写法。
+（M2 起 analyzing/ready/error，点击开运行抽屉；块级在跑时其下另挂橙色
+「章节/段落生成中」标签）、写作进度（`已写 x/y 章` + mini 进度条 + 总字数，
+零块大纲显示「待建大纲」）、更新时间（下附创建时间）、操作
+（工作台/删除/导出）；`createPollLoop` 在有 analyzing 行或任一行
+`part_running` 时轮询，`onDeactivated` 停表；完成跃迁发带「打开工作台」
+按钮的 notification。全部复用 Slides.vue 已验证写法。
 
 ### 5.3 工作台三栏
 
@@ -370,6 +372,30 @@ owner 隔离 404、cid 发放与大纲清洗、字数统计、运行中拦截删
 >   RUN_RUNNING、第二 TestClient 验列表/详情/删除闸门）；全量回归 1993 passed
 >   in 331s（81 个既有 warning，零失败）。前端保持 170 个用例全绿，vue-tsc 与
 >   生产构建通过。
+>
+> 列表信息密度增强与工作台滚动修复（2026-11）：
+> - **后端新增 `written_count`**：成稿块数随 `_counts_map` 一次分组查询取回
+>   （块数/总字数/成稿数同一条 SQL），判定口径是 `word_count > 0` 而不是
+>   `trim(content) != ''`——sqlite 的 trim 只去 0x20、不去 `\n\t`，与 Python
+>   strip 不同口径；word_count 本就在每次写入时由 count_words 重算（纯空白/
+>   标点为 0），与列表展示的字数同源，跨 sqlite/mysql 行为一致。`to_detail`
+>   的 Python 侧计数严格同口径，避免双份真理。
+> - **列表行丰富化**：进度列从「x 章 · y 字」升级为「已写 x/y 章 + a-progress
+>   mini 进度条 + 千分位总字数」，零块显示「待建大纲」；状态列在作品级 tag 下
+>   挂橙色「章节/段落生成中」标签（part_running 独立于作品级 status）；时间列
+>   补创建时间；轮询条件从只认作品级 analyzing 扩为 `analyzing || part_running`，
+>   块级生成结束后标签与进度条自动收口。
+> - **修工作台双滚动条/页面空白**：根因有三处——`.studio-workbench` 用
+>   `min-height: calc(100vh-120px)` 自然高度被长正文撑破外层 `.dashboard-main`
+>   （它才是设计中的页面滚动容器）；`.wb-body` 外包的 a-spin 两层容器是 block，
+>   截断了 flex 高度链，`wb-body` 的 flex:1 没有着力点；`.wb-main`/`.pane` 缺
+>   `min-height:0`，flex 子项默认 min-height:auto 被内容撑到自然高度，栏内
+>   `overflow:auto` 永不触发。修法：工作台改 `height:100%; overflow:hidden`
+>   填满 dashboard-main 内容盒，`:deep()` 把 a-spin 两层容器补成 flex 列，
+>   高度链补齐 min-height:0，滚动只发生在大纲树/编辑框/预览三栏内部。
+> - 测试：后端写作三套 104 个（flows 新增 written_count 全生命周期 1 个、
+>   api 在既有用例上补字段断言），全量回归 1994 passed in 192s（零失败）；
+>   前端 170 个用例全绿，vue-tsc 与生产构建通过。
 
 v1 backlog（明确不做）：SSE 逐字流式、知识库 RAG 喂设定、小说批量章节生成、
 作品回收站（v1 同 slides 硬删除）、与短视频人物库联动。

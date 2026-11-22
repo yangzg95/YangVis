@@ -52,25 +52,45 @@
           <div class="cell-sub">{{ subtitle(record) }}</div>
         </template>
         <template v-else-if="column.key === 'status'">
-          <!-- 状态由最近一次运行翻译，点 tag 直接看那次运行的现场；没跑过的新作不显示。 -->
-          <a-tooltip :title="statusHint(record.status, record.error_msg)">
-            <a-tag
-              v-if="record.status !== 'uploaded'"
-              :color="statusColor(record.status)"
-              class="run-tag"
-              @click="openRuns(record)"
-            >
-              <LoadingOutlined v-if="record.status === 'analyzing'" />
-              {{ statusText(record.status) }}
+          <div class="status-cell">
+            <!-- 状态由最近一次运行翻译，点 tag 直接看那次运行的现场；没跑过的新作不显示。 -->
+            <a-tooltip :title="statusHint(record.status, record.error_msg)">
+              <a-tag
+                v-if="record.status !== 'uploaded'"
+                :color="statusColor(record.status)"
+                class="run-tag"
+                @click="openRuns(record)"
+              >
+                <LoadingOutlined v-if="record.status === 'analyzing'" />
+                {{ statusText(record.status) }}
+              </a-tag>
+              <span v-else class="muted">待生成</span>
+            </a-tooltip>
+            <!-- 块级运行不进作品级 status，单独挂一个橙色标签，让列表看得见章节在跑。 -->
+            <a-tag v-if="record.part_running" color="orange" class="part-running-tag">
+              <LoadingOutlined /> {{ activeKind === 'novel' ? '章节生成中' : '段落生成中' }}
             </a-tag>
-            <span v-else class="muted">待生成</span>
-          </a-tooltip>
+          </div>
         </template>
         <template v-else-if="column.key === 'progress'">
-          {{ record.part_count }} {{ activeKind === 'novel' ? '章' : '段' }} · {{ record.word_count }} 字
+          <div v-if="record.part_count === 0" class="muted">待建大纲</div>
+          <div v-else class="progress-cell">
+            <div class="progress-line">
+              已写 <b>{{ record.written_count }}</b> / {{ record.part_count }}
+              {{ activeKind === 'novel' ? '章' : '段' }}
+              <span class="muted">· {{ record.word_count.toLocaleString() }} 字</span>
+            </div>
+            <a-progress
+              size="small"
+              :percent="progressPercent(record)"
+              :show-info="false"
+              class="progress-bar"
+            />
+          </div>
         </template>
         <template v-else-if="column.key === 'updated_at'">
-          <span class="muted">{{ fmtDateTime(record.updated_at) }}</span>
+          <div>{{ fmtDateTime(record.updated_at) }}</div>
+          <div class="muted cell-sub">创建于 {{ fmtShortDateTime(record.created_at) }}</div>
         </template>
         <template v-else-if="column.key === 'actions'">
           <a-space :size="4" wrap>
@@ -143,7 +163,7 @@ import {
 } from '@/api'
 import { saveBlobResponse } from '@/utils/download'
 import { errorText } from '@/utils/errors'
-import { fmtDateTime } from '@/utils/format'
+import { fmtDateTime, fmtShortDateTime } from '@/utils/format'
 import { createPollLoop } from '@/utils/polling'
 import WorkCreateModal from '@/components/writing/WorkCreateModal.vue'
 import WorkflowRunsDrawer from '@/components/WorkflowRunsDrawer.vue'
@@ -173,11 +193,16 @@ const activeTab = computed({
 
 const columns = [
   { key: 'title', title: '标题', dataIndex: 'title', ellipsis: true },
-  { key: 'status', title: '状态', dataIndex: 'status', width: 110 },
-  { key: 'progress', title: '章节 / 字数', width: 150 },
+  { key: 'status', title: '状态', dataIndex: 'status', width: 130 },
+  { key: 'progress', title: '写作进度', width: 200 },
   { key: 'updated_at', title: '更新时间', dataIndex: 'updated_at', width: 180 },
   { key: 'actions', title: '操作', width: 230 },
 ]
+
+/** 成稿块占比：0 块大纲时进度条不渲染，这里只处理 part_count>0 的行。 */
+function progressPercent(record: WritingWorkItem): number {
+  return Math.round((record.written_count / record.part_count) * 100)
+}
 
 function openRuns(record: WritingWorkItem) {
   runsSubject.value = { kind: 'writing-work', ref: record.id, label: record.title }
@@ -256,12 +281,15 @@ function notifyFinished(item: WritingWorkItem) {
 }
 
 // 生成是后台任务，列表靠轮询跟随；失败退避、页面隐藏暂停见 utils/polling.ts。
+// 块级生成（part_running）也要跟：否则「章节生成中」标签和进度条不会自动收口。
+const hasLiveWork = () =>
+  works.value.some((item) => item.status === 'analyzing' || item.part_running)
 const pollLoop = createPollLoop(() => load(false), {
-  shouldContinue: () => works.value.some((item) => item.status === 'analyzing'),
+  shouldContinue: hasLiveWork,
 })
 
 function syncPolling() {
-  if (works.value.some((item) => item.status === 'analyzing')) pollLoop.start()
+  if (hasLiveWork()) pollLoop.start()
   else pollLoop.stop()
 }
 
@@ -350,6 +378,32 @@ onUnmounted(() => pollLoop.stop())
 
 .run-tag {
   cursor: pointer;
+}
+
+.status-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+/* a-tag 默认带右侧 margin，竖排时会让标签视觉不贴左。 */
+.part-running-tag {
+  margin-inline-end: 0;
+}
+
+.progress-cell {
+  min-width: 150px;
+}
+
+.progress-line {
+  margin-bottom: 2px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.progress-bar {
+  margin: 0;
 }
 
 .delete-cell {

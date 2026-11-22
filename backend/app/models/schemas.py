@@ -3679,6 +3679,9 @@ class WritingWorkItem(BaseModel):
     params: Dict[str, Any] = Field(default_factory=dict)
     part_count: int = 0
     word_count: int = 0
+    # 已成稿（word_count>0，纯空白/标点不计）的块数：列表页据此展示「已写 x/y 章」
+    # 的写作进度，与 part_count 同源一次分组查询取回，不是每行一次。
+    written_count: int = 0
     # 词表与 workflows 包的 SUBJECT_* 同形：uploaded=还没跑过，analyzing/ready/error。
     status: str = "uploaded"
     error_msg: Optional[str] = None
