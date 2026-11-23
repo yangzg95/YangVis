@@ -141,6 +141,55 @@ class MaterialService:
             raise LookupError("素材不存在")
         return asset
 
+    def list_trash(
+        self,
+        kind: Optional[str] = None,
+        keyword: Optional[str] = None,
+        limit: int = 60,
+        offset: int = 0,
+    ) -> Tuple[List[MaterialAsset], int]:
+        """回收期里的素材一页 + 筛选后总数。
+
+        与 :meth:`list_assets` 反着来：只看 ``deleted_at`` 非空的行；先懒清理过期项，
+        让回收站里永远不会出现「倒计时已经是 0 却还能恢复」的行。排序按删除时刻倒序——
+        晚删的剩余窗口最长，恢复价值最高，放最前。
+        """
+        self.purge_expired()
+        stmt = self._scope(select(MaterialAsset)).where(MaterialAsset.deleted_at.is_not(None))
+        if kind in MATERIAL_KINDS:
+            stmt = stmt.where(MaterialAsset.kind == kind)
+        term = (keyword or "").strip().translate(_LIKE_ESCAPE)
+        if term:
+            like = f"%{term}%"
+            stmt = stmt.where(
+                or_(
+                    MaterialAsset.name.ilike(like, escape="/"),
+                    MaterialAsset.tag.ilike(like, escape="/"),
+                )
+            )
+        total = int(self._db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+        rows = list(
+            self._db.scalars(
+                stmt.order_by(MaterialAsset.deleted_at.desc(), MaterialAsset.id.desc())
+                .limit(max(1, min(int(limit or 60), MAX_PAGE_SIZE)))
+                .offset(max(0, int(offset or 0)))
+            ).all()
+        )
+        return rows, total
+
+    def trash_count(self) -> int:
+        """回收站内还没过期的条数，给列表页的入口角标用；同样先懒清理。"""
+        self.purge_expired()
+        return int(
+            self._db.scalar(
+                select(func.count(MaterialAsset.id)).where(
+                    MaterialAsset.owner_id == self._owner_id,
+                    MaterialAsset.deleted_at.is_not(None),
+                )
+            )
+            or 0
+        )
+
     # -- 写 -------------------------------------------------------------------
 
     def add(self, stored: StoredMaterial, name: str, tag: str | None = None) -> MaterialAsset:

@@ -3224,6 +3224,37 @@ class MaterialListOut(BaseModel):
     max_per_owner: int = 0
     # 删除后的撤销窗口：界面照它写「N 分钟内可撤销」，与后端配置同一口径。
     trash_ttl_seconds: int = 0
+    # 回收期里还没过期的条数：素材库页的「回收站」入口角标照它显示。
+    trash_count: int = 0
+
+
+class MaterialTrashItemOut(BaseModel):
+    """回收期里的一条素材：普通字段之外带删除时刻与距真删的剩余秒数。
+
+    ``expires_in_seconds`` 在请求时刻按服务端时钟算好，界面只做减法展示，不自己
+    拼 ``deleted_at + TTL``——浏览器时钟与服务器不齐时倒计时会凭空多出/少掉一截。
+    """
+
+    id: int
+    kind: MaterialKind
+    name: str
+    tag: Optional[str] = None
+    mime: str = ""
+    size: int = 0
+    url: str = ""
+    thumb_url: str = ""
+    created_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None
+    # 距回收期结束（真删文件、解引用）还剩多少秒，请求时刻的服务端口径。
+    expires_in_seconds: int = 0
+
+
+class MaterialTrashListOut(BaseModel):
+    """回收站一屏：回收期内的行按删除时刻倒序，晚删的剩余时间最多、排最前。"""
+
+    items: List[MaterialTrashItemOut] = Field(default_factory=list)
+    total: int = 0
+    trash_ttl_seconds: int = 0
 
 
 # ---- 人物库 -----------------------------------------------------------------
@@ -3468,6 +3499,17 @@ class VideoShotsSave(BaseModel):
     # 上限比 settings.VIDEO_MAX_SHOTS 宽：那条是「模型能产出多少镜」的闸门，
     # 这里是「别把一次请求塞进几百行」的闸门，服务层再按前者裁。
     shots: List[VideoShotIn] = Field(default_factory=list, max_length=60)
+
+
+class TtsPreviewIn(BaseModel):
+    """工作台单句试听：拿当前台词与项目音色真合成一段短音频。
+
+    试听是真计费调用，所以文本上限与镜头台词同档（512），由界面按钮显式触发，
+    不做任何自动调用。``voice`` 留空时退到服务端 ``TTS_DEFAULT_VOICE``。
+    """
+
+    text: str = Field(min_length=1, max_length=512)
+    voice: Optional[str] = Field(default=None, max_length=128)
 
 
 class VideoRenderRequest(BaseModel):

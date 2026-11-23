@@ -22,6 +22,12 @@
           {{ filtered.length === items.length ? `共 ${total} 条` : `筛出 ${filtered.length} / ${total} 条` }}
           · 占用 {{ fmtSize(bytesTotal) }} · 一个账号最多 {{ maxPerOwner }} 条
         </span>
+        <!-- 角标为 0 时 Badge 自己藏掉：没有回收物就不占视觉位。 -->
+        <a-badge :count="trashCount" :offset="[-6, 4]">
+          <a-button @click="openTrash">
+            <DeleteOutlined /> 回收站
+          </a-button>
+        </a-badge>
         <a-upload
           :before-upload="onUpload"
           :show-upload-list="false"
@@ -239,6 +245,77 @@
         </div>
       </a-spin>
     </a-modal>
+
+    <!-- 回收站：软删的素材在撤销窗口内都在这里，到期才真删文件、解镜头引用。 -->
+    <a-drawer
+      v-model:open="trashOpen"
+      title="回收站"
+      width="720"
+      :destroy-on-close="false"
+    >
+      <div class="toolbar toolbar--between toolbar--snug">
+        <a-space :size="8" wrap>
+          <a-radio-group v-model:value="trashKind" button-style="solid" size="small">
+            <a-radio-button value="">全部</a-radio-button>
+            <a-radio-button value="image">图片</a-radio-button>
+            <a-radio-button value="video">视频</a-radio-button>
+          </a-radio-group>
+          <a-input-search
+            v-model:value="trashKeyword"
+            placeholder="按名称或分组搜"
+            allow-clear
+            size="small"
+            style="width: 220px"
+          />
+        </a-space>
+        <a-space :size="8">
+          <a-button size="small" :disabled="!trashItems.length" @click="restoreAllTrash">
+            <UndoOutlined /> 全部恢复
+          </a-button>
+          <a-button size="small" @click="loadTrash">刷新</a-button>
+        </a-space>
+      </div>
+      <div class="hint trash-hint">
+        删除的素材先在这里放 {{ undoWindowLabel }}，到期才真正删除文件并解除镜头引用；
+        若素材库名额已满，恢复会先放回更早删除的，其余的继续留在这里。
+      </div>
+
+      <a-spin :spinning="trashLoading">
+        <ul v-if="filteredTrash.length" class="trash-list">
+          <li v-for="item in filteredTrash" :key="item.id" class="trash-row">
+            <span class="trash-thumb">
+              <img
+                v-if="item.kind === 'image'"
+                :src="item.thumb_url || item.url"
+                :alt="item.name"
+                loading="lazy"
+              />
+              <video v-else-if="item.url" :src="item.url" preload="metadata" muted playsinline />
+              <span v-else class="thumb-missing">已丢失</span>
+            </span>
+            <span class="trash-body">
+              <span class="trash-name" :title="item.name">{{ item.name }}</span>
+              <span class="hint">
+                <a-tag v-if="item.tag" class="trash-tag">{{ item.tag }}</a-tag>
+                {{ item.kind === 'video' ? '视频' : '图片' }} · {{ fmtSize(item.size) }}
+                · 删除于 {{ fmtShortDateTime(item.deleted_at) }}
+              </span>
+            </span>
+            <span class="trash-side">
+              <a-tag :color="remainColor(remainingOf(item))">{{ remainLabel(remainingOf(item)) }}</a-tag>
+              <a-button size="small" type="link" @click="restoreOne(item.id)">
+                <UndoOutlined /> 恢复
+              </a-button>
+            </span>
+          </li>
+        </ul>
+        <a-empty
+          v-else
+          :image="simpleEmpty"
+          :description="trashKeyword.trim() || trashKind ? '回收站里没有符合筛选的素材' : '回收站是空的'"
+        />
+      </a-spin>
+    </a-drawer>
   </div>
 </template>
 
@@ -254,12 +331,13 @@
 //
 // 视频类素材只存下来、也能被镜头引用，但那条链路要等参考视频有公网可达地址才通，
 // 所以这里的文案只说「记录」，不说「用上」。
-import { computed, h, onMounted, ref } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   DeleteOutlined,
   EditOutlined,
   EyeOutlined,
   TagsOutlined,
+  UndoOutlined,
   UploadOutlined,
 } from '@ant-design/icons-vue'
 import { Empty, message } from 'ant-design-vue'
@@ -267,6 +345,7 @@ import {
   materialsApi,
   type MaterialAsset,
   type MaterialKind,
+  type MaterialTrashItem,
   type MaterialUsage,
 } from '@/api'
 import { errorText } from '@/utils/errors'
@@ -408,10 +487,129 @@ async function load() {
     bytesTotal.value = data.bytes_total
     maxPerOwner.value = data.max_per_owner
     trashTtlSeconds.value = data.trash_ttl_seconds
+    // 入口角标搭在列表响应里，不单独发请求。
+    trashCount.value = data.trash_count ?? 0
   } finally {
     loading.value = false
   }
 }
+
+// -- 回收站 ----------------------------------------------------------------
+// 软删的素材在撤销窗口内都在这里；到期由后端懒清理，前端只负责展示剩余时间与恢复。
+
+const trashOpen = ref(false)
+const trashLoading = ref(false)
+const trashItems = ref<MaterialTrashItem[]>([])
+const trashCount = ref(0)
+const trashKind = ref<'' | MaterialKind>('')
+const trashKeyword = ref('')
+/** 本次拉取的浏览器时刻：剩余秒数由服务端口径减去本地流逝，避免时钟各算各的。 */
+let trashFetchedAt = 0
+/** 倒计时心跳：30 秒一跳，只服务于剩余时间的重算。 */
+const trashTick = ref(0)
+let trashTimer: ReturnType<typeof setInterval> | null = null
+
+const filteredTrash = computed(() => {
+  const kw = trashKeyword.value.trim().toLowerCase()
+  return trashItems.value.filter(
+    (item) =>
+      (!trashKind.value || item.kind === trashKind.value) &&
+      (!kw ||
+        item.name.toLowerCase().includes(kw) ||
+        (item.tag || '').toLowerCase().includes(kw)),
+  )
+})
+
+function remainingOf(item: MaterialTrashItem): number {
+  // 引用一次心跳值，让这个随计时器重算。
+  void trashTick.value
+  const elapsed = trashFetchedAt ? Math.floor((Date.now() - trashFetchedAt) / 1000) : 0
+  return Math.max(0, item.expires_in_seconds - elapsed)
+}
+
+function remainLabel(seconds: number): string {
+  if (seconds <= 0) return '即将清除'
+  if (seconds < 60) return `还剩 ${seconds} 秒`
+  return `还剩 ${Math.ceil(seconds / 60)} 分钟`
+}
+
+function remainColor(seconds: number): string {
+  if (seconds <= 0) return 'error'
+  if (seconds <= 60) return 'warning'
+  return 'default'
+}
+
+async function loadTrash() {
+  trashLoading.value = true
+  try {
+    // 回收站上限与账号上限同档（200），一次拉满，筛选在本地做。
+    const data = await materialsApi.trash({ limit: FETCH_LIMIT })
+    trashItems.value = data.items
+    trashCount.value = data.total
+    trashFetchedAt = Date.now()
+    trashTick.value = 0
+  } catch (err) {
+    message.error(errorText(err, '回收站读不出来'))
+  } finally {
+    trashLoading.value = false
+  }
+}
+
+function openTrash() {
+  trashOpen.value = true
+  trashKind.value = ''
+  trashKeyword.value = ''
+  void loadTrash()
+}
+
+async function restoreOne(id: number) {
+  try {
+    const { restored } = await materialsApi.restore([id])
+    if (!restored) {
+      message.warning('没有可恢复的素材：可能已过撤销期限，或素材库名额已满')
+    } else {
+      message.success(`已恢复 ${restored} 条素材`)
+    }
+    await Promise.all([loadTrash(), load()])
+  } catch (err) {
+    message.error(errorText(err, '恢复失败'))
+  }
+}
+
+async function restoreAllTrash() {
+  const ids = trashItems.value.map((item) => item.id)
+  if (!ids.length) return
+  try {
+    const { restored } = await materialsApi.restore(ids)
+    if (!restored) {
+      message.warning('一条都没恢复：可能已过撤销期限，或素材库名额已满')
+    } else if (restored < ids.length) {
+      message.warning(`名额已满，只恢复了 ${restored} 条，其余的继续留在回收站`)
+    } else {
+      message.success(`已恢复 ${restored} 条素材`)
+    }
+    await Promise.all([loadTrash(), load()])
+  } catch (err) {
+    message.error(errorText(err, '恢复失败'))
+  }
+}
+
+// 抽屉开着才跳表；有条目倒计时归零就重拉一次，让到期项随后端懒清理消失。
+watch(trashOpen, (open) => {
+  if (open && !trashTimer) {
+    trashTimer = setInterval(() => {
+      trashTick.value += 1
+      if (trashItems.value.some((item) => remainingOf(item) <= 0)) void loadTrash()
+    }, 30_000)
+  } else if (!open && trashTimer) {
+    clearInterval(trashTimer)
+    trashTimer = null
+  }
+})
+
+onBeforeUnmount(() => {
+  if (trashTimer) clearInterval(trashTimer)
+})
 
 // -- 选择与预览 -----------------------------------------------------------
 
@@ -963,5 +1161,76 @@ onMounted(() => void load())
   align-items: center;
   gap: 2px 0;
   margin-top: 10px;
+}
+
+/* 回收站抽屉：行结构与素材选择器同口径，右侧固定倒计时与恢复动作。 */
+.trash-hint {
+  margin: 10px 0;
+}
+
+.trash-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.trash-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.trash-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 52px;
+  height: 52px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.trash-thumb img,
+.trash-thumb video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.trash-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.trash-name {
+  font-weight: 600;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.trash-tag {
+  margin-inline-end: 4px;
+  transform: scale(0.9);
+}
+
+.trash-side {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
 }
 </style>

@@ -36,6 +36,30 @@ export interface MaterialList {
   max_per_owner: number
   /** 删除后的撤销窗口（秒）：界面照它写「N 分钟内可撤销」。 */
   trash_ttl_seconds: number
+  /** 回收期里还没过期的条数：回收站入口角标照它显示。 */
+  trash_count: number
+}
+
+/** 回收期里的一条：普通素材字段之外，带删除时刻与距真删的剩余秒数（请求时刻）。 */
+export interface MaterialTrashItem {
+  id: number
+  kind: MaterialKind
+  name: string
+  tag: string | null
+  mime: string
+  size: number
+  url: string
+  thumb_url: string
+  created_at: string | null
+  deleted_at: string | null
+  /** 距回收期结束还剩多少秒，服务端时钟口径；前端只做减法倒计时。 */
+  expires_in_seconds: number
+}
+
+export interface MaterialTrashList {
+  items: MaterialTrashItem[]
+  total: number
+  trash_ttl_seconds: number
 }
 
 export interface MaterialUsageShot {
@@ -133,4 +157,7 @@ export const materialsApi = {
       data: { ids },
       skipErrorToast: true,
     }),
+  /** 回收站一屏：只列撤销窗口内的素材，带剩余秒数；打开时后端会先清掉过期项。 */
+  trash: (params: { kind?: MaterialKind; q?: string; limit?: number } = {}) =>
+    request<MaterialTrashList>({ url: '/office/materials/trash', params }),
 }

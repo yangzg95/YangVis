@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import io
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -36,6 +36,7 @@ from app.services.materials.service import MaterialService
 from app.services.materials.store import store_material
 from app.services.media import store as media_store
 from app.services.media.store import MediaFileError
+from app.timeutil import db_now
 
 settings = get_settings()
 OWNER = 1
@@ -413,6 +414,66 @@ def test_trash_frees_a_quota_slot_and_restore_respects_the_cap(db, tmp_path, mon
     assert _service(db).list_assets()[1] == 1
 
 
+def test_list_trash_only_returns_trashed_rows_newest_first(db):
+    """回收站只看软删行，按删除时刻倒序：晚删的剩余窗口最长，排最前。"""
+    service = _service(db)
+    first = _add(db, "主角形象.png")
+    second = _add(db, "片头.mp4", MP4)
+    live = _add(db, "还在用.png")
+    service.remove(first.id)
+    service.remove(second.id)
+    # 同一批 remove 会写同一个 now，手工拉开删除时刻，顺序断言才有意义。
+    # 时刻必须相对「现在」往回拨且落在 TTL 内，否则 list_trash 的懒清理会直接当过期清掉。
+    stamp = db_now()
+    db.get(MaterialAsset, first.id).deleted_at = stamp - timedelta(seconds=120)
+    db.get(MaterialAsset, second.id).deleted_at = stamp - timedelta(seconds=30)
+    db.commit()
+
+    rows, total = service.list_trash()
+    assert [row.id for row in rows] == [second.id, first.id]
+    assert total == 2
+    assert service.trash_count() == 2
+    # 正常列表与回收站是两个互不相交的视图。
+    assert [row.id for row in service.list_assets()[0]] == [live.id]
+
+
+def test_list_trash_filters_by_kind_and_keyword(db):
+    """回收站沿用正常列表的两个筛选维度：类别与名字/分组关键字。"""
+    service = _service(db)
+    image = _add(db, "主角形象.png")
+    video = _add(db, "片头.mp4", MP4)
+    service.remove(image.id)
+    service.remove(video.id)
+
+    assert [row.id for row in service.list_trash(kind=KIND_VIDEO)[0]] == [video.id]
+    assert [row.id for row in service.list_trash(keyword="主角")[0]] == [image.id]
+    assert service.list_trash(keyword="不存在的分组")[1] == 0
+
+
+def test_list_trash_purges_expired_rows_first(db):
+    """打开回收站先懒清理：过期行已经真删，不该出现在可恢复列表里。"""
+    service = _service(db)
+    asset = _add(db)
+    service.remove(asset.id)
+    _expire(db, asset.id)
+
+    assert service.list_trash() == ([], 0)
+    assert service.trash_count() == 0
+    db.expire_all()
+    assert db.get(MaterialAsset, asset.id) is None
+
+
+def test_trash_is_owner_scoped(db):
+    """别人账号的回收站对我读作空，与正常列表同一隔离口径。"""
+    service = _service(db)
+    asset = _add(db)
+    service.remove(asset.id)
+
+    other = MaterialService(db, OTHER)
+    assert other.list_trash() == ([], 0)
+    assert other.trash_count() == 0
+
+
 def test_tag_is_normalized_on_write_and_searchable(db):
     """打标分组：空白即摘掉、超长即截断，名字与标签两条检索路都得能命中。"""
     service = _service(db)
@@ -686,6 +747,50 @@ def test_batch_delete_unbinds_only_after_the_window(client, db):
     db.expire_all()
     assert db.get(MaterialAsset, assets[0]) is None
     assert db.get(VideoShot, shot.id).material_ids == []
+
+
+def test_trash_endpoint_lists_the_restore_window_and_list_carries_count(client):
+    """回收站接口：删除后能按剩余秒数看到它，恢复后入口角标归零。"""
+    # 用真 PNG：假文件头的 PNG 生成不了缩略图，thumb_url 会是空串，与回收站逻辑无关。
+    asset_id = client.post(
+        "/api/office/materials", files={"file": ("主角形象.png", _real_png(), "image/png")}
+    ).json()["data"]["id"]
+    client.post("/api/office/materials/batch-delete", json={"ids": [asset_id]})
+
+    listing = client.get("/api/office/materials").json()["data"]
+    assert listing["total"] == 0
+    assert listing["trash_count"] == 1
+
+    trash = client.get("/api/office/materials/trash").json()["data"]
+    assert trash["total"] == 1
+    assert trash["trash_ttl_seconds"] == 600
+    item = trash["items"][0]
+    assert item["id"] == asset_id
+    assert item["deleted_at"] is not None
+    # 刚删的：剩余窗口在 (0, TTL] 之间，边界由服务端时钟钉死。
+    assert 0 < item["expires_in_seconds"] <= 600
+    assert item["url"] and item["thumb_url"], "回收期内文件还在，URL 照常可拼"
+
+    restored = client.post(
+        "/api/office/materials/batch-restore", json={"ids": [asset_id]}
+    ).json()
+    assert restored["data"] == {"restored": 1}
+    assert client.get("/api/office/materials/trash").json()["data"]["total"] == 0
+    assert client.get("/api/office/materials").json()["data"]["trash_count"] == 0
+
+
+def test_trash_endpoint_is_owner_scoped(client_for):
+    """别人删进回收站的素材，我的回收站一条都看不见。"""
+    owner = client_for(OWNER)
+    asset_id = owner.post(
+        "/api/office/materials", files={"file": ("主角形象.png", PNG, "image/png")}
+    ).json()["data"]["id"]
+    owner.post("/api/office/materials/batch-delete", json={"ids": [asset_id]})
+
+    other = client_for(OTHER)
+    body = other.get("/api/office/materials/trash").json()
+    assert body["data"]["total"] == 0
+    assert body["data"]["items"] == []
 
 
 # ---- 旧参考图列的退役 ---------------------------------------------------------

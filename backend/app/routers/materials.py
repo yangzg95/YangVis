@@ -47,6 +47,8 @@ from app.models.schemas import (
     MaterialRenameIn,
     MaterialTagIn,
     MaterialTagResult,
+    MaterialTrashItemOut,
+    MaterialTrashListOut,
     MaterialUsageOut,
 )
 from app.services.materials import MATERIAL_KINDS
@@ -59,6 +61,7 @@ from app.services.uploads import (
     oversize_message,
     read_upload_limited,
 )
+from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.materials")
 
@@ -162,7 +165,49 @@ def list_materials(
             bytes_total=bytes_total,
             max_per_owner=settings.MATERIAL_MAX_PER_OWNER,
             trash_ttl_seconds=service.trash_ttl_seconds,
+            # 列表读取本来就会先懒清理过期项，这里顺手数一遍，入口角标不用单开请求。
+            trash_count=service.trash_count(),
         )
+    )
+
+
+@router.get("/trash", response_model=APIResponse[MaterialTrashListOut])
+def list_trash_materials(
+    kind: str | None = Query(default=None, max_length=8),
+    q: str | None = Query(default=None, max_length=64),
+    limit: int = Query(default=60, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    service: MaterialService = Depends(get_service),
+) -> APIResponse[MaterialTrashListOut]:
+    """回收站一屏：只列撤销窗口内的素材，带距真删的剩余秒数。
+
+    必须声明在 ``/{asset_id}`` 那组路由之前——虽然目前没有 GET 单条路由，
+    显式固定顺序能防后来人加一条 ``GET /{asset_id}`` 把 ``trash`` 吃成 id。
+    """
+    rows, total = service.list_trash(
+        kind=kind if kind in MATERIAL_KINDS else None,
+        keyword=q,
+        limit=limit,
+        offset=offset,
+    )
+    thumbs = _resolve_thumbs(rows)
+    ttl = service.trash_ttl_seconds
+    now = db_now()
+    items: list[MaterialTrashItemOut] = []
+    for row, thumb_url in zip(rows, thumbs):
+        base = _out(row, thumb_url).model_dump()
+        remaining = ttl
+        if row.deleted_at is not None:
+            remaining = max(0, ttl - int((now - row.deleted_at).total_seconds()))
+        items.append(
+            MaterialTrashItemOut(
+                **base,
+                deleted_at=row.deleted_at,
+                expires_in_seconds=remaining,
+            )
+        )
+    return APIResponse(
+        data=MaterialTrashListOut(items=items, total=total, trash_ttl_seconds=ttl)
     )
 
 
