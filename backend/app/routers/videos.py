@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -26,6 +26,8 @@ from app.models.schemas import (
     CurrentUser,
     ListResponse,
     MediaCapacityOut,
+    ModelPurpose,
+    TtsPreviewIn,
     VideoClipRenderRequest,
     VideoProjectCreate,
     VideoProjectDetail,
@@ -34,7 +36,8 @@ from app.models.schemas import (
     VideoRenderRequest,
     VideoShotsSave,
 )
-from app.services.media import store
+from app.services.media import store, tts as tts_client
+from app.services.model_config import default_model_config
 from app.services.videos import VideoService
 
 logger = logging.getLogger("yangvis.videos")
@@ -82,6 +85,54 @@ def render_capacity(
             image_transport=settings.MEDIA_IMAGE_TRANSPORT,
             video_reference_ready=bool((settings.PUBLIC_MEDIA_BASE_URL or "").strip()),
         )
+    )
+
+
+@router.post("/tts-preview")
+async def tts_preview(
+    body: TtsPreviewIn,
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    """单句试听：用项目音色把当前台词真合成一段 mp3 直接回二进制。
+
+    与发布作业同一套准入口径（默认 TTS 配置存在且已测通、音色非空），把「音色写错、
+    句子太长会怎么念」的发现时机从分钟级的成片阶段提前到编辑期。试听是真计费调用，
+    只由界面按钮显式触发；错误仍走统一信封的 JSON，前端按 blob 内容类型分辨。
+    """
+    config = default_model_config(db, user.user_id, ModelPurpose.TTS)
+    if config is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="还没有配置用途为「语音」的默认模型：先在「模型与集成」里添加并测通",
+        )
+    if not config.last_test_ok:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="语音模型还没通过连通性测试：先在「模型与集成」里测通再试听",
+        )
+    clean_text = body.text.strip()
+    if not clean_text:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="试听文本为空",
+        )
+    voice = (body.voice or "").strip() or settings.TTS_DEFAULT_VOICE.strip()
+    if not voice:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="没有可用的音色 ID：项目渲染参数与服务端 TTS_DEFAULT_VOICE 都为空",
+        )
+    try:
+        audio = await tts_client.synthesize(config, text=clean_text, voice=voice)
+    except tts_client.TtsError as exc:
+        # 上游错误已经是中文人话，原样交给界面。
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.friendly()) from exc
+    # no-store：试听音频没有复用价值，别让浏览器/代理缓存占盘。
+    return Response(
+        content=audio,
+        media_type="audio/mpeg",
+        headers={"Cache-Control": "no-store"},
     )
 
 

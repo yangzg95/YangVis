@@ -111,7 +111,13 @@
             :class="['shot-item', { active: index === selected }]"
             @click="selected = index"
           >
-            <span class="shot-no">{{ index + 1 }}</span>
+            <!-- 首帧缩略图：渲过就显示真实画面，没渲过留空框；镜号压在左上角，状态点压右下角。 -->
+            <span class="shot-thumb" :title="shotJobsText(shot)">
+              <img v-if="frameUrlOf(shot)" :src="frameUrlOf(shot)" :alt="`第 ${index + 1} 镜首帧`" loading="lazy" />
+              <span v-else class="shot-thumb-empty" />
+              <span class="shot-thumb-no">{{ index + 1 }}</span>
+              <span class="shot-thumb-dot" :class="shotDotClass(shot)" :title="shotJobsText(shot)" />
+            </span>
             <span class="shot-text">
               <span class="shot-name">{{ shot.scene || shot.image_prompt || '（还没写画面）' }}</span>
               <span class="shot-sub">{{ shot.duration_s }} 秒 · {{ shotJobsText(shot) }}</span>
@@ -306,9 +312,28 @@
                     v-model:value="current.dialogue"
                     :rows="2"
                     :maxlength="512"
-                    placeholder="这一镜说的话（本期不配音，留给后续或剪辑）"
+                    placeholder="这一镜说的话；开了 TTS 配音后会按它逐句合成"
                     @change="markShotDirty"
                   />
+                  <!-- 编辑期预检：把 atempo 失败从成片阶段提前到写台词这一刻，预估口径见 ttsCheck。 -->
+                  <div
+                    v-if="params.tts_enabled && current.dialogue.trim()"
+                    class="hint tts-precheck"
+                    :class="'tts-precheck--' + ttsCheck(current).level"
+                  >
+                    {{ ttsCheck(current).text }}
+                  </div>
+                  <div v-if="params.tts_enabled" class="tts-preview-row">
+                    <a-button
+                      size="small"
+                      :loading="ttsLoading"
+                      :disabled="!current.dialogue.trim()"
+                      @click="onPreviewTts"
+                    >
+                      <SoundOutlined /> {{ ttsPlaying ? '停止试听' : '试听这句' }}
+                    </a-button>
+                    <span class="hint">真合成一句，会产生极少量计费；音色用渲染参数里的配置，留空走服务端默认。</span>
+                  </div>
                 </a-form-item>
               </div>
             </a-form>
@@ -920,12 +945,20 @@
     <a-modal
       v-model:open="renderModal"
       title="渲染首帧"
-      ok-text="开始渲染"
+      :ok-text="dirtyShots ? '保存并开始渲染' : '开始渲染'"
       cancel-text="取消"
       width="720px"
       :ok-button-props="{ disabled: renderOkDisabled }"
       @ok="onRenderConfirm"
     >
+      <a-alert
+        v-if="dirtyShots"
+        type="warning"
+        show-icon
+        class="render-alert"
+        message="分镜还有未保存的改动"
+        description="点「保存并开始渲染」会先把分镜存到服务端（新镜头在这一步拿到正式 id），再按勾选入队。"
+      />
       <a-alert
         type="info"
         show-icon
@@ -984,12 +1017,20 @@
     <a-modal
       v-model:open="clipModal"
       title="渲染片段"
-      ok-text="开始渲染"
+      :ok-text="dirtyShots ? '保存并开始渲染' : '开始渲染'"
       cancel-text="取消"
       width="760px"
       :ok-button-props="{ disabled: clipOkDisabled }"
       @ok="onClipConfirm"
     >
+      <a-alert
+        v-if="dirtyShots"
+        type="warning"
+        show-icon
+        class="render-alert"
+        message="分镜还有未保存的改动"
+        description="点「保存并开始渲染」会先把分镜存到服务端（新镜头在这一步拿到正式 id），再按勾选入队。"
+      />
       <a-alert
         type="info"
         show-icon
@@ -1089,6 +1130,7 @@ import {
   PlusOutlined,
   ReloadOutlined,
   SaveOutlined,
+  SoundOutlined,
   TeamOutlined,
   VideoCameraOutlined,
 } from '@ant-design/icons-vue'
@@ -1261,6 +1303,8 @@ const referencePrevious = ref(false)
 // 换镜头即复位，每一镜都从默认关开始；批量弹窗里那枚同名勾选绑同一变量，一并复位。
 watch(selected, () => {
   referencePrevious.value = false
+  // 试听绑定的是上一镜的台词，切镜头不能让声音继续播。
+  stopTtsPreview()
 })
 
 const current = computed(() => shots.value[selected.value])
@@ -1313,7 +1357,7 @@ const missingPromptInTarget = computed(() =>
 )
 const renderBlockHint = computed(() => {
   if (!shots.value.length) return '先生成脚本拿到分镜'
-  if (dirtyShots.value) return '分镜还有未保存的改动，先保存再渲染'
+  // 未保存不再置灰：确认屏与单镜按钮都走「先保存再渲染」，消除灰按钮卡点。
   if (generating.value) return '脚本还在生成'
   return ''
 })
@@ -1451,14 +1495,12 @@ const castChips = computed<CastChip[]>(() =>
 const canRenderOne = computed(
   () =>
     Boolean(current.value) &&
-    !dirtyShots.value &&
     Boolean(current.value?.image_prompt.trim()) &&
     !isActiveJob(current.value?.image_job),
 )
 const canRenderClipOne = computed(
   () =>
     Boolean(current.value) &&
-    !dirtyShots.value &&
     !clipProblem(current.value) &&
     !isActiveJob(current.value?.video_job),
 )
@@ -1747,6 +1789,18 @@ async function onSave(): Promise<boolean> {
   }
 }
 
+/**
+ * 渲染前的统一闸门：分镜有未保存改动就先存再渲染，存失败则中止——
+ * 入队必须基于服务端那一份镜头（新镜 id、夹过的时长都在保存回执里），
+ * 不能拿着本地草稿直接发。
+ */
+async function ensureShotsSaved(): Promise<boolean> {
+  if (!dirtyShots.value) return true
+  const ok = await onSave()
+  if (ok) message.info('已先保存分镜改动，开始渲染')
+  return ok
+}
+
 function onRegenerate() {
   const replaces = shots.value.length
     ? `创作卡、口播文案与 ${shots.value.length} 个已保存镜头都会被这一轮的结果整包替换，已渲出的首帧与片段将不再挂在新镜头上。`
@@ -1799,8 +1853,20 @@ function onPick(keys: (string | number)[]) {
 
 async function onRenderConfirm() {
   if (!picked.value.length) return
+  // 先记下勾选的是第几镜：本地新镜 id 还是 0，保存后才能对回服务端发的真实 id。
+  const pickedIndexes = shots.value
+    .map((shot, index) => (picked.value.includes(shot.id) ? index : -1))
+    .filter((index) => index >= 0)
+  if (!(await ensureShotsSaved())) return
+  const ids = pickedIndexes
+    .map((index) => shots.value[index]?.id)
+    .filter((id): id is number => Boolean(id))
+  if (!ids.length) {
+    message.warning('勾选的镜头还没有保存成功，先确认分镜已保存')
+    return
+  }
   try {
-    const detail = await videosApi.renderFrames(projectId.value, picked.value)
+    const detail = await videosApi.renderFrames(projectId.value, ids)
     applyDetail(detail)
     renderModal.value = false
     message.success('已开始渲染首帧，出片需要几十秒到几分钟')
@@ -1811,9 +1877,12 @@ async function onRenderConfirm() {
 }
 
 async function onRenderOne() {
-  if (!current.value?.id) return
+  const index = selected.value
+  if (!(await ensureShotsSaved())) return
+  const shot = shots.value[index]
+  if (!shot?.id) return
   try {
-    const detail = await videosApi.renderFrames(projectId.value, [current.value.id])
+    const detail = await videosApi.renderFrames(projectId.value, [shot.id])
     applyDetail(detail)
     message.success('已开始渲染这一镜')
     syncPolling()
@@ -1839,10 +1908,22 @@ async function openClipRender() {
 
 async function onClipConfirm() {
   if (!picked.value.length) return
+  // 与首帧确认同一口径：按镜头序号记住勾选，保存后对回真实 id 再入队。
+  const pickedIndexes = shots.value
+    .map((shot, index) => (picked.value.includes(shot.id) ? index : -1))
+    .filter((index) => index >= 0)
+  if (!(await ensureShotsSaved())) return
+  const ids = pickedIndexes
+    .map((index) => shots.value[index]?.id)
+    .filter((id): id is number => Boolean(id))
+  if (!ids.length) {
+    message.warning('勾选的镜头还没有保存成功，先确认分镜已保存')
+    return
+  }
   try {
     const detail = await videosApi.renderClips(
       projectId.value,
-      picked.value,
+      ids,
       referencePrevious.value,
     )
     applyDetail(detail)
@@ -1855,11 +1936,14 @@ async function onClipConfirm() {
 }
 
 async function onRenderClipOne() {
-  if (!current.value?.id) return
+  const index = selected.value
+  if (!(await ensureShotsSaved())) return
+  const shot = shots.value[index]
+  if (!shot?.id) return
   try {
     const detail = await videosApi.renderClips(
       projectId.value,
-      [current.value.id],
+      [shot.id],
       referencePrevious.value,
     )
     applyDetail(detail)
@@ -1918,6 +2002,108 @@ function onExportSubtitle({ key }: { key: string | number }) {
   if (key === 'ass') saveTextFile(`${name}.ass`, buildAss(shots.value, title.value), 'text/plain')
   else saveTextFile(`${name}.srt`, buildSrt(shots.value), 'text/plain')
   message.success('字幕文件已下载（时间轴按当前镜头顺序）')
+}
+
+// ---- TTS 试听与台词预检 -------------------------------------------------------
+
+// 中文播报的经验语速：每秒约 4.5 个非空白字符。只做编辑期预估，真实时长以合成后
+// 服务端探测为准——语速随音色与文本波动，这里宁可报得保守一点。
+const TTS_ESTIMATE_RATE = 4.5
+// 与后端 TTS_MAX_ATEMPO 默认值同口径：超槽位的台词最多被加速到这一档，再长就判失败。
+const TTS_MAX_ATEMPO = 1.6
+
+const ttsLoading = ref(false)
+const ttsPlaying = ref(false)
+let ttsAudio: HTMLAudioElement | null = null
+let ttsObjectUrl = ''
+
+function speechEstimateSeconds(text: string): number {
+  const chars = (text || '').replace(/\s/g, '').length
+  return chars / TTS_ESTIMATE_RATE
+}
+
+/** 台词时长预检：放得下 / 需要加速 / 必然失败三档，把成片阶段的失败提前到编辑期。 */
+function ttsCheck(shot: VideoShot): { level: 'ok' | 'warn' | 'danger'; text: string } {
+  const est = speechEstimateSeconds(shot.dialogue)
+  const slot = shot.duration_s || 0
+  if (est <= slot) {
+    return { level: 'ok', text: `预估配音约 ${est.toFixed(1)} 秒，镜头槽位 ${slot} 秒，放得下（预估值，实际以合成为准）` }
+  }
+  if (est <= slot * TTS_MAX_ATEMPO) {
+    return {
+      level: 'warn',
+      text: `预估配音约 ${est.toFixed(1)} 秒，超过槽位 ${slot} 秒：合成时会自动加速（最多 ${TTS_MAX_ATEMPO} 倍）`,
+    }
+  }
+  return {
+    level: 'danger',
+    text: `预估配音约 ${est.toFixed(1)} 秒，超出 ${TTS_MAX_ATEMPO} 倍加速上限，成片合成会失败：删台词，或把镜头加到至少 ${Math.ceil(est / TTS_MAX_ATEMPO)} 秒`,
+  }
+}
+
+function stopTtsPreview() {
+  if (ttsAudio) {
+    ttsAudio.pause()
+    ttsAudio.onended = null
+    ttsAudio.onerror = null
+    ttsAudio = null
+  }
+  if (ttsObjectUrl) {
+    URL.revokeObjectURL(ttsObjectUrl)
+    ttsObjectUrl = ''
+  }
+  ttsPlaying.value = false
+}
+
+/** blob 响应的错误体仍是 JSON 信封：axios 拦截器读不到 blob 里的 message，这里自己拆。 */
+async function blobErrorMessage(err: unknown, fallback: string): Promise<string> {
+  const data = (err as { response?: { data?: unknown } } | null)?.response?.data
+  if (data instanceof Blob && data.type.includes('json')) {
+    try {
+      const body = JSON.parse(await data.text()) as { message?: string }
+      if (body.message) return body.message
+    } catch {
+      // 不是 JSON 就走通用口径
+    }
+  }
+  return errorText(err, fallback)
+}
+
+async function onPreviewTts() {
+  if (!current.value) return
+  // 再点一次即停：同一个按钮承担播放/停止两态，省一个控件。
+  if (ttsPlaying.value) {
+    stopTtsPreview()
+    return
+  }
+  const text = current.value.dialogue.trim()
+  if (!text) return
+  // 记住发起时的镜头：请求要几秒，期间用户可能切走，回来的音频不能播在新镜头上。
+  const shotId = current.value.id
+  ttsLoading.value = true
+  try {
+    stopTtsPreview()
+    const blob = await videosApi.ttsPreview(text, params.tts_voice || '')
+    if (shotId !== current.value?.id) {
+      // 已经切到别的镜头：还没建 object URL，blob 交给 GC，直接不播。
+      return
+    }
+    ttsObjectUrl = URL.createObjectURL(blob)
+    ttsAudio = new Audio(ttsObjectUrl)
+    ttsAudio.onended = () => {
+      ttsPlaying.value = false
+    }
+    ttsAudio.onerror = () => {
+      ttsPlaying.value = false
+      message.error('试听音频播放失败')
+    }
+    await ttsAudio.play()
+    ttsPlaying.value = true
+  } catch (err) {
+    message.error(await blobErrorMessage(err, '试听失败'))
+  } finally {
+    ttsLoading.value = false
+  }
 }
 
 // ---- 发布（成片合成 + 手动发布包） --------------------------------------------
@@ -2156,6 +2342,21 @@ function shotJobsText(shot: VideoShot): string {
   return shot.video_job ? `${frame} · 片 ${jobTextOf(shot.video_job, 'video')}` : frame
 }
 
+/**
+ * 缩略图右下角的状态点，取这条镜头「最值得注意」的状态：
+ * 在途（脉冲蓝）> 失败（红）> 片段已成（绿）> 首帧已成（青）> 未渲（灰）。
+ * 链式等待仍是 queued，归在「在途」里。
+ */
+function shotDotClass(shot: VideoShot): string {
+  if (isActiveJob(shot.image_job) || isActiveJob(shot.video_job)) return 'is-active'
+  const failed = [shot.image_job?.status, shot.video_job?.status].includes('failed')
+    || [shot.image_job?.status, shot.video_job?.status].includes('expired')
+  if (failed) return 'is-failed'
+  if (shot.video_job?.status === 'succeeded') return 'is-clip'
+  if (shot.image_job?.status === 'succeeded') return 'is-frame'
+  return 'is-idle'
+}
+
 function frameUrlOf(shot?: VideoShot): string {
   return shot?.image_job?.status === 'succeeded' ? shot.image_job.url : ''
 }
@@ -2230,12 +2431,14 @@ onMounted(async () => {
 onUnmounted(() => {
   pollLoop.stop()
   stopClock()
+  stopTtsPreview()
 })
 
 // keep-alive：切去别的标签页时停表，回来时按状态恢复。
 onDeactivated(() => {
   pollLoop.stop()
   stopClock()
+  stopTtsPreview()
 })
 onActivated(() => {
   void load(true)
@@ -2399,11 +2602,77 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   background: rgba(10, 126, 134, 0.1);
 }
 
-.shot-no {
-  flex-shrink: 0;
-  width: 20px;
-  color: var(--text-3);
-  font-size: var(--fs-xs);
+/* 分镜行的首帧缩略图：9:16 小框，镜号压左上、作业状态点压右下。 */
+.shot-thumb {
+  position: relative;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 60px;
+  overflow: hidden;
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+}
+
+.shot-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.shot-thumb-empty {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.shot-thumb-no {
+  position: absolute;
+  top: 1px;
+  left: 3px;
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.3;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
+  pointer-events: none;
+}
+
+.shot-thumb-dot {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  background: var(--text-3);
+}
+
+.shot-thumb-dot.is-active {
+  background: #1677ff;
+  animation: shot-dot-pulse 1.2s ease-in-out infinite;
+}
+
+.shot-thumb-dot.is-failed {
+  background: var(--danger, #cf1322);
+}
+
+.shot-thumb-dot.is-frame {
+  background: var(--brand, #0a7e86);
+}
+
+.shot-thumb-dot.is-clip {
+  background: #52c41a;
+}
+
+@keyframes shot-dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .shot-text {
@@ -2712,6 +2981,26 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
 
 .render-alert {
   margin-bottom: 10px;
+}
+
+.tts-precheck {
+  margin-top: 4px;
+}
+
+.tts-precheck--warn {
+  color: var(--warning, #d48806);
+}
+
+.tts-precheck--danger {
+  color: var(--danger, #cf1322);
+}
+
+.tts-preview-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
 }
 
 @media (max-width: 1180px) {

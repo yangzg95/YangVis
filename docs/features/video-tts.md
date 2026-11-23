@@ -50,6 +50,12 @@ Agent Plan 专属 Key 走 HTTP 调用的**，费用从套餐 AFP 额度抵扣（
   （先加速再定位，避免把定位静音一起缩短）；倍率超过 `TTS_MAX_ATEMPO`（默认 1.6）
   直接判作业失败，报错点出是第几镜、配音多长、槽位多长，让人删台词或加长镜头——
   不产出加速怪声，也不悄悄截断句子。
+- **编辑期试听与时长预检**：打开 TTS 开关后，每镜「台词」下出现「试听这句」按钮，
+  用项目音色（留空走 `TTS_DEFAULT_VOICE`）真合成一段 mp3 就地播放。试听是真计费
+  调用，只由按钮显式触发；同一按钮承担播放/停止，切镜头或离开页面自动停。台词框
+  下方同时给三档预估提示（按每秒约 4.5 个非空白字符估算）：放得下 / 需要自动加速 /
+  超出 1.6 倍上限必然失败，把成片阶段才暴露的问题提前到写台词这一刻。预估值只是
+  编辑期提示，真实时长仍以合成后探测为准。
 - 不开配音时链路与上线前完全一致：`request` 里不带 `tts` 键，产物无音轨，既有的直拼/
   重编码两档行为一个字没动。SRT/ASS 字幕导出不受影响，仍按「屏幕文字」走独立文件。
 
@@ -90,11 +96,12 @@ ffmpeg 的 `amix` 默认按输入数把音量等比调小（防削顶的老默�
 | `backend/app/services/publish/composer.py` | `VoiceoverLine/VoiceoverPlan`、`probe_duration`（无 ffprobe，解析 `ffmpeg -i` 的 stderr）、`build_voiceover`（atempo→adelay→amix→apad/atrim）、`mux_voiceover`（流拷贝封装）；无配音走原 `_concat_silent` |
 | `backend/app/services/publish/runner.py` | `_synthesize_voiceover`：读快照、运行时解析 TTS 默认配置、逐句合成落临时目录、构造时间轴计划 |
 | `backend/app/services/videos/service.py` | `_tts_snapshot`：入队门槛（配置存在/已测通/音色非空/至少一句台词）与 `request.tts` 快照 |
+| `backend/app/routers/videos.py` | `POST /office/videos/tts-preview`：单句试听，复用发布作业的准入口径（默认 TTS 配置存在且已测通、音色非空），成功直接回 `audio/mpeg` 二进制，失败仍走统一信封 JSON |
 | `backend/app/routers/settings.py` | tts 用途的探测分支与 `/settings/models/status` 的 `tts` 就绪位（不参与短视频页面准入，只在工作台开关处提示） |
 | `backend/app/models/schemas.py` | `ModelPurpose.TTS`、`VideoParams.tts_enabled/tts_voice`、`ReadinessStatus.tts` |
 | `backend/app/config.py` | `TTS_HTTP_TIMEOUT` / `TTS_DEFAULT_VOICE` / `TTS_AUDIO_MAX_BYTES` / `TTS_MAX_ATEMPO` / `TTS_SAMPLE_RATE` |
 | `frontend/src/views/Settings.vue` | 用途「语音」的筛选、表单、型号提示与 request_extra 透传入口 |
-| `frontend/src/views/VideoWorkbench.vue` | 配音开关、音色输入、未就绪告警与合成按钮前置门槛 |
+| `frontend/src/views/VideoWorkbench.vue` | 配音开关、音色输入、未就绪告警与合成按钮前置门槛、单句试听（blob 播放）与台词时长三档预检 |
 | `frontend/src/api/{settings,videos}.ts` | `ModelPurpose` / `ReadinessStatus.tts` / `VideoParams` 两个新字段 |
 
 零 DDL：`model_config.purpose` 与 `video_project.params` 本来就是 VARCHAR/JSON，
@@ -124,3 +131,6 @@ ffmpeg 的 `amix` 默认按输入数把音量等比调小（防削顶的老默�
   六次 ffmpeg 调用的形状与流拷贝封装。
 - 既有无声链路的测试全部保留原断言（`voiceover is None`、回退档 `-an`），保证开关
   关闭时行为零变化。
+- `test_videos.py` 的 `tts_preview` 用例：成功回 mp3 二进制且文本/音色透传、
+  项目音色留空时退到 `TTS_DEFAULT_VOICE`、无配置/未测通/无音色三道前置门各自 400、
+  空白文本拒绝与 `TtsError` 的中文翻译。

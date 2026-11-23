@@ -348,4 +348,19 @@ export const videosApi = {
       method: 'POST',
       skipErrorToast: true,
     }),
+  /**
+   * 单句试听：真合成一段 mp3 回二进制（真计费，只由按钮显式触发）。
+   * 失败时后端回的是 JSON 信封且响应类型仍是 blob，由调用方读 blob 文本拆 message。
+   */
+  ttsPreview: async (text: string, voice: string): Promise<Blob> => {
+    const response = await request<{ data: Blob }>({
+      url: '/office/videos/tts-preview',
+      method: 'POST',
+      data: { text, voice },
+      responseType: 'blob',
+      skipErrorToast: true,
+      timeout: 60000,
+    })
+    return response.data
+  },
 }

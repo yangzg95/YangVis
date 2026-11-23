@@ -61,6 +61,7 @@ from app.services.characters import store as character_store
 from app.services.characters.service import CharacterService
 from app.services.characters.store import store_character_image
 from app.services.media import store as media_store
+from app.services.media.tts import TtsError
 from app.services.materials import KIND_IMAGE as MATERIAL_IMAGE
 from app.services.materials import service as material_service
 from app.services.materials import store as material_store
@@ -1897,6 +1898,112 @@ def test_detail_http_carries_the_script_run(client, db):
     assert body["code"] == 0
     assert body["data"]["script_run"]["status"] == RUN_PENDING
     assert [row["key"] for row in body["data"]["script_run"]["steps"]] == ["brief", "script"]
+
+
+# ---- TTS 单句试听 ------------------------------------------------------------
+
+
+def _tts_model(db, *, tested: bool = True) -> ModelConfig:
+    config = ModelConfig(
+        owner_id=OWNER,
+        purpose=ModelPurpose.TTS.value,
+        title="测试语音模型",
+        model_name="tts-unit-test",
+        base_url="http://localhost:1/api/v3",
+        api_key_enc=encrypt("sk-tts"),
+        is_default=True,
+        last_test_ok=tested,
+    )
+    db.add(config)
+    db.commit()
+    return config
+
+
+def test_tts_preview_returns_audio_bytes(client, db, monkeypatch):
+    """试听成功直接回 mp3 二进制：文本与音色按调用值透传给 TTS 客户端。"""
+    _tts_model(db)
+    captured = {}
+
+    async def fake_synthesize(config, *, text, voice, **kwargs):
+        captured.update(text=text, voice=voice)
+        return b"ID3fake-mp3"
+
+    monkeypatch.setattr("app.services.media.tts.synthesize", fake_synthesize)
+
+    response = client.post(
+        "/api/office/videos/tts-preview",
+        json={"text": " 今天天气不错 ", "voice": "zh_female_1"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/mpeg"
+    assert response.content == b"ID3fake-mp3"
+    # 路由在入口 strip，客户端拿到的不该带首尾空白。
+    assert captured == {"text": "今天天气不错", "voice": "zh_female_1"}
+
+
+def test_tts_preview_falls_back_to_server_default_voice(client, db, monkeypatch):
+    """项目没填音色时退到 TTS_DEFAULT_VOICE，与发布作业同一兜底口径。"""
+    _tts_model(db)
+    captured = {}
+
+    async def fake_synthesize(config, *, text, voice, **kwargs):
+        captured["voice"] = voice
+        return b"mp3"
+
+    monkeypatch.setattr("app.services.media.tts.synthesize", fake_synthesize)
+    monkeypatch.setattr("app.routers.videos.settings.TTS_DEFAULT_VOICE", "zh_server_default")
+
+    response = client.post("/api/office/videos/tts-preview", json={"text": "兜底音色"})
+    assert response.status_code == 200
+    assert captured["voice"] == "zh_server_default"
+
+
+def test_tts_preview_is_rejected_without_a_usable_config(client, db, monkeypatch):
+    """三道前置门：没配置、没测通、没音色，各自给明确的中文原因而不是静默失败。"""
+    monkeypatch.setattr("app.routers.videos.settings.TTS_DEFAULT_VOICE", "")
+
+    response = client.post(
+        "/api/office/videos/tts-preview", json={"text": "还没配模型", "voice": "v1"}
+    )
+    assert response.status_code == 400
+    assert "语音" in response.json()["message"]
+
+    _tts_model(db, tested=False)
+    response = client.post(
+        "/api/office/videos/tts-preview", json={"text": "模型没测通", "voice": "v1"}
+    )
+    assert response.status_code == 400
+    assert "连通性测试" in response.json()["message"]
+
+    db.query(ModelConfig).delete()
+    db.commit()
+    _tts_model(db)
+    response = client.post(
+        "/api/office/videos/tts-preview", json={"text": "没有音色", "voice": "  "}
+    )
+    assert response.status_code == 400
+    assert "音色" in response.json()["message"]
+
+
+def test_tts_preview_rejects_blank_text_and_translates_tts_errors(client, db, monkeypatch):
+    """空白文本当场拒；TTS 客户端的业务错误原样翻译成 400 人话。"""
+    _tts_model(db)
+
+    response = client.post(
+        "/api/office/videos/tts-preview", json={"text": "   ", "voice": "v1"}
+    )
+    assert response.status_code == 400
+    assert response.json()["message"] == "试听文本为空"
+
+    async def broken(config, *, text, voice, **kwargs):
+        raise TtsError("音色 ID 不被该模型接受（BadVoice）")
+
+    monkeypatch.setattr("app.services.media.tts.synthesize", broken)
+    response = client.post(
+        "/api/office/videos/tts-preview", json={"text": "坏音色", "voice": "bad"}
+    )
+    assert response.status_code == 400
+    assert "BadVoice" in response.json()["message"]
 
 
 def test_business_rows_still_carry_no_status_column(db):
