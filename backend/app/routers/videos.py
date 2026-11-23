@@ -15,7 +15,16 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Body,
+    Depends,
+    HTTPException,
+    Query,
+    Response,
+    status,
+)
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -29,6 +38,7 @@ from app.models.schemas import (
     ModelPurpose,
     TtsPreviewIn,
     VideoClipRenderRequest,
+    VideoComposeIn,
     VideoProjectCreate,
     VideoProjectDetail,
     VideoProjectItem,
@@ -64,9 +74,12 @@ def _not_found(exc: LookupError) -> HTTPException:
 
 @router.get("", response_model=APIResponse[ListResponse[VideoProjectItem]])
 def list_projects(
+    q: str | None = Query(default=None, max_length=128),
+    order: str = Query(default="updated_desc", max_length=16),
     service: VideoService = Depends(get_service),
 ) -> APIResponse[ListResponse[VideoProjectItem]]:
-    items = service.to_items(service.list_projects())
+    # 排序白名单在 service 里兜底，非法 order 回落默认序，不报错。
+    items = service.to_items(service.list_projects(keyword=q, order=order))
     return APIResponse(data=ListResponse(items=items, total=len(items)))
 
 
@@ -400,6 +413,7 @@ def save_frame_to_material(
 def compose_project(
     project_id: int,
     background: BackgroundTasks,
+    payload: VideoComposeIn = Body(default_factory=VideoComposeIn),
     service: VideoService = Depends(get_service),
 ) -> APIResponse[VideoProjectDetail]:
     """入队一条成片合成：各镜最近一次成功片段按镜头顺序拼成一个 MP4。
@@ -408,7 +422,7 @@ def compose_project(
     一起带回来，前端轮询它就是进度，与渲染作业同一套交互。
     """
     try:
-        job = service.compose_publish(project_id)
+        job = service.compose_publish(project_id, allow_missing=payload.allow_missing)
     except LookupError as exc:
         raise _not_found(exc) from exc
     except ValueError as exc:
@@ -416,7 +430,7 @@ def compose_project(
     background.add_task(_compose_task, service.owner_id, job.id)
     return APIResponse(
         data=service.to_detail(service.get_project(project_id)),
-        message="已开始合成成片",
+        message="已开始合成草稿片" if payload.allow_missing else "已开始合成成片",
     )
 
 

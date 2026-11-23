@@ -102,6 +102,9 @@ from app.services.workflows import STEP_SUCCEEDED, SUBJECT_UPLOADED, SUBJECT_VID
 
 logger = logging.getLogger("yangvis.videos")
 
+# LIKE 通配符转义，与素材库/笔记同一张表：用户搜的 % 与 _ 是普通字符。
+_LIKE_ESCAPE = str.maketrans({"/": "//", "%": "/%", "_": "/_"})
+
 settings = get_settings()
 
 # 脚本那条内置流程，以及它两步的 key：产物分别落在这里的两个 JSON 列上。
@@ -355,8 +358,28 @@ class VideoService:
 
     # -- 项目 -----------------------------------------------------------------
 
-    def list_projects(self) -> List[VideoProject]:
-        stmt = self._scope(select(VideoProject)).order_by(VideoProject.id.desc())
+    # 列表排序白名单：键 → ORM 排序表达式，非法值一律回落默认，不拼字符串进 SQL。
+    _LIST_ORDERS = {
+        "updated_desc": lambda: (VideoProject.updated_at.desc(), VideoProject.id.desc()),
+        "updated_asc": lambda: (VideoProject.updated_at.asc(), VideoProject.id.asc()),
+        "created_desc": lambda: (VideoProject.id.desc(),),
+        "created_asc": lambda: (VideoProject.id.asc(),),
+    }
+
+    def list_projects(
+        self, keyword: Optional[str] = None, order: str = "updated_desc"
+    ) -> List[VideoProject]:
+        """账号下的项目列表，可选标题模糊搜与白名单排序。
+
+        默认按最近更新倒序：列表是工作台入口，刚渲过/改过的项目该排在最前。
+        ``%``/``_`` 按普通字符转义，搜索词只进参数位、不碰 SQL 拼接。
+        """
+        stmt = self._scope(select(VideoProject))
+        term = (keyword or "").strip().translate(_LIKE_ESCAPE)
+        if term:
+            stmt = stmt.where(VideoProject.title.ilike(f"%{term}%", escape="/"))
+        order_expr = self._LIST_ORDERS.get(order, self._LIST_ORDERS["updated_desc"])()
+        stmt = stmt.order_by(*order_expr)
         return list(self._db.scalars(stmt).all())
 
     def get_project(self, project_id: int) -> VideoProject:
@@ -1150,12 +1173,16 @@ class VideoService:
 
     # -- 发布（成片合成 + 手动发布包） -----------------------------------------
 
-    def compose_publish(self, project_id: int) -> PublishJob:
+    def compose_publish(self, project_id: int, allow_missing: bool = False) -> PublishJob:
         """入队一条成片合成作业：把各镜最近一次成功片段按镜头顺序拼成一个 MP4。
 
         与渲染入队同一口径——整批里有一镜没有可用片段就整条拒掉，并一次报全缺的
         是哪几镜，而不是拼到一半才发现少一段。片段文件还要在盘上：作业行报成功但
         文件被手工清掉时，发 ffmpeg 只会换来看不懂的 No such file。
+
+        ``allow_missing`` 打开时出草稿片：跳过缺片段的镜头，只把已就绪的片段拼起来，
+        跳过的镜号快照进 ``request.skipped_shots``；TTS 起点按保留镜头重新累加，
+        否则配音还按全片时间轴定位会整体错位。一条成功片段都没有时仍拒绝。
         """
         project = self.get_project(project_id)
         rows = self.shots_of(project_id)
@@ -1177,29 +1204,50 @@ class VideoService:
 
         clip_jobs = self._latest_jobs([row.video_job_id for row in rows])
         missing: List[int] = []
+        included: List[VideoShot] = []
         sources: List[str] = []
         for row in rows:
             rel_path = _ready_rel_path(clip_jobs.get(row.video_job_id))
             if not rel_path or not (settings.upload_media_path / rel_path).is_file():
                 missing.append(row.sort_order)
-            else:
-                sources.append(rel_path)
-        if missing:
+                continue
+            included.append(row)
+            sources.append(rel_path)
+        if missing and not allow_missing:
             raise ValueError(
-                f"第 {_shot_nums(missing)} 镜还没有可用的视频片段，先把片段渲完再合成"
+                f"第 {_shot_nums(missing)} 镜还没有可用的视频片段，先把片段渲完再合成；"
+                "或选「合成草稿片」先跳过这几镜出一版"
             )
+        if not sources:
+            raise ValueError("还没有任何成功的视频片段，先渲出至少一镜再合成")
+
+        # 草稿片跳过了镜头：保留镜头在拼接片里的起点要按新顺序重新累加，
+        # TTS 仍按库里的全片 start_s 定位就会整体错位。
+        is_draft = allow_missing and bool(missing)
+        start_offsets: Optional[Dict[int, float]] = None
+        if is_draft:
+            start_offsets = {}
+            cursor = 0.0
+            for row in included:
+                start_offsets[row.id] = cursor
+                cursor += float(row.duration_s or 0)
 
         cover = self._cover_jobs([project_id]).get(str(project_id))
         publish = project.publish or {}
         candidates = list(publish.get("title_candidates") or [])
         # 配音门槛放在片段闸门之后：先保证「有片可拼」，再谈声音配置。
-        tts_snapshot = self._tts_snapshot(project, rows)
+        tts_snapshot = self._tts_snapshot(
+            project, included if is_draft else rows, start_offsets
+        )
         request: Dict[str, Any] = {
             "sources": sources,
             "title": str(candidates[0] if candidates else project.title),
             "tags": [str(tag) for tag in (publish.get("tags") or [])][:8],
             "cover": cover.rel_path if cover else "",
         }
+        if is_draft:
+            # 留痕：这条成片少了哪几镜，回头排查对得上号。
+            request["skipped_shots"] = missing
         if tts_snapshot:
             # 不开配音时 request 里干脆不带这个键，runner 按缺失即无声处理。
             request["tts"] = tts_snapshot
@@ -1226,12 +1274,19 @@ class VideoService:
         return job
 
     def _tts_snapshot(
-        self, project: VideoProject, rows: List[VideoShot]
+        self,
+        project: VideoProject,
+        rows: List[VideoShot],
+        start_offsets: Optional[Dict[int, float]] = None,
     ) -> Optional[Dict[str, Any]]:
         """配音开启时组装入队快照；关闭返回 ``None``（作业请求里不带 tts 键）。
 
         与 ``sources`` 同一取舍：台词、起点、槽位在这里快照写死，合成进行中改分镜
         不影响这次作业。模型配置只快照 id/name 留痕，运行时由 runner 重新解析默认项。
+
+        ``start_offsets`` 给的是 ``{镜头 id: 新起点秒}``：草稿片跳过部分镜头后，保留
+        镜头在拼接片里的位置变了，不能再用库里按全片累加的 ``row.start_s``，由调用方
+        按保留序列重新累加传进来；为 ``None`` 时走完整片的原始起点。
         """
         params = project.params or {}
         if not params.get("tts_enabled"):
@@ -1255,7 +1310,11 @@ class VideoService:
         lines = [
             {
                 "sort_order": row.sort_order,
-                "start_s": row.start_s,
+                "start_s": (
+                    start_offsets[row.id]
+                    if start_offsets is not None and row.id in start_offsets
+                    else row.start_s
+                ),
                 "duration_s": row.duration_s,
                 "text": (row.dialogue or "").strip(),
             }
@@ -1263,7 +1322,7 @@ class VideoService:
             if (row.dialogue or "").strip()
         ]
         if not lines:
-            raise ValueError("已开启 TTS 配音，但所有镜头的台词都是空的：先在分镜里写台词")
+            raise ValueError("已开启 TTS 配音，但参与合成的镜头台词都是空的：先在分镜里写台词")
 
         return {
             "enabled": True,

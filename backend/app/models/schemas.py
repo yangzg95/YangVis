@@ -3532,6 +3532,16 @@ class VideoClipRenderRequest(VideoRenderRequest):
     reference_previous: bool = False
 
 
+class VideoComposeIn(BaseModel):
+    """成片合成请求。
+
+    ``allow_missing`` 打开时走草稿片：跳过还没有成功片段的镜头，只拼已就绪的部分，
+    TTS 时间轴按保留镜头重新累加。默认关，保持「缺一条就整条拒掉」的严格口径。
+    """
+
+    allow_missing: bool = False
+
+
 class MediaCapacityItem(BaseModel):
     """一类作业的并发现状：渲染前那屏「现在有几个在跑、还能塞几个」。"""
 

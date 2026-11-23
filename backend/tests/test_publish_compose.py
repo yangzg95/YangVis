@@ -250,6 +250,54 @@ def test_compose_rejects_when_clip_file_gone(db):
         _service(db).compose_publish(project.id)
 
 
+def test_compose_draft_skips_missing_shots_and_records_them(db):
+    """草稿片：缺片段的镜头跳过，sources 只含就绪片段，跳过镜号留痕。"""
+    project = _project(db)
+    rows = _shots(db, project.id, 3)
+    _clip_ready(db, project.id, rows[0])
+    _clip_ready(db, project.id, rows[2])
+
+    # 严格口径不变：缺第 2 镜仍然整条拒绝。
+    with pytest.raises(ValueError, match="第 2 镜"):
+        _service(db).compose_publish(project.id)
+
+    job = _service(db).compose_publish(project.id, allow_missing=True)
+    assert job.status == PUBLISH_QUEUED
+    assert job.request["skipped_shots"] == [2]
+    assert len(job.request["sources"]) == 2
+    # 没开配音时请求里不带 tts 键。
+    assert "tts" not in job.request
+
+
+def test_compose_draft_needs_at_least_one_ready_clip(db):
+    """一条成功片段都没有时，草稿模式也不能拼空气。"""
+    project = _project(db)
+    _shots(db, project.id, 2)
+    with pytest.raises(ValueError, match="成功的视频片段"):
+        _service(db).compose_publish(project.id, allow_missing=True)
+
+
+def test_compose_draft_recomputes_tts_offsets_for_kept_shots(db):
+    """跳过中间镜头后，保留镜头的配音起点按新序列重算，不能沿用全片 start_s。"""
+    project = _project(db)
+    _tts_config(db)
+    rows = _all_clips_with_dialogue(db, project.id, ["第一句", "第二句", "第三句"])
+    # 让第 2 镜的片段文件消失，它在草稿片里被跳过。
+    stored = db.get(MediaJob, rows[1].video_job_id).rel_path
+    (media_store.settings.upload_media_path / stored).unlink()
+    _enable_tts(db, project, voice="zh_female_1")
+
+    job = _service(db).compose_publish(project.id, allow_missing=True)
+    lines = job.request["tts"]["lines"]
+    # 第 2 镜整镜不在片里，它的台词也不进快照。
+    assert [line["sort_order"] for line in lines] == [1, 3]
+    by_order = {line["sort_order"]: line for line in lines}
+    # 每镜 5 秒：镜 1 从头（0），镜 3 在新序列里是第二段（5），而不是全片里的 10。
+    assert by_order[1]["start_s"] == 0
+    assert by_order[3]["start_s"] == 5
+    assert job.request["skipped_shots"] == [2]
+
+
 def test_compose_enqueues_ordered_sources_and_publish_snapshot(db):
     project = _project(db)
     project.publish = {"title_candidates": ["就用这个标题"], "tags": ["复盘", "职场"]}

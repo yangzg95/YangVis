@@ -1596,6 +1596,45 @@ def test_other_users_cannot_reach_a_project(db):
     assert stranger.list_projects() == []
 
 
+def test_list_projects_filters_by_title_and_orders(db):
+    first = _project(db, title="季度复盘教学")
+    _project(db, title="年终总结模板")
+    third = _project(db, title="复盘怎么做")
+    service = _service(db)
+
+    # 标题模糊：命中两个，按创建倒序（id 倒序）排。
+    hits = service.list_projects(keyword="复盘", order="created_desc")
+    assert [row.id for row in hits] == [third.id, first.id]
+    # 搜不到时是空列表而不是报错。
+    assert service.list_projects(keyword="不存在的选题") == []
+    # 创建正序就是 id 正序。
+    assert [row.id for row in service.list_projects(order="created_asc")] == [
+        first.id,
+        first.id + 1,
+        third.id,
+    ]
+    # 非法排序键回落默认序，不抛异常。
+    assert len(service.list_projects(order="DROP TABLE")) == 3
+    # % 与 _ 是普通字符：转义后不该匹配到任何标题。
+    assert service.list_projects(keyword="%") == []
+    assert service.list_projects(keyword="_") == []
+
+
+def test_list_projects_http_accepts_q_and_order(client, db):
+    _project(db, title="alpha 片头")
+    _project(db, title="beta 片头")
+
+    body = client.get(
+        "/api/office/videos", params={"q": "alpha", "order": "created_asc"}
+    ).json()
+    assert body["code"] == 0
+    assert [item["title"] for item in body["data"]["items"]] == ["alpha 片头"]
+    assert body["data"]["total"] == 1
+
+    # 不带参数仍是全量、默认排序，老调用方不受影响。
+    assert client.get("/api/office/videos").json()["data"]["total"] == 2
+
+
 # ---- 并发现状与序列化 ------------------------------------------------------
 
 
