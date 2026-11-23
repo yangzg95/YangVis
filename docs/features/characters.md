@@ -25,8 +25,9 @@
 - **新建短视频弹窗**：可多选出场角色（带头像与名字的下拉，最多 3 个），随项目一起
   创建，脚本生成的第一次运行就带角色档案。
 - **工作台 → 全片 → 出场角色**：角色组 chip 支持移除与改选（`CharacterPicker`，
-  带搜索，可跳人物库建档）。提示文案写明两件事：下一次「重新生成脚本」才带新档案；
-  形象图在渲染时自动注入。
+  带搜索）。选择器里带一套**内联简版建档**：名字 + 形象图必填，人设/衣着/特色折叠
+  可选，建好就地勾选，不用跳去人物库页再回来重选；完整档案的维护仍归人物库页。
+  提示文案写明两件事：下一次「重新生成脚本」才带新档案；形象图在渲染时自动注入。
 - **渲染注入规则**：首帧作业的参考图 = 角色形象图（在前）+ 该镜图片素材，合计超过
   4 张时保角色、截素材（截断写日志）；片段作业只有「参考图生视频」档注入角色图，
   首帧档只喂本镜首帧产物（角色形象已烤进首帧，混挂参考图会撞方舟
@@ -74,7 +75,7 @@
 | `backend/app/bootstrap.py` | 旧库幂等补列 `video_project.character_ids JSON NULL`；新表随 `create_all` 建 |
 | `frontend/src/api/characters.ts` | `charactersApi` 与 `MAX_CHARACTERS_PER_PROJECT` |
 | `frontend/src/views/Characters.vue` | 人物库页：卡片网格、建档/编辑弹窗、引用影响面删除确认 |
-| `frontend/src/components/videos/CharacterPicker.vue` | 项目角色组选择器（多选 3 个、搜索、跳人物库建档） |
+| `frontend/src/components/videos/CharacterPicker.vue` | 项目角色组选择器（多选 3 个、搜索、内联简版建档并自动勾选） |
 | `frontend/src/views/Videos.vue`、`VideoWorkbench.vue` | 创建弹窗与全片 tab 的角色组选择；payload/detail 增加 `character_ids` |
 
 ## 接口列表

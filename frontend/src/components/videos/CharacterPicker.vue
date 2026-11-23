@@ -18,9 +18,72 @@
       >
         <template #suffix><SearchOutlined @click="load" /></template>
       </a-input>
-      <a-button size="small" @click="goLibrary">
-        <PlusOutlined /> 去人物库新建
+      <a-button size="small" type="primary" ghost @click="toggleCreate">
+        <PlusOutlined /> {{ showCreate ? '收起新建' : '新建角色' }}
       </a-button>
+    </div>
+
+    <!-- 内联简版建档：名字 + 形象图即可，档案三字段折叠可选，建好自动勾选，不跳页。 -->
+    <div v-if="showCreate" class="create-panel">
+      <div class="create-row">
+        <a-upload
+          list-type="picture-card"
+          :show-upload-list="false"
+          :before-upload="pickFile"
+          accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"
+          class="create-upload"
+        >
+          <img v-if="previewUrl" class="create-preview" :src="previewUrl" alt="形象图预览" />
+          <div v-else class="create-upload-ph">
+            <UploadOutlined />
+            <span>形象图</span>
+          </div>
+        </a-upload>
+        <div class="create-fields">
+          <a-input
+            v-model:value="createName"
+            size="small"
+            :maxlength="64"
+            placeholder="角色名（必填），例如：林小夏"
+            @press-enter="submitCreate"
+          />
+          <a-button size="small" type="link" class="create-more" @click="showMore = !showMore">
+            {{ showMore ? '收起档案字段' : '补充人设/衣着/特色（可选）' }}
+          </a-button>
+          <a-textarea
+            v-if="showMore"
+            v-model:value="createPersona"
+            size="small"
+            :rows="2"
+            :maxlength="512"
+            placeholder="人设：身份、性格、说话方式"
+          />
+          <a-textarea
+            v-if="showMore"
+            v-model:value="createOutfit"
+            size="small"
+            :rows="2"
+            :maxlength="512"
+            placeholder="衣着：固定穿搭"
+            class="create-textarea"
+          />
+          <a-textarea
+            v-if="showMore"
+            v-model:value="createFeatures"
+            size="small"
+            :rows="2"
+            :maxlength="512"
+            placeholder="外形特色：发型、体型、标志物"
+            class="create-textarea"
+          />
+        </div>
+      </div>
+      <div class="create-actions">
+        <span class="hint">建档后自动勾选；完整档案之后可在人物库页补。</span>
+        <a-button size="small" type="primary" :loading="creating" @click="submitCreate">
+          保存并选用
+        </a-button>
+      </div>
     </div>
 
     <a-spin :spinning="loading">
@@ -65,14 +128,15 @@
 
 <script setup lang="ts">
 // 项目级角色组选择框：从账号级人物库挑，只回 id 列表。
-// 与 MaterialPicker 的分工：素材选择器允许弹窗内直传，角色建档要填人设/衣着/特色，
-// 那是一张完整表单，这里只给「去人物库新建」的入口，不在弹窗里塞半套建档流程。
-import { computed, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+// 弹窗内带一套简版建档（名字 + 形象图必填，人设/衣着/特色折叠可选）：建好就地勾选，
+// 不用跳去人物库页再回来重选；完整档案的维护仍归人物库页。
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Empty, message } from 'ant-design-vue'
-import { PlusOutlined, SearchOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, SearchOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import { charactersApi, MAX_CHARACTERS_PER_PROJECT, type Character } from '@/api'
 import { errorText } from '@/utils/errors'
+
+const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp']
 
 const props = withDefaults(
   defineProps<{ open: boolean; selected: string[]; max?: number }>(),
@@ -83,7 +147,6 @@ const emit = defineEmits<{
   confirm: [ids: string[]]
 }>()
 
-const router = useRouter()
 const PAGE_LIMIT = 200
 
 const visible = computed({
@@ -119,9 +182,97 @@ watch(
     // 每次打开都对一遍库：角色可能刚被删掉，用旧列表会挑出不存在的 id。
     picked.value = [...props.selected]
     keyword.value = ''
+    resetCreate()
     void load()
   },
 )
+
+// -- 内联建档：名字 + 形象图是必填，档案三字段可选，建好就地勾选，不打断选角流程。
+const showCreate = ref(false)
+const showMore = ref(false)
+const creating = ref(false)
+const createName = ref('')
+const createPersona = ref('')
+const createOutfit = ref('')
+const createFeatures = ref('')
+const createFile = ref<File | null>(null)
+const previewUrl = ref('')
+let previewObjectUrl: string | null = null
+
+function releasePreview() {
+  if (previewObjectUrl) {
+    URL.revokeObjectURL(previewObjectUrl)
+    previewObjectUrl = null
+  }
+  previewUrl.value = ''
+}
+
+onBeforeUnmount(releasePreview)
+
+function resetCreate() {
+  showCreate.value = false
+  showMore.value = false
+  createName.value = ''
+  createPersona.value = ''
+  createOutfit.value = ''
+  createFeatures.value = ''
+  createFile.value = null
+  releasePreview()
+}
+
+function toggleCreate() {
+  if (showCreate.value) resetCreate()
+  else showCreate.value = true
+}
+
+function pickFile(file: File) {
+  if (!ACCEPTED_TYPES.includes(file.type)) {
+    message.warning('只支持 PNG / JPEG / GIF / WebP / BMP 图片')
+    return false
+  }
+  createFile.value = file
+  releasePreview()
+  previewObjectUrl = URL.createObjectURL(file)
+  previewUrl.value = previewObjectUrl
+  // 拦住 antd 自动上传，保存时随 multipart 一起发。
+  return false
+}
+
+async function submitCreate() {
+  const name = createName.value.trim()
+  if (!name) {
+    message.warning('请先填写角色名')
+    return
+  }
+  if (!createFile.value) {
+    message.warning('请先上传一张形象图')
+    return
+  }
+  creating.value = true
+  try {
+    const created = await charactersApi.create(createFile.value, {
+      name,
+      persona: createPersona.value.trim() || undefined,
+      outfit: createOutfit.value.trim() || undefined,
+      features: createFeatures.value.trim() || undefined,
+    })
+    await load()
+    const id = String(created.id)
+    if (!picked.value.includes(id)) {
+      if (picked.value.length >= props.max) {
+        message.warning(`一条片子最多选 ${props.max} 个角色，已建档但没自动勾选，请手动调整`)
+      } else {
+        picked.value = [...picked.value, id]
+      }
+    }
+    message.success(`已建立角色「${name}」并选用`)
+    resetCreate()
+  } catch (err) {
+    message.error(errorText(err, '建档失败'))
+  } finally {
+    creating.value = false
+  }
+}
 
 function toggle(item: Character) {
   const id = String(item.id)
@@ -135,11 +286,6 @@ function toggle(item: Character) {
 function onConfirm() {
   // 只在点「确定」时回传：关掉这一框而不确定，不该改项目上已有的角色组。
   emit('confirm', picked.value)
-}
-
-function goLibrary() {
-  visible.value = false
-  router.push('/office/characters')
 }
 </script>
 
@@ -218,5 +364,68 @@ function goLibrary() {
 
 .picker-foot {
   margin-top: 10px;
+}
+
+/* 内联建档面板：上传格压到 72px，与右侧字段并排，不把选择列表挤到折叠下面。 */
+.create-panel {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.create-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.create-upload :deep(.ant-upload.ant-upload-select) {
+  width: 72px;
+  height: 72px;
+  margin: 0;
+}
+
+.create-upload-ph {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
+.create-preview {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+}
+
+.create-fields {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.create-more {
+  align-self: flex-start;
+  padding: 0;
+  height: auto;
+}
+
+.create-textarea {
+  margin-top: -2px;
+}
+
+.create-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
 }
 </style>

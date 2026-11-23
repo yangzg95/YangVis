@@ -94,22 +94,35 @@
       <aside class="wb-shots">
         <div class="pane-title">
           分镜 {{ shots.length }}
-          <a-button
-            size="small"
-            type="text"
-            :disabled="shots.length >= MAX_SHOTS"
-            :title="`一个项目最多 ${MAX_SHOTS} 镜`"
-            @click="addShot"
-          >
-            <PlusOutlined /> 加一镜
-          </a-button>
+          <a-space :size="2">
+            <a-tooltip title="跳到下一个首帧或片段未成功的镜头">
+              <a-button size="small" type="text" :disabled="!shots.length" @click="gotoNextProblem">
+                <WarningOutlined /> 待处理
+              </a-button>
+            </a-tooltip>
+            <a-button
+              size="small"
+              type="text"
+              :disabled="shots.length >= MAX_SHOTS"
+              :title="`一个项目最多 ${MAX_SHOTS} 镜`"
+              @click="addShot"
+            >
+              <PlusOutlined /> 加一镜
+            </a-button>
+          </a-space>
         </div>
         <ul v-if="shots.length" class="shot-list">
           <li
             v-for="(shot, index) in shots"
             :key="shot.id || `new-${index}`"
-            :class="['shot-item', { active: index === selected }]"
+            :class="['shot-item', { active: index === selected, 'drag-over': index === dragOverIndex }]"
+            draggable="true"
             @click="selected = index"
+            @dragstart="onDragStart(index, $event)"
+            @dragover.prevent="onDragOver(index)"
+            @dragleave="onDragLeave(index)"
+            @drop.prevent="onDrop(index)"
+            @dragend="dragOverIndex = -1"
           >
             <!-- 首帧缩略图：渲过就显示真实画面，没渲过留空框；镜号压在左上角，状态点压右下角。 -->
             <span class="shot-thumb" :title="shotJobsText(shot)">
@@ -711,12 +724,28 @@
                       :loading="composing"
                       :disabled="Boolean(composeProblem)"
                       :title="composeProblem || '把各镜片段按镜头顺序拼成一个 MP4'"
-                      @click="onCompose"
+                      @click="onCompose(false)"
                     >
                       <VideoCameraOutlined /> 合成成片
                     </a-button>
+                    <!-- 有镜头缺片段时才出现：先出一版只含已就绪片段的草稿，不必被一镜卡死。 -->
+                    <a-tooltip
+                      v-if="missingClipShots.length && succeededClipCount"
+                      :title="draftProblem || `跳过第 ${missingClipShots.join('、')} 镜，只拼已就绪的 ${succeededClipCount} 个片段`"
+                    >
+                      <a-button
+                        :loading="composing"
+                        :disabled="Boolean(draftProblem)"
+                        @click="onCompose(true)"
+                      >
+                        <VideoCameraOutlined /> 合成草稿片（跳过 {{ missingClipShots.length }} 镜）
+                      </a-button>
+                    </a-tooltip>
                     <span v-if="composeProblem" class="hint">{{ composeProblem }}</span>
                   </a-space>
+                  <div v-if="missingClipShots.length && succeededClipCount" class="hint draft-hint">
+                    草稿片按保留镜头重新拼接与对齐配音，被跳过的镜号会记在发布作业里；补齐片段后仍可再合成完整成片。
+                  </div>
                   <div v-if="publishJob" class="job-meta publish-job">
                     <div class="job-kind">发布作业 #{{ publishJob.id }}</div>
                     <div class="job-row">
@@ -780,16 +809,28 @@
         <div class="pane-title">
           预览
           <span class="muted">9 : 16</span>
+          <a-button
+            size="small"
+            type="text"
+            :disabled="!chainableCount"
+            class="chain-play-btn"
+            @click="toggleChainPlay"
+          >
+            <PlayCircleOutlined /> {{ chainPlaying ? '停止连播' : `连播片段（${chainableCount}）` }}
+          </a-button>
         </div>
         <div class="preview-body">
           <div class="phone">
             <video
               v-if="clipUrl"
+              ref="phoneVideo"
               class="phone-frame"
               :src="clipUrl"
               controls
               playsinline
               preload="metadata"
+              @ended="onClipEnded"
+              @loadeddata="onPhoneLoaded"
             />
             <img
               v-else-if="frameUrl"
@@ -984,6 +1025,7 @@
         </span>
         <a-space :size="8">
           <a-button size="small" type="text" @click="pickAllShots">全选</a-button>
+          <a-button size="small" type="text" @click="pickFramesPending">只选待处理</a-button>
           <a-button v-if="picked.length" size="small" type="text" @click="picked = []">
             全不选
           </a-button>
@@ -1078,6 +1120,7 @@
         </span>
         <a-space :size="8">
           <a-button size="small" type="text" @click="pickAllShots">全选</a-button>
+          <a-button size="small" type="text" @click="pickClipsPending">只选待处理</a-button>
           <a-button v-if="picked.length" size="small" type="text" @click="picked = []">
             全不选
           </a-button>
@@ -1113,7 +1156,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowDownOutlined,
@@ -1133,6 +1176,7 @@ import {
   SoundOutlined,
   TeamOutlined,
   VideoCameraOutlined,
+  WarningOutlined,
 } from '@ant-design/icons-vue'
 import { Empty, Modal, message } from 'ant-design-vue'
 import {
@@ -1305,6 +1349,8 @@ watch(selected, () => {
   referencePrevious.value = false
   // 试听绑定的是上一镜的台词，切镜头不能让声音继续播。
   stopTtsPreview()
+  // 连播程序化切镜带 navigating 标志；用户手动点别的镜头就中止连播。
+  if (chainPlaying.value && !chainNavigating) stopChainPlay()
 })
 
 const current = computed(() => shots.value[selected.value])
@@ -1432,6 +1478,30 @@ const composeProblem = computed(() => {
   return ''
 })
 const canCompose = computed(() => !composeProblem.value && !composing.value)
+/** 还没有成功片段的镜头镜号：草稿片要跳过的就是它们。 */
+const missingClipShots = computed(() =>
+  shots.value
+    .filter((shot) => shot.video_job?.status !== 'succeeded' || !shot.video_job?.url)
+    .map((shot) => shot.sort_order),
+)
+const succeededClipCount = computed(
+  () => shots.value.length - missingClipShots.value.length,
+)
+/**
+ * 草稿片门槛：与完整合成共享保存/在途/配音这几道，只放宽「片段必须全齐」——
+ * 改成至少有一镜成功。它是出片修复回路的兜底，不是常态入口，所以全齐时不显示。
+ */
+const draftProblem = computed(() => {
+  if (!shots.value.length) return '还没有镜头，先生成脚本'
+  if (dirtyProject.value || dirtyShots.value) return '有未保存的改动，先保存再合成'
+  if (generating.value) return '脚本还在生成'
+  if (rendering.value) return '还有首帧或片段在渲染'
+  if (!succeededClipCount.value) return '还没有成功的片段，先渲出至少一镜'
+  if (params.tts_enabled && !ttsReady.value) return '已开配音：先到「模型与集成」配好并测通语音模型'
+  if (publishActive.value) return '成片正在合成中，等它结束再发起'
+  return ''
+})
+const canComposeDraft = computed(() => !draftProblem.value && !composing.value)
 /** 手动发布包要复制的文案：首条标题候选（没有就项目名）+ 统一补 # 的话题。 */
 const publishCopyText = computed(() => {
   const heading = publish.title_candidates[0] || title.value
@@ -1571,6 +1641,8 @@ function applyDetail(detail: VideoProjectDetail) {
   if (selected.value >= detail.shots.length) selected.value = Math.max(0, detail.shots.length - 1)
   dirtyProject.value = false
   dirtyShots.value = false
+  // 列表页带进来的定位请求只消费一次：轮询重载时 pendingFocus 已空，不会抢用户的选中。
+  applyFocus()
 }
 
 async function load(quiet = false) {
@@ -1702,11 +1774,46 @@ function addShot() {
 function moveShot(index: number, delta: number) {
   const target = index + delta
   if (target < 0 || target >= shots.value.length) return
+  reorderShot(index, target)
+}
+
+// -- 拖拽排序：原生 HTML5 drag，不引第三方库。draggable 挂在整行，上下箭头与拖拽共用 reorder。
+const dragFromIndex = ref(-1)
+const dragOverIndex = ref(-1)
+
+function onDragStart(index: number, event: DragEvent) {
+  dragFromIndex.value = index
+  if (event.dataTransfer) {
+    // Firefox 不 setData 不会触发 drag；给个无副作用的占位。
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(index))
+  }
+}
+
+function onDragOver(index: number) {
+  if (dragFromIndex.value === -1 || index === dragOverIndex.value) return
+  dragOverIndex.value = index
+}
+
+function onDragLeave(index: number) {
+  // 只清自己这格：拖过子元素会连发 leave，避免反馈闪烁。
+  if (dragOverIndex.value === index) dragOverIndex.value = -1
+}
+
+function onDrop(index: number) {
+  const from = dragFromIndex.value
+  dragOverIndex.value = -1
+  dragFromIndex.value = -1
+  if (from === -1 || from === index) return
+  reorderShot(from, index)
+}
+
+function reorderShot(from: number, to: number) {
   const rows = shots.value.slice()
-  const [row] = rows.splice(index, 1)
-  rows.splice(target, 0, row)
+  const [row] = rows.splice(from, 1)
+  rows.splice(to, 0, row)
   shots.value = rows
-  selected.value = target
+  selected.value = to
   markShotDirty()
 }
 
@@ -1834,6 +1941,25 @@ async function doRegenerate() {
 
 function pickAllShots() {
   picked.value = shots.value.map((shot) => shot.id)
+}
+
+/** 首帧补渲：只挑还没成功出图、当前也不在途的镜头，补渲时不用手动取消一堆勾选。 */
+function pickFramesPending() {
+  picked.value = shots.value
+    .filter((shot) => !frameUrlOf(shot) && !isActiveJob(shot.image_job))
+    .map((shot) => shot.id)
+}
+
+/** 片段补渲：只挑片段没成功、不在途且这一档现在发得出去的镜头。 */
+function pickClipsPending() {
+  picked.value = shots.value
+    .filter(
+      (shot) =>
+        shot.video_job?.status !== 'succeeded' &&
+        !isActiveJob(shot.video_job) &&
+        !clipProblem(shot),
+    )
+    .map((shot) => shot.id)
 }
 
 async function openRender() {
@@ -2108,14 +2234,22 @@ async function onPreviewTts() {
 
 // ---- 发布（成片合成 + 手动发布包） --------------------------------------------
 
-async function onCompose() {
-  if (!canCompose.value) return
+async function onCompose(allowMissing = false) {
+  if (allowMissing) {
+    if (!canComposeDraft.value) return
+  } else if (!canCompose.value) {
+    return
+  }
   composing.value = true
   try {
     // 入队即返回：后台任务在本机跑 ffmpeg，进度靠详情轮询里的 publish_job 跟随。
-    const detail = await videosApi.compose(projectId.value)
+    const detail = await videosApi.compose(projectId.value, allowMissing)
     applyDetail(detail)
-    message.success('已开始合成成片，本机拼接通常几十秒内完成')
+    message.success(
+      allowMissing
+        ? `已开始合成草稿片，跳过第 ${missingClipShots.value.join('、')} 镜`
+        : '已开始合成成片，本机拼接通常几十秒内完成',
+    )
     syncPolling()
   } catch (err) {
     message.error(errorText(err, '合成发起失败'))
@@ -2342,6 +2476,59 @@ function shotJobsText(shot: VideoShot): string {
   return shot.video_job ? `${frame} · 片 ${jobTextOf(shot.video_job, 'video')}` : frame
 }
 
+/** 这一镜是否有需要人工处理的问题：作业失败/超时/取消，或还没出到该出的产物。 */
+function shotProblemText(shot: VideoShot): string {
+  const bad = ['failed', 'expired', 'cancelled']
+  if (shot.image_job && bad.includes(shot.image_job.status)) return '首帧作业未成功'
+  if (shot.video_job && bad.includes(shot.video_job.status)) return '片段作业未成功'
+  if (!frameUrlOf(shot)) return '还没出首帧'
+  if (shot.video_job?.status !== 'succeeded') return '还没出片段'
+  return ''
+}
+
+/** 从 start 起（绕回开头）找第一个待处理镜头的 index，没有返回 -1。 */
+function firstProblemIndex(start: number): number {
+  const count = shots.value.length
+  if (!count) return -1
+  for (let step = 0; step < count; step += 1) {
+    const index = (start + step) % count
+    if (shotProblemText(shots.value[index])) return index
+  }
+  return -1
+}
+
+function gotoNextProblem() {
+  const index = firstProblemIndex(selected.value + 1)
+  if (index < 0) {
+    message.success('所有镜头的首帧与片段都已就绪')
+    return
+  }
+  selected.value = index
+  message.info(`第 ${shots.value[index].sort_order} 镜：${shotProblemText(shots.value[index])}`)
+}
+
+// 列表页「需处理」项目跳进来时带的定位请求，detail 加载完再消费（那时才有镜头）。
+const pendingFocus = ref<{ shot?: number; attention?: boolean }>({})
+
+function consumeRouteFocus() {
+  const shot = Number(route.query.shot)
+  if (shot > 0) pendingFocus.value.shot = shot
+  if (route.query.attention === '1') pendingFocus.value.attention = true
+}
+
+function applyFocus() {
+  if (!shots.value.length) return
+  if (pendingFocus.value.shot) {
+    const index = shots.value.findIndex((shot) => shot.sort_order === pendingFocus.value.shot)
+    if (index >= 0) selected.value = index
+    pendingFocus.value.shot = undefined
+  } else if (pendingFocus.value.attention) {
+    const index = firstProblemIndex(0)
+    if (index >= 0) selected.value = index
+    pendingFocus.value.attention = false
+  }
+}
+
 /**
  * 缩略图右下角的状态点，取这条镜头「最值得注意」的状态：
  * 在途（脉冲蓝）> 失败（红）> 片段已成（绿）> 首帧已成（青）> 未渲（灰）。
@@ -2363,6 +2550,85 @@ function frameUrlOf(shot?: VideoShot): string {
 
 function clipUrlOf(shot?: VideoShot): string {
   return shot?.video_job?.status === 'succeeded' ? shot.video_job.url : ''
+}
+
+// -- 片段连播：按镜头顺序自动接续播放所有成功片段，用来在出整片前检查衔接与节奏。
+const phoneVideo = ref<HTMLVideoElement | null>(null)
+const chainPlaying = ref(false)
+/** 连播队列：存镜头 index，只含当时有成功片段的镜头。 */
+const chainQueue = ref<number[]>([])
+const chainPos = ref(-1)
+/** 连播内部程序化切镜的标志：用来和用户手动点镜头区分，后者要中止连播。 */
+let chainNavigating = false
+
+const chainableCount = computed(
+  () => shots.value.filter((shot) => clipUrlOf(shot)).length,
+)
+
+function toggleChainPlay() {
+  if (chainPlaying.value) {
+    stopChainPlay()
+    return
+  }
+  const queue = shots.value
+    .map((shot, index) => ({ index, url: clipUrlOf(shot) }))
+    .filter((item) => item.url)
+    .map((item) => item.index)
+  if (!queue.length) {
+    message.warning('还没有已成功的片段可以连播')
+    return
+  }
+  chainQueue.value = queue
+  // 从当前选中镜（或它之后第一个有片段的镜）开始，而不是每次都从头。
+  const start = queue.findIndex((index) => index >= selected.value)
+  chainPos.value = start >= 0 ? start : 0
+  chainPlaying.value = true
+  gotoChainShot(queue[chainPos.value])
+  void playPhoneWhenReady()
+}
+
+/** 连播内部的镜头跳转：打上标志，让 selected 监听知道这不是用户手动切镜。 */
+function gotoChainShot(index: number) {
+  chainNavigating = true
+  selected.value = index
+  void nextTick(() => {
+    chainNavigating = false
+  })
+}
+
+function playPhoneWhenReady() {
+  // selected 改动后 phone video 的 src 才换，等 DOM 更新完再调 play。
+  void nextTick(() => {
+    const el = phoneVideo.value
+    if (!el) return
+    // loadeddata 事件也会兜底再 play 一次，这里先尝试抢跑。
+    void el.play().catch(() => undefined)
+  })
+}
+
+function onPhoneLoaded() {
+  // 连播切换 src 后浏览器不会自动播，得在能播时手动起。
+  if (chainPlaying.value) void phoneVideo.value?.play().catch(() => undefined)
+}
+
+function onClipEnded() {
+  if (!chainPlaying.value) return
+  if (chainPos.value + 1 >= chainQueue.value.length) {
+    stopChainPlay()
+    message.success('连播结束')
+    return
+  }
+  chainPos.value += 1
+  gotoChainShot(chainQueue.value[chainPos.value])
+  void playPhoneWhenReady()
+}
+
+function stopChainPlay() {
+  chainPlaying.value = false
+  chainQueue.value = []
+  chainPos.value = -1
+  chainNavigating = false
+  phoneVideo.value?.pause()
 }
 
 function genModeLabel(mode: VideoGenMode): string {
@@ -2418,6 +2684,7 @@ function goToScriptRun() {
 // ---- 生命周期 ----------------------------------------------------------------
 
 onMounted(async () => {
+  consumeRouteFocus()
   await Promise.all([
     load(),
     loadReadiness(),
@@ -2432,6 +2699,7 @@ onUnmounted(() => {
   pollLoop.stop()
   stopClock()
   stopTtsPreview()
+  stopChainPlay()
 })
 
 // keep-alive：切去别的标签页时停表，回来时按状态恢复。
@@ -2439,6 +2707,7 @@ onDeactivated(() => {
   pollLoop.stop()
   stopClock()
   stopTtsPreview()
+  stopChainPlay()
 })
 onActivated(() => {
   void load(true)
@@ -2472,6 +2741,7 @@ watch(
     dirtyProject.value = false
     dirtyShots.value = false
     loadError.value = ''
+    consumeRouteFocus()
     void loadMaterials()
     void loadCharacters()
     void load().then(syncPolling)
@@ -2580,6 +2850,11 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   flex-shrink: 0;
 }
 
+.chain-play-btn {
+  /* 标题与比例靠左，连播按钮单独顶到右边。 */
+  margin-left: auto;
+}
+
 .shot-list {
   list-style: none;
   margin: 0;
@@ -2600,6 +2875,11 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
 
 .shot-item.active {
   background: rgba(10, 126, 134, 0.1);
+}
+
+/* 拖拽落点：一条上沿分隔线，比整行染色更能表达「插到这里」。 */
+.shot-item.drag-over {
+  box-shadow: inset 0 2px 0 var(--brand, #0a7e86);
 }
 
 /* 分镜行的首帧缩略图：9:16 小框，镜号压左上、作业状态点压右下。 */
@@ -3001,6 +3281,11 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 6px;
+}
+
+.draft-hint {
+  margin-top: 6px;
+  max-width: 560px;
 }
 
 @media (max-width: 1180px) {

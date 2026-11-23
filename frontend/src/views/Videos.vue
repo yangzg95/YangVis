@@ -30,6 +30,20 @@
 
     <div class="toolbar toolbar--between toolbar--snug">
       <a-space :size="12" wrap>
+        <a-input-search
+          v-model:value="keyword"
+          placeholder="按标题搜"
+          allow-clear
+          size="small"
+          class="keyword-search"
+          @search="load"
+        />
+        <a-select v-model:value="order" size="small" class="order-filter" @change="load">
+          <a-select-option value="updated_desc">最近更新</a-select-option>
+          <a-select-option value="updated_asc">最早更新</a-select-option>
+          <a-select-option value="created_desc">最新创建</a-select-option>
+          <a-select-option value="created_asc">最早创建</a-select-option>
+        </a-select>
         <span class="muted">
           {{ filteredProjects.length === projects.length
             ? `共 ${projects.length} 条片子`
@@ -126,7 +140,7 @@
         </template>
         <template v-else-if="column.key === 'actions'">
           <a-space :size="4" wrap>
-            <a-button size="small" type="link" @click="openWorkbench(record.id)">工作台</a-button>
+            <a-button size="small" type="link" @click="openWorkbench(record)">工作台</a-button>
             <a-popconfirm
               title="重新生成会整包替换创作卡、口播文案与全部分镜（含已保存内容），已渲出的首帧与片段将不再挂在新镜头上，确认继续？"
               ok-text="重新生成"
@@ -157,9 +171,7 @@
       <template #emptyText>
         <a-empty
           :image="simpleEmpty"
-          :description="lifecycleFilter
-            ? '没有符合当前制作进度的短视频'
-            : '还没有短视频，写一句想法生成第一版分镜'"
+          :description="emptyText"
         />
       </template>
     </a-table>
@@ -259,7 +271,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, h, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { LoadingOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import { Button, Empty, message, notification } from 'ant-design-vue'
@@ -297,9 +309,18 @@ const loading = ref(false)
 const chatReady = ref(true)
 const imageReady = ref(true)
 const lifecycleFilter = ref('')
+// 标题搜索走后端（回车触发）；排序白名单在后端兜底，这里只存选中值。
+const keyword = ref('')
+const order = ref('updated_desc')
 const filteredProjects = computed(() =>
   projects.value.filter((item) => matchesVideoLifecycle(item, lifecycleFilter.value)),
 )
+
+const emptyText = computed(() => {
+  if (keyword.value.trim()) return '没有标题匹配的短视频'
+  if (lifecycleFilter.value) return '没有符合当前制作进度的短视频'
+  return '还没有短视频，写一句想法生成第一版分镜'
+})
 
 const columns = [
   { key: 'cover', title: '封面', width: 72 },
@@ -400,7 +421,10 @@ const lastStatus = new Map<number, VideoProjectStatus | string>()
 async function load() {
   loading.value = true
   try {
-    const result = await videosApi.list()
+    const result = await videosApi.list({
+      q: keyword.value.trim() || undefined,
+      order: order.value,
+    })
     projects.value = result.items
     for (const item of result.items) {
       const previous = lastStatus.get(item.id)
@@ -422,7 +446,7 @@ function notifyFinished(item: VideoProjectItem) {
       btn: () =>
         h(
           Button,
-          { size: 'small', type: 'primary', onClick: () => openWorkbench(item.id) },
+          { size: 'small', type: 'primary', onClick: () => openWorkbench(item) },
           () => '打开工作台',
         ),
     })
@@ -457,10 +481,23 @@ async function loadReadiness() {
   }
 }
 
+// 点搜索框的清除叉不触发 search，这里兜一道：关键字被清空就回到全量。
+watch(keyword, (value) => {
+  if (!value.trim()) void load()
+})
+
 // ---- 操作 --------------------------------------------------------------------
 
-function openWorkbench(id: number) {
-  router.push({ name: 'VideoWorkbench', params: { id } })
+function openWorkbench(record: VideoProjectItem) {
+  // 任一渲染阶段有失败/超时镜头时带 attention 标记，工作台落地后自动选到第一个问题镜。
+  const hasAttention = (['frames', 'clips', 'publish'] as const).some(
+    (stage) => lifecycleFor(record, stage).attention > 0,
+  )
+  router.push({
+    name: 'VideoWorkbench',
+    params: { id: record.id },
+    query: hasAttention ? { attention: '1' } : undefined,
+  })
 }
 
 function goToSettings() {
@@ -570,6 +607,15 @@ onUnmounted(() => pollLoop.stop())
 
 .lifecycle-filter {
   width: 190px;
+  text-align: left;
+}
+
+.keyword-search {
+  width: 180px;
+}
+
+.order-filter {
+  width: 120px;
   text-align: left;
 }
 

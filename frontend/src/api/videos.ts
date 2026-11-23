@@ -264,7 +264,11 @@ export interface MediaCapacityOut {
 }
 
 export const videosApi = {
-  list: () => request<{ items: VideoProjectItem[]; total: number }>({ url: '/office/videos' }),
+  list: (params: { q?: string; order?: string } = {}) =>
+    request<{ items: VideoProjectItem[]; total: number }>({
+      url: '/office/videos',
+      params,
+    }),
   /** 选镜头之前就要显示的并发余量。 */
   capacity: () => request<MediaCapacityOut>({ url: '/office/videos/capacity' }),
   /** 创建即发起脚本生成：一次两阶段流程要几十秒，后端交给后台任务，这里不等。 */
@@ -341,11 +345,15 @@ export const videosApi = {
       method: 'POST',
       skipErrorToast: true,
     }),
-  /** 入队一条成片合成：各镜最近一次成功片段按镜头顺序拼成一个 MP4，进度看 publish_job。 */
-  compose: (id: number) =>
+  /**
+   * 入队一条成片合成：各镜最近一次成功片段按镜头顺序拼成一个 MP4，进度看 publish_job。
+   * allowMissing 为真时出草稿片，跳过还没有成功片段的镜头（TTS 时间轴由后端重算）。
+   */
+  compose: (id: number, allowMissing = false) =>
     request<VideoProjectDetail>({
       url: `/office/videos/${id}/compose`,
       method: 'POST',
+      data: { allow_missing: allowMissing },
       skipErrorToast: true,
     }),
   /**
