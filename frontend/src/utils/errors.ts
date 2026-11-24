@@ -11,3 +11,21 @@ export function errorText(err: unknown, fallback: string): string {
   }
   return fallback
 }
+
+/**
+ * blob 响应的错误体仍是 JSON 信封：`responseType: 'blob'` 时 axios 拦截器读不到
+ * blob 里的 message，这里自己拆开读；不是 JSON 就退回通用口径。
+ * TTS 试听、AI 生图这类「成功回二进制、失败回 JSON」的接口共用这一份。
+ */
+export async function blobErrorMessage(err: unknown, fallback: string): Promise<string> {
+  const data = (err as { response?: { data?: unknown } } | null)?.response?.data
+  if (data instanceof Blob && data.type.includes('json')) {
+    try {
+      const body = JSON.parse(await data.text()) as { message?: string }
+      if (body.message) return body.message
+    } catch {
+      // 不是 JSON 就走通用口径
+    }
+  }
+  return errorText(err, fallback)
+}

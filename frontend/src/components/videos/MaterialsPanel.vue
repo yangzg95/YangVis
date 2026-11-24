@@ -1,7 +1,5 @@
 <template>
-  <div class="page-card">
-    <div class="page-title">素材库</div>
-
+  <div class="materials-panel">
     <div class="toolbar toolbar--between">
       <a-space :size="8" wrap>
         <a-radio-group v-model:value="kind" button-style="solid" size="small">
@@ -349,9 +347,9 @@
 </template>
 
 <script setup lang="ts">
-// 素材库：账号级的图片/视频素材，跨项目复用。
+// 素材库（短视频页的「素材库」页签）：账号级的图片/视频素材，跨项目复用。
 //
-// 这一页做五件事：拉全量（账号上限 200 条，一次拉满，筛选与分组全在本地做，
+// 这个面板做五件事：拉全量（账号上限 200 条，一次拉满，筛选与分组全在本地做，
 // 输入即生效）、按「打标分组 + 时间」分组展示（从短视频存进来的首帧自动打上
 // 项目名，同一批聚成一组；没打标的按天归组）、列表图一律走后端生成的 320px
 // WebP 缩略图（首帧是 2K PNG，一张好几 MB，几十张原图同时进网络就是卡的根因）、

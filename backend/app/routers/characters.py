@@ -21,6 +21,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     UploadFile,
     status,
 )
@@ -35,16 +36,20 @@ from app.models.schemas import (
     CharacterIdsIn,
     CharacterListOut,
     CharacterOut,
+    CharacterPortraitPreviewIn,
     CharacterTrashItemOut,
     CharacterTrashListOut,
     CharacterUpdateIn,
     CharacterUsageOut,
     CurrentUser,
+    ModelPurpose,
 )
+from app.services.characters.prompts import build_turnaround_prompt
 from app.services.characters.service import CharacterService
 from app.services.characters.store import ensure_thumbnail, store_character_image
-from app.services.media import store
-from app.services.media.store import MediaFileError
+from app.services.media import ark, store
+from app.services.media.store import MediaFileError, sniff_media
+from app.services.model_config import default_model_config
 from app.services.uploads import (
     content_length_exceeds,
     oversize_message,
@@ -187,6 +192,71 @@ async def create_character(
         store.delete_blob(stored.rel_path)
         return APIResponse(code=-1, message=str(exc))
     return APIResponse(data=_out(row), message="已建立人物档案")
+
+
+@router.post("/portrait-preview")
+async def preview_portrait(
+    body: CharacterPortraitPreviewIn,
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    """AI 生成三视图形象：同步文生图，二进制直接回，不落盘不写库。
+
+    与短视频的 TTS 单句试听同口径——真计费、只由界面按钮显式触发、no-store：
+    用户可能连点几次挑一张，只有点保存时那张才随建档/换图 multipart 落盘，
+    取消或换图不留任何孤儿文件。准入门也与渲染作业一致：默认图片模型必须存在
+    且已通过连通性测试，否则凭证错误要等上游报错才暴露，等于白烧一次抵扣。
+    """
+    config = default_model_config(db, user.user_id, ModelPurpose.IMAGE)
+    if config is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="还没有配置用途为「图片」的默认模型：先在「模型与集成」里添加并测通",
+        )
+    if not config.last_test_ok:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="图片模型还没通过连通性测试：先在「模型与集成」里测通再生成",
+        )
+
+    description = body.prompt.strip()
+    if not description:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="角色描述为空：写清外形与衣着才能生成三视图",
+        )
+
+    prompt = build_turnaround_prompt(description)
+    try:
+        result = await ark.generate_image(config, prompt=prompt, size="2K")
+        raw = await ark.download(result.url, max_bytes=settings.MEDIA_IMAGE_MAX_BYTES)
+    except ark.ArkError as exc:
+        # 上游错误已经是中文人话（含内容审核、限流、404 型号错误等），原样交给界面。
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=exc.friendly()
+        ) from exc
+
+    # 防御一道：上游理论上只回图片，但落进编辑器之前仍按文件头认一次，
+    # 别让一份非图片字节伪装成形象图进 multipart。
+    try:
+        mime, _ext = sniff_media(raw)
+    except MediaFileError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"上游返回的不是图片内容：{exc}",
+        ) from exc
+    if not mime.startswith("image/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="上游返回的不是图片内容，换个描述再试一次",
+        )
+    logger.info(
+        "character portrait preview generated: owner=%s model=%s bytes=%d",
+        user.user_id,
+        config.model_name,
+        len(raw),
+    )
+    return Response(content=raw, media_type=mime, headers={"Cache-Control": "no-store"})
 
 
 @router.put("/{character_id}", response_model=APIResponse[CharacterOut])

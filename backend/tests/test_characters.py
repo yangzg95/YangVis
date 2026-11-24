@@ -22,20 +22,22 @@ from sqlalchemy.orm import sessionmaker
 
 from app import bootstrap
 from app.config import get_settings
+from app.crypto import encrypt
 from app.database import Base, get_db
 from app.deps import require_user
 from app.main import app
-from app.models.entities import VideoCharacter, VideoProject
-from app.models.schemas import CurrentUser
+from app.models.entities import ModelConfig, VideoCharacter, VideoProject
+from app.models.schemas import CurrentUser, ModelPurpose
 from app.services.characters import service as character_service
 from app.services.characters import store as character_store
+from app.services.characters.prompts import build_turnaround_prompt
 from app.services.characters.service import CharacterService
 from app.services.characters.store import (
     ensure_thumbnail,
     store_character_image,
     thumbnail_url,
 )
-from app.services.media import store as media_store
+from app.services.media import ark, store as media_store
 from app.services.media.store import MediaFileError
 
 settings = get_settings()
@@ -460,3 +462,123 @@ def test_api_usage_endpoint(client):
         "/api/office/characters/usage", json={"ids": [created["id"]]}
     ).json()
     assert body["code"] == 0 and body["data"][0]["character_id"] == created["id"]
+
+
+# ---- AI 三视图形象预览 -------------------------------------------------------
+
+
+def _image_model(db, *, tested: bool = True) -> ModelConfig:
+    config = ModelConfig(
+        owner_id=OWNER,
+        purpose=ModelPurpose.IMAGE.value,
+        title="测试图片模型",
+        model_name="image-unit-test",
+        base_url="http://localhost:1/api/v3",
+        api_key_enc=encrypt("sk-image"),
+        is_default=True,
+        last_test_ok=tested,
+    )
+    db.add(config)
+    db.commit()
+    return config
+
+
+def test_turnaround_prompt_carries_three_views_and_description():
+    prompt = build_turnaround_prompt("  28 岁女老师，爱穿风衣  ")
+    # 三个视角与「同一人」约束是模板的立身之本，关键词丢了等于功能失效。
+    for keyword in ("正面", "侧面", "背面", "全身", "turnaround"):
+        assert keyword in prompt
+    # 入口 strip 过的描述不该带首尾空白，且必须原样接在模板后面。
+    assert "28 岁女老师，爱穿风衣" in prompt
+    assert "  28 岁" not in prompt
+
+
+def test_portrait_preview_returns_image_bytes(client, db, monkeypatch):
+    _image_model(db)
+    captured = {}
+    png = _real_png()
+
+    async def fake_generate(config, *, prompt, size, **kwargs):
+        captured.update(prompt=prompt, size=size)
+        return ark.ImageResult(url="https://ark.example.com/sheet.png", size="2048x2048")
+
+    async def fake_download(url, *, max_bytes, timeout=None):
+        assert url == "https://ark.example.com/sheet.png"
+        return png
+
+    monkeypatch.setattr(ark, "generate_image", fake_generate)
+    monkeypatch.setattr(ark, "download", fake_download)
+
+    response = client.post(
+        "/api/office/characters/portrait-preview",
+        json={"prompt": "短发女教师，米色风衣"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    # no-store：预览图没有复用价值，别让浏览器/代理缓存占盘（与 TTS 试听同口径）。
+    assert response.headers["cache-control"] == "no-store"
+    assert response.content == png
+    # 2K 档位与首帧渲染同档；用户描述原样进上游 prompt，三视图模板词也要在。
+    assert captured["size"] == "2K"
+    assert "短发女教师，米色风衣" in captured["prompt"]
+    for keyword in ("正面", "侧面", "背面"):
+        assert keyword in captured["prompt"]
+
+
+def test_portrait_preview_requires_usable_image_config(client, db):
+    # 没配图片模型：明确告诉去设置页，而不是把上游 401 抛给用户。
+    response = client.post(
+        "/api/office/characters/portrait-preview", json={"prompt": "一个角色"}
+    )
+    assert response.status_code == 400
+    assert "图片" in response.json()["message"]
+
+    _image_model(db, tested=False)
+    response = client.post(
+        "/api/office/characters/portrait-preview", json={"prompt": "一个角色"}
+    )
+    assert response.status_code == 400
+    assert "连通性测试" in response.json()["message"]
+
+
+def test_portrait_preview_rejects_blank_prompt(client, db):
+    _image_model(db)
+    # 纯空白在进上游之前拦下，省一次真计费调用。
+    response = client.post(
+        "/api/office/characters/portrait-preview", json={"prompt": "   "}
+    )
+    assert response.status_code == 400
+    assert "空" in response.json()["message"]
+
+
+def test_portrait_preview_translates_ark_error(client, db, monkeypatch):
+    _image_model(db)
+
+    async def broken(config, *, prompt, size, **kwargs):
+        raise ark.ArkError("提示词未通过内容安全审核（ContentRisk）", code="ContentRisk")
+
+    monkeypatch.setattr(ark, "generate_image", broken)
+    response = client.post(
+        "/api/office/characters/portrait-preview", json={"prompt": "敏感描述"}
+    )
+    assert response.status_code == 400
+    assert "ContentRisk" in response.json()["message"]
+
+
+def test_portrait_preview_rejects_non_image_payload(client, db, monkeypatch):
+    _image_model(db)
+
+    async def fake_generate(config, *, prompt, size, **kwargs):
+        return ark.ImageResult(url="https://ark.example.com/weird")
+
+    async def fake_download(url, *, max_bytes, timeout=None):
+        return NOT_MEDIA
+
+    monkeypatch.setattr(ark, "generate_image", fake_generate)
+    monkeypatch.setattr(ark, "download", fake_download)
+
+    response = client.post(
+        "/api/office/characters/portrait-preview", json={"prompt": "一个角色"}
+    )
+    assert response.status_code == 400
+    assert "不是图片" in response.json()["message"]

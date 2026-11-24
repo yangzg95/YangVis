@@ -426,7 +426,11 @@
                       <TeamOutlined />
                       {{ castIds.length ? '改选角色' : '从人物库选择' }}
                     </a-button>
-                    <a-button size="small" type="text" @click="router.push('/office/characters')">
+                    <a-button
+                      size="small"
+                      type="text"
+                      @click="router.push({ path: '/office/videos', query: { tab: 'characters' } })"
+                    >
                       管理人物库
                     </a-button>
                   </a-space>
@@ -1221,7 +1225,7 @@ import MaterialPicker from '@/components/videos/MaterialPicker.vue'
 import CharacterPicker from '@/components/videos/CharacterPicker.vue'
 import { copyText } from '@/utils/clipboard'
 import { saveTextFile } from '@/utils/download'
-import { errorText } from '@/utils/errors'
+import { blobErrorMessage, errorText } from '@/utils/errors'
 import { fmtElapsed, fmtSize, runStatusColor, runStatusText } from '@/utils/format'
 import { createPollLoop } from '@/utils/polling'
 import { buildAss, buildDialogueSrt, buildSrt, dialogueCues, subtitleCues } from '@/utils/videoSubtitles'
@@ -2224,20 +2228,6 @@ function stopTtsPreview() {
   ttsPlaying.value = false
 }
 
-/** blob 响应的错误体仍是 JSON 信封：axios 拦截器读不到 blob 里的 message，这里自己拆。 */
-async function blobErrorMessage(err: unknown, fallback: string): Promise<string> {
-  const data = (err as { response?: { data?: unknown } } | null)?.response?.data
-  if (data instanceof Blob && data.type.includes('json')) {
-    try {
-      const body = JSON.parse(await data.text()) as { message?: string }
-      if (body.message) return body.message
-    } catch {
-      // 不是 JSON 就走通用口径
-    }
-  }
-  return errorText(err, fallback)
-}
-
 async function onPreviewTts() {
   if (!current.value) return
   // 再点一次即停：同一个按钮承担播放/停止两态，省一个控件。
@@ -2425,7 +2415,7 @@ function applyMaterialsToAll() {
 }
 
 function goToMaterials() {
-  router.push('/office/materials')
+  router.push({ path: '/office/videos', query: { tab: 'materials' } })
 }
 
 // ---- 展示辅助 ----------------------------------------------------------------

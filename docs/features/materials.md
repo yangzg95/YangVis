@@ -10,7 +10,8 @@
 
 ## 用户可见行为
 
-- **素材库页（/office/materials）**：图片/视频筛选 + 名称与分组关键字本地即时搜；
+- **素材库页签（短视频页 `/office/videos?tab=materials`）**：素材库与人物库已并入
+  短视频页的页签，旧路径 `/office/materials` 重定向过来；图片/视频筛选 + 名称与分组关键字本地即时搜；
   打了标的按标签聚组、没打的按天归组（今天/昨天/日期）。列表图一律走后端生成的
   320px WebP 缩略图，缺缩略图时回退原图。
 - **引用可见性与未使用清理**：每条素材带镜头引用计数（`ref_count`），被引用的卡片
@@ -74,7 +75,7 @@
 | `backend/app/routers/materials.py` | `/office/materials` 一组接口；列表带每条 `ref_count`；`GET /trash` 拼缩略图并按服务端时钟算剩余秒数；错误翻译 |
 | `backend/app/services/videos/service.py` | 镜头保存归一化 `material_ids`、渲染入队时 `materials_for` 解析、只把图片并入参考图预算 |
 | `frontend/src/api/materials.ts` | `materialsApi`：list/upload/标签/删除/恢复/`trash` |
-| `frontend/src/views/Materials.vue` | 素材库页：分组网格、上传进度、批量条、删除影响面、回收站抽屉与倒计时 |
+| `frontend/src/components/videos/MaterialsPanel.vue` | 素材库页签：分组网格、上传进度、批量条、删除影响面、回收站抽屉与倒计时 |
 | `frontend/src/components/videos/MaterialPicker.vue` | 镜头级选择器：勾选上限、弹窗内直传、只回 id |
 
 ## 接口列表

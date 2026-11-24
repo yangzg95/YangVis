@@ -161,7 +161,6 @@ import {
   DatabaseOutlined,
   DesktopOutlined,
   EditOutlined,
-  FolderOpenOutlined,
   FundProjectionScreenOutlined,
   HomeOutlined,
   LogoutOutlined,
@@ -231,11 +230,10 @@ const MENU: MenuNode[] = [
       // 面试记录曾是简历页里的一个 tab，实体和接口都独立，拆成同级叶子。
       { path: '/office/interviews', title: '面试', icon: SolutionOutlined },
       { path: '/office/slides', title: '幻灯片', icon: FundProjectionScreenOutlined },
+      // 一个菜单叶子、页内三页签：片子（项目列表）、人物库（账号级角色档案）、
+      // 素材库（账号级图片/视频素材）。旧路径 /office/characters、/office/materials
+      // 在路由表里重定向到 /office/videos?tab=...，书签不会 404。
       { path: '/office/videos', title: '短视频', icon: VideoCameraOutlined },
-      // 人物库是账号级的角色档案：短视频选了角色组，脚本带档案、渲染注入形象图。
-      { path: '/office/characters', title: '人物库', icon: TeamOutlined },
-      // 库是账号级的，但今天只有短视频的镜头会引用它，所以紧跟在短视频后面同级摆放。
-      { path: '/office/materials', title: '素材库', icon: FolderOpenOutlined },
       // 创作（写小说 / 写文章）：一个菜单叶子，页内两 tab；工作台按作品 id 占动态标签。
       { path: '/studio', title: '创作', icon: EditOutlined },
     ],

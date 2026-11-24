@@ -160,21 +160,14 @@ const routes: RouteRecordRaw[] = [
         meta: {title: '短视频'},
     },
     {
-        // 人物库：账号级的角色档案与形象图。短视频通过项目角色组认领：脚本生成带档案、
-        // 首帧渲染注入形象图。紧跟短视频摆放，与素材库同级，都不属于任何一条片子。
+        // 人物库与素材库已并入短视频页的页签（views/Videos.vue），旧路径带 tab query
+        // 重定向过来，书签和外发链接不会 404——与 /mcp → /tools 同一处理。
         path: '/office/characters',
-        name: 'Characters',
-        component: () => import('@/views/Characters.vue'),
-        meta: {title: '人物库'},
+        redirect: {path: '/office/videos', query: {tab: 'characters'}},
     },
     {
-        // 素材库：账号级的图片/视频素材。放在短视频之后、与它同级，是因为目前只有
-        // 短视频工作台的镜头会引用它；库里的人物形象图换一条选题还要接着用，所以它
-        // 不属于任何一条片子。
         path: '/office/materials',
-        name: 'Materials',
-        component: () => import('@/views/Materials.vue'),
-        meta: {title: '素材库'},
+        redirect: {path: '/office/videos', query: {tab: 'materials'}},
     },
     {
         // 短视频工作台：左分镜、中提示词、右竖屏预览。与幻灯片工作台不同，这一条

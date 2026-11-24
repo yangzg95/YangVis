@@ -70,7 +70,7 @@
 | `backend/app/routers/videos.py` | 列表 `q/order` 查询参数；`compose` 收 `VideoComposeIn` |
 | `backend/app/models/schemas.py` | `VideoComposeIn.allow_missing` |
 | `frontend/src/views/VideoWorkbench.vue` | 拖拽排序、状态点、连播、待处理导航与 query 定位、只选待处理、草稿片入口与门槛 |
-| `frontend/src/views/Videos.vue` | 标题搜索、排序选择、attention 跳转 |
+| `frontend/src/views/Videos.vue`（壳）、`components/videos/VideoProjectsPanel.vue` | 三页签壳（片子/人物库/素材库，tab 走 query）；片子页签的标题搜索、排序选择、attention 跳转 |
 | `frontend/src/components/videos/CharacterPicker.vue` | 内联简版建档（见 characters.md） |
 
 ## 测试

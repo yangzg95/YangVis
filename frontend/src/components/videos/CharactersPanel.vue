@@ -1,7 +1,5 @@
 <template>
-  <div class="page-card">
-    <div class="page-title">人物库</div>
-
+  <div class="characters-panel">
     <div class="toolbar toolbar--between">
       <a-input-search
         v-model:value="keyword"
@@ -93,6 +91,39 @@
             </div>
           </a-upload>
           <div class="hint">只收图片（PNG / JPEG / GIF / WebP / BMP），视频会被服务端拒绝。</div>
+
+          <!-- AI 生成：后端同步出一张正面/侧面/背面三视角合一的设定图，转成 File
+               走与手工上传完全相同的保存路径，取消或重生成都不会在服务器留垃圾。 -->
+          <div class="ai-portrait">
+            <div class="ai-portrait-head">
+              <span class="ai-portrait-title"><ThunderboltOutlined /> AI 生成三视图形象</span>
+              <a-button type="link" size="small" @click="fillPromptFromProfile">
+                填入档案描述
+              </a-button>
+            </div>
+            <a-textarea
+              v-model:value="genPrompt"
+              :rows="3"
+              :maxlength="1000"
+              show-count
+              placeholder="描述性别年龄、发型、脸型、体型、服装与标志物，例如：28 岁女性，齐肩黑发、圆框眼镜，米白色西装外套、牛仔裤、白球鞋"
+            />
+            <div class="ai-portrait-actions">
+              <a-button
+                type="primary"
+                ghost
+                :loading="generating"
+                :disabled="!genPrompt.trim()"
+                @click="onGeneratePortrait"
+              >
+                <template #icon><ThunderboltOutlined /></template>
+                生成三视图
+              </a-button>
+              <span class="hint">
+                正面 / 侧面 / 背面三视角合一，按次计费；生成后替换当前形象图，点保存才落库
+              </span>
+            </div>
+          </div>
         </a-form-item>
         <a-form-item label="角色名" required>
           <a-input v-model:value="editor.name" :maxlength="64" placeholder="例如：林小夏" />
@@ -199,14 +230,15 @@
 </template>
 
 <script setup lang="ts">
-// 人物库：账号级的角色档案与形象图。
-// 这一页做五件事：拉列表（名称搜索走后端，带项目引用数）、卡片网格展示档案、
+// 人物库（短视频页的「人物库」页签）：账号级的角色档案与形象图。
+// 这个面板做五件事：拉列表（名称搜索走后端，带项目引用数）、卡片网格展示档案、
 // 建档/编辑（multipart 一次收图与文字，重名给二次确认但不硬拦）、删除（先进回收期，
 // 回收站可撤销，过期才真删）、回收站恢复。残留引用交给视频侧在保存/渲染时按 id 缺失跳过。
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
   DeleteOutlined,
   PlusOutlined,
+  ThunderboltOutlined,
   UndoOutlined,
   UploadOutlined,
 } from '@ant-design/icons-vue'
@@ -217,7 +249,7 @@ import {
   type CharacterTrashItem,
   type CharacterUsageProject,
 } from '@/api'
-import { errorText } from '@/utils/errors'
+import { blobErrorMessage, errorText } from '@/utils/errors'
 import { fmtShortDateTime } from '@/utils/format'
 
 const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp']
@@ -280,6 +312,19 @@ function releasePreview() {
 }
 
 onBeforeUnmount(releasePreview)
+
+// AI 三视图生成：genPrompt 是用户可改的角色描述，generating 跟一次真计费调用。
+const genPrompt = ref('')
+const generating = ref(false)
+
+// 后端 sniff 认出来的图片 MIME 都在这张表里；认不出时按 png 落，保存时后端还会再判一次。
+const MIME_EXTENSIONS: Record<string, string> = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+  'image/bmp': '.bmp',
+}
 
 const deleteOpen = ref(false)
 const deleting = ref(false)
@@ -399,6 +444,7 @@ function resetEditor() {
   editor.features = ''
   editor.file = null
   editor.currentUrl = ''
+  genPrompt.value = ''
   releasePreview()
 }
 
@@ -430,6 +476,48 @@ function pickFile(file: File) {
   previewUrl.value = previewObjectUrl
   // 返回 false 阻止 antd 自动上传，保存时随表单一起发。
   return false
+}
+
+/** 把已填的文字档案拼成一段描述，给不会写提示词的人起步，拼完仍可手工改。 */
+function fillPromptFromProfile() {
+  const parts = [
+    editor.name.trim() && `角色：${editor.name.trim()}`,
+    editor.persona.trim() && `身份人设：${editor.persona.trim()}`,
+    editor.outfit.trim() && `衣着：${editor.outfit.trim()}`,
+    editor.features.trim() && `外形特色：${editor.features.trim()}`,
+  ].filter(Boolean)
+  if (!parts.length) {
+    message.info('先填写角色名或人设 / 衣着 / 外形，也可以直接手写描述')
+    return
+  }
+  genPrompt.value = parts.join('；')
+}
+
+/** 调后端同步生成三视图，拿到的二进制转成 File 走与手工上传完全相同的保存路径。 */
+async function onGeneratePortrait() {
+  const prompt = genPrompt.value.trim()
+  if (!prompt) {
+    message.warning('先写一段角色外形描述')
+    return
+  }
+  generating.value = true
+  try {
+    const blob = await charactersApi.portraitPreview(prompt)
+    const mime = blob.type || 'image/png'
+    const file = new File([blob], `ai-turnaround${MIME_EXTENSIONS[mime] ?? '.png'}`, {
+      type: mime,
+    })
+    editor.file = file
+    releasePreview()
+    previewObjectUrl = URL.createObjectURL(file)
+    previewUrl.value = previewObjectUrl
+    message.success('三视图已生成，确认无误后点保存')
+  } catch (err) {
+    // 失败响应是 blob 里的 JSON 信封，拦截器拆不到，自己读 message。
+    message.error(await blobErrorMessage(err, '三视图生成失败'))
+  } finally {
+    generating.value = false
+  }
 }
 
 /** 同名角色（排除编辑中的自身）：后端允许重名，这里只做提示，不硬拦。 */
@@ -705,6 +793,39 @@ onMounted(load)
   gap: 6px;
   color: var(--text-3);
   font-size: var(--fs-xs);
+}
+
+/* AI 生成区：虚线块与上传区视觉分组，表达「两条任选其一」的形象图来源。 */
+.ai-portrait {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px dashed var(--hairline);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.ai-portrait-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.ai-portrait-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: var(--fs-sm);
+}
+
+.ai-portrait-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
 }
 
 .delete-alert {
