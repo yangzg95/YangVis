@@ -18,6 +18,10 @@ RUN npm config set registry https://registry.npmmirror.com \
 # （ant-design-x-vue 的类型图把峰值推过 2GB），在内存受限的构建机上会
 # JS heap OOM。类型门保留在本地/CI 的 `npm run build`（含 vue-tsc）里。
 COPY frontend/ ./
+# Node 在容器内按 cgroup 探测出的默认 old-space 上限约 2GB，引入
+# ant-design-x-vue 后 rollup 打包峰值越线 OOM；构建 VM 有约 9.6GB，
+# 抬到 4GB 仍留足余量。ENV 只存活于本构建阶段，不进入运行时镜像。
+ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN npm run build:web
 
 
