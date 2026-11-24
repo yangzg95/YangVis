@@ -528,6 +528,14 @@ def _retire_project_assets(column_names) -> None:
             conn.execute(text("ALTER TABLE video_project ADD COLUMN character_ids JSON NULL"))
         logger.info("added video_project.character_ids")
 
+    # 人物库软删除：角色删除先进回收期，旧库在这儿补 deleted_at；
+    # 存量行读到 NULL，服务层一律按正常角色处理，行为与上线前一致。
+    character_cols = column_names("video_character")
+    if character_cols and "deleted_at" not in character_cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE video_character ADD COLUMN deleted_at DATETIME NULL"))
+        logger.info("added video_character.deleted_at")
+
     # 尾帧链式渲染：视频作业成功时转存上游返回的 last_frame_url，供下一镜当首帧。
     media_cols = column_names("media_job")
     if media_cols and "last_frame_rel_path" not in media_cols:

@@ -35,6 +35,8 @@ from app.models.schemas import (
     CharacterIdsIn,
     CharacterListOut,
     CharacterOut,
+    CharacterTrashItemOut,
+    CharacterTrashListOut,
     CharacterUpdateIn,
     CharacterUsageOut,
     CurrentUser,
@@ -48,6 +50,7 @@ from app.services.uploads import (
     oversize_message,
     read_upload_limited,
 )
+from app.timeutil import db_now
 
 logger = logging.getLogger("yangvis.characters")
 
@@ -68,7 +71,7 @@ def _not_found(exc: LookupError) -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
 
 
-def _out(row) -> CharacterOut:
+def _out(row, project_count: int = 0) -> CharacterOut:
     rel = str(row.rel_path or "")
     return CharacterOut(
         id=row.id,
@@ -82,6 +85,7 @@ def _out(row) -> CharacterOut:
         url=store.resolve_url(rel),
         thumb_url=ensure_thumbnail(rel),
         created_at=row.created_at,
+        project_count=project_count,
     )
 
 
@@ -92,14 +96,59 @@ def list_characters(
     offset: int = Query(default=0, ge=0),
     service: CharacterService = Depends(get_service),
 ) -> APIResponse[CharacterListOut]:
-    """一页角色 + 筛选后的总数。``q`` 只搜角色名。"""
+    """一页角色 + 筛选后的总数。``q`` 只搜角色名；每条带项目引用数与回收站角标。"""
     rows, total = service.list_characters(keyword=q, limit=limit, offset=offset)
+    usage_map = service.project_usage_map([row.id for row in rows])
     return APIResponse(
         data=CharacterListOut(
-            items=[_out(row) for row in rows],
+            items=[_out(row, usage_map.get(row.id, 0)) for row in rows],
             total=total,
             max_per_owner=settings.CHARACTER_MAX_PER_OWNER,
+            trash_count=service.trash_count(),
+            trash_ttl_seconds=service.trash_ttl_seconds,
         )
+    )
+
+
+@router.get("/trash", response_model=APIResponse[CharacterTrashListOut])
+def list_trash_characters(
+    q: str | None = Query(default=None, max_length=64),
+    limit: int = Query(default=60, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    service: CharacterService = Depends(get_service),
+) -> APIResponse[CharacterTrashListOut]:
+    """回收站一屏：只列撤销窗口内的角色，带距真删的剩余秒数。"""
+    rows, total = service.list_trash(keyword=q, limit=limit, offset=offset)
+    ttl = service.trash_ttl_seconds
+    now = db_now()
+    items: list[CharacterTrashItemOut] = []
+    for row in rows:
+        base = _out(row).model_dump()
+        remaining = ttl
+        if row.deleted_at is not None:
+            remaining = max(0, ttl - int((now - row.deleted_at).total_seconds()))
+        items.append(
+            CharacterTrashItemOut(
+                **base,
+                deleted_at=row.deleted_at,
+                expires_in_seconds=remaining,
+            )
+        )
+    return APIResponse(
+        data=CharacterTrashListOut(items=items, total=total, trash_ttl_seconds=ttl)
+    )
+
+
+@router.post("/batch-restore", response_model=APIResponse[CharacterIdsIn])
+def restore_characters(
+    body: CharacterIdsIn,
+    service: CharacterService = Depends(get_service),
+) -> APIResponse[CharacterIdsIn]:
+    """撤销删除：把回收期里的角色原样恢复，超额时只放回预算内那批。"""
+    restored = service.restore_many(body.ids)
+    return APIResponse(
+        data=CharacterIdsIn(ids=body.ids[:restored]),
+        message=f"已恢复 {restored} 个人物" if restored else "没有可恢复的人物，可能已过撤销期限",
     )
 
 
@@ -206,7 +255,7 @@ def delete_character(
     character_id: int,
     service: CharacterService = Depends(get_service),
 ) -> APIResponse[CharacterDeleteOut]:
-    """硬删除：删行 + best-effort 删形象图；回执里的引用数仅作界面提示。
+    """移进回收期：行与形象图都保留，窗口内可在回收站撤销；回执引用数仅作界面提示。
 
     项目里残留的角色 id 不在这儿改写——视频侧保存与渲染时按「id 已不存在」跳过。
     """
@@ -214,7 +263,7 @@ def delete_character(
         references = service.remove(character_id)
     except LookupError as exc:
         raise _not_found(exc) from exc
-    message = "已删除人物"
+    message = f"已移入回收站，{service.trash_ttl_seconds // 60} 分钟内可撤销"
     if references:
-        message += f"，{references} 个短视频项目仍引用它（保存或渲染时自动跳过）"
+        message += f"；{references} 个短视频项目仍引用它（保存或渲染时自动跳过）"
     return APIResponse(data=CharacterDeleteOut(id=character_id, references=references), message=message)

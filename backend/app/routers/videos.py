@@ -406,6 +406,27 @@ def save_frame_to_material(
     )
 
 
+@router.post(
+    "/{project_id}/shots/{shot_id}/clip-to-material",
+    response_model=APIResponse[VideoProjectDetail],
+)
+def save_clip_to_material(
+    project_id: int,
+    shot_id: int,
+    service: VideoService = Depends(get_service),
+) -> APIResponse[VideoProjectDetail]:
+    """把这一镜渲出来的视频片段复制进素材库，跨项目复用（视频类素材本期只记录引用）。"""
+    try:
+        service.save_clip_to_material(project_id, shot_id)
+    except LookupError as exc:
+        raise _not_found(exc) from exc
+    except ValueError as exc:
+        return APIResponse(code=-1, message=str(exc))
+    return APIResponse(
+        data=service.to_detail(service.get_project(project_id)), message="片段已存进素材库"
+    )
+
+
 # ---- 发布（成片合成 + 手动发布包） -------------------------------------------
 
 

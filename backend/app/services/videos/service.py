@@ -1171,6 +1171,45 @@ class VideoService:
         )
         return asset
 
+    def save_clip_to_material(self, project_id: int, shot_id: int) -> MaterialAsset:
+        """把这一镜最近一次成功的**视频片段**复制一条进素材库。
+
+        与 :meth:`save_frame_to_material` 同一套复制语义：产物按项目分、素材按账号分，
+        复制而不是移动，删项目不带走库里那条；名字与分组标签都由服务端按项目/镜号定。
+        存进来的是视频类素材（``kind=video``），这一期只记录引用、不参与渲染——和直接
+        上传的视频素材同一口径。
+        """
+        project = self.get_project(project_id)
+        row = next((item for item in self.shots_of(project_id) if item.id == shot_id), None)
+        if row is None:
+            raise ValueError("这一镜不属于该项目")
+        job = (
+            self._latest_jobs([row.video_job_id]).get(row.video_job_id)
+            if row.video_job_id
+            else None
+        )
+        if job is None or job.status != JOB_SUCCEEDED or not job.rel_path:
+            raise ValueError("这一镜还没有成功的视频片段，先渲完再存")
+
+        stored = store_material(self._owner_id, store.read_blob(str(job.rel_path)))
+        try:
+            asset = self._materials().add(
+                stored, f"{project.title}｜第 {row.sort_order} 镜片段", tag=project.title
+            )
+        except ValueError:
+            store.delete_blob(stored.rel_path)
+            raise
+        logger.info(
+            "video clip copied to materials: owner=%s project=%s shot=%s job=%s asset=%s bytes=%d",
+            self._owner_id,
+            project.id,
+            row.id,
+            job.id,
+            asset.id,
+            asset.size,
+        )
+        return asset
+
     # -- 发布（成片合成 + 手动发布包） -----------------------------------------
 
     def compose_publish(self, project_id: int, allow_missing: bool = False) -> PublishJob:

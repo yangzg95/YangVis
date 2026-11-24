@@ -284,6 +284,8 @@ class Settings(BaseSettings):
     # 角色形象图会并进每镜的参考图请求（总预算 4 张），项目角色组再大只会互相干扰。
     CHARACTER_MAX_PER_OWNER: int = 50
     CHARACTER_MAX_PER_PROJECT: int = 3
+    # 角色删除回收期：与素材同一套软删语义，窗口内可撤销，过期才真删行与形象图。
+    CHARACTER_TRASH_TTL_SECONDS: int = 600
     # 单条提示词长度上限。方舟的硬限制是中文 500 字 / 英文 1000 词，模型给的
     # 分镜提示词经常压线，超长在入队前截断并留痕，别让整个批量被一条 400 打断。
     VIDEO_MAX_PROMPT_CHARS: int = 480

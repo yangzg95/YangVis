@@ -474,6 +474,21 @@ def test_trash_is_owner_scoped(db):
     assert other.trash_count() == 0
 
 
+def test_ref_usage_map_counts_referencing_shots(db):
+    """引用计数：一个素材被几个镜头引用就报几，没被引用的报 0，按 id 对齐。"""
+    project = _project(db)
+    first = _add(db, "主角形象.png")
+    second = _add(db, "片头.mp4", MP4)
+    unused = _add(db, "备用.png")
+    # 同一镜头引用两条，两个镜头又都引用 first：first 应被计两次。
+    _shot(db, project.id, [str(first.id), str(second.id)])
+    _shot(db, project.id, [str(first.id)])
+
+    counts = _service(db).ref_usage_map([first.id, second.id, unused.id])
+    assert counts == {first.id: 2, second.id: 1, unused.id: 0}
+    assert _service(db).ref_usage_map([]) == {}
+
+
 def test_tag_is_normalized_on_write_and_searchable(db):
     """打标分组：空白即摘掉、超长即截断，名字与标签两条检索路都得能命中。"""
     service = _service(db)

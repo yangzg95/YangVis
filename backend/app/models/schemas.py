@@ -3137,6 +3137,8 @@ class MaterialAssetOut(BaseModel):
     url: str = ""
     thumb_url: str = ""
     created_at: Optional[datetime] = None
+    # 被多少个镜头引用：列表卡片的引用角标，未使用清理视图按它筛 0。
+    ref_count: int = 0
 
 
 class MaterialTagIn(BaseModel):
@@ -3277,6 +3279,8 @@ class CharacterOut(BaseModel):
     url: str = ""
     thumb_url: str = ""
     created_at: Optional[datetime] = None
+    # 被多少个短视频项目选进角色组：列表卡片的引用角标，未使用清理视图按它筛。
+    project_count: int = 0
 
 
 class CharacterListOut(BaseModel):
@@ -3285,6 +3289,34 @@ class CharacterListOut(BaseModel):
     items: List[CharacterOut] = Field(default_factory=list)
     total: int = 0
     max_per_owner: int = 0
+    # 回收期里还没过期的条数：人物库页的「回收站」入口角标照它显示。
+    trash_count: int = 0
+    trash_ttl_seconds: int = 0
+
+
+class CharacterTrashItemOut(BaseModel):
+    """回收期里的一个角色：普通字段之外带删除时刻与距真删的剩余秒数。"""
+
+    id: int
+    name: str
+    persona: str = ""
+    outfit: str = ""
+    features: str = ""
+    mime: str = ""
+    size: int = 0
+    url: str = ""
+    thumb_url: str = ""
+    created_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None
+    expires_in_seconds: int = 0
+
+
+class CharacterTrashListOut(BaseModel):
+    """回收站一屏：回收期内的行按删除时刻倒序，晚删的排最前。"""
+
+    items: List[CharacterTrashItemOut] = Field(default_factory=list)
+    total: int = 0
+    trash_ttl_seconds: int = 0
 
 
 class CharacterUpdateIn(BaseModel):

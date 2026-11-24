@@ -473,6 +473,25 @@ class MaterialService:
             for asset_id, projects in buckets.items()
         ]
 
+    def ref_usage_map(self, asset_ids: List[int]) -> Dict[int, int]:
+        """一批素材各自被多少个镜头引用，列表卡片的引用角标用。
+
+        一次读全本账号镜头再 Python 聚合，与 :meth:`usage` / :meth:`_mark_deleted`
+        同一反查口径；同一镜头引用多条只在各条上各算一次。
+        """
+        wanted = {str(item) for item in asset_ids}
+        if not wanted:
+            return {}
+        counts: Dict[int, int] = {int(item): 0 for item in asset_ids}
+        rows = list(
+            self._db.scalars(select(VideoShot).where(VideoShot.owner_id == self._owner_id)).all()
+        )
+        for row in rows:
+            refs = {str(item) for item in (row.material_ids or [])} & wanted
+            for ref in refs:
+                counts[int(ref)] += 1
+        return counts
+
     # -- 供短视频侧批量读 -------------------------------------------------------
 
     def materials_for(self, asset_ids: List[str]) -> Dict[str, MaterialAsset]:

@@ -29,6 +29,7 @@ from app.models.entities import (
     MediaJob,
     ModelConfig,
     PublishJob,
+    VideoCharacter,
     VideoProject,
     VideoShot,
     Workflow,
@@ -63,6 +64,7 @@ from app.services.characters.store import store_character_image
 from app.services.media import store as media_store
 from app.services.media.tts import TtsError
 from app.services.materials import KIND_IMAGE as MATERIAL_IMAGE
+from app.services.materials import KIND_VIDEO as MATERIAL_VIDEO
 from app.services.materials import service as material_service
 from app.services.materials import store as material_store
 from app.services.materials.store import store_material
@@ -120,6 +122,7 @@ def media_dir(tmp_path, monkeypatch):
         MATERIAL_MAX_IMAGE_BYTES=settings.MATERIAL_MAX_IMAGE_BYTES,
         MATERIAL_MAX_VIDEO_BYTES=settings.MATERIAL_MAX_VIDEO_BYTES,
         CHARACTER_MAX_PER_OWNER=settings.CHARACTER_MAX_PER_OWNER,
+        CHARACTER_TRASH_TTL_SECONDS=settings.CHARACTER_TRASH_TTL_SECONDS,
     )
     monkeypatch.setattr(media_store, "settings", fake)
     monkeypatch.setattr(material_store, "settings", fake)
@@ -1273,9 +1276,18 @@ def test_project_character_ids_keep_only_known_owned_ids(db):
     )
     assert project.character_ids == [str(first.id), str(second.id)]
 
-    # 角色被硬删除后，下一次保存把残留 id 自然清掉，读取侧不报错。
-    CharacterService(db, OWNER).remove(second.id)
+    # 角色进回收站（软删）：撤销窗口内 id 仍是「已知」，保存不会提前抹掉引用，
+    # 这样撤销恢复后项目角色组完全无损——与素材回收期同一口径。
+    character_service = CharacterService(db, OWNER)
+    character_service.remove(second.id)
     service = _service(db)
+    saved = service.update_project(project.id, character_ids=project.character_ids)
+    assert saved.character_ids == [str(first.id), str(second.id)]
+
+    # 过了撤销窗口被懒清理真删后，下一次保存才把残留 id 自然清掉。
+    db.get(VideoCharacter, second.id).deleted_at = datetime(2000, 1, 1)
+    db.commit()
+    character_service.purge_expired()
     saved = service.update_project(project.id, character_ids=project.character_ids)
     assert saved.character_ids == [str(first.id)]
 
@@ -1321,8 +1333,16 @@ def test_render_frames_injects_character_portraits_before_materials(db):
     request = service.render_frames(project.id, [])[0].request
     assert request["images"] == [character.rel_path, image.rel_path]
 
-    # 删掉角色后同一项目再渲：残留 id 被跳过，只剩素材，渲染不炸。
-    CharacterService(db, OWNER).remove(character.id)
+    # 角色进回收站（软删）：撤销窗口内形象图仍注入，撤销才能无损恢复。
+    character_service = CharacterService(db, OWNER)
+    character_service.remove(character.id)
+    request = service.render_frames(project.id, [])[0].request
+    assert request["images"] == [character.rel_path, image.rel_path]
+
+    # 过了撤销窗口真删后同一项目再渲：残留 id 被跳过，只剩素材，渲染不炸。
+    db.get(VideoCharacter, character.id).deleted_at = datetime(2000, 1, 1)
+    db.commit()
+    character_service.purge_expired()
     request = service.render_frames(project.id, [])[0].request
     assert request["images"] == [image.rel_path]
 
@@ -1429,6 +1449,35 @@ def test_the_copy_outlives_the_project(db, tmp_path):
     assert not artifact.exists()
     assert material_file.exists()
     assert MaterialService(db, OWNER).get_asset(asset.id).rel_path == asset.rel_path
+
+
+def test_save_clip_copies_the_video_artifact_into_the_library(db, tmp_path):
+    """片段存素材：复制成视频类素材，名字/分组由服务端定，产物本身不动。"""
+    project = _project(db)
+    service = _service(db)
+    rows = _shots(db, project.id, 1)
+    job = _clip_with_last_frame(db, project.id, rows[0])
+    artifact = tmp_path / job.rel_path
+
+    asset = service.save_clip_to_material(project.id, rows[0].id)
+
+    assert (asset.owner_id, asset.kind) == (OWNER, MATERIAL_VIDEO)
+    assert asset.name == "季度复盘三步｜第 1 镜片段"
+    assert asset.tag == "季度复盘三步"
+    assert asset.rel_path.startswith(f"materials/{OWNER}/")
+    assert (tmp_path / asset.rel_path).read_bytes() == MP4
+    # 复制不是移动：这一镜的片段产物照旧在，作业行也没改。
+    assert artifact.exists()
+    db.expire_all()
+    assert db.get(MediaJob, job.id).rel_path == job.rel_path
+
+
+def test_save_clip_refuses_a_shot_without_a_succeeded_clip(db):
+    project = _project(db)
+    service = _service(db)
+    row = _shots(db, project.id, 1)[0]
+    with pytest.raises(ValueError, match="视频片段"):
+        service.save_clip_to_material(project.id, row.id)
 
 
 def test_save_frame_refuses_a_shot_that_has_no_artifact(db, tmp_path):

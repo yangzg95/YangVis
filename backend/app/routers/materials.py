@@ -128,7 +128,7 @@ def _resolve_thumbs(rows) -> list[str]:
     return urls
 
 
-def _out(asset, thumb_url: str = "") -> MaterialAssetOut:
+def _out(asset, thumb_url: str = "", ref_count: int = 0) -> MaterialAssetOut:
     return MaterialAssetOut(
         id=asset.id,
         kind=asset.kind,
@@ -142,6 +142,7 @@ def _out(asset, thumb_url: str = "") -> MaterialAssetOut:
         # 空串时界面回退原图——提速件坏了不该把列表也带走。
         thumb_url=thumb_url,
         created_at=asset.created_at,
+        ref_count=ref_count,
     )
 
 
@@ -158,9 +159,10 @@ def list_materials(
         kind=kind if kind in MATERIAL_KINDS else None, keyword=q, limit=limit, offset=offset
     )
     thumbs = _resolve_thumbs(rows)
+    ref_map = service.ref_usage_map([row.id for row in rows])
     return APIResponse(
         data=MaterialListOut(
-            items=[_out(row, thumb) for row, thumb in zip(rows, thumbs)],
+            items=[_out(row, thumb, ref_map.get(row.id, 0)) for row, thumb in zip(rows, thumbs)],
             total=total,
             bytes_total=bytes_total,
             max_per_owner=settings.MATERIAL_MAX_PER_OWNER,

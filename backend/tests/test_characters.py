@@ -1,4 +1,4 @@
-"""人物库：形象图落盘（只收图片）、账号级存取、硬删除与引用反查、HTTP 信封。
+"""人物库：形象图落盘（只收图片）、账号级存取、回收期软删除与引用反查、HTTP 信封。
 
 三条线各管一段（与 ``test_materials.py`` 同一形状）：
 
@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import io
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -53,6 +54,7 @@ def _fake_settings(root, **overrides):
         "UPLOAD_MEDIA_URL": "/uploads",
         "MATERIAL_MAX_IMAGE_BYTES": settings.MATERIAL_MAX_IMAGE_BYTES,
         "CHARACTER_MAX_PER_OWNER": settings.CHARACTER_MAX_PER_OWNER,
+        "CHARACTER_TRASH_TTL_SECONDS": settings.CHARACTER_TRASH_TTL_SECONDS,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -280,7 +282,15 @@ def test_characters_for_drops_unknown_and_foreign_ids(db):
     assert _service(db).characters_for([]) == {}
 
 
-def test_remove_deletes_row_and_file_and_counts_references(db, tmp_path):
+def _expire_character(db, *character_ids: int) -> None:
+    """把删除时间调到撤销窗口之外，状态与「很久以前删的」一致。"""
+    for character_id in character_ids:
+        db.get(VideoCharacter, character_id).deleted_at = datetime(2000, 1, 1)
+    db.commit()
+    db.expire_all()
+
+
+def test_remove_moves_to_trash_keeps_file_and_counts_references(db, tmp_path):
     row = _character(db)
     project = _project(db, character_ids=[str(row.id)])
     # 另一个不相关的项目不该被算进引用数。
@@ -289,12 +299,56 @@ def test_remove_deletes_row_and_file_and_counts_references(db, tmp_path):
     references = _service(db).remove(row.id)
 
     assert references == 1
+    # 软删：正常读路径看不见，但行还在、文件还在、项目引用原样保留。
     with pytest.raises(LookupError):
         _service(db).get_character(row.id)
-    assert not (tmp_path / row.rel_path).exists()
-    # 删除不改项目行：残留 id 由视频侧保存/渲染时按「已不存在」跳过。
+    assert (tmp_path / row.rel_path).is_file()
+    assert _service(db).list_characters()[1] == 0
+    assert _service(db).trash_count() == 1
     db.refresh(project)
     assert project.character_ids == [str(row.id)]
+    # 撤销窗口内 characters_for 仍能解析（与素材 materials_for 同口径），撤销才无损。
+    assert str(row.id) in _service(db).characters_for([str(row.id)])
+
+
+def test_restore_brings_a_trashed_character_back(db):
+    row = _character(db)
+    _service(db).remove(row.id)
+    assert _service(db).list_characters()[1] == 0
+
+    assert _service(db).restore_many([row.id]) == 1
+    assert _service(db).get_character(row.id).id == row.id
+    assert _service(db).trash_count() == 0
+    # 已经在列表里的再恢复是空操作。
+    assert _service(db).restore_many([row.id]) == 0
+
+
+def test_purge_after_window_deletes_row_and_file(db, tmp_path):
+    row = _character(db)
+    rel_path = row.rel_path
+    _service(db).remove(row.id)
+    assert (tmp_path / rel_path).is_file()
+
+    _expire_character(db, row.id)
+    # 下次列表读取顺手懒清理。
+    assert _service(db).list_characters()[1] == 0
+    db.expire_all()
+    assert db.get(VideoCharacter, row.id) is None
+    assert not (tmp_path / rel_path).exists()
+
+
+def test_restore_respects_the_owner_cap(db, tmp_path, monkeypatch):
+    """名额被占满后，撤销不能把人物库撑过上限，先恢复的那批才进得来。"""
+    monkeypatch.setattr(
+        character_service, "settings", _fake_settings(tmp_path, CHARACTER_MAX_PER_OWNER=1)
+    )
+    first = _character(db)
+    _service(db).remove(first.id)
+    _character(db, name="占满名额的新人")
+
+    assert _service(db).restore_many([first.id]) == 0
+    assert _service(db).list_characters()[1] == 1
+    assert _service(db).trash_count() == 1
 
 
 def test_usage_lists_referencing_projects(db):
@@ -367,10 +421,26 @@ def test_api_update_replace_and_delete(client):
 
     listed = client.get("/api/office/characters").json()["data"]
     assert listed["total"] == 1 and listed["max_per_owner"] == settings.CHARACTER_MAX_PER_OWNER
+    # 列表每条带项目引用数，回收站角标初始为 0。
+    assert listed["items"][0]["project_count"] == 0
+    assert listed["trash_count"] == 0
 
     body = client.delete(f"/api/office/characters/{created['id']}").json()
     assert body["code"] == 0 and body["data"]["references"] == 0
+    assert "回收站" in body["message"]
     assert client.get("/api/office/characters").json()["data"]["total"] == 0
+
+    # 回收站里能看到它并撤销恢复。
+    trash = client.get("/api/office/characters/trash").json()["data"]
+    assert trash["total"] == 1 and trash["trash_ttl_seconds"] == 600
+    item = trash["items"][0]
+    assert item["id"] == created["id"] and 0 < item["expires_in_seconds"] <= 600
+    restored = client.post(
+        "/api/office/characters/batch-restore", json={"ids": [created["id"]]}
+    ).json()
+    assert restored["code"] == 0
+    assert client.get("/api/office/characters").json()["data"]["total"] == 1
+    assert client.get("/api/office/characters/trash").json()["data"]["total"] == 0
 
 
 def test_api_unknown_character_is_404(client):

@@ -1186,8 +1186,9 @@ class VideoCharacter(Base):
 
     文件存储与素材同一取舍：形象图在服务器本地磁盘的 ``characters/<owner_id>/``
     树下，库里只存 ``rel_path``，URL 由 ``services/characters/store.py`` 现拼。
-    角色按账号归属、跨项目复用，删项目不碰它；删角色是硬删除，项目里残留的 id
-    由视频侧在读取/渲染时按「已不存在」跳过，与素材丢失同一降级口径。
+    角色按账号归属、跨项目复用，删项目不碰它；删除先进回收期（``deleted_at``），
+    窗口内可撤销，过期才真删行与形象图；项目里残留的 id 由视频侧在读取/渲染时
+    按「已不存在」跳过，与素材丢失同一降级口径。
     """
 
     __tablename__ = "video_character"
@@ -1205,6 +1206,9 @@ class VideoCharacter(Base):
     mime: Mapped[str] = mapped_column(String(64), nullable=False)
     size: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     rel_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    # 软删除：删除先进回收期，窗口内可原样恢复；过期由懒清理真删行与形象图。
+    # 所有读路径、计数与建档闸门只看 IS NULL 的行，删掉一个角色立刻腾名额。
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
