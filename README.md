@@ -228,6 +228,31 @@ npm run dev                   # http://localhost:5173，/api 与网关的 /v1 �
 
 也可以使用 `scripts/` 下的 `dev.sh / dev.bat` 同时拉起两端。MySQL 与 Qdrant 可用 `docker-compose up -d mysql qdrant` 单独启动。
 
+### 后端测试
+
+测试依赖（pytest、pytest-xdist）声明在 `pyproject.toml` 的 dev 依赖组，先同步一次：
+
+```bash
+uv sync --group dev
+```
+
+```bash
+# 全量回归·并行：-n auto 按逻辑核数开 worker（推荐，CI 与本地回归都用它）
+.venv/bin/python -m pytest backend/tests -n auto            # Linux/macOS
+.venv/Scripts/python.exe -m pytest backend/tests -n auto    # Windows
+
+# 串行：调试单用例、排查并行干扰时用
+.venv/bin/python -m pytest backend/tests
+
+# 按模块 / 关键字筛选（并行串行都能带）
+.venv/bin/python -m pytest backend/tests/test_videos.py -q
+.venv/bin/python -m pytest backend/tests/test_videos.py -k tts_preview
+```
+
+实测口径（16 逻辑核、2015 个用例）：串行约 598 秒，`-n auto` 约 195 秒，**3 倍左右提速**；核数更少的机器收益相应降低，但不会变慢。用例天然支持并行——每个测试用 `tmp_path` 建独立 SQLite 与媒体目录、settings 走模块级 `monkeypatch`，没有固定端口绑定或跨进程共享文件，不需要额外的 worker 隔离配置。
+
+没有把 `-n auto` 写进 pytest 默认参数：IDE 里点跑单个用例、带断点调试时串行更直观，并行作为全量回归的显式选项。新写测试请继续遵守同一隔离约定（临时资源进 `tmp_path`、全局状态用 `monkeypatch` 而不是直接改模块变量），否则并行下会出现偶发失败。
+
 ## 配置项
 
 全部通过环境变量 / `.env` 注入（`backend/app/config.py`）：
