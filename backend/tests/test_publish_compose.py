@@ -961,7 +961,10 @@ def test_build_voiceover_places_lines_without_atempo_when_they_fit(
     # 旧版 ffmpeg（<4.4）不认 all=1，滤镜图里绝不能再出现这个写法。
     assert "all=" not in graph
     assert "amix=inputs=2" in graph
-    assert "normalize=0" in graph
+    # 旧版 ffmpeg（<4.3）不认 normalize 选项：靠 amix 后的 volume=N 补回被
+    # 输入数等比调小的增益，滤镜图里不能再出现 normalize。
+    assert "volume=2[mixed]" in graph
+    assert "normalize=" not in graph
     assert "atrim=0:10.000" in graph
     assert "aresample=44100" in graph
 

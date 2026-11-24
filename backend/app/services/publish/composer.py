@@ -285,9 +285,10 @@ async def build_voiceover(
     滤镜顺序有讲究：``atempo`` 必须在 ``adelay`` 之前——否则加速会把前面那段
     定位静音一起缩短，句子的起点就漂了。``adelay`` 按探针读到的声道数逐声道列
     延迟（``D|D``），不用 ``all=1``——那是 FFmpeg 4.4 才有的选项，旧 ffmpeg 会
-    直接拒掉整张滤镜图。``amix`` 显式 ``normalize=0``：它默认按输入数把音量等比
-    调小，单人配音不该被这个默认值压声。最后 ``apad + atrim`` 把整条轨垫到、也
-    截到与视频完全等长，封装阶段 ``-shortest`` 只是双保险。
+    直接拒掉整张滤镜图。``amix`` 同样不用 4.3 才有的 ``normalize=0``：旧版 amix
+    固定按输入数 N 把音量等比调小，混音后挂 ``volume=N`` 补回增益，单人配音各句
+    互不重叠，不会削顶。最后 ``apad + atrim`` 把整条轨垫到、也截到与视频完全等长，
+    封装阶段 ``-shortest`` 只是双保险。
     """
     if not plan.lines:
         raise PublishComposeError("配音计划为空：没有任何镜头带台词")
@@ -319,10 +320,15 @@ async def build_voiceover(
         chain += f"adelay={delay_args}[a{index}]"
         filters.append(chain)
 
-    mix_inputs = "".join(f"[a{index}]" for index in range(len(plan.lines)))
+    line_count = len(plan.lines)
+    mix_inputs = "".join(f"[a{index}]" for index in range(line_count))
+    # 不用 amix 的 normalize=0：那是 FFmpeg 4.3 才有的选项，旧 ffmpeg 会整张滤镜图
+    # 拒掉（报 Option 'normalize' not found）。旧版 amix 固定把混合结果除以输入数 N，
+    # 混音后挂 volume=N 把增益补回来——各句在时间轴上互不重叠，任一时刻只有一句在响，
+    # 补完与 normalize=0 数学等价且不会削顶；volume 滤镜所有 ffmpeg 版本都自带。
     filters.append(
-        f"{mix_inputs}amix=inputs={len(plan.lines)}:duration=longest:"
-        "dropout_transition=0:normalize=0[mixed]"
+        f"{mix_inputs}amix=inputs={line_count}:duration=longest:"
+        f"dropout_transition=0,volume={line_count}[mixed]"
     )
     filters.append(
         f"[mixed]apad,atrim=0:{total_s:.3f},aresample={settings.TTS_SAMPLE_RATE}[aout]"
