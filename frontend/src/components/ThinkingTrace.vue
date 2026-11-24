@@ -125,16 +125,16 @@ const activeLabel = computed(
   white-space: nowrap;
 }
 .tt-body {
-  /* 固定高度而非 max-height：无论思维链/工具输出多长，展开后占位恒定，
-     流式追加内容时消息流不跟着跳动；超长部分内部滚动。 */
-  height: 300px;
+  /* 高度跟随内容：内容少就收缩不留白，长到上限后内部滚动。代价是流式
+     追加时框会先长高、封顶后才固定，下方消息在长高阶段会被轻微下推。 */
+  max-height: 300px;
   overflow-y: auto;
   padding: 2px 10px 8px;
   border-top: 1px dashed var(--hairline);
 }
 @media (max-width: 768px) {
   .tt-body {
-    height: 240px;
+    max-height: 240px;
   }
 }
 </style>
