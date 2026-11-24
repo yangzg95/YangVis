@@ -14,8 +14,11 @@ RUN npm config set registry https://registry.npmmirror.com \
  && (npm ci || npm install)
 
 # Copy the rest of the frontend source and build.
+# 只跑 vite 产物构建，跳过 vue-tsc：类型检查的内存峰值随依赖体积增长
+# （ant-design-x-vue 的类型图把峰值推过 2GB），在内存受限的构建机上会
+# JS heap OOM。类型门保留在本地/CI 的 `npm run build`（含 vue-tsc）里。
 COPY frontend/ ./
-RUN npm run build
+RUN npm run build:web
 
 
 # ============================================================

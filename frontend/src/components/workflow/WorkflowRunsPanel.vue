@@ -95,7 +95,7 @@
         <!-- 步骤内部的模型往返 / 工具调用：run_agent 黑盒打开后的现场，
              与对话回答的「思考过程」同一套节点与渲染。 -->
         <div v-if="liveTraceNodes(step).length" class="live-step-trace">
-          <TraceNodeList :nodes="liveTraceNodes(step)" :streaming="step.status === 'running'" />
+          <TraceChain :nodes="liveTraceNodes(step)" :streaming="step.status === 'running'" />
         </div>
       </div>
       <a-alert
@@ -224,7 +224,7 @@ import { message } from 'ant-design-vue'
 import { DownOutlined, PlayCircleOutlined, RightOutlined } from '@ant-design/icons-vue'
 import RunScene from '@/components/workflow/RunScene.vue'
 import StepOverrideModal from '@/components/workflow/StepOverrideModal.vue'
-import TraceNodeList from '@/components/trace/TraceNodeList.vue'
+import TraceChain from '@/components/trace/TraceChain.vue'
 import { stepInputFields, type StepField } from '@/components/workflow/runFields'
 import { errorText } from '@/utils/errors'
 import { workflowTraceNodes, type TraceNode } from '@/utils/traceModel'
@@ -467,7 +467,7 @@ function applyStepEnd(data: {
   step.model_name = data.model_name
 }
 
-/** 步骤内部 trace：扁平事件按 key 累积进对应步骤，配对成统一节点交给 TraceNodeList。 */
+/** 步骤内部 trace：扁平事件按 key 累积进对应步骤，配对成统一节点交给 TraceChain。 */
 function applyStepTrace(data: { key: string; group_key: string; node: WorkflowTraceEvent }) {
   const step = live.steps.find((item) => item.key === data.key)
   if (!step) return

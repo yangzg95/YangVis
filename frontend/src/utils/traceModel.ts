@@ -3,7 +3,7 @@
  *
  * 三个来源——对话回答（chat_message.timeline）、工作流步骤（workflow_run_step.trace）、
  * 运维问答（复用对话 timeline）——各自的存储形状不同，渲染前都在这里适配成同一组
- * TraceNode，交给 components/trace/TraceTimeline.vue 一套组件渲染。
+ * TraceNode，交给 components/trace/TraceChain.vue（ant-design-x-vue ThoughtChain）渲染。
  *
  * 后端对应约定：
  * - chat timeline 条目：{type:'reason'|'step'|'llm'|'text'|'confirm', ...}，

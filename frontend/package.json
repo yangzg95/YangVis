@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "build:web": "vite build",
     "preview": "vite preview",
     "type-check": "vue-tsc --noEmit",
     "test": "vitest run",
@@ -23,6 +24,7 @@
     "@fontsource/ibm-plex-sans": "^5.3.0",
     "@lezer/highlight": "^1.2.3",
     "ant-design-vue": "4.2.6",
+    "ant-design-x-vue": "^2.10.0",
     "axios": "1.7.7",
     "elkjs": "^0.12.0",
     "markdown-it": "^14.1.0",

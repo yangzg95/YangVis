@@ -86,7 +86,7 @@
             <span class="muted">{{ traceSummary(step) }}</span>
           </div>
           <div v-show="isSectionOpen(step, 'trace')" class="scene-group-body">
-            <TraceNodeList :nodes="traceOf(step)" :streaming="step.status === 'running'" />
+            <TraceChain :nodes="traceOf(step)" :streaming="step.status === 'running'" />
           </div>
         </div>
 
@@ -197,7 +197,7 @@ import { copyText } from '@/utils/clipboard'
 import type { WorkflowRunDetail, WorkflowRunStep } from '@/api'
 import { fmtElapsed, runStatusColor as statusColor, runStatusText as statusText } from '@/utils/format'
 import { stepInputFields, type StepField } from './runFields'
-import TraceNodeList from '@/components/trace/TraceNodeList.vue'
+import TraceChain from '@/components/trace/TraceChain.vue'
 import { workflowTraceNodes, type TraceNode } from '@/utils/traceModel'
 
 const props = defineProps<{
