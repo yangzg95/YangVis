@@ -247,6 +247,9 @@
         </div>
 
         <div ref="scrollEl" class="messages" @scroll="onMessagesScroll">
+         <!-- 千问/豆包式限宽列：滚动容器不变（吸附/翻页逻辑零改动），只把内容
+              收进 860px 居中列，宽屏下文字行宽可读、消息不再贴着卡片边缘。 -->
+         <div class="messages-inner">
           <!-- 向上翻页：只在还有更早消息时出现，加载期间禁用防连点。 -->
           <div v-if="activeId && hasMoreHistory" class="load-older">
             <a-button size="small" :loading="historyLoading" :disabled="streaming" @click="loadOlder">
@@ -254,9 +257,11 @@
             </a-button>
           </div>
 
+          <!-- 千问/豆包式空状态：AI 头像 + 智能体名 + 一句自我介绍，居中留白。 -->
           <div v-if="!messages.length && !streaming" class="empty-state">
-            <RobotOutlined class="empty-icon" />
-            <div>{{ activeAgent?.description || '开始一个新的对话吧' }}</div>
+            <div class="empty-avatar"><RobotOutlined /></div>
+            <div class="empty-title">{{ activeAgent?.name || '智能助手' }}</div>
+            <div class="empty-desc">{{ activeAgent?.description || '有什么可以帮你？' }}</div>
           </div>
 
           <!-- 压缩分界卡：手动压缩后锚点前的消息在本视图隐藏，用这张卡交代
@@ -320,9 +325,12 @@
           <!-- 第一个过程事件（思考/工具/正文）到达前的占位；事件一到，过程就
                挂到助手气泡自身的时间线上，这个独立占位随即消失。 -->
           <div v-if="streaming && !streamBubbleShown" class="msg assistant">
-            <div class="bubble">
-              <a-spin size="small" />
-              <span class="thinking">正在思考…</span>
+            <div class="msg-avatar"><RobotOutlined /></div>
+            <div class="msg-main">
+              <div class="bubble thinking-bubble">
+                <a-spin size="small" />
+                <span class="thinking">正在思考…</span>
+              </div>
             </div>
           </div>
 
@@ -339,6 +347,7 @@
               <VerticalAlignBottomOutlined />
             </button>
           </transition>
+         </div>
         </div>
 
         <div class="composer">
@@ -1948,43 +1957,53 @@ function send() {
   beginStream(bubble.key)
   streamingBubbleKey.value = bubble.key
 
-  abort = chatApi.streamCompletion(
-    {
-      message: question,
-      ...(snapshot.length ? { attachment_ids: snapshot.map((a) => a.id) } : {}),
-      conversation_id: activeId.value ?? undefined,
-      agent_id: activeAgentId.value,
-      model_config_id: activeModelConfigId.value,
-      // 只有依赖知识库的智能体才需要传；其他智能体压根不做检索。
-      project_id: needsKnowledge.value ? activeProjectId.value ?? undefined : undefined,
-      // 空数组表示「整个项目」，后端会当作没传来处理。
-      type_ids:
-        needsKnowledge.value && selectedTypeIds.value.length
-          ? [...selectedTypeIds.value]
-          : undefined,
-      // 工具选择每轮显式带数组：空数组就是清空（与不传=沿用会话选择相对）。
-      local_tool_keys: selectedLocalToolKeys.value,
-      mcp_server_ids: selectedMcpServerIds.value,
-    },
-    {
-      onMeta: ({ conversation_id, local_tool_keys, mcp_server_ids }) => {
-        activeId.value = conversation_id
-        // 以服务端落库后的选择为准回写选择器（自动建会话的首问也由此记住）。
-        toolSelection.value = [
-          ...(local_tool_keys ?? []).map((key) => `local:${key}`),
-          ...(mcp_server_ids ?? []).map((id) => `mcp:${id}`),
-        ]
+  // 同步抛错（构造请求阶段失败等）走不进 SSE 的 onError，必须在这里兜底：
+  // 否则 streaming 永久挂 true，思考过程卡在「思考中…」展开态收不起来。
+  try {
+    abort = chatApi.streamCompletion(
+      {
+        message: question,
+        ...(snapshot.length ? { attachment_ids: snapshot.map((a) => a.id) } : {}),
+        conversation_id: activeId.value ?? undefined,
+        agent_id: activeAgentId.value,
+        model_config_id: activeModelConfigId.value,
+        // 只有依赖知识库的智能体才需要传；其他智能体压根不做检索。
+        project_id: needsKnowledge.value ? activeProjectId.value ?? undefined : undefined,
+        // 空数组表示「整个项目」，后端会当作没传来处理。
+        type_ids:
+          needsKnowledge.value && selectedTypeIds.value.length
+            ? [...selectedTypeIds.value]
+            : undefined,
+        // 工具选择每轮显式带数组：空数组就是清空（与不传=沿用会话选择相对）。
+        local_tool_keys: selectedLocalToolKeys.value,
+        mcp_server_ids: selectedMcpServerIds.value,
       },
-      ...makeStreamHandlers(bubble, streamActions, (_message, retryable) => {
-        // 提问还在、回答没落成：挂上「可重试」标记，别让用户重新打一遍。
-        // 工厂已弹过错误提示、撤掉了没有正文的空气泡。超时单独留一句话，
-        // 用户才知道是「等太久」而不是模型答错。
-        userBubble.failed = true
-        userBubble.failNote = retryable ? '回答超时，本次回答未保存' : undefined
-        finish()
-      }),
-    },
-  )
+      {
+        onMeta: ({ conversation_id, local_tool_keys, mcp_server_ids }) => {
+          activeId.value = conversation_id
+          // 以服务端落库后的选择为准回写选择器（自动建会话的首问也由此记住）。
+          toolSelection.value = [
+            ...(local_tool_keys ?? []).map((key) => `local:${key}`),
+            ...(mcp_server_ids ?? []).map((id) => `mcp:${id}`),
+          ]
+        },
+        ...makeStreamHandlers(bubble, streamActions, (_message, retryable) => {
+          // 提问还在、回答没落成：挂上「可重试」标记，别让用户重新打一遍。
+          // 工厂已弹过错误提示、撤掉了没有正文的空气泡。超时单独留一句话，
+          // 用户才知道是「等太久」而不是模型答错。
+          userBubble.failed = true
+          userBubble.failNote = retryable ? '回答超时，本次回答未保存' : undefined
+          finish()
+        }),
+      },
+    )
+  } catch (err) {
+    const idx = messages.value.indexOf(bubble)
+    if (idx >= 0) messages.value.splice(idx, 1)
+    userBubble.failed = true
+    finish()
+    toast.error(errorText(err, '发送失败，请稍后重试'))
+  }
 }
 
 // 重试一条失败的提问：后端会先把库里那条悬空的 user 消息删掉再重新回答，
@@ -2018,16 +2037,24 @@ function retryMessage(msg: Bubble) {
   streamingBubbleKey.value = bubble.key
   pinToBottom()
 
-  abort = chatApi.streamRetry(
-    activeId.value,
-    makeStreamHandlers(bubble, streamActions, (_message, retryable) => {
-      // 又失败了：残文（含只有过程的空气泡）清掉，提问重新挂回「可重试」。
-      messages.value.splice(idx + 1)
-      msg.failed = true
-      msg.failNote = retryable ? '回答超时，本次回答未保存' : undefined
-      finish()
-    }),
-  )
+  // 同步异常同样要兜底收尾，理由同 send。
+  try {
+    abort = chatApi.streamRetry(
+      activeId.value,
+      makeStreamHandlers(bubble, streamActions, (_message, retryable) => {
+        // 又失败了：残文（含只有过程的空气泡）清掉，提问重新挂回「可重试」。
+        messages.value.splice(idx + 1)
+        msg.failed = true
+        msg.failNote = retryable ? '回答超时，本次回答未保存' : undefined
+        finish()
+      }),
+    )
+  } catch (err) {
+    messages.value.splice(idx + 1)
+    msg.failed = true
+    finish()
+    toast.error(errorText(err, '重试失败，请稍后再试'))
+  }
 }
 
 // 确认一条写命令：exec 结果由 useOpsConfirm 写回卡片，这里把续答接进一个
@@ -2047,15 +2074,22 @@ function approveAction(action: OpsAction) {
   streamingBubbleKey.value = bubble.key
   pinToBottom()
 
-  abort = approve(action, {
-    onExec: () => {
-      // 执行结果写回卡片后滚到底，让输出块进入视野。
-      scrollToBottom()
-    },
-    ...makeStreamHandlers(bubble, streamActions, () => {
-      finish()
-    }),
-  })
+  try {
+    abort = approve(action, {
+      onExec: () => {
+        // 执行结果写回卡片后滚到底，让输出块进入视野。
+        scrollToBottom()
+      },
+      ...makeStreamHandlers(bubble, streamActions, () => {
+        finish()
+      }),
+    })
+  } catch (err) {
+    const idx = messages.value.indexOf(bubble)
+    if (idx >= 0) messages.value.splice(idx, 1)
+    finish()
+    toast.error(errorText(err, '操作失败，请稍后重试'))
+  }
 }
 
 function rejectAction(action: OpsAction) {
@@ -2282,7 +2316,15 @@ onUnmounted(() => {
 .messages {
   flex: 1;
   overflow-y: auto;
-  padding: 4px 4px 12px;
+  padding: 16px 4px 12px;
+}
+/* 限宽居中列：消息、压缩卡、回底按钮都收在同一根 860px 轴线上。 */
+.messages-inner {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  max-width: 860px;
+  margin: 0 auto;
 }
 .load-older {
   display: flex;
@@ -2427,7 +2469,7 @@ onUnmounted(() => {
   transform: translateY(8px);
 }
 .empty-state {
-  height: 100%;
+  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2435,33 +2477,123 @@ onUnmounted(() => {
   gap: 10px;
   color: var(--text-3);
 }
-/* 空态是大片留白里的唯一视觉锚点：放大并给一点信号色，不然在白底上
-   完全没存在感。 */
-.empty-icon {
-  font-size: var(--fs-6xl);
-  color: var(--signal-text);
+/* 空态头像与消息行头像同规格，放大一号做视觉锚点。 */
+.empty-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 4px;
+  border-radius: 50%;
+  font-size: 24px;
+  color: #fff;
+  background: linear-gradient(135deg, var(--signal), var(--signal-text));
 }
-/* 消息气泡的版式与内容样式都在 components/chat/MessageBubble.vue；
-   这里只留流式占位气泡复用到的两条。 */
+.empty-title {
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  color: var(--text-1);
+}
+.empty-desc {
+  max-width: 420px;
+  text-align: center;
+  line-height: 1.6;
+}
+/* 消息行版式与 MessageBubble.vue 保持同源：这里只覆盖流式占位气泡
+   （组件外的 .msg.assistant 结构），头像/主列规格必须一致。 */
 .msg {
   display: flex;
-  margin-bottom: 14px;
+  gap: 12px;
+  margin-bottom: 22px;
+}
+.msg-avatar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  font-size: 16px;
+  color: #fff;
+  background: linear-gradient(135deg, var(--signal), var(--signal-text));
+}
+.msg-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 .bubble {
-  max-width: 78%;
-  padding: 10px 14px;
-  border-radius: 10px;
-  background: var(--paper);
   line-height: 1.7;
 }
-.thinking {
-  margin-left: 8px;
+.thinking-bubble {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--text-3);
 }
+.thinking {
+  color: var(--text-3);
+}
+/* 豆包/千问式输入卡：浮起的白底大圆角卡片，与消息列同宽同轴；
+   flex 列 + order 把「上下文条/附件预览/输入框/底部操作行」排进同一张卡。 */
 .composer {
   position: relative;
-  border-top: 1px solid var(--hairline);
-  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  /* flex 容器在卡片体内会按内容收缩，必须显式 width 才能先撑满再被 max-width 截断。 */
+  width: 100%;
+  max-width: 860px;
+  margin: 8px auto 4px;
+  padding: 10px 12px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow-overlay);
+  transition: border-color 0.18s ease;
+}
+.composer:focus-within {
+  border-color: var(--signal-border);
+}
+.composer .context-bar {
+  order: 0;
+}
+/* 附件待发列表（AttachmentPicker 的第二段）贴在输入框上方。 */
+.composer :deep(.pending-list) {
+  order: 1;
+}
+.composer :deep(.ant-input) {
+  order: 2;
+  /* 卡片自身承担边框与底色，输入框彻底裸化，避免卡里再套一个白盒子。 */
+  padding-right: 0;
+  background: transparent;
+  border-color: transparent;
+  border-radius: 0;
+  box-shadow: none;
+  resize: none;
+}
+.composer :deep(.ant-input:focus),
+.composer :deep(.ant-input-focused),
+.composer :deep(.ant-input:hover) {
+  border-color: transparent;
+  box-shadow: none;
+}
+/* 回形针行落到底部左侧；发送钮绝对贴卡片右下，同行不挤（栏位预留 96px）。 */
+.composer :deep(.attach-bar) {
+  order: 3;
+  margin-bottom: 0;
+  padding-right: 96px;
+}
+.composer-actions {
+  order: 3;
+  position: absolute;
+  right: 12px;
+  bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 /* 挂起的简历上下文：输入框上方的一条提示卡，提醒先选智能体/工具再发送。 */
 .context-bar {
@@ -2513,30 +2645,24 @@ onUnmounted(() => {
   opacity: 0.5;
 }
 /* 上传入口与待发附件条的样式都在 components/chat/AttachmentPicker.vue。 */
-/* 按钮和提示悬浮在输入框右下角，不再单独占一行；给 textarea 右侧留出
-   空隙，避免输入的长文本钻到按钮底下。打字时提示已隐藏、只剩发送按钮，
-   留白只需盖住按钮；流式期间出现的「停止」按钮更宽，但那时输入框是
-   禁用态、不会有文本和它重叠。 */
-.composer :deep(.ant-input) {
-  padding-right: 110px;
-}
-.composer-actions {
-  position: absolute;
-  right: 12px;
-  bottom: 10px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
 
 @media (max-width: 768px) {
   /* 触屏没有 hover：操作入口常显，不然手机上找不到重命名/删除。 */
   .conv-actions {
     opacity: 1;
   }
-  /* 小屏放宽气泡：78% 在手机上白白浪费一截宽度。 */
-  .bubble {
-    max-width: 92%;
+  /* 小屏消息列吃满宽度，用户气泡放宽到 85%，头像缩一号。 */
+  .messages-inner,
+  .composer {
+    max-width: 100%;
+  }
+  .msg-avatar {
+    width: 28px;
+    height: 28px;
+    font-size: 14px;
+  }
+  .composer {
+    border-radius: 14px;
   }
 }
 </style>

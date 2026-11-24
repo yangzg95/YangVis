@@ -1,5 +1,13 @@
 <template>
+  <!-- 千问/豆包式消息行：头像做身份锚点（AI 在左、用户在右），AI 回复去气泡化
+       纯文字铺开，仅用户消息保留淡色气泡。业务内容（思考链/确认卡/图卡/引用）
+       全部留在 bubble 内，AI 场景下 bubble 只是无底色的内容容器。 -->
   <div :class="['msg', msg.role]">
+    <div class="msg-avatar">
+      <RobotOutlined v-if="msg.role === 'assistant'" />
+      <UserOutlined v-else />
+    </div>
+    <div class="msg-main">
     <div class="bubble">
       <!-- 助手气泡按 timeline 原顺序切成「过程组 / 正文段 / 确认卡」交替渲染：
            每波思考+工具调用就地待在它那轮解说文字旁边，多轮排查时读起来才是
@@ -134,6 +142,7 @@
         </a-tooltip>
       </div>
     </div>
+    </div>
   </div>
 </template>
 
@@ -141,7 +150,14 @@
 import MermaidCard from '@/components/MermaidCard.vue'
 import ConfirmCard from '@/components/ConfirmCard.vue'
 import ThinkingTrace from '@/components/ThinkingTrace.vue'
-import { CopyOutlined, DownOutlined, FileOutlined, UpOutlined } from '@ant-design/icons-vue'
+import {
+  CopyOutlined,
+  DownOutlined,
+  FileOutlined,
+  RobotOutlined,
+  UpOutlined,
+  UserOutlined,
+} from '@ant-design/icons-vue'
 import { computed, ref } from 'vue'
 import type { OpsAction } from '@/api'
 import { actionsOf, assistantSections, sectionParts, type Bubble } from '@/utils/chatSections'
@@ -185,8 +201,8 @@ function onSavePart(index: number, source: string) {
   emit('save', { msg: props.msg, index, source })
 }
 
-/** 折叠时保留几条来源：再多就把正文挤出视野了。 */
-const COLLAPSED_LIMIT = 5
+/** 折叠时保留几条来源：默认只露 2 条，其余收进「展开全部 N 条」。 */
+const COLLAPSED_LIMIT = 2
 
 const sourcesExpanded = ref(false)
 const collapsible = computed(() => props.msg.citations.length > COLLAPSED_LIMIT)
@@ -229,23 +245,59 @@ function citationLocation(c: Bubble['citations'][number]): string {
 <style scoped>
 .msg {
   display: flex;
-  margin-bottom: 14px;
+  gap: 12px;
+  margin-bottom: 22px;
   /* 历史消息离屏跳过渲染：长会话不再一次性布局全部 DOM。auto 让浏览器
      记住上次实测高度，来回滚动时不会因估算高度而跳动。 */
   content-visibility: auto;
   contain-intrinsic-size: auto 120px;
 }
+/* 用户行整行翻转：头像落到右侧，气泡靠右收。 */
 .msg.user {
-  justify-content: flex-end;
+  flex-direction: row-reverse;
+}
+/* 头像：32px 圆形身份锚点。AI 用品牌青色渐变，用户用中性灰底。 */
+.msg-avatar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  font-size: 16px;
+}
+.msg.assistant .msg-avatar {
+  color: #fff;
+  background: linear-gradient(135deg, var(--signal), var(--signal-text));
+}
+.msg.user .msg-avatar {
+  color: var(--text-2);
+  background: var(--surface-2);
+}
+.msg-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.msg.user .msg-main {
+  align-items: flex-end;
 }
 .bubble {
-  max-width: 78%;
-  padding: 10px 14px;
-  border-radius: 10px;
-  background: var(--paper);
+  max-width: 100%;
+  padding: 0;
   line-height: 1.7;
 }
+/* AI 回复去气泡化：无底色无圆角，内容（含思考卡/引用分区）直接铺在页面上。 */
+.msg.assistant .bubble {
+  background: transparent;
+}
+/* 用户消息保留淡色气泡，大圆角，宽度不越过列的四分之三。 */
 .msg.user .bubble {
+  max-width: 75%;
+  padding: 10px 14px;
+  border-radius: 12px;
   background: var(--signal-bg-strong);
 }
 /* 提问附件：图片给缩略图（ant-image 自带点击预览），文档只露文件名。 */
@@ -297,6 +349,12 @@ function citationLocation(c: Bubble['citations'][number]): string {
 .msg:hover .bubble-actions,
 .msg:focus-within .bubble-actions {
   opacity: 1;
+}
+/* 触屏没有 hover：操作行常显，否则手机上找不到复制入口。 */
+@media (hover: none) {
+  .bubble-actions {
+    opacity: 1;
+  }
 }
 
 .copy-btn {
