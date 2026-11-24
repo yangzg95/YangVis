@@ -16,6 +16,8 @@
           size="small"
           style="width: 240px"
         />
+        <!-- 未使用清理视图：撞 200 条上限时，先把没有任何镜头引用的翻出来删。 -->
+        <a-checkbox v-model:checked="onlyUnused">只看未使用</a-checkbox>
       </a-space>
       <a-space :size="10" wrap>
         <span class="muted">
@@ -118,6 +120,10 @@
               <a-tag class="kind-tag" :color="item.kind === 'video' ? 'purple' : 'blue'">
                 {{ item.kind === 'video' ? '视频' : '图片' }}
               </a-tag>
+              <!-- 被镜头引用的条数：0 不显示，清理时按「只看未使用」筛它们。 -->
+              <a-tag v-if="item.ref_count" class="ref-tag" color="processing">
+                {{ item.ref_count }} 镜引用
+              </a-tag>
             </div>
             <div class="material-meta">
               <span class="material-name" :title="item.name">{{ item.name }}</span>
@@ -126,6 +132,7 @@
                   <TagsOutlined v-if="!item.tag" /> {{ item.tag || '分组' }}
                 </a>
                 · {{ fmtSize(item.size) }} · {{ fmtShortDateTime(item.created_at) }}
+                <template v-if="!item.ref_count"> · 未使用</template>
               </span>
             </div>
             <div class="cell-actions">
@@ -177,11 +184,28 @@
     <a-modal
       v-model:open="previewOpen"
       :title="previewItem?.name"
-      width="820px"
+      width="860px"
       :footer="null"
       destroy-on-close
     >
       <div v-if="previewItem" class="preview-body">
+        <!-- 左右切换：在当前筛选结果里翻，边界禁用而不是循环，避免误以为还有内容。 -->
+        <a-button
+          class="preview-nav preview-nav--prev"
+          :disabled="previewIndex <= 0"
+          title="上一张"
+          @click="stepPreview(-1)"
+        >
+          <LeftOutlined />
+        </a-button>
+        <a-button
+          class="preview-nav preview-nav--next"
+          :disabled="previewIndex >= filtered.length - 1"
+          title="下一张"
+          @click="stepPreview(1)"
+        >
+          <RightOutlined />
+        </a-button>
         <img
           v-if="previewItem.kind === 'image'"
           :src="previewItem.url"
@@ -190,9 +214,14 @@
         />
         <video v-else :src="previewItem.url" controls autoplay class="preview-media" />
         <div class="hint preview-meta">
+          {{ previewIndex + 1 }} / {{ filtered.length }} ·
           {{ previewItem.kind === 'video' ? '视频' : '图片' }} ·
           {{ fmtSize(previewItem.size) }} · {{ fmtShortDateTime(previewItem.created_at) }}
           <template v-if="previewItem.tag"> · 分组：{{ previewItem.tag }}</template>
+          <template v-if="previewItem.ref_count"> · {{ previewItem.ref_count }} 镜引用</template>
+          <a v-if="previewItem.url" class="preview-download" @click="downloadAsset(previewItem)">
+            <DownloadOutlined /> 下载
+          </a>
         </div>
       </div>
     </a-modal>
@@ -334,8 +363,11 @@
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   DeleteOutlined,
+  DownloadOutlined,
   EditOutlined,
   EyeOutlined,
+  LeftOutlined,
+  RightOutlined,
   TagsOutlined,
   UndoOutlined,
   UploadOutlined,
@@ -400,11 +432,13 @@ const undoWindowLabel = computed(() => {
 let pendingUploads = 0
 
 // 本地筛选：全量已在手上，类别与关键词（名字 + 分组标签）输入即生效，不发请求。
+const onlyUnused = ref(false)
 const filtered = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
   return items.value.filter(
     (item) =>
       (!kind.value || item.kind === kind.value) &&
+      (!onlyUnused.value || !item.ref_count) &&
       (!kw ||
         item.name.toLowerCase().includes(kw) ||
         (item.tag || '').toLowerCase().includes(kw)),
@@ -621,14 +655,36 @@ function toggleSelect(item: MaterialAsset) {
 
 const previewOpen = ref(false)
 const previewItem = ref<MaterialAsset | null>(null)
+/** 当前预览在筛选结果里的位置：灯箱上下张按它翻，不重新发请求。 */
+const previewIndex = ref(0)
 
 function openPreview(item: MaterialAsset) {
   if (!item.url) {
     message.warning('这条素材的文件已丢失，没有可预览的内容')
     return
   }
+  const index = filtered.value.findIndex((row) => row.id === item.id)
+  previewIndex.value = index >= 0 ? index : 0
   previewItem.value = item
   previewOpen.value = true
+}
+
+function stepPreview(delta: number) {
+  const next = previewIndex.value + delta
+  const item = filtered.value[next]
+  if (!item || !item.url) return
+  previewIndex.value = next
+  previewItem.value = item
+}
+
+/** 同源地址直接用 download 属性给友好文件名，不必先拉成 blob。 */
+function downloadAsset(item: MaterialAsset) {
+  if (!item.url) return
+  const anchor = document.createElement('a')
+  anchor.href = item.url
+  anchor.download = item.name.replace(/[\\/:*?"<>|]/g, '_')
+  anchor.rel = 'noopener'
+  anchor.click()
 }
 
 // -- 改名 -----------------------------------------------------------------
@@ -986,6 +1042,15 @@ onMounted(() => void load())
   margin: 0;
 }
 
+.ref-tag {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  margin: 0;
+  transform: scale(0.9);
+  transform-origin: right bottom;
+}
+
 .batch-bar {
   display: flex;
   align-items: center;
@@ -1135,6 +1200,39 @@ onMounted(() => void load())
   max-height: 60vh;
   border-radius: 8px;
   background: #000;
+}
+
+/* 灯箱左右切换：半透明圆钮浮在媒体两侧，禁用时降透明度。 */
+.preview-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.preview-nav--prev {
+  left: 12px;
+}
+
+.preview-nav--next {
+  right: 12px;
+}
+
+.preview-body {
+  position: relative;
+}
+
+.preview-download {
+  margin-left: 10px;
+  font-weight: 600;
+  color: var(--primary, #1677ff);
+  cursor: pointer;
 }
 
 .preview-meta {

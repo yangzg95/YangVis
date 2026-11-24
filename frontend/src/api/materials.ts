@@ -25,6 +25,8 @@ export interface MaterialAsset {
   /** 列表缩略图（320px WebP）；没有时为空串，回退到 url。 */
   thumb_url: string
   created_at: string | null
+  /** 被多少个镜头引用：未使用清理视图按它筛 0。 */
+  ref_count: number
 }
 
 export interface MaterialList {

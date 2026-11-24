@@ -345,6 +345,14 @@ export const videosApi = {
       method: 'POST',
       skipErrorToast: true,
     }),
+  /** 把这一镜成功的视频片段复制一条进素材库（视频类，本期只记录引用不参与渲染）。 */
+  saveClipToMaterial: (id: number, shotId: number) =>
+    request<VideoProjectDetail>({
+      url: `/office/videos/${id}/shots/${shotId}/clip-to-material`,
+      method: 'POST',
+      skipErrorToast: true,
+      timeout: 120000,
+    }),
   /**
    * 入队一条成片合成：各镜最近一次成功片段按镜头顺序拼成一个 MP4，进度看 publish_job。
    * allowMissing 为真时出草稿片，跳过还没有成功片段的镜头（TTS 时间轴由后端重算）。

@@ -52,8 +52,9 @@
           </a-button>
           <template #overlay>
             <a-menu @click="onExportSubtitle">
-              <a-menu-item key="srt">SRT（剪映 / PR 通用）</a-menu-item>
-              <a-menu-item key="ass">ASS（自带竖屏样式）</a-menu-item>
+              <a-menu-item key="srt">屏幕文字 SRT（剪映 / PR 通用）</a-menu-item>
+              <a-menu-item key="ass">屏幕文字 ASS（自带竖屏样式）</a-menu-item>
+              <a-menu-item key="dialogue">台词 SRT（TTS 配音校对）</a-menu-item>
             </a-menu>
           </template>
         </a-dropdown>
@@ -942,6 +943,15 @@
                 >
                   <PlayCircleOutlined /> {{ clipUrl ? '重做片段' : '渲片段' }}
                 </a-button>
+                <a-button
+                  v-if="clipUrl && current?.video_job?.id"
+                  size="small"
+                  :loading="storingClip"
+                  title="把这段视频复制一份进素材库，删掉这个项目它也还在（视频类素材本期只记录引用）"
+                  @click="onSaveClipToMaterial"
+                >
+                  <PlusOutlined /> 片段存素材
+                </a-button>
               </template>
             </a-space>
           </div>
@@ -1214,7 +1224,7 @@ import { saveTextFile } from '@/utils/download'
 import { errorText } from '@/utils/errors'
 import { fmtElapsed, fmtSize, runStatusColor, runStatusText } from '@/utils/format'
 import { createPollLoop } from '@/utils/polling'
-import { buildAss, buildSrt, subtitleCues } from '@/utils/videoSubtitles'
+import { buildAss, buildDialogueSrt, buildSrt, dialogueCues, subtitleCues } from '@/utils/videoSubtitles'
 
 // 短视频工作台：左边分镜（顺序即成片顺序）、中间两套提示词与全片参数、右边竖屏预览。
 //
@@ -2119,14 +2129,47 @@ async function onSaveToMaterial() {
   }
 }
 
-function onExportSubtitle({ key }: { key: string | number }) {
-  if (!subtitleCues(shots.value).length) {
-    message.warning('还没有镜头写了屏幕文字，字幕导出用的是每一镜的「屏幕文字」')
-    return
+/** 片段存素材：独立 loading，避免和首帧存素材的状态互相干扰。 */
+const storingClip = ref(false)
+
+async function onSaveClipToMaterial() {
+  const shotId = current.value?.id
+  if (!shotId) return
+  storingClip.value = true
+  try {
+    const detail = await videosApi.saveClipToMaterial(projectId.value, shotId)
+    applyDetail(detail)
+    await loadMaterials()
+    message.success('片段已存进素材库，其它选题也能复用')
+  } catch (err) {
+    message.error(errorText(err, '片段存素材失败'))
+  } finally {
+    storingClip.value = false
   }
+}
+
+function onExportSubtitle({ key }: { key: string | number }) {
   const name = (title.value || 'subtitle').replace(/[\\/:*?"<>|]/g, '_')
-  if (key === 'ass') saveTextFile(`${name}.ass`, buildAss(shots.value, title.value), 'text/plain')
-  else saveTextFile(`${name}.srt`, buildSrt(shots.value), 'text/plain')
+  if (key === 'ass') {
+    if (!subtitleCues(shots.value).length) {
+      message.warning('还没有镜头写了屏幕文字，字幕导出用的是每一镜的「屏幕文字」')
+      return
+    }
+    saveTextFile(`${name}.ass`, buildAss(shots.value, title.value), 'text/plain')
+  } else if (key === 'dialogue') {
+    // 配音校对版：文本源是台词（TTS 念的那一段），不是屏幕文字。
+    if (!dialogueCues(shots.value).length) {
+      message.warning('还没有镜头写台词，台词 SRT 用的是每一镜的「台词」')
+      return
+    }
+    saveTextFile(`${name}-台词.srt`, buildDialogueSrt(shots.value), 'text/plain')
+  } else {
+    if (!subtitleCues(shots.value).length) {
+      message.warning('还没有镜头写了屏幕文字，字幕导出用的是每一镜的「屏幕文字」')
+      return
+    }
+    saveTextFile(`${name}.srt`, buildSrt(shots.value), 'text/plain')
+  }
   message.success('字幕文件已下载（时间轴按当前镜头顺序）')
 }
 

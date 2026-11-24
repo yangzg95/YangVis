@@ -15,13 +15,18 @@
 
 ## 用户可见行为
 
-- **人物库页（/office/characters）**：卡片网格展示形象图与三段档案；新建/编辑共用
-  一个弹窗（图片 + 角色名必填，人设/衣着/特色可空，各 512 字）。形象图只收图片
-  （PNG/JPEG/GIF/WebP/BMP），视频与识别不出的内容在写盘前拒绝。编辑只改文字时
-  不重传图片；换图走独立接口，旧图 best-effort 删除。
-- **删除是硬删除**：删除确认弹窗先拉引用影响面（哪些短视频项目仍选了它）。确认后
-  删行 + 删形象图，不可撤销；项目里残留的 id 不逐条改写，而在项目保存与渲染时按
-  「id 已不存在」自然跳过，工作台用「人物已删除」的虚线 chip 占位，下次保存清掉。
+- **人物库页（/office/characters）**：卡片网格展示形象图与三段档案，卡片角标显示
+  「N 项目在用」（0 不显示）；新建/编辑共用一个弹窗（图片 + 角色名必填，人设/衣着/
+  特色可空，各 512 字）。形象图只收图片（PNG/JPEG/GIF/WebP/BMP），视频与识别不出的
+  内容在写盘前拒绝。编辑只改文字时不重传图片；换图走独立接口，旧图 best-effort 删除。
+- **重名提示**：后端不做名称唯一约束（允许同名），保存时前端对当前库做一次同名检查，
+  重名弹二次确认而不是硬拦——人物一多容易撞名，选角色时才需要提醒，不该阻断建档。
+- **删除走回收期**：删除确认弹窗先拉引用影响面（哪些短视频项目仍选了它），确认后只写
+  `deleted_at` 进回收期，行、形象图与项目引用都原样保留。默认窗口 600 秒
+  （`CHARACTER_TRASH_TTL_SECONDS`），过期后懒清理真删行与形象图。工具栏「回收站」带
+  角标，抽屉里按剩余秒数倒计时，支持单条与全部恢复；名额满时先恢复更早删除的。
+  项目里残留的 id 不逐条改写：回收期内 `characters_for` 仍解析（撤销无损），过期真删后
+  在项目保存与渲染时按「id 已不存在」自然跳过，工作台用「人物已删除」虚线 chip 占位。
 - **新建短视频弹窗**：可多选出场角色（带头像与名字的下拉，最多 3 个），随项目一起
   创建，脚本生成的第一次运行就带角色档案。
 - **工作台 → 全片 → 出场角色**：角色组 chip 支持移除与改选（`CharacterPicker`，
@@ -49,11 +54,20 @@
 需要生成时可以在短视频里渲一张满意的首帧，再走既有的「存为素材」路线，或后续在
 人物库弹窗里加「用图片模型生成」入口。
 
-### 为什么硬删除而不是素材库那套回收期
+### 为什么删除也走回收期而不是直接硬删
 
-素材有批量删除/分组管理的高频操作，回收期防误删；角色条目少（默认账号上限 50）、
-删除是低频且 deliberate 的动作，删除前还有引用影响面确认。残留引用的降级口径与
-素材文件丢失完全一致（读取/渲染跳过、保存归一化清掉），不需要额外的软删状态机。
+角色形象图会注入所有在产项目的渲染请求，误删一个被多项目引用的角色，影响面比删一条
+素材更大。角色库因此与素材库对齐成同一套软删语义：删除只翻转 `deleted_at`，所有读路径、
+计数与建档闸门只看 `IS NULL` 的行，删一个角色立刻腾名额；撤销就是把这一列清回去，
+回收期内 `characters_for` 仍能解析它，项目角色组与渲染注入完全无损。真删（删行、删图）
+推迟到过期懒清理，过期后残留引用的降级口径与素材文件丢失一致（读取/渲染跳过、保存
+归一化清掉）。懒清理搭在列表/回收站读取上，不引入后台任务，清理失败只记日志。
+
+### 为什么允许重名，只在前端提示
+
+名称是展示标签而不是引用键——项目角色组存的是数字 id，同名不会造成引用歧义。加唯一
+约束反而会挡住「同一角色的不同造型」这类合理场景，所以后端不拦，由前端在保存时给一次
+同名确认，把「选角色时可能分不清」的风险显式化，决定权留给用户。
 
 ### 参考图预算为什么是 4 张、角色为什么在前
 
@@ -67,14 +81,14 @@
 | --- | --- |
 | `backend/app/models/entities.py` `VideoCharacter` | 表 `video_character`：name/persona/outfit/features + 形象图 rel_path/mime/size；`VideoProject.character_ids` JSON 列存项目角色组 |
 | `backend/app/services/characters/store.py` | 形象图落盘（`characters/<owner_id>/<随机 id>.<ext>`，只收图片、魔数判型、320px WebP 缩略图） |
-| `backend/app/services/characters/service.py` | `CharacterService`：owner 收敛的列表/搜索/CRUD、配额闸门、`characters_for` 批量解析、`usage`/`remove` 的引用反查 |
+| `backend/app/services/characters/service.py` | `CharacterService`：owner 收敛的列表/搜索/CRUD、配额闸门（只算正常行）、`characters_for` 批量解析（含回收期内行）、`usage`/`project_usage_map` 引用反查、`remove` 软删、`restore_many`/`purge_expired`/`list_trash`/`trash_count` 回收站 |
 | `backend/app/services/media/store.py` | 路径守卫 `_ROOTS` 增加 `characters` 根；`resolve_url`/`delete_blob`（连带删缩略图）对新树直接生效 |
-| `backend/app/routers/characters.py` | `/office/characters` 一组接口；multipart 建档/换图，错误翻译与素材路由同口径 |
+| `backend/app/routers/characters.py` | `/office/characters` 一组接口；multipart 建档/换图、列表带项目引用数与回收站角标、`GET /trash` 与 `POST /batch-restore` |
 | `backend/app/services/videos/service.py` | `_normalize_character_ids`（写入侧校验）、`_characters_note`（档案段落）、`_character_portraits`（形象图路径）、`_merge_reference_images`（预算合并）；接入 create/update、`_start_script_run`、`render_frames`、`render_clips`、`to_detail` |
 | `backend/app/services/workflows/builtin.py` | `video-script-generation` 新增可选输入 `characters_note`，两步 prompt 都插 `{{characters_note}}`；启动 seed 自动刷新 |
-| `backend/app/bootstrap.py` | 旧库幂等补列 `video_project.character_ids JSON NULL`；新表随 `create_all` 建 |
-| `frontend/src/api/characters.ts` | `charactersApi` 与 `MAX_CHARACTERS_PER_PROJECT` |
-| `frontend/src/views/Characters.vue` | 人物库页：卡片网格、建档/编辑弹窗、引用影响面删除确认 |
+| `backend/app/bootstrap.py` | 旧库幂等补列 `video_project.character_ids JSON NULL` 与 `video_character.deleted_at DATETIME NULL`；新表随 `create_all` 建 |
+| `frontend/src/api/characters.ts` | `charactersApi` 与 `MAX_CHARACTERS_PER_PROJECT`，含 `trash`/`restore` |
+| `frontend/src/views/Characters.vue` | 人物库页：卡片网格与项目引用角标、建档/编辑弹窗（重名二次确认）、回收站抽屉与倒计时 |
 | `frontend/src/components/videos/CharacterPicker.vue` | 项目角色组选择器（多选 3 个、搜索、内联简版建档并自动勾选） |
 | `frontend/src/views/Videos.vue`、`VideoWorkbench.vue` | 创建弹窗与全片 tab 的角色组选择；payload/detail 增加 `character_ids` |
 
@@ -82,12 +96,14 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/office/characters?q=&limit=&offset=` | 角色列表，`q` 只搜名字；回 total 与账号条数上限 |
+| GET | `/office/characters?q=&limit=&offset=` | 角色列表，`q` 只搜名字；每条带 `project_count`，响应带回收站 `trash_count`/`trash_ttl_seconds` |
 | POST | `/office/characters` | multipart 建档：`file` + `name`（必填）+ persona/outfit/features；非图片或空名走 `code=-1` 业务拒绝 |
 | PUT | `/office/characters/{id}` | 改文字档案，全可选；name 给了不能是空白，他人/不存在为 404 |
 | PUT | `/office/characters/{id}/portrait` | multipart 换形象图，旧图 best-effort 删 |
 | POST | `/office/characters/usage` | 批量查引用：每个角色被哪些项目选进角色组 |
-| DELETE | `/office/characters/{id}` | 硬删除，回执带 `references`（仍引用它的项目数，仅提示） |
+| DELETE | `/office/characters/{id}` | 移进回收期，回执带 `references`（仍引用它的项目数，仅提示） |
+| GET | `/office/characters/trash` | 回收站一屏：软删行按删除时刻倒序，每条带 `deleted_at` 与 `expires_in_seconds` |
+| POST | `/office/characters/batch-restore` | 撤销删除，超额时只放回预算内那批 |
 
 短视频侧没有新增接口：角色组随 `POST/PUT /office/videos` 的 `character_ids` 落库，
 详情接口 `GET /office/videos/{id}` 原样带回（含已删除角色的残留 id，由前端占位）。
@@ -97,22 +113,27 @@
 - 新库：`Base.metadata.create_all` 直接建 `video_character` 表与
   `video_project.character_ids` 列。
 - 旧库：`migrate_schema` 幂等补 `ALTER TABLE video_project ADD COLUMN
-  character_ids JSON NULL`；存量行读到 NULL，服务层一律按空角色组处理，行为与
+  character_ids JSON NULL` 与 `ALTER TABLE video_character ADD COLUMN deleted_at
+  DATETIME NULL`；存量行读到 NULL，服务层一律按正常角色/空角色组处理，行为与
   上线前完全一致。
 - 内置工作流的输入声明与 prompt 模板随启动 seed 就地刷新：`characters_note` 是
   可选输入，没选角色时恒为空串，模板整段不渲染，历史项目跑出来的脚本与之前等价。
 - 配置项：`CHARACTER_MAX_PER_OWNER`（默认 50）、`CHARACTER_MAX_PER_PROJECT`
-  （默认 3）；形象图大小闸门复用 `MATERIAL_MAX_IMAGE_BYTES`（10MB）。
+  （默认 3）、`CHARACTER_TRASH_TTL_SECONDS`（默认 600）；形象图大小闸门复用
+  `MATERIAL_MAX_IMAGE_BYTES`（10MB）。
 
 ## 测试
 
-- `backend/tests/test_characters.py`（18 个，store/service/HTTP 三层）：
+- `backend/tests/test_characters.py`（store/service/HTTP 三层）：
   - 落盘：账号树路径形状、路径守卫放行、视频/非媒体/超限/空文件拒绝、缩略图生成；
   - 服务：owner 隔离、CRUD 与搜索、空名拒绝、配额闸门、空串清空 vs None 保留、
-    换图删旧文件、`characters_for` 丢未知/他人 id、硬删除的引用计数与文件清理、usage；
-  - HTTP：multipart 信封、非图片/空名业务拒绝、改档/换图/删除/404/usage。
-- `backend/tests/test_videos.py` 新增角色集成用例：角色组写入归一（未知/他人 id
+    换图删旧文件、`characters_for` 丢未知/他人 id、软删进回收站（行/文件/引用保留）、
+    恢复、过期真删行与文件、恢复受配额限制、usage；
+  - HTTP：multipart 信封、非图片/空名业务拒绝、改档/换图/软删/404/usage、
+    `GET /trash` 的剩余秒数与 `batch-restore` 整条恢复。
+- `backend/tests/test_videos.py` 的角色集成用例：角色组写入归一（未知/他人 id
   丢弃、上限 3、空列表清空）、`_characters_note` 档案段落、首帧注入角色图且角色
-  在前、合计超 4 张的截断、参考图档注入而首帧档不混图、删角色后渲染自动跳过。
+  在前、合计超 4 张的截断、参考图档注入而首帧档不混图；软删角色在回收期内仍注入、
+  过期真删后渲染自动跳过。
   同文件的 `media_dir` 夹具补了 `video_service.settings.upload_media_path` 的
   property 重定向（链式衔接与成片合成的产物存在性检查需要它）。

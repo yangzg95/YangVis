@@ -20,17 +20,27 @@ export interface ShotCue {
 
 const pad = (value: number, width = 2) => String(value).padStart(width, '0')
 
-/** 只有写了屏幕文字的镜头出字幕；空文字的那一镜在两份文件里都不该占一行。 */
-export function subtitleCues(shots: VideoShot[]): ShotCue[] {
+/** 按指定字段构建时间轴 cue：起点是前面各镜时长的累加，空文本镜头不占行。 */
+function cuesFrom(shots: VideoShot[], pick: (shot: VideoShot) => string): ShotCue[] {
   const cues: ShotCue[] = []
   let cursor = 0
   shots.forEach((shot, index) => {
-    const text = (shot.on_screen_text || '').trim()
+    const text = pick(shot).trim()
     const duration = Math.max(1, Math.round(shot.duration_s || 0))
     if (text) cues.push({ index: index + 1, startS: cursor, durationS: duration, text })
     cursor += duration
   })
   return cues
+}
+
+/** 只有写了屏幕文字的镜头出字幕；空文字的那一镜在两份文件里都不该占一行。 */
+export function subtitleCues(shots: VideoShot[]): ShotCue[] {
+  return cuesFrom(shots, (shot) => shot.on_screen_text || '')
+}
+
+/** 按台词（TTS 配音源文本）构建 cue，用来导出配音校对用的 SRT。 */
+export function dialogueCues(shots: VideoShot[]): ShotCue[] {
+  return cuesFrom(shots, (shot) => shot.dialogue || '')
 }
 
 /** 秒 → 「HH:MM:SS,mmm」（SRT）或「H:MM:SS.cc」（ASS，百分秒）。 */
@@ -48,8 +58,7 @@ function assTime(seconds: number): string {
   )}.${pad(cs % 100)}`
 }
 
-export function buildSrt(shots: VideoShot[]): string {
-  const cues = subtitleCues(shots)
+function srtFromCues(cues: ShotCue[]): string {
   if (!cues.length) return ''
   // 块与块之间空一行，最后一条也以换行收尾——播放器对结尾空行的容忍度不一样。
   return (
@@ -60,6 +69,16 @@ export function buildSrt(shots: VideoShot[]): string {
       )
       .join('\n') + '\n'
   )
+}
+
+/** 屏幕文字版 SRT：剪映/PR/必剪通用，时间轴按镜头顺序累加。 */
+export function buildSrt(shots: VideoShot[]): string {
+  return srtFromCues(subtitleCues(shots))
+}
+
+/** 台词版 SRT：拿 TTS 配音源文本做配音校对，时间轴与屏幕文字版同一口径。 */
+export function buildDialogueSrt(shots: VideoShot[]): string {
+  return srtFromCues(dialogueCues(shots))
 }
 
 /**

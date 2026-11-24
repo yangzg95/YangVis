@@ -13,6 +13,11 @@
 - **素材库页（/office/materials）**：图片/视频筛选 + 名称与分组关键字本地即时搜；
   打了标的按标签聚组、没打的按天归组（今天/昨天/日期）。列表图一律走后端生成的
   320px WebP 缩略图，缺缩略图时回退原图。
+- **引用可见性与未使用清理**：每条素材带镜头引用计数（`ref_count`），被引用的卡片
+  显示「N 镜引用」角标，0 引用在 meta 区标「未使用」；工具栏「只看未使用」一键筛出
+  没有任何镜头引用的素材，撞 200 条上限时先清这批。
+- **预览灯箱**：点缩略图打开大图/视频预览，支持在当前筛选结果里上一张/下一张（边界
+  禁用而不是循环）、显示「第 N / 共 M 条」与引用数，并提供直接下载。
 - **上传**：按钮多选上传，每条一行实时进度；按文件头魔数判型（PNG/JPEG/GIF/WebP/BMP、
   MP4/WebM），不认识的内容在写盘前拒绝，图片闸门 10MB、视频 50MB，账号上限 200 条。
 - **整理**：单条改名、单条/批量/整组打分组标签，标签同时是检索键；勾选跨分组保留，
@@ -65,8 +70,8 @@
 | --- | --- |
 | `backend/app/models/entities.py` `MaterialAsset` | 表 `material_asset`：kind/name/tag/mime/size/rel_path + `deleted_at` 软删列、owner 隔离 |
 | `backend/app/services/materials/store.py` | 魔数判型落盘（`materials/<owner_id>/<随机 id>.<ext>`）、320px WebP 缩略图、路径守卫 |
-| `backend/app/services/materials/service.py` | `MaterialService`：`list_assets`/`list_trash`/`trash_count`、上传闸门、打标、`remove_many`/`restore_many`、`purge_expired` 懒清理、`usage` 引用反查、`materials_for` 批量解析 |
-| `backend/app/routers/materials.py` | `/office/materials` 一组接口；`GET /trash` 拼缩略图并按服务端时钟算剩余秒数；错误翻译 |
+| `backend/app/services/materials/service.py` | `MaterialService`：`list_assets`/`list_trash`/`trash_count`、上传闸门、打标、`remove_many`/`restore_many`、`purge_expired` 懒清理、`usage`/`ref_usage_map` 引用反查、`materials_for` 批量解析 |
+| `backend/app/routers/materials.py` | `/office/materials` 一组接口；列表带每条 `ref_count`；`GET /trash` 拼缩略图并按服务端时钟算剩余秒数；错误翻译 |
 | `backend/app/services/videos/service.py` | 镜头保存归一化 `material_ids`、渲染入队时 `materials_for` 解析、只把图片并入参考图预算 |
 | `frontend/src/api/materials.ts` | `materialsApi`：list/upload/标签/删除/恢复/`trash` |
 | `frontend/src/views/Materials.vue` | 素材库页：分组网格、上传进度、批量条、删除影响面、回收站抽屉与倒计时 |
@@ -76,7 +81,7 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/office/materials?kind=&q=&limit=&offset=` | 正常素材一页；响应带 `bytes_total`、`max_per_owner`、`trash_ttl_seconds` 与 `trash_count` |
+| GET | `/office/materials?kind=&q=&limit=&offset=` | 正常素材一页；每条带 `ref_count` 镜头引用数；响应带 `bytes_total`、`max_per_owner`、`trash_ttl_seconds` 与 `trash_count` |
 | POST | `/office/materials` | multipart 上传，魔数判型；非媒体或超限走 `code=-1` 业务拒绝 |
 | PUT | `/office/materials/{id}/name` | 改名，空名拒绝 |
 | PUT | `/office/materials/{id}/tag` | 改单条分组，空串摘标签 |
@@ -103,4 +108,5 @@
 - `backend/tests/test_materials.py`：落盘判型/缩略图、账号隔离、筛选分页、
   回收期删除/恢复/过期真删（含文件与引用）、配额与恢复预算；回收站部分覆盖
   `list_trash` 的排序、类别/关键字筛选、过期先清理、owner 隔离，以及
-  `GET /trash` 的信封形状、剩余秒数与列表角标 `trash_count`。
+  `GET /trash` 的信封形状、剩余秒数与列表角标 `trash_count`；`ref_usage_map`
+  按镜头聚合引用数（同一镜头引用多条各算一次、未引用报 0）。

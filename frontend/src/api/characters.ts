@@ -5,8 +5,8 @@
  * 项目角色组（video_project.character_ids）认领人物：脚本生成时档案会拼进提示词，
  * 渲染时形象图自动并进每镜的参考图请求（角色图在前，与镜头素材合计最多 4 张）。
  *
- * 删除是硬删除：项目里残留的 id 由后端在保存/渲染时按「已不存在」跳过，与素材文件
- * 丢失同一降级口径；删除回执里的 references 仅作界面提示。
+ * 删除先进回收期（默认 10 分钟），窗口内可在回收站撤销，过期才真删行与形象图；
+ * 项目里残留的 id 由后端在保存/渲染时按「已不存在」跳过，与素材文件丢失同一降级口径。
  */
 import { request } from './http'
 
@@ -32,12 +32,39 @@ export interface Character {
   /** 列表缩略图（320px WebP）；没有时为空串，界面回退到 url。 */
   thumb_url: string
   created_at: string | null
+  /** 被多少个短视频项目选进角色组。 */
+  project_count: number
 }
 
 export interface CharacterList {
   items: Character[]
   total: number
   max_per_owner: number
+  /** 回收期里还没过期的条数：回收站入口角标。 */
+  trash_count: number
+  trash_ttl_seconds: number
+}
+
+/** 回收期里的一个角色：普通字段之外带删除时刻与距真删的剩余秒数。 */
+export interface CharacterTrashItem {
+  id: number
+  name: string
+  persona: string
+  outfit: string
+  features: string
+  mime: string
+  size: number
+  url: string
+  thumb_url: string
+  created_at: string | null
+  deleted_at: string | null
+  expires_in_seconds: number
+}
+
+export interface CharacterTrashList {
+  items: CharacterTrashItem[]
+  total: number
+  trash_ttl_seconds: number
 }
 
 /** 建档/换图共用的 multipart 字段；形象图只收图片，视频会被后端拒绝。 */
@@ -114,11 +141,22 @@ export const charactersApi = {
       data: { ids },
       skipErrorToast: true,
     }),
-  /** 硬删除：删行 + 删形象图，残留引用由视频侧自然跳过。 */
+  /** 移进回收期：行与形象图保留，窗口内可撤销，残留引用由视频侧自然跳过。 */
   remove: (id: number) =>
     request<CharacterDeleteResult>({
       url: `/office/characters/${id}`,
       method: 'DELETE',
+      skipErrorToast: true,
+    }),
+  /** 回收站一屏：只列撤销窗口内的角色，带剩余秒数。 */
+  trash: (params: { q?: string; limit?: number } = {}) =>
+    request<CharacterTrashList>({ url: '/office/characters/trash', params }),
+  /** 撤销删除：把回收期里的角色恢复成可见，超额时只放回预算内那批。 */
+  restore: (ids: number[]) =>
+    request<{ ids: number[] }>({
+      url: '/office/characters/batch-restore',
+      method: 'POST',
+      data: { ids },
       skipErrorToast: true,
     }),
 }

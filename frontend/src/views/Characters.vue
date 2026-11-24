@@ -16,6 +16,11 @@
           {{ filtered.length === items.length ? `共 ${total} 个角色` : `筛出 ${filtered.length} / ${total} 个` }}
           · 一个账号最多 {{ maxPerOwner }} 个
         </span>
+        <a-badge :count="trashCount" :offset="[-6, 4]">
+          <a-button @click="openTrash">
+            <DeleteOutlined /> 回收站
+          </a-button>
+        </a-badge>
         <a-button type="primary" :disabled="items.length >= maxPerOwner" @click="openCreate">
           <PlusOutlined /> 新建人物
         </a-button>
@@ -34,6 +39,9 @@
               @click="preview(item)"
             />
             <span v-else class="portrait-missing">形象图已丢失</span>
+            <a-tag v-if="item.project_count" class="project-tag" color="processing">
+              {{ item.project_count }} 项目在用
+            </a-tag>
           </div>
           <div class="character-meta">
             <div class="character-name" :title="item.name">{{ item.name }}</div>
@@ -119,11 +127,11 @@
       </a-form>
     </a-modal>
 
-    <!-- 删除确认：先拉引用影响面，硬删除后项目里的残留 id 在保存/渲染时自动跳过。 -->
+    <!-- 删除确认：先进回收期，窗口内可在回收站撤销，过期才真删行与形象图。 -->
     <a-modal
       v-model:open="deleteOpen"
       :title="`删除人物「${deleteTarget?.name ?? ''}」`"
-      ok-text="删除"
+      ok-text="移入回收站"
       cancel-text="取消"
       :confirm-loading="deleting"
       :ok-button-props="{ danger: true }"
@@ -133,35 +141,84 @@
         <a-alert
           type="warning"
           show-icon
-          message="删除后形象图文件一并清除，且不能撤销。"
+          :message="`先移入回收站，${undoWindowLabel}内可在回收站撤销；过期才真正删除形象图。`"
           class="delete-alert"
         />
         <div v-if="usageProjects.length" class="usage-block">
-          <div class="hint">这些短视频项目仍把它选在角色组里，删除后保存或渲染时会自动跳过该角色：</div>
+          <div class="hint">这些短视频项目仍把它选在角色组里，回收期内引用保留，过期真删后保存或渲染时自动跳过：</div>
           <ul class="usage-list">
             <li v-for="project in usageProjects" :key="project.project_id">《{{ project.title }}》</li>
           </ul>
         </div>
-        <div v-else-if="!loadingUsage" class="hint">没有短视频项目引用它，可以放心删除。</div>
+        <div v-else-if="!loadingUsage" class="hint">没有短视频项目引用它。</div>
       </a-spin>
     </a-modal>
+
+    <!-- 回收站：软删的角色在撤销窗口内都在这里，到期才真删行与形象图。 -->
+    <a-drawer v-model:open="trashOpen" title="回收站" width="680">
+      <div class="hint trash-hint">
+        删除的角色先在这里放 {{ undoWindowLabel }}，到期才真正删除；恢复后项目角色组里
+        对它的引用原样生效。名额已满时，恢复会先放回更早删除的，其余继续留在这里。
+      </div>
+      <a-button
+        size="small"
+        style="margin-bottom: 10px"
+        :disabled="!trashItems.length"
+        @click="restoreAllTrash"
+      >
+        <UndoOutlined /> 全部恢复
+      </a-button>
+      <a-spin :spinning="trashLoading">
+        <ul v-if="trashItems.length" class="trash-list">
+          <li v-for="item in trashItems" :key="item.id" class="trash-row">
+            <span class="trash-thumb">
+              <img
+                v-if="item.thumb_url || item.url"
+                :src="item.thumb_url || item.url"
+                :alt="item.name"
+                loading="lazy"
+              />
+              <span v-else class="portrait-missing">已丢失</span>
+            </span>
+            <span class="trash-body">
+              <span class="trash-name" :title="item.name">{{ item.name }}</span>
+              <span class="hint">删除于 {{ fmtShortDateTime(item.deleted_at) }}</span>
+            </span>
+            <span class="trash-side">
+              <a-tag :color="remainColor(remainingOf(item))">{{ remainLabel(remainingOf(item)) }}</a-tag>
+              <a-button size="small" type="link" @click="restoreOne(item.id)">
+                <UndoOutlined /> 恢复
+              </a-button>
+            </span>
+          </li>
+        </ul>
+        <a-empty v-else :image="simpleEmpty" description="回收站是空的" />
+      </a-spin>
+    </a-drawer>
   </div>
 </template>
 
 <script setup lang="ts">
 // 人物库：账号级的角色档案与形象图。
-// 这一页做四件事：拉列表（名称搜索走后端）、卡片网格展示档案、建档/编辑
-// （multipart 一次收图与文字，编辑只改文字时不带文件）、删除（先列引用项目，
-// 硬删除，残留引用交给视频侧在保存/渲染时按 id 缺失跳过）。
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { PlusOutlined, UploadOutlined } from '@ant-design/icons-vue'
-import { Empty, message } from 'ant-design-vue'
+// 这一页做五件事：拉列表（名称搜索走后端，带项目引用数）、卡片网格展示档案、
+// 建档/编辑（multipart 一次收图与文字，重名给二次确认但不硬拦）、删除（先进回收期，
+// 回收站可撤销，过期才真删）、回收站恢复。残留引用交给视频侧在保存/渲染时按 id 缺失跳过。
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import {
+  DeleteOutlined,
+  PlusOutlined,
+  UndoOutlined,
+  UploadOutlined,
+} from '@ant-design/icons-vue'
+import { Empty, Modal, message } from 'ant-design-vue'
 import {
   charactersApi,
   type Character,
+  type CharacterTrashItem,
   type CharacterUsageProject,
 } from '@/api'
 import { errorText } from '@/utils/errors'
+import { fmtShortDateTime } from '@/utils/format'
 
 const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp']
 const FETCH_LIMIT = 200
@@ -172,6 +229,15 @@ const maxPerOwner = ref(50)
 const loading = ref(false)
 const keyword = ref('')
 const simpleEmpty = Empty.PRESENTED_IMAGE_SIMPLE
+const trashCount = ref(0)
+const trashTtlSeconds = ref(600)
+
+const undoWindowLabel = computed(() => {
+  const seconds = trashTtlSeconds.value
+  if (seconds <= 0) return '撤销窗口'
+  if (seconds % 60 === 0) return `${seconds / 60} 分钟`
+  return `${seconds} 秒`
+})
 
 const filtered = computed(() => {
   // 后端已按关键字过滤；本地这层只在没翻页（一次拉满）时兜住输入过程的即时感。
@@ -231,12 +297,99 @@ async function load() {
     items.value = data.items
     total.value = data.total
     maxPerOwner.value = data.max_per_owner
+    trashCount.value = data.trash_count ?? 0
+    trashTtlSeconds.value = data.trash_ttl_seconds ?? 600
   } catch (err) {
     message.error(errorText(err, '人物库读不出来'))
   } finally {
     loading.value = false
   }
 }
+
+// -- 回收站 ----------------------------------------------------------------
+
+const trashOpen = ref(false)
+const trashLoading = ref(false)
+const trashItems = ref<CharacterTrashItem[]>([])
+let trashFetchedAt = 0
+const trashTick = ref(0)
+let trashTimer: ReturnType<typeof setInterval> | null = null
+
+function remainingOf(item: CharacterTrashItem): number {
+  void trashTick.value
+  const elapsed = trashFetchedAt ? Math.floor((Date.now() - trashFetchedAt) / 1000) : 0
+  return Math.max(0, item.expires_in_seconds - elapsed)
+}
+
+function remainLabel(seconds: number): string {
+  if (seconds <= 0) return '即将清除'
+  if (seconds < 60) return `还剩 ${seconds} 秒`
+  return `还剩 ${Math.ceil(seconds / 60)} 分钟`
+}
+
+function remainColor(seconds: number): string {
+  if (seconds <= 0) return 'error'
+  if (seconds <= 60) return 'warning'
+  return 'default'
+}
+
+async function loadTrash() {
+  trashLoading.value = true
+  try {
+    const data = await charactersApi.trash({ limit: FETCH_LIMIT })
+    trashItems.value = data.items
+    trashCount.value = data.total
+    trashFetchedAt = Date.now()
+    trashTick.value = 0
+  } catch (err) {
+    message.error(errorText(err, '回收站读不出来'))
+  } finally {
+    trashLoading.value = false
+  }
+}
+
+function openTrash() {
+  trashOpen.value = true
+  void loadTrash()
+}
+
+async function restoreOne(id: number) {
+  try {
+    await charactersApi.restore([id])
+    message.success('已恢复人物')
+    await Promise.all([loadTrash(), load()])
+  } catch (err) {
+    message.error(errorText(err, '恢复失败'))
+  }
+}
+
+async function restoreAllTrash() {
+  const ids = trashItems.value.map((item) => item.id)
+  if (!ids.length) return
+  try {
+    const result = await charactersApi.restore(ids)
+    message.success(`已恢复 ${result.ids.length} 个人物`)
+    await Promise.all([loadTrash(), load()])
+  } catch (err) {
+    message.error(errorText(err, '恢复失败'))
+  }
+}
+
+watch(trashOpen, (open) => {
+  if (open && !trashTimer) {
+    trashTimer = setInterval(() => {
+      trashTick.value += 1
+      if (trashItems.value.some((item) => remainingOf(item) <= 0)) void loadTrash()
+    }, 30_000)
+  } else if (!open && trashTimer) {
+    clearInterval(trashTimer)
+    trashTimer = null
+  }
+})
+
+onBeforeUnmount(() => {
+  if (trashTimer) clearInterval(trashTimer)
+})
 
 function resetEditor() {
   editor.id = null
@@ -279,6 +432,15 @@ function pickFile(file: File) {
   return false
 }
 
+/** 同名角色（排除编辑中的自身）：后端允许重名，这里只做提示，不硬拦。 */
+function duplicateNames(): Character[] {
+  const name = editor.name.trim().toLowerCase()
+  if (!name) return []
+  return items.value.filter(
+    (item) => item.id !== editor.id && item.name.trim().toLowerCase() === name,
+  )
+}
+
 async function onSave() {
   if (!editor.name.trim()) {
     message.warning('请先填写角色名')
@@ -288,6 +450,22 @@ async function onSave() {
     message.warning('请先上传一张形象图')
     return
   }
+  const dup = duplicateNames()
+  if (dup.length) {
+    // 重名在选择器里容易选错，给一次显式确认；用户坚持就照存，后端不做唯一约束。
+    Modal.confirm({
+      title: '存在同名角色',
+      content: `人物库里已有 ${dup.length} 个叫「${editor.name.trim()}」的角色，仍要保存？`,
+      okText: '仍要保存',
+      cancelText: '取消',
+      onOk: () => doSave(),
+    })
+    return
+  }
+  await doSave()
+}
+
+async function doSave() {
   editor.saving = true
   try {
     if (editor.id === null) {
@@ -342,7 +520,7 @@ async function confirmDelete() {
   deleting.value = true
   try {
     await charactersApi.remove(deleteTarget.value.id)
-    message.success('已删除人物')
+    message.success('已移入回收站，可在撤销窗口内恢复')
     deleteOpen.value = false
     await load()
   } catch (err) {
@@ -403,6 +581,77 @@ onMounted(load)
   height: 100%;
   color: var(--text-3);
   font-size: var(--fs-xs);
+}
+
+.project-tag {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  margin: 0;
+  transform: scale(0.9);
+  transform-origin: right top;
+}
+
+/* 回收站抽屉：与素材回收站同口径，头像 + 名称 + 倒计时 + 恢复。 */
+.trash-hint {
+  margin-bottom: 10px;
+}
+
+.trash-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.trash-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.trash-thumb {
+  flex: 0 0 auto;
+  width: 48px;
+  height: 64px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.trash-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.trash-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.trash-name {
+  font-weight: 600;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.trash-side {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
 }
 
 .character-meta {
