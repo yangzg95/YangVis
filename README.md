@@ -284,6 +284,7 @@ uv sync --group dev
 | `AI_GATEWAY_AUTO_CLASSIFY_CHARS` | 1200 | 送进分类 prompt 的用户正文截断长度 |
 | `AI_GATEWAY_PUBLIC_ORIGIN` | 空 | 对外公布的站点 origin（如 `https://ai.nanwa.xyz`），概览页据此显示接入地址；留空则按打开控制台时的 origin 推导。`/v1` 由程序拼接 |
 | `MEDIA_IMAGE_TRANSPORT` | data_url | 参考图怎么送给方舟：`data_url` 读本地文件内联成 base64，`public_url` 改发 `PUBLIC_MEDIA_BASE_URL` + 产物路径 |
+| `PUBLISH_COMPOSE_TIMEOUT` | 1800 | 每条 FFmpeg 子进程的最长秒数；片段直拼、重编码、配音混音、音视频封装各自计时 |
 | `PUBLIC_MEDIA_BASE_URL` | 空 | 本站对外 origin（如 `https://yangvis.nanwa.xyz`）。**短视频「参考上一版片段」的硬前置**，见下文；留空则该开关入队即拒、界面上禁用 |
 
 ### 上传上限与反代配合
@@ -356,6 +357,18 @@ location ^~ /api/ops/servers/ {
 - 音色取项目参数 `tts_voice`，留空退到环境变量 `TTS_DEFAULT_VOICE`；两者都空时入队被拒。
 - 台词比镜头槽位长时自动 `atempo` 加速，倍率超过 `TTS_MAX_ATEMPO`（默认 1.6）则作业失败、点名镜号，不产出加速怪声。
 - 相关环境变量：`TTS_DEFAULT_VOICE`、`TTS_HTTP_TIMEOUT`（60s）、`TTS_AUDIO_MAX_BYTES`（10MB）、`TTS_MAX_ATEMPO`（1.6）、`TTS_SAMPLE_RATE`（44100）。
+
+### 短视频成片合成超时
+
+界面出现「ffmpeg 片段重编码超过 1800 秒，已终止」这类提示时，指的是**那一条 FFmpeg 子进程**触发了上限，不是整个页面请求或任务队列超时。默认 1800 秒；直拼、重编码、配音混音和封装各自计时，任何一步失败都会结束本次作业。报错会带上具体阶段和 FFmpeg 的最后一段输出，服务日志也记录各阶段耗时。
+
+低配主机或片段编码参数不一致导致直拼失败、回退 `libx264` 整片重编码时，可在根目录 `.env` 调整：
+
+```env
+PUBLISH_COMPOSE_TIMEOUT=3600
+```
+
+改后执行 `docker-compose up -d app` 重建应用容器使配置生效。若反复卡在「片段重编码」，优先统一各镜的生成模型、分辨率和帧率，避免触发整片重编码；单纯继续调大超时不会加快编码。
 
 ## API 概览
 

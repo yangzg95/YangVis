@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -115,9 +116,10 @@ def write_concat_list(sources: Sequence[Path], list_file: Path) -> None:
     list_file.write_text("\n".join(lines), encoding="utf-8")
 
 
-async def _run_ffmpeg(args: Sequence[str]) -> tuple[int, str]:
+async def _run_ffmpeg(args: Sequence[str], *, stage: str = "处理") -> tuple[int, str]:
     """跑一次 ffmpeg，返回 ``(返回码, stderr 文本)``；超时杀进程并抛错。"""
-    logger.info("ffmpeg invoke: %s", " ".join(str(arg) for arg in args[:8]))
+    started = time.monotonic()
+    logger.info("ffmpeg %s invoke: %s", stage, " ".join(str(arg) for arg in args[:8]))
     try:
         process = await asyncio.create_subprocess_exec(
             *args,
@@ -126,18 +128,37 @@ async def _run_ffmpeg(args: Sequence[str]) -> tuple[int, str]:
             stderr=asyncio.subprocess.PIPE,
         )
     except OSError as exc:
-        raise PublishComposeError(f"ffmpeg 启动失败：{exc}") from exc
+        raise PublishComposeError(f"ffmpeg 启动失败（{stage}）：{exc}") from exc
 
+    communication = asyncio.create_task(process.communicate())
     try:
         _, stderr_bytes = await asyncio.wait_for(
-            process.communicate(), timeout=settings.PUBLISH_COMPOSE_TIMEOUT
+            asyncio.shield(communication), timeout=settings.PUBLISH_COMPOSE_TIMEOUT
         )
     except asyncio.TimeoutError as exc:
-        process.kill()
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
         await process.wait()
+        _, stderr_bytes = await communication
+        detail = stderr_bytes.decode("utf-8", "replace").strip()
+        logger.warning(
+            "ffmpeg %s timed out: elapsed=%.1fs stderr=%s",
+            stage,
+            time.monotonic() - started,
+            detail[-_STERR_TAIL:],
+        )
+        suffix = f"；ffmpeg 输出：{detail[-_STERR_TAIL:]}" if detail else ""
         raise PublishComposeError(
-            f"ffmpeg 合成超过 {settings.PUBLISH_COMPOSE_TIMEOUT:.0f} 秒，已终止"
+            f"ffmpeg {stage}超过 {settings.PUBLISH_COMPOSE_TIMEOUT:g} 秒，已终止{suffix}"
         ) from exc
+    logger.info(
+        "ffmpeg %s finished: code=%s elapsed=%.1fs",
+        stage,
+        process.returncode,
+        time.monotonic() - started,
+    )
     return process.returncode or 0, stderr_bytes.decode("utf-8", "replace")
 
 
@@ -203,7 +224,9 @@ def _output_ok(out_path: Path) -> bool:
 
 async def _concat_silent(exe: str, list_file: Path, out_path: Path) -> None:
     """按镜头清单拼出一条**无声**中间片：直拼优先，失败回退重编码。"""
-    code, stderr = await _run_ffmpeg(_copy_args(exe, list_file, out_path))
+    code, stderr = await _run_ffmpeg(
+        _copy_args(exe, list_file, out_path), stage="片段直拼"
+    )
     if code == 0 and _output_ok(out_path):
         logger.info("ffmpeg concat-copy ok: out=%s", out_path.name)
         return
@@ -214,7 +237,9 @@ async def _concat_silent(exe: str, list_file: Path, out_path: Path) -> None:
         stderr[-_STERR_TAIL:],
     )
     out_path.unlink(missing_ok=True)
-    code, stderr = await _run_ffmpeg(_reencode_args(exe, list_file, out_path))
+    code, stderr = await _run_ffmpeg(
+        _reencode_args(exe, list_file, out_path), stage="片段重编码"
+    )
     if code != 0 or not _output_ok(out_path):
         detail = stderr.strip()[-_STERR_TAIL:] or f"退出码 {code}"
         raise PublishComposeError(f"ffmpeg 合成失败：{detail}")
@@ -228,7 +253,9 @@ async def probe_duration(exe: str, path: Path) -> float:
     文件时会以退出码 1 结束、却照样把输入信息（含 ``Duration:`` 行）打到 stderr——
     所以这里不看返回码，只认正则；解析不到就是真失败，抛错让作业落失败状态。
     """
-    _, stderr = await _run_ffmpeg([exe, "-nostdin", "-hide_banner", "-i", str(path)])
+    _, stderr = await _run_ffmpeg(
+        [exe, "-nostdin", "-hide_banner", "-i", str(path)], stage="成片时长探测"
+    )
     match = _DURATION_RE.search(stderr)
     if not match:
         raise PublishComposeError(
@@ -266,7 +293,10 @@ async def probe_audio(exe: str, path: Path) -> tuple[float, int]:
     "Option 'all' not found"）；显式写成 ``adelay=D``（mono）或
     ``adelay=D|D``（stereo）则哪个版本都吃。
     """
-    _, stderr = await _run_ffmpeg([exe, "-nostdin", "-hide_banner", "-i", str(path)])
+    _, stderr = await _run_ffmpeg(
+        [exe, "-nostdin", "-hide_banner", "-i", str(path)],
+        stage=f"配音时长探测（{path.name}）",
+    )
     match = _DURATION_RE.search(stderr)
     if not match:
         raise PublishComposeError(
@@ -352,7 +382,7 @@ async def build_voiceover(
         _AUDIO_BITRATE,
         str(out_path),
     ]
-    code, stderr = await _run_ffmpeg(args)
+    code, stderr = await _run_ffmpeg(args, stage="配音混音")
     if code != 0 or not _output_ok(out_path):
         detail = stderr.strip()[-_STERR_TAIL:] or f"退出码 {code}"
         raise PublishComposeError(f"ffmpeg 配音混音失败：{detail}")
@@ -385,7 +415,7 @@ async def mux_voiceover(exe: str, video_path: Path, audio_path: Path, out_path: 
         "+faststart",
         str(out_path),
     ]
-    code, stderr = await _run_ffmpeg(args)
+    code, stderr = await _run_ffmpeg(args, stage="音视频封装")
     if code != 0 or not _output_ok(out_path):
         detail = stderr.strip()[-_STERR_TAIL:] or f"退出码 {code}"
         raise PublishComposeError(f"ffmpeg 音视频封装失败：{detail}")

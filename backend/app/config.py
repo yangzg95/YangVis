@@ -291,9 +291,9 @@ class Settings(BaseSettings):
     VIDEO_MAX_PROMPT_CHARS: int = 480
     # 产物保留天数，与 workflow_run 的 30 天同一口径：视频比幻灯片更吃盘。
     VIDEO_RETENTION_DAYS: int = 30
-    # 一次成片合成（ffmpeg 拼接各镜片段）的最长秒数。本地进程活，正常十几段 720p
-    # 直拼只要几秒；超时通常是回退重编码卡住，到点杀进程比留一条永远 running 的作业诚实。
-    PUBLISH_COMPOSE_TIMEOUT: float = 300.0
+    # 每条 ffmpeg 子进程的最长秒数（拼接、混音、封装各自计时）。低配机器或片段
+    # 参数不一致触发重编码时可能超过 5 分钟；保留 30 分钟上限，避免正常重编码被误杀。
+    PUBLISH_COMPOSE_TIMEOUT: float = 1800.0
 
     # 智能应用 · 短视频 · TTS 配音（方舟 OpenAI 兼容 /audio/speech）
     # 单句合成的 HTTP 超时。一次合成按镜头逐句调用，每句都是独立的短请求，

@@ -32,6 +32,7 @@ services:
       # First start only: creates the initial administrator.
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+      PUBLISH_COMPOSE_TIMEOUT: ${PUBLISH_COMPOSE_TIMEOUT:-1800}
       # Optional mobile App inbox + SSE. Both values must be set to enable it.
       NOTIFY_APP_TOKEN: ${NOTIFY_APP_TOKEN:-}
       NOTIFY_APP_OWNER_ID: ${NOTIFY_APP_OWNER_ID:-}

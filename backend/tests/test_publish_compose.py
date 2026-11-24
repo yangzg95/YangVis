@@ -476,6 +476,45 @@ class _FakeProc:
         pass
 
 
+class _HangingProc:
+    def __init__(self):
+        self.killed = False
+        self.returncode = None
+        self.communicate_calls = 0
+        self._release = asyncio.Event()
+
+    async def communicate(self):
+        self.communicate_calls += 1
+        if not self.killed:
+            await self._release.wait()
+        return b"", b"encoder stalled"
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+        self._release.set()
+
+    async def wait(self):
+        return self.returncode
+
+
+def test_ffmpeg_timeout_reports_stage_and_drains_stderr(monkeypatch):
+    process = _HangingProc()
+
+    async def fake_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr(composer.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(composer.settings, "PUBLISH_COMPOSE_TIMEOUT", 0.001)
+
+    with pytest.raises(PublishComposeError, match="ffmpeg 配音混音超过") as exc_info:
+        asyncio.run(composer._run_ffmpeg(["ffmpeg"], stage="配音混音"))
+
+    assert process.killed
+    assert process.communicate_calls == 1
+    assert "encoder stalled" in str(exc_info.value)
+
+
 def test_concat_list_uses_forward_slashes_and_quotes(tmp_path):
     bad = tmp_path / "a'b" / "clip one.mp4"
     list_file = tmp_path / "concat.txt"
