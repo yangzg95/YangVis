@@ -804,11 +804,16 @@ class _Proc:
         pass
 
 
-def _duration_stderr(seconds: float) -> bytes:
+def _duration_stderr(seconds: float, channels: int | None = None) -> bytes:
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = seconds % 60
-    return f"  Duration: {hours:02d}:{minutes:02d}:{secs:05.2f}, start: 0.000000".encode()
+    text = f"  Duration: {hours:02d}:{minutes:02d}:{secs:05.2f}, start: 0.000000"
+    if channels is not None:
+        # 仿 ffmpeg -i 的音频流行：1 声道印 mono，2 声道印 stereo，其余印 N channels。
+        layout = "mono" if channels == 1 else "stereo" if channels == 2 else f"{channels} channels"
+        text += f"\n  Stream #0:0: Audio: mp3, 44100 Hz, {layout}, fltp, 128 kb/s"
+    return text.encode()
 
 
 def test_probe_duration_parses_ffmpeg_stderr(tmp_path, monkeypatch, fake_ffmpeg):
@@ -842,6 +847,57 @@ def test_probe_duration_raises_when_line_missing(tmp_path, monkeypatch, fake_ffm
         asyncio.run(composer.probe_duration("ffmpeg", target))
 
 
+def _audio_stderr(seconds: float, stream_token: str) -> bytes:
+    return (
+        _duration_stderr(seconds).decode()
+        + f"\n  Stream #0:0: Audio: mp3, 44100 Hz, {stream_token}, fltp, 128 kb/s"
+    ).encode()
+
+
+@pytest.mark.parametrize(
+    ("stream_token", "expected"),
+    [
+        ("mono", 1),
+        ("stereo", 2),
+        ("5.1(side)", 6),
+        ("2 channels", 2),
+    ],
+)
+def test_probe_audio_parses_duration_and_channels(
+    tmp_path, monkeypatch, fake_ffmpeg, stream_token, expected
+):
+    target = tmp_path / "a.mp3"
+    target.write_bytes(MP4)
+
+    def fake_exec(*args, **kwargs):
+        async def run():
+            return _Proc(1, _audio_stderr(12.5, stream_token))
+
+        return run()
+
+    monkeypatch.setattr(composer.asyncio, "create_subprocess_exec", fake_exec)
+
+    assert asyncio.run(composer.probe_audio("ffmpeg", target)) == (12.5, expected)
+
+
+def test_probe_audio_falls_back_to_mono_when_stream_line_absent(
+    tmp_path, monkeypatch, fake_ffmpeg
+):
+    target = tmp_path / "a.mp3"
+    target.write_bytes(MP4)
+
+    def fake_exec(*args, **kwargs):
+        async def run():
+            # 只有 Duration 没有音频流行：不抛错，按单声道兜底，作业不被冷门文件卡死。
+            return _Proc(1, _duration_stderr(3.0))
+
+        return run()
+
+    monkeypatch.setattr(composer.asyncio, "create_subprocess_exec", fake_exec)
+
+    assert asyncio.run(composer.probe_audio("ffmpeg", target)) == (3.0, 1)
+
+
 def _voice_lines(tmp_path: Path) -> list[VoiceoverLine]:
     lines = []
     for index, (start, slot) in enumerate(((0, 5), (5, 5))):
@@ -853,8 +909,13 @@ def _voice_lines(tmp_path: Path) -> list[VoiceoverLine]:
     return lines
 
 
-def _routing_exec(calls: list, durations: dict[str, float]):
-    """按调用形状路由的假 ffmpeg：探针回 Duration，其余落产物文件。"""
+def _routing_exec(calls: list, durations: dict[str, float], channels: dict[str, int] | None = None):
+    """按调用形状路由的假 ffmpeg：探针回 Duration，其余落产物文件。
+
+    ``channels`` 按文件名给音频探针定制声道数；mp3 探针默认 mono，视频探针
+    （silent.mp4）不带音频流行，保持与真实无声中间片一致。
+    """
+    channels = channels or {}
 
     def fake_exec(*args, **kwargs):
         argv = list(args)
@@ -863,7 +924,10 @@ def _routing_exec(calls: list, durations: dict[str, float]):
         async def run():
             if argv[-2] == "-i":  # 探针调用：[exe, -nostdin, -hide_banner, -i, path]
                 name = Path(argv[-1]).name
-                return _Proc(1, _duration_stderr(durations[name]))
+                probe_channels = channels.get(name)
+                if probe_channels is None and name.endswith(".mp3"):
+                    probe_channels = 1
+                return _Proc(1, _duration_stderr(durations[name], probe_channels))
             Path(argv[-1]).write_bytes(MP4)
             return _Proc(0)
 
@@ -890,10 +954,12 @@ def test_build_voiceover_places_lines_without_atempo_when_they_fit(
     assert out.is_file()
     mix_call = next(argv for argv in calls if "-filter_complex" in argv)
     graph = mix_call[mix_call.index("-filter_complex") + 1]
-    # 都放得进 5 秒槽位：不该出现加速；起点分别是 0ms 与 5000ms。
+    # 都放得进 5 秒槽位：不该出现加速；mono 输入逐声道只列一个延迟值。
     assert "atempo" not in graph
-    assert "adelay=0:all=1" in graph
-    assert "adelay=5000:all=1" in graph
+    assert "adelay=0[a0]" in graph
+    assert "adelay=5000[a1]" in graph
+    # 旧版 ffmpeg（<4.4）不认 all=1，滤镜图里绝不能再出现这个写法。
+    assert "all=" not in graph
     assert "amix=inputs=2" in graph
     assert "normalize=0" in graph
     assert "atrim=0:10.000" in graph
@@ -920,8 +986,34 @@ def test_build_voiceover_speeds_up_overflowing_line(tmp_path, monkeypatch, fake_
         if "-filter_complex" in argv
     )
     # 顺序必须是先 atempo 再 adelay：反过来会把定位静音一起加速。
-    assert "[0:a]atempo=1.6000,adelay=0:all=1[a0]" in graph
-    assert "[1:a]adelay=5000:all=1[a1]" in graph
+    assert "[0:a]atempo=1.6000,adelay=0[a0]" in graph
+    assert "[1:a]adelay=5000[a1]" in graph
+
+
+def test_build_voiceover_emits_per_channel_delay_for_stereo(
+    tmp_path, monkeypatch, fake_ffmpeg
+):
+    plan = VoiceoverPlan(_voice_lines(tmp_path))
+    out = tmp_path / "voiceover.m4a"
+    calls: list[list[str]] = []
+    durations = {"line_0.mp3": 3.0, "line_1.mp3": 4.0}
+    # 两路配音都是立体声：adelay 必须逐声道列两个延迟，而不是用 all=1。
+    monkeypatch.setattr(
+        composer.asyncio,
+        "create_subprocess_exec",
+        _routing_exec(calls, durations, {"line_0.mp3": 2, "line_1.mp3": 2}),
+    )
+
+    asyncio.run(composer.build_voiceover("ffmpeg", plan, total_s=10.0, out_path=out))
+
+    graph = next(
+        argv[argv.index("-filter_complex") + 1]
+        for argv in calls
+        if "-filter_complex" in argv
+    )
+    assert "adelay=0|0[a0]" in graph
+    assert "adelay=5000|5000[a1]" in graph
+    assert "all=" not in graph
 
 
 def test_build_voiceover_fails_when_speedup_exceeds_cap(

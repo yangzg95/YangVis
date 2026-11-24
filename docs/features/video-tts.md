@@ -14,7 +14,7 @@
          └─ OpenAI 兼容：Bearer + /audio/speech，直接回音频二进制
          └─ 临时目录 line_00.mp3、line_01.mp3 …
 片段（静音）─concat→ silent.mp4
-各句 mp3 ─atempo（超限兜底）→adelay（按镜头起点定位）→amix→ voiceover.m4a
+各句 mp3 ─atempo（超限兜底）→adelay（按镜头起点定位，逐声道列延迟）→amix→ voiceover.m4a
 silent.mp4 + voiceover.m4a ─流拷贝封装→ final.mp4
 ```
 
@@ -88,12 +88,21 @@ ffmpeg 的 `amix` 默认按输入数把音量等比调小（防削顶的老默�
 上互不重叠，这个默认只会把人声整体压闷。`normalize=0` 关掉它，再用 `apad + atrim`
 把音轨垫到、也截到与视频完全等长，封装时的 `-shortest` 只是双保险。
 
+### adelay 为什么逐声道列延迟，不用 all=1
+
+`adelay=DELAY:all=1` 里的 `all` 选项是 FFmpeg 4.4 才加的，部署机若挂着更老的 ffmpeg
+（或 `IMAGEIO_FFMPEG_EXE` 指向系统旧二进制），整张滤镜图会在初始化阶段被拒，报
+`Option 'all' not found`。改为探针先读出每句 mp3 的声道数，按声道显式列延迟：
+mono 写 `adelay=DELAY`，stereo 写 `adelay=DELAY|DELAY`——这套语法所有 ffmpeg 版本
+都认，且与 `all=1` 语义完全等价。声道信息从 `probe_audio` 复用的那次 `ffmpeg -i`
+stderr 里解析，不新增进程调用；解析不到冷门布局时按单声道兜底并打 warning。
+
 ## 实现结构
 
 | 位置 | 职责 |
 | --- | --- |
 | `backend/app/services/media/tts.py` | 双协议 TTS 客户端：`_is_plan_endpoint` 按 base_url 分流；套餐分支处理 X-Api-Key/X-Api-Resource-Id 头、`req_params` 请求体与 JSON 行流（base64 分块拼回、终止码 20000000）；OpenAI 分支处理 Bearer 鉴权与二进制/JSON 双态响应；中文错误翻译与大小闸门 |
-| `backend/app/services/publish/composer.py` | `VoiceoverLine/VoiceoverPlan`、`probe_duration`（无 ffprobe，解析 `ffmpeg -i` 的 stderr）、`build_voiceover`（atempo→adelay→amix→apad/atrim）、`mux_voiceover`（流拷贝封装）；无配音走原 `_concat_silent` |
+| `backend/app/services/publish/composer.py` | `VoiceoverLine/VoiceoverPlan`、`probe_duration`/`probe_audio`（无 ffprobe，一次 `ffmpeg -i` 的 stderr 同时解析时长与声道数）、`build_voiceover`（atempo→adelay 逐声道延迟→amix→apad/atrim）、`mux_voiceover`（流拷贝封装）；无配音走原 `_concat_silent` |
 | `backend/app/services/publish/runner.py` | `_synthesize_voiceover`：读快照、运行时解析 TTS 默认配置、逐句合成落临时目录、构造时间轴计划 |
 | `backend/app/services/videos/service.py` | `_tts_snapshot`：入队门槛（配置存在/已测通/音色非空/至少一句台词）与 `request.tts` 快照 |
 | `backend/app/routers/videos.py` | `POST /office/videos/tts-preview`：单句试听，复用发布作业的准入口径（默认 TTS 配置存在且已测通、音色非空），成功直接回 `audio/mpeg` 二进制，失败仍走统一信封 JSON |

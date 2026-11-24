@@ -40,6 +40,24 @@ _STERR_TAIL = 400
 
 # ffmpeg -i 的 stderr 里时长行形状：「Duration: 00:00:05.04, start: 0.000000, ...」。
 _DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+# 音频流行形状：「Stream #0:0: Audio: mp3, 44100 Hz, mono, fltp, 128 kb/s」。
+# 声道布局那一栏可能是 mono/stereo、5.1(side) 或「2 channels」，截到逗号/括号前。
+_AUDIO_STREAM_RE = re.compile(r"Audio:\s*[^,]+,\s*\d+\s*Hz,\s*([^,\[(]+)")
+# 常见布局名 → 声道数；TTS 产物实际只会落在 mono/stereo，其余只是兜底。
+_LAYOUT_CHANNELS = {
+    "mono": 1,
+    "stereo": 2,
+    "2.1": 3,
+    "3.0": 3,
+    "4.0": 4,
+    "quad": 4,
+    "5.0": 5,
+    "5.1": 6,
+    "6.0": 6,
+    "6.1": 7,
+    "7.0": 7,
+    "7.1": 8,
+}
 # 实测比槽位长这一点点以内不加速：帧级误差不值得为它挂一个 atempo 滤镜。
 _SLOT_TOLERANCE_S = 0.05
 _AUDIO_BITRATE = "128k"
@@ -220,15 +238,56 @@ async def probe_duration(exe: str, path: Path) -> float:
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
+def _parse_audio_channels(stderr: str) -> int:
+    """从 ``ffmpeg -i`` 的 stderr 里认音频声道数；认不出来按单声道兜底。
+
+    TTS 两路协议产出的都是单声道 mp3，兜底成 1 与现实一致；真碰到冷门布局
+    （5.1 之类）只打 warning，不为它阻断整条发布作业。
+    """
+    match = _AUDIO_STREAM_RE.search(stderr)
+    if not match:
+        logger.warning("ffmpeg 输出里找不到音频流信息，按单声道处理配音延迟")
+        return 1
+    token = match.group(1).strip().lower()
+    if token in _LAYOUT_CHANNELS:
+        return _LAYOUT_CHANNELS[token]
+    explicit = re.fullmatch(r"(\d+)\s*channels?", token)
+    if explicit:
+        return int(explicit.group(1))
+    logger.warning("无法识别的音频声道布局 %r，按单声道处理配音延迟", token)
+    return 1
+
+
+async def probe_audio(exe: str, path: Path) -> tuple[float, int]:
+    """一次 ``ffmpeg -i`` 同时读音频时长（秒）与声道数。
+
+    声道数是给 ``adelay`` 逐声道列延迟用的：``adelay=D:all=1`` 只有
+    FFmpeg ≥ 4.4 认识，部署机上的旧 ffmpeg 会整张滤镜图拒掉（报
+    "Option 'all' not found"）；显式写成 ``adelay=D``（mono）或
+    ``adelay=D|D``（stereo）则哪个版本都吃。
+    """
+    _, stderr = await _run_ffmpeg([exe, "-nostdin", "-hide_banner", "-i", str(path)])
+    match = _DURATION_RE.search(stderr)
+    if not match:
+        raise PublishComposeError(
+            f"ffmpeg 读不到文件时长（{path.name}），无法对齐配音时间轴"
+        )
+    hours, minutes, seconds = match.groups()
+    duration_s = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    return duration_s, _parse_audio_channels(stderr)
+
+
 async def build_voiceover(
     exe: str, plan: VoiceoverPlan, total_s: float, out_path: Path
 ) -> None:
     """把各句 mp3 按镜头时间轴混成一条与成片等长的 AAC（m4a 封装）。
 
     滤镜顺序有讲究：``atempo`` 必须在 ``adelay`` 之前——否则加速会把前面那段
-    定位静音一起缩短，句子的起点就漂了。``amix`` 显式 ``normalize=0``：它默认按
-    输入数把音量等比调小，单人配音不该被这个默认值压声。最后 ``apad + atrim``
-    把整条轨垫到、也截到与视频完全等长，封装阶段 ``-shortest`` 只是双保险。
+    定位静音一起缩短，句子的起点就漂了。``adelay`` 按探针读到的声道数逐声道列
+    延迟（``D|D``），不用 ``all=1``——那是 FFmpeg 4.4 才有的选项，旧 ffmpeg 会
+    直接拒掉整张滤镜图。``amix`` 显式 ``normalize=0``：它默认按输入数把音量等比
+    调小，单人配音不该被这个默认值压声。最后 ``apad + atrim`` 把整条轨垫到、也
+    截到与视频完全等长，封装阶段 ``-shortest`` 只是双保险。
     """
     if not plan.lines:
         raise PublishComposeError("配音计划为空：没有任何镜头带台词")
@@ -242,7 +301,7 @@ async def build_voiceover(
             raise PublishComposeError(f"第 {line.sort_order} 镜的时长为 0，无法放置配音")
         inputs.extend(["-i", str(line.path)])
 
-        duration_s = await probe_duration(exe, line.path)
+        duration_s, channels = await probe_audio(exe, line.path)
         chain = f"[{index}:a]"
         if duration_s - line.slot_s > _SLOT_TOLERANCE_S:
             # 先加速再定位：atempo 只作用在人声本体上，不吃掉前面的定位静音。
@@ -255,7 +314,9 @@ async def build_voiceover(
                 )
             chain += f"atempo={factor:.4f},"
         delay_ms = max(0, round(line.start_s * 1000))
-        chain += f"adelay={delay_ms}:all=1[a{index}]"
+        # 逐声道列延迟（mono: adelay=D；stereo: adelay=D|D），不用 4.4 才有的 all=1。
+        delay_args = "|".join([str(delay_ms)] * channels)
+        chain += f"adelay={delay_args}[a{index}]"
         filters.append(chain)
 
     mix_inputs = "".join(f"[a{index}]" for index in range(len(plan.lines)))
