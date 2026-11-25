@@ -15,8 +15,19 @@ export interface FoldChunk {
   detail: string
   /** confirm 时指向 actions 里的那条待确认项。 */
   actionId?: number
-  /** step 时的完整命令：detail 已被 toolLabel 截断，悬停看全文。 */
+  /** step 时的完整命令：preview 已截断，悬停看全文。 */
   full?: string
+  /** step 行的动作名（「执行命令」），与参数摘要分两段排。
+      叫 actionName 是给 confirm 行的 `action?: A` 让位，两者不能同名。 */
+  actionName?: string
+  /** step 行的参数摘要（命令本体 / 检索词）。 */
+  preview?: string
+  /** step 已返回且标了错：行首红叉。 */
+  isError?: boolean
+  /** step 还在执行：行首转圈。 */
+  running?: boolean
+  /** step 与 step_result 事件配对的 run_id。 */
+  runId?: string
 }
 
 export type FoldedChunk<T extends FoldChunk, A> = T & {
@@ -25,6 +36,8 @@ export type FoldedChunk<T extends FoldChunk, A> = T & {
   summary: boolean
   /** 本组连续步骤的条数（摘要行文案用）。 */
   runCount: number
+  /** 本组里失败的步骤条数（摘要行的「其中 M 次失败」用）。 */
+  runErrors: number
   /** 本组折叠状态的键：一条回答里多组命令各自独立展开/收起。 */
   runKey: string
   expanded: boolean
@@ -57,6 +70,7 @@ export function foldChunks<T extends FoldChunk, A>(
         index: i,
         summary: false,
         runCount: 0,
+        runErrors: 0,
         runKey: '',
         expanded: false,
         action: chunk.type === 'confirm' ? actionById.get(chunk.actionId ?? -1) : undefined,
@@ -71,20 +85,23 @@ export function foldChunks<T extends FoldChunk, A>(
     let j = i
     while (j < chunks.length && chunks[j].type === runType) j += 1
     const runCount = j - i
+    const runErrors = chunks
+      .slice(i, j)
+      .filter((c) => c.type === 'step' && c.isError).length
     const runKey = `${key}:${runType}:${runIndex}`
     // 命令：≥2 条才折叠（单条命令藏起来省不了空间）；思考：整段可折叠。
     const collapsible = runType === 'step' ? runCount > threshold : true
     const expanded = expandedKeys.has(runKey)
     if (collapsible && !expanded) {
       // 折叠态：整组收成一行摘要，就地待在这组原本的位置。
-      out.push({ ...chunk, index: i, summary: true, runCount, runKey, expanded })
+      out.push({ ...chunk, index: i, summary: true, runCount, runErrors, runKey, expanded })
     } else {
       // 展开态（或本组不折叠）：可折叠时先给一行「收起」摘要，再逐条列出。
       if (collapsible) {
-        out.push({ ...chunk, index: i, summary: true, runCount, runKey, expanded })
+        out.push({ ...chunk, index: i, summary: true, runCount, runErrors, runKey, expanded })
       }
       for (let k = i; k < j; k += 1) {
-        out.push({ ...chunks[k], index: k, summary: false, runCount, runKey, expanded })
+        out.push({ ...chunks[k], index: k, summary: false, runCount, runErrors, runKey, expanded })
       }
     }
     runIndex += 1

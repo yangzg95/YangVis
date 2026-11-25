@@ -12,7 +12,7 @@
  *   {kind:'tool_start'|'tool_end',name,args,output,is_error,elapsed_ms}，
  *   tool_start/tool_end 在这里配对成一个工具节点。
  */
-import { toolLabel } from './chatTools'
+import { argPreview, toolAction } from './chatTools'
 import type { TimelineEntry, WorkflowTraceEvent } from '@/api'
 
 export type TraceKind = 'reason' | 'tool' | 'llm'
@@ -30,8 +30,10 @@ export interface TraceNode {
   key: string
   kind: TraceKind
   status: TraceStatus
-  /** 行内主文案：工具的中文名/「模型思考」。 */
-  title: string
+  /** 行内动作名：「已思考」「模型思考」「检索知识库」，恒非空。 */
+  action: string
+  /** 动作名后面的灰色摘要：思考首行、命令、检索词；没有参数时为空串。 */
+  preview: string
   /** 工具原始名（悬浮提示用）。 */
   tool?: string
   /** 耗时毫秒；running 或老数据没有时为 null。 */
@@ -40,7 +42,7 @@ export interface TraceNode {
   startedAt?: string
   /** 可展开的代码块（入参 / 返回结果）。 */
   blocks: TraceBlock[]
-  /** reason 节点的思维链全文。 */
+  /** reason 节点的思维链全文，展开后整段显示。 */
   detail?: string
 }
 
@@ -53,20 +55,30 @@ function argsText(input: Record<string, unknown> | undefined): string {
   }
 }
 
+/** 思维链行内只留第一行：整段铺开会把工具行挤出视野，全文在展开内容里。 */
+function firstLine(text: string | undefined): string {
+  const MAX = 60
+  const line = (text ?? '').split('\n').find((l) => l.trim())?.trim() ?? ''
+  if (!line) return ''
+  return line.length <= MAX ? line : `${line.slice(0, MAX)}…`
+}
+
 /** chat timeline 条目 → 统一节点。text/confirm（正文与确认提议）不属于过程，过滤掉。 */
 export function chatTraceNodes(entries: TimelineEntry[]): TraceNode[] {
   const nodes: TraceNode[] = []
   let toolSeq = 0
   for (const entry of entries) {
     if (entry.type === 'reason') {
+      const detail = entry.detail ?? ''
       nodes.push({
         key: `r${nodes.length}`,
         kind: 'reason',
         status: 'done',
-        title: '思考',
+        action: '已思考',
+        preview: firstLine(detail),
         elapsedMs: null,
-        blocks: [],
-        detail: entry.detail ?? '',
+        blocks: detail ? [{ label: '思考内容', text: detail, copy: true }] : [],
+        detail,
       })
       continue
     }
@@ -75,7 +87,8 @@ export function chatTraceNodes(entries: TimelineEntry[]): TraceNode[] {
         key: `l${nodes.length}`,
         kind: 'llm',
         status: 'done',
-        title: '模型思考',
+        action: '模型思考',
+        preview: '',
         elapsedMs: entry.elapsed_ms ?? null,
         blocks: [],
       })
@@ -94,12 +107,15 @@ export function chatTraceNodes(entries: TimelineEntry[]): TraceNode[] {
         copy: true,
       })
     }
+    const { label, preview } = toolAction(entry.tool, entry.input)
     nodes.push({
       key: `t${toolSeq++}`,
       kind: 'tool',
       // output 还没回来且标了 running 才是执行中；历史条目没有 running 字段，按完成渲染。
       status: entry.running && entry.output == null ? 'running' : entry.is_error ? 'error' : 'done',
-      title: toolLabel(entry.tool ?? '', entry.input),
+      action: label,
+      // 摘要位没有入参时退回后端直接给的 query（老数据只有它）。
+      preview: preview || (entry.query ?? '').replace(/\s+/g, ' ').trim(),
       tool: entry.tool,
       elapsedMs: entry.elapsed_ms ?? null,
       startedAt: entry.started_at,
@@ -141,7 +157,10 @@ export function workflowTraceNodes(raw: WorkflowTraceEvent[] | null | undefined)
       key: `wt${seq++}`,
       kind: 'tool',
       status: end == null ? 'running' : end.is_error ? 'error' : 'done',
-      title: start.name || '工具调用',
+      // 工作流里的工具名是代码注册的原名，没有中文登记表，动作名照原名显示、
+      // 参数挑一个摘要位，避免把内部工具名误判成 MCP 前缀。
+      action: start.name || '工具调用',
+      preview: argPreview(args),
       tool: start.name,
       elapsedMs: end?.elapsed_ms ?? null,
       blocks,
@@ -154,7 +173,8 @@ export function workflowTraceNodes(raw: WorkflowTraceEvent[] | null | undefined)
         key: `wl${seq++}`,
         kind: 'llm',
         status: 'done',
-        title: '模型思考',
+        action: '模型思考',
+        preview: '',
         elapsedMs: event.elapsed_ms ?? null,
         blocks: [],
       })

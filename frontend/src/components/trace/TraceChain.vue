@@ -18,14 +18,15 @@ import { computed, h, reactive, ref } from 'vue'
 // 只用命名导入：默认导出是带全量 install 的对象，会把 mermaid/prism/x-sdk 整条
 // 依赖链激活打进 bundle；命名导入配合 sideEffects:false 才能摇掉未用组件。
 import { ThoughtChain, type ThoughtChainItemType } from 'ant-design-x-vue'
-import { BulbOutlined, CopyOutlined, RobotOutlined } from '@ant-design/icons-vue'
+import { CopyOutlined, RobotOutlined } from '@ant-design/icons-vue'
 import { fmtElapsed } from '@/utils/format'
 import { copyText } from '@/utils/clipboard'
+import { toolStateText } from '@/utils/chatTools'
 import type { TraceBlock, TraceNode } from '@/utils/traceModel'
 
 const props = defineProps<{
   nodes: TraceNode[]
-  /** 外层是否还在流式：流式期间最新一个已返回的工具默认展开，落定后默认全收。 */
+  /** 外层是否还在流式：流式中的最后一段思考保持整段铺开（边生成边看），落定后收回一行摘要。 */
   streaming?: boolean
 }>()
 
@@ -106,26 +107,49 @@ function blocksContent(node: TraceNode) {
   )
 }
 
+/**
+ * 轨迹行主体：动作名 + 状态词 + 灰色摘要 + 耗时，全挤进库组件的 title 位。
+ *
+ * 不用 ThoughtChain 的 description：它的 header 是纵向 flex，description 会掉到
+ * 第二行，而这里要的是「一行一件事」。摘要吃掉剩余宽度并省略号截断，动作名与
+ * 耗时不缩。
+ */
+function rowLine(node: TraceNode, withState: boolean) {
+  return h('span', { class: 'tc-line' }, [
+    h('span', { class: 'tc-action' }, node.action),
+    withState
+      ? h(
+          'span',
+          { class: ['tc-state', node.status === 'error' ? 'tc-state--error' : ''] },
+          toolStateText(node.status),
+        )
+      : null,
+    node.preview ? h('span', { class: 'tc-preview' }, `· ${node.preview}`) : null,
+    node.elapsedMs != null
+      ? h('span', { class: 'tc-elapsed', title: startedTitle(node) }, fmtElapsed(node.elapsedMs))
+      : null,
+  ])
+}
+
 const items = computed<ThoughtChainItemType[]>(() =>
-  props.nodes.map((node) => {
-    // 思维链：灯泡图标坐进轨道，弱色全文常驻铺在右侧（不可折叠）。
+  props.nodes.map((node, index) => {
+    // 思维链：行内只留首行摘要，全文收在展开内容里。唯一例外是还在生成的最后
+    // 一段——那会儿要看它正在想，整段铺开（外层容器负责限高内滚）。
     if (node.kind === 'reason') {
+      const live = !!props.streaming && index === props.nodes.length - 1
       return {
         key: node.key,
-        icon: h(BulbOutlined),
-        title: '思考',
-        content: h('div', { class: 'tc-reason-text' }, node.detail ?? ''),
+        status: live ? ('loading' as const) : ('success' as const),
+        title: rowLine(node, false),
+        collapsible: !live,
+        content: live
+          ? h('div', { class: 'tc-reason-text' }, node.detail ?? '')
+          : blocksContent(node),
       }
     }
-    // 模型往返：机器人图标 + 耗时描述，没有可展开内容。
+    // 模型往返：机器人图标 + 耗时，没有可展开内容。
     if (node.kind === 'llm') {
-      return {
-        key: node.key,
-        icon: h(RobotOutlined),
-        title: '模型思考',
-        description:
-          node.elapsedMs != null ? fmtElapsed(node.elapsedMs) : undefined,
-      }
+      return { key: node.key, icon: h(RobotOutlined), title: rowLine(node, false) }
     }
     // 工具调用：状态交给库——loading 转圈（标题扫光 blink）、success 打勾、
     // error 红叉；有 blocks 才可折叠，content 挂入参/返回结果。
@@ -138,15 +162,7 @@ const items = computed<ThoughtChainItemType[]>(() =>
             ? 'error'
             : 'success',
       blink: node.status === 'running',
-      title: node.title,
-      description:
-        node.elapsedMs != null
-          ? h(
-              'span',
-              { title: startedTitle(node) },
-              fmtElapsed(node.elapsedMs),
-            )
-          : undefined,
+      title: rowLine(node, true),
       collapsible: node.blocks.length > 0,
       content: node.blocks.length ? blocksContent(node) : undefined,
     }
@@ -159,7 +175,44 @@ const items = computed<ThoughtChainItemType[]>(() =>
 .tc :deep(.ant-thought-chain) {
   font-size: var(--fs-sm);
 }
-.tc :deep(.ant-thought-chain-node-description) {
+/* 库默认给 title 留了 inline-block + nowrap，行内摘要要能自己收缩。 */
+.tc :deep(.ant-thought-chain-node-title) {
+  min-width: 0;
+  overflow: hidden;
+}
+.tc-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  /* 折叠箭头由库追加在 title 末尾，这一行得先给它让出宽度。 */
+  flex: 1 1 auto;
+}
+.tc-action {
+  flex: none;
+  color: var(--text-2);
+  font-weight: 500;
+}
+.tc-state {
+  flex: none;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+.tc-state--error {
+  color: var(--danger);
+}
+.tc-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-3);
+  font-weight: 400;
+}
+.tc-elapsed {
+  flex: none;
+  color: var(--text-3);
   font-size: var(--fs-xs);
 }
 .tc-reason-text {

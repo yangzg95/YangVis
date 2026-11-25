@@ -74,14 +74,11 @@
                   class="step-line step-summary"
                   @click="toggleSteps(chunk.runKey)"
                 >
-                  <span class="step-icon">{{ chunk.type === 'reason' ? '✦' : '⚙' }}</span>
+                  <DownOutlined :class="['step-caret', { open: chunk.expanded }]" />
+                  <ThunderboltOutlined class="step-icon" />
                   <span class="step-text">
-                    <template v-if="chunk.type === 'reason'">
-                      {{ chunk.expanded ? '收起思考过程' : '思考过程 · 点击展开' }}
-                    </template>
-                    <template v-else>
-                      {{ chunk.expanded ? `收起 ${chunk.runCount} 步` : `已执行 ${chunk.runCount} 步 · 点击展开` }}
-                    </template>
+                    <template v-if="chunk.type === 'reason'">思考过程</template>
+                    <template v-else>{{ stepSummaryText(chunk) }}</template>
                   </span>
                 </button>
                 <div
@@ -89,8 +86,16 @@
                   class="step-line"
                   :title="chunk.full"
                 >
-                  <span class="step-icon">⚙</span>
-                  <span class="step-text">{{ chunk.detail }}</span>
+                  <LoadingOutlined v-if="chunk.running" spin class="step-icon" />
+                  <CloseCircleOutlined v-else-if="chunk.isError" class="step-icon step-icon--err" />
+                  <CheckCircleOutlined v-else class="step-icon step-icon--ok" />
+                  <span class="step-text step-text--row">
+                    <span class="step-action">{{ chunk.actionName || '调用工具' }}</span>
+                    <span :class="['step-state', chunk.isError ? 'step-state--err' : '']">
+                      {{ stepStateText(chunk) }}
+                    </span>
+                    <span v-if="chunk.preview" class="step-preview">· {{ chunk.preview }}</span>
+                  </span>
                 </div>
                 <div
                   v-else-if="chunk.type === 'reason' && chunk.detail"
@@ -231,8 +236,13 @@ import { message as toast, Modal } from 'ant-design-vue'
 import {
   RobotOutlined,
   ArrowUpOutlined,
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  DownOutlined,
+  ThunderboltOutlined,
   CopyOutlined,
   HistoryOutlined,
+  LoadingOutlined,
   PlusOutlined,
   VerticalAlignBottomOutlined,
   WarningOutlined,
@@ -243,7 +253,7 @@ import { useAuthStore } from '@/stores/auth'
 import { createMarkdown } from '@/utils/markdown'
 import { useStickToBottom } from '@/utils/useStickToBottom'
 import { capCache } from '@/utils/cacheLimit'
-import { toolLabel } from '@/utils/chatTools'
+import { toolAction, toolStateText } from '@/utils/chatTools'
 import { useOpsConfirm, actionFromConfirm } from '@/utils/useOpsConfirm'
 import { useStreamRender } from '@/utils/streamRender'
 import { foldChunks, type FoldChunk, type FoldedChunk } from '@/utils/opsChunks'
@@ -367,6 +377,19 @@ function displayChunks(item: TalkItem): RenderChunk[] {
   return foldChunks(item.chunks, item.key, expandedSteps.value, actionById.value)
 }
 
+/** 折叠摘要行与主对话同一口径：报次数，失败数只在真有失败时跟上。
+    展开/收起由行首箭头的转向表达，文案不再随展开态变化。 */
+function stepSummaryText(chunk: RenderChunk): string {
+  return chunk.runErrors
+    ? `执行工具 ${chunk.runCount} 次，其中 ${chunk.runErrors} 次失败`
+    : `执行工具 ${chunk.runCount} 次`
+}
+
+/** 状态词与行首图标同源：running 转圈、error 红叉、其余打勾。 */
+function stepStateText(chunk: RenderChunk): string {
+  return toolStateText(chunk.running ? 'running' : chunk.isError ? 'error' : 'done')
+}
+
 // ---- 会话与写命令确认 ---------------------------------------------------------
 // 传输层是主对话那套 SSE（/chat/completions + /chat/actions/{id}/confirm），
 // 会话与待确认项全在库里：刷新/重开页面，拉一遍 messages+actions 即恢复，
@@ -473,8 +496,8 @@ const aiStatusText = computed(() => {
     const { attempt, max } = retryState.value
     return `请求超时，正在自动重试（${attempt}/${max}）…`
   }
-  // 步骤文案走 toolLabel，动词自带（「执行只读命令：…」），再套一层
-  // 「正在执行：」就重复了；进行中由那三个跳动的点表示。
+  // 步骤文案是「动作名 + 摘要」（「执行命令 df -h」），再套一层「正在执行：」
+  // 就重复了；进行中由那三个跳动的点表示。
   if (currentStepDetail.value) return currentStepDetail.value
   if (streamingText.value) return '正在生成回答…'
   return '正在思考…'
@@ -632,12 +655,19 @@ async function openConversation(id: number) {
         )
         .map((e): TalkChunk => {
           if (e.type === 'step') {
-            const { text, full } = describeStep({
+            const { action, preview, full } = describeStep({
               tool: e.tool ?? '',
               query: e.query,
               input: e.input,
             })
-            return { type: 'step', detail: text, full }
+            return {
+              type: 'step',
+              detail: preview,
+              actionName: action,
+              preview,
+              full,
+              isError: e.is_error,
+            }
           }
           if (e.type === 'confirm') {
             return { type: 'confirm', detail: '', actionId: e.action_id }
@@ -835,10 +865,29 @@ function streamHandlers(
       // 换块前先把还没提交的正文结掉，否则这段文字会被算到下一步骤后的新块里。
       flushText()
       closeTextChunk()
-      const { text, full } = describeStep(data)
-      currentStepDetail.value = text
-      item.chunks.push({ type: 'step', detail: text, full })
+      const { action, preview, full } = describeStep(data)
+      currentStepDetail.value = preview ? `${action} ${preview}` : action
+      item.chunks.push({
+        type: 'step',
+        detail: preview,
+        actionName: action,
+        preview,
+        full,
+        runId: data.run_id,
+        running: true,
+      })
       scrollToBottom()
+    },
+    onStepResult: ({ run_id, is_error }) => {
+      // 结果回填只改状态：命令行在 onStep 已经落下，这里把转圈换成勾/叉。
+      const item = items.value[items.value.length - 1]
+      const chunk =
+        item?.kind === 'assistant'
+          ? item.chunks.find((c) => c.type === 'step' && c.runId === run_id && c.running)
+          : undefined
+      if (!chunk) return
+      chunk.running = false
+      chunk.isError = is_error
     },
     onReason: (token) => {
       const item = answer()
@@ -890,8 +939,11 @@ function streamHandlers(
         // 命令全文在上面那张确认卡片里，这里只报结果，不再摊一遍命令。
         item.chunks.push({
           type: 'step',
-          detail: `已执行写命令（exit ${ev.exit_status ?? '—'}）`,
+          detail: `exit ${ev.exit_status ?? '—'}`,
+          actionName: '执行写命令',
+          preview: `exit ${ev.exit_status ?? '—'}`,
           full: ev.command,
+          isError: (ev.exit_status ?? 0) !== 0,
         })
       }
       // 两种 exec 都通知父组件——服务器问答时父组件把命令和输出打到终端窗口。
@@ -955,22 +1007,24 @@ async function copyItem(item: TalkItem) {
 }
 
 /**
- * 步骤行的文案：走主对话同一份 toolLabel（中文标题 + 80 字截断），全文另存在
- * full 里给悬停 title。写命令提议是个例外——它的正文就是紧随其后的那张确认
- * 卡片，步骤行再摊一遍命令，一条气泡里同一串 kubectl 会出现三遍。
+ * 步骤行的文案：走主对话同一份登记表，拆成动作名 + 参数摘要两段（行内排成
+ * 「动作名 状态词 · 摘要」），全文另存在 full 里给悬停 title。写命令提议是个
+ * 例外——它的正文就是紧随其后的那张确认卡片，步骤行再摊一遍命令，一条气泡里
+ * 同一串 kubectl 会出现三遍。
  */
 function describeStep(payload: {
   tool: string
   query?: string
   input?: Record<string, unknown>
-}): { text: string; full: string } {
+}): { action: string; preview: string; full: string } {
   const input = payload.input ?? (payload.query ? { query: payload.query } : {})
   const raw = input.command ?? input.statement ?? input.query ?? ''
   const full = typeof raw === 'string' && raw ? raw : ''
   if (payload.tool === 'propose_command') {
-    return { text: '已提议一条写命令，见下方确认卡片', full }
+    return { action: '提议写命令', preview: '', full }
   }
-  return { text: toolLabel(payload.tool, input), full }
+  const { label, preview } = toolAction(payload.tool, input)
+  return { action: label, preview, full }
 }
 
 function onComposerEnter(e: KeyboardEvent) {
@@ -1393,7 +1447,17 @@ defineExpose({
   opacity: 0.5;
 }
 
-/* toolLabel 把命令截到 80 字，这里只负责让截断后的部分换行不溢出。全文没丢：
+.step-icon--ok {
+  color: var(--success);
+  opacity: 1;
+}
+
+.step-icon--err {
+  color: var(--danger);
+  opacity: 1;
+}
+
+/* 摘要在 chatTools 里截到 80 字，这里只负责让截断后的部分换行不溢出。全文没丢：
    整行有悬停 title，写命令的全文在确认卡片里，只读命令在终端窗口有回显。 */
 .step-text {
   flex: 1;
@@ -1402,6 +1466,50 @@ defineExpose({
   overflow-wrap: anywhere;
   font-family: 'IBM Plex Mono', Menlo, Consolas, monospace;
   color: var(--text-2);
+}
+
+/* 逐条调用行：动作名与状态词走界面字体，只有摘要位保留等宽（命令要看得清）。 */
+.step-text--row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+  font-family: inherit;
+}
+
+.step-action {
+  flex: none;
+  color: var(--text-2);
+}
+
+.step-state {
+  flex: none;
+  color: var(--text-3);
+}
+
+.step-state--err {
+  color: var(--danger);
+}
+
+.step-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: 'IBM Plex Mono', Menlo, Consolas, monospace;
+  color: var(--text-3);
+}
+
+/* 行首箭头负责展开/收起的指向感（与主对话的思考卡同一套），文案保持报次数不变。 */
+.step-caret {
+  font-size: 10px;
+  color: var(--text-3);
+  transform: rotate(-90deg);
+  transition: transform 0.18s ease;
+}
+
+.step-caret.open {
+  transform: rotate(0deg);
 }
 
 /* 折叠摘要行同样是无边底的一行字：可点的提示交给 hover 变色，不靠底色。 */
@@ -1416,7 +1524,8 @@ defineExpose({
 }
 
 .step-summary:hover .step-icon,
-.step-summary:hover .step-text {
+.step-summary:hover .step-text,
+.step-summary:hover .step-caret {
   color: var(--signal-text);
   opacity: 1;
 }
@@ -1605,7 +1714,8 @@ defineExpose({
 }
 
 .ops-chat.dark .step-summary:hover .step-icon,
-.ops-chat.dark .step-summary:hover .step-text {
+.ops-chat.dark .step-summary:hover .step-text,
+.ops-chat.dark .step-summary:hover .step-caret {
   color: var(--signal-bright);
 }
 

@@ -20,12 +20,25 @@ describe('chatTraceNodes', () => {
     expect(nodes[0]).toMatchObject({
       kind: 'llm',
       status: 'done',
-      title: '模型思考',
+      action: '模型思考',
       elapsedMs: 1230,
     })
   })
 
-  it('工具节点带上起始时刻、耗时、入参与返回块', () => {
+  it('思考节点行内只给首行摘要，全文进展开块', () => {
+    const nodes = chatTraceNodes([
+      { type: 'reason', detail: '先看 nginx 的日志\n再看端口' },
+    ])
+    expect(nodes[0]).toMatchObject({
+      kind: 'reason',
+      action: '已思考',
+      preview: '先看 nginx 的日志',
+      detail: '先看 nginx 的日志\n再看端口',
+    })
+    expect(nodes[0].blocks[0]).toMatchObject({ label: '思考内容', copy: true })
+  })
+
+  it('工具节点拆成动作名与参数摘要，并带上时刻、耗时、入参与返回块', () => {
     const nodes = chatTraceNodes([
       {
         type: 'step',
@@ -41,13 +54,26 @@ describe('chatTraceNodes', () => {
     expect(nodes[0]).toMatchObject({
       kind: 'tool',
       status: 'done',
-      title: '检索知识库：nginx 502',
+      action: '检索知识库',
+      preview: 'nginx 502',
       tool: 'search_knowledge_base',
       elapsedMs: 540,
       startedAt: '2026-10-26T10:00:00',
     })
     expect(nodes[0].blocks.map((b) => b.label)).toEqual(['入参', '返回结果'])
     expect(nodes[0].blocks[1].copy).toBe(true)
+  })
+
+  it('命令类工具取 command 作摘要，没有入参时退回后端的 query 字段', () => {
+    const byInput = chatTraceNodes([
+      { type: 'step', tool: 'run_readonly_command', input: { command: 'df -h' } },
+    ])
+    expect(byInput[0]).toMatchObject({ action: '执行命令', preview: 'df -h' })
+
+    const byQuery = chatTraceNodes([
+      { type: 'step', tool: 'search_knowledge_base', query: '磁盘占用' },
+    ])
+    expect(byQuery[0]).toMatchObject({ action: '检索知识库', preview: '磁盘占用' })
   })
 
   it('执行中（running 且无返回）保留转圈态；失败标红', () => {
@@ -82,7 +108,7 @@ describe('workflowTraceNodes', () => {
       ['llm', 'done'],
       ['tool', 'done'],
     ])
-    expect(nodes[1]).toMatchObject({ title: 'search', elapsedMs: 300 })
+    expect(nodes[1]).toMatchObject({ action: 'search', preview: '', elapsedMs: 300 })
     expect(nodes[1].blocks.map((b) => b.label)).toEqual(['入参', '返回结果'])
   })
 
@@ -116,7 +142,7 @@ describe('workflowTraceNodes', () => {
       { kind: 'tool_end', name: 'orphan', output: 'late', elapsed_ms: 5, is_error: true },
     ])
     expect(nodes).toHaveLength(1)
-    expect(nodes[0]).toMatchObject({ kind: 'tool', status: 'error', title: 'orphan' })
+    expect(nodes[0]).toMatchObject({ kind: 'tool', status: 'error', action: 'orphan' })
   })
 
   it('null / undefined 与空数组都给空列表', () => {
