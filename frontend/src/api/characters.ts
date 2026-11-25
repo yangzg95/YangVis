@@ -121,15 +121,21 @@ export const charactersApi = {
       skipErrorToast: true,
     }),
   /**
-   * AI 生成三视图形象：真计费的同步文生图，回二进制图片（真计费，只由按钮显式触发）。
-   * 产物不落库——调用方把它转成 File 后随建档/换图一起提交，取消不留垃圾。
-   * 失败时后端回的是 JSON 信封且响应类型仍是 blob，由调用方用 blobErrorMessage 拆 message。
+   * AI 生成三视图形象：真计费的同步生成，回二进制图片（只由按钮显式触发）。
+   * 带 file 时走图生图（参考图内联 data URL，与首帧渲染同一条通道），不带则纯文生图；
+   * prompt 在有参考图时可空。产物不落库——调用方把它转成 File 后随建档/换图一起提交，
+   * 取消不留垃圾。失败时后端回的是 JSON 信封且响应类型仍是 blob，
+   * 由调用方用 blobErrorMessage 拆 message。
    */
-  portraitPreview: async (prompt: string): Promise<Blob> => {
+  portraitPreview: async (prompt: string, file?: File | null): Promise<Blob> => {
+    const fd = new FormData()
+    if (file) fd.append('file', file)
+    fd.append('prompt', prompt)
     const response = await request<{ data: Blob }>({
       url: '/office/characters/portrait-preview',
       method: 'POST',
-      data: { prompt },
+      data: fd,
+      headers: { 'Content-Type': 'multipart/form-data' },
       responseType: 'blob',
       skipErrorToast: true,
       // 图片生成比 TTS 慢，给到与 multipart 上传同档的 120s。

@@ -491,15 +491,29 @@ def test_turnaround_prompt_carries_three_views_and_description():
     # 入口 strip 过的描述不该带首尾空白，且必须原样接在模板后面。
     assert "28 岁女老师，爱穿风衣" in prompt
     assert "  28 岁" not in prompt
+    # 纯文字模式用文生图开场（硬性要求里的「角色参考图」字样两种模式都有，不作区分），
+    # 描述挂在「角色设定」段。
+    assert "请根据参考图" not in prompt and "角色设定：" in prompt
 
 
-def test_portrait_preview_returns_image_bytes(client, db, monkeypatch):
-    _image_model(db)
-    captured = {}
-    png = _real_png()
+def test_turnaround_prompt_with_reference_pins_identity_and_allows_blank():
+    prompt = build_turnaround_prompt("保持微笑", has_reference=True)
+    # 参考图模式先钉死「与参考图同一个人」，描述降为补充要求。
+    for keyword in ("参考图", "正面", "侧面", "背面", "同一个人"):
+        assert keyword in prompt
+    assert "补充要求：" in prompt and "保持微笑" in prompt
+    # 描述可空：空描述时整段不渲染，也不许出现 Python 的 None 字样。
+    blank = build_turnaround_prompt("   ", has_reference=True)
+    assert "补充要求" not in blank and "None" not in blank
 
-    async def fake_generate(config, *, prompt, size, **kwargs):
-        captured.update(prompt=prompt, size=size)
+
+def _patch_ark(monkeypatch, *, artifact: bytes | None = None):
+    """把方舟两件套换成记录调用的假实现，返回捕获 dict。"""
+    captured: dict = {}
+    png = artifact if artifact is not None else _real_png()
+
+    async def fake_generate(config, *, prompt, size, images=(), **kwargs):
+        captured.update(prompt=prompt, size=size, images=list(images))
         return ark.ImageResult(url="https://ark.example.com/sheet.png", size="2048x2048")
 
     async def fake_download(url, *, max_bytes, timeout=None):
@@ -508,58 +522,141 @@ def test_portrait_preview_returns_image_bytes(client, db, monkeypatch):
 
     monkeypatch.setattr(ark, "generate_image", fake_generate)
     monkeypatch.setattr(ark, "download", fake_download)
+    return captured
 
+
+def test_portrait_preview_text_mode_returns_image_bytes(client, db, monkeypatch):
+    _image_model(db)
+    png = _real_png()
+    captured = _patch_ark(monkeypatch, artifact=png)
+
+    # 不带文件就是纯文生图：multipart 只有 prompt 字段。
     response = client.post(
         "/api/office/characters/portrait-preview",
-        json={"prompt": "短发女教师，米色风衣"},
+        data={"prompt": "短发女教师，米色风衣"},
     )
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
     # no-store：预览图没有复用价值，别让浏览器/代理缓存占盘（与 TTS 试听同口径）。
     assert response.headers["cache-control"] == "no-store"
     assert response.content == png
-    # 2K 档位与首帧渲染同档；用户描述原样进上游 prompt，三视图模板词也要在。
+    # 2K 档位与首帧渲染同档；纯文字模式不带任何参考图，描述原样进上游 prompt。
     assert captured["size"] == "2K"
+    assert captured["images"] == []
+    assert "请根据参考图" not in captured["prompt"]
     assert "短发女教师，米色风衣" in captured["prompt"]
     for keyword in ("正面", "侧面", "背面"):
         assert keyword in captured["prompt"]
 
 
+def test_portrait_preview_sends_reference_as_data_url(client, db, monkeypatch):
+    _image_model(db)
+    captured = _patch_ark(monkeypatch)
+
+    with io.BytesIO(_real_png()) as handle:
+        response = client.post(
+            "/api/office/characters/portrait-preview",
+            files={"file": ("ref.png", handle, "image/png")},
+            data={"prompt": " 保持圆脸与风衣配色 "},
+        )
+    assert response.status_code == 200
+    # 参考图与首帧渲染同一条通道：读本地字节转 base64 data URL 内联进请求体。
+    assert len(captured["images"]) == 1
+    assert captured["images"][0].startswith("data:image/png;base64,")
+    # 图生图模式的提示词必须带「参考图同一个人」约束，补充描述原样接在后面。
+    assert "参考图" in captured["prompt"]
+    assert "保持圆脸与风衣配色" in captured["prompt"]
+
+
+def test_portrait_preview_accepts_reference_with_blank_prompt(client, db, monkeypatch):
+    _image_model(db)
+    captured = _patch_ark(monkeypatch)
+
+    with io.BytesIO(_real_png()) as handle:
+        response = client.post(
+            "/api/office/characters/portrait-preview",
+            files={"file": ("ref.png", handle, "image/png")},
+            data={"prompt": "   "},
+        )
+    assert response.status_code == 200
+    assert len(captured["images"]) == 1
+
+
+def test_portrait_preview_requires_image_or_prompt(client, db):
+    _image_model(db)
+    # 两个依据都不给时在进上游之前拦下，省一次真计费调用。
+    response = client.post(
+        "/api/office/characters/portrait-preview", data={"prompt": "   "}
+    )
+    assert response.status_code == 400
+    assert "参考图" in response.json()["message"]
+
+
 def test_portrait_preview_requires_usable_image_config(client, db):
     # 没配图片模型：明确告诉去设置页，而不是把上游 401 抛给用户。
     response = client.post(
-        "/api/office/characters/portrait-preview", json={"prompt": "一个角色"}
+        "/api/office/characters/portrait-preview", data={"prompt": "一个角色"}
     )
     assert response.status_code == 400
     assert "图片" in response.json()["message"]
 
     _image_model(db, tested=False)
     response = client.post(
-        "/api/office/characters/portrait-preview", json={"prompt": "一个角色"}
+        "/api/office/characters/portrait-preview", data={"prompt": "一个角色"}
     )
     assert response.status_code == 400
     assert "连通性测试" in response.json()["message"]
 
 
-def test_portrait_preview_rejects_blank_prompt(client, db):
+def test_portrait_preview_rejects_non_image_reference(client, db):
     _image_model(db)
-    # 纯空白在进上游之前拦下，省一次真计费调用。
-    response = client.post(
-        "/api/office/characters/portrait-preview", json={"prompt": "   "}
-    )
+    # 视频容器没有入口，魔数判型在写任何上游请求之前拒绝。
+    with io.BytesIO(MP4) as handle:
+        response = client.post(
+            "/api/office/characters/portrait-preview",
+            files={"file": ("ref.mp4", handle, "video/mp4")},
+            data={"prompt": ""},
+        )
     assert response.status_code == 400
-    assert "空" in response.json()["message"]
+    assert "参考图" in response.json()["message"]
+
+    # 识别不出的字节同样拒绝，不把 MediaFileError 抛成 500。
+    with io.BytesIO(NOT_MEDIA) as handle:
+        response = client.post(
+            "/api/office/characters/portrait-preview",
+            files={"file": ("ref.bin", handle, "application/octet-stream")},
+            data={"prompt": ""},
+        )
+    assert response.status_code == 400
+    assert "参考图" in response.json()["message"]
+
+
+def test_portrait_preview_rejects_oversize_reference(client, db, monkeypatch):
+    _image_model(db)
+    # 把闸门压到 128 字节：真实 PNG 必然超限，read_upload_limited 返回 None。
+    monkeypatch.setattr(
+        "app.routers.characters.settings",
+        SimpleNamespace(MATERIAL_MAX_IMAGE_BYTES=128, MEDIA_IMAGE_MAX_BYTES=128),
+    )
+    with io.BytesIO(_real_png()) as handle:
+        response = client.post(
+            "/api/office/characters/portrait-preview",
+            files={"file": ("big.png", handle, "image/png")},
+            data={"prompt": ""},
+        )
+    assert response.status_code == 400
+    assert "上限" in response.json()["message"]
 
 
 def test_portrait_preview_translates_ark_error(client, db, monkeypatch):
     _image_model(db)
 
-    async def broken(config, *, prompt, size, **kwargs):
+    async def broken(config, *, prompt, size, images=(), **kwargs):
         raise ark.ArkError("提示词未通过内容安全审核（ContentRisk）", code="ContentRisk")
 
     monkeypatch.setattr(ark, "generate_image", broken)
     response = client.post(
-        "/api/office/characters/portrait-preview", json={"prompt": "敏感描述"}
+        "/api/office/characters/portrait-preview", data={"prompt": "敏感描述"}
     )
     assert response.status_code == 400
     assert "ContentRisk" in response.json()["message"]
@@ -567,18 +664,10 @@ def test_portrait_preview_translates_ark_error(client, db, monkeypatch):
 
 def test_portrait_preview_rejects_non_image_payload(client, db, monkeypatch):
     _image_model(db)
-
-    async def fake_generate(config, *, prompt, size, **kwargs):
-        return ark.ImageResult(url="https://ark.example.com/weird")
-
-    async def fake_download(url, *, max_bytes, timeout=None):
-        return NOT_MEDIA
-
-    monkeypatch.setattr(ark, "generate_image", fake_generate)
-    monkeypatch.setattr(ark, "download", fake_download)
+    _patch_ark(monkeypatch, artifact=NOT_MEDIA)
 
     response = client.post(
-        "/api/office/characters/portrait-preview", json={"prompt": "一个角色"}
+        "/api/office/characters/portrait-preview", data={"prompt": "一个角色"}
     )
     assert response.status_code == 400
     assert "不是图片" in response.json()["message"]

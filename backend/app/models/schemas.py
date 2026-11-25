@@ -3334,16 +3334,6 @@ class CharacterIdsIn(BaseModel):
     ids: List[int] = Field(default_factory=list, max_length=50)
 
 
-class CharacterPortraitPreviewIn(BaseModel):
-    """AI 生成三视图形象：拿角色描述真生成一张三视角设定图。
-
-    与 TTS 单句试听同口径——真计费的同步调用，由界面按钮显式触发，不做任何自动
-    调用；产物以二进制直接回给浏览器挑图，不落盘、不写库，保存时才走建档/换图。
-    """
-
-    prompt: str = Field(min_length=1, max_length=1000)
-
-
 class CharacterUsageProject(BaseModel):
     project_id: int
     title: str

@@ -36,7 +36,6 @@ from app.models.schemas import (
     CharacterIdsIn,
     CharacterListOut,
     CharacterOut,
-    CharacterPortraitPreviewIn,
     CharacterTrashItemOut,
     CharacterTrashListOut,
     CharacterUpdateIn,
@@ -196,16 +195,20 @@ async def create_character(
 
 @router.post("/portrait-preview")
 async def preview_portrait(
-    body: CharacterPortraitPreviewIn,
+    request: Request,
+    prompt: str = Form(default=""),
+    file: UploadFile | None = File(default=None),
     user: CurrentUser = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> Response:
-    """AI 生成三视图形象：同步文生图，二进制直接回，不落盘不写库。
+    """AI 生成三视图形象：可带参考图的同步图生图，二进制直接回，不落盘不写库。
 
     与短视频的 TTS 单句试听同口径——真计费、只由界面按钮显式触发、no-store：
     用户可能连点几次挑一张，只有点保存时那张才随建档/换图 multipart 落盘，
-    取消或换图不留任何孤儿文件。准入门也与渲染作业一致：默认图片模型必须存在
-    且已通过连通性测试，否则凭证错误要等上游报错才暴露，等于白烧一次抵扣。
+    取消或换图不留任何孤儿文件。参考图与描述至少给一个：有参考图时走图生图，
+    data URL 内联进请求体（与首帧渲染的参考图同一条通道），描述降为可空的补充
+    要求；没参考图时退化为纯文生图，描述必填。准入门与渲染作业一致：默认图片
+    模型必须存在且已通过连通性测试，否则凭证错误要等上游报错才暴露，白烧抵扣。
     """
     config = default_model_config(db, user.user_id, ModelPurpose.IMAGE)
     if config is None:
@@ -219,16 +222,46 @@ async def preview_portrait(
             detail="图片模型还没通过连通性测试：先在「模型与集成」里测通再生成",
         )
 
-    description = body.prompt.strip()
-    if not description:
+    description = (prompt or "").strip()
+    reference_urls: list[str] = []
+    if file is not None and file.filename:
+        # 参考图与形象图同一道闸门：先挡请求体，再按文件头认型，视频与非媒体直接拒。
+        limit = settings.MATERIAL_MAX_IMAGE_BYTES
+        if content_length_exceeds(request.headers.get("content-length"), limit):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=oversize_message(limit)
+            )
+        raw_upload = await read_upload_limited(file, limit)
+        if raw_upload is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=oversize_message(limit)
+            )
+        try:
+            ref_mime, _ext = sniff_media(raw_upload)
+        except MediaFileError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=f"参考图无法识别：{exc}"
+            ) from exc
+        if not ref_mime.startswith("image/"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="参考图只支持 PNG / JPEG / GIF / WebP / BMP 图片",
+            )
+        reference_urls.append(ark.image_data_url(raw_upload, ref_mime))
+
+    if not reference_urls and not description:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="角色描述为空：写清外形与衣着才能生成三视图",
+            detail="请上传参考图或填写角色描述，至少给一个生成依据",
         )
 
-    prompt = build_turnaround_prompt(description)
+    full_prompt = build_turnaround_prompt(
+        description, has_reference=bool(reference_urls)
+    )
     try:
-        result = await ark.generate_image(config, prompt=prompt, size="2K")
+        result = await ark.generate_image(
+            config, prompt=full_prompt, size="2K", images=reference_urls
+        )
         raw = await ark.download(result.url, max_bytes=settings.MEDIA_IMAGE_MAX_BYTES)
     except ark.ArkError as exc:
         # 上游错误已经是中文人话（含内容审核、限流、404 型号错误等），原样交给界面。
@@ -251,9 +284,10 @@ async def preview_portrait(
             detail="上游返回的不是图片内容，换个描述再试一次",
         )
     logger.info(
-        "character portrait preview generated: owner=%s model=%s bytes=%d",
+        "character portrait preview generated: owner=%s model=%s reference=%s bytes=%d",
         user.user_id,
         config.model_name,
+        bool(reference_urls),
         len(raw),
     )
     return Response(content=raw, media_type=mime, headers={"Cache-Control": "no-store"})

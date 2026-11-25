@@ -20,13 +20,18 @@
   「N 项目在用」（0 不显示）；新建/编辑共用一个弹窗（图片 + 角色名必填，人设/衣着/
   特色可空，各 512 字）。形象图只收图片（PNG/JPEG/GIF/WebP/BMP），视频与识别不出的
   内容在写盘前拒绝。编辑只改文字时不重传图片；换图走独立接口，旧图 best-effort 删除。
-- **AI 生成三视图形象**：建档/编辑弹窗的形象图区除上传外，还可以写一段角色描述
-  （或点「填入档案描述」把人设/衣着/外形拼成初稿再改），由默认「图片」模型同步生成
-  一张**正面/侧面/背面三视角合一**的设定图（character turnaround sheet，2K 档）。
+- **AI 生成三视图形象**：建档/编辑弹窗的形象图区除上传外，还可以让默认「图片」模型
+  同步生成一张**正面/侧面/背面三视角合一**的设定图（character turnaround sheet，2K 档），
+  两个生成依据至少给一个：
+  - **带参考图（图生图）**：上传一张单人肖像或立绘当参考，提示词钉死「三个视角与
+    参考图是同一个人」，五官/发型/服装严格对齐参考图；文字描述降为可空的补充要求；
+  - **纯文字（文生图）**：写一段角色描述（或点「填入档案描述」把人设/衣着/外形拼成
+    初稿再改），描述必填。
   生成是真计费调用，只由按钮显式触发；产物以二进制直接回传、不落盘不写库，前端转成
   File 后与手工上传走同一条 multipart 建档/换图链路——可多次生成挑一张，取消或换图
-  不在服务器留任何垃圾。准入门与渲染作业一致：图片模型不存在或未通过连通性测试时
-  直接 400 并提示去设置页，不把凭证错误留给上游报错。
+  不在服务器留任何垃圾。参考图同样只收图片（魔数判型、10MB 闸门），视频与非媒体在
+  发上游之前拒绝。准入门与渲染作业一致：图片模型不存在或未通过连通性测试时直接 400
+  并提示去设置页，不把凭证错误留给上游报错。
 - **重名提示**：后端不做名称唯一约束（允许同名），保存时前端对当前库做一次同名检查，
   重名弹二次确认而不是硬拦——人物一多容易撞名，选角色时才需要提醒，不该阻断建档。
 - **删除走回收期**：删除确认弹窗先拉引用影响面（哪些短视频项目仍选了它），确认后只写
@@ -60,11 +65,13 @@
 出图链路（`media_job` 图片作业）是为镜头渲染设计的：入队、轮询、重 roll、产物按项目
 落盘，一条作业占一个并发位。但人物建档是一次轻量表单动作，用户在弹窗里的预期是
 「等十几秒看到图、不满意就再来一次」，没有「离线跑完回来看」的场景。因此三视图生成
-对齐 TTS 单句试听的形态：`POST /portrait-preview` 同步调用方舟文生图、下载后以二进制
-直接回浏览器（`Cache-Control: no-store`），**不建作业、不写库、不落盘**；只有用户点
-保存，那张图才随既有 multipart 建档/换图接口过魔数判定落进 `characters/<owner_id>/`。
-提示词模板（三视角、同一人、纯色背景、无文字水印）放在后端
-`services/characters/prompts.py` 集中维护，迭代措辞不需要发版前端。
+对齐 TTS 单句试听的形态：`POST /portrait-preview` 是 multipart 接口（可选 `file` +
+可选 `prompt`，二者至少一个），同步调用方舟 `generate_image`——带参考图时把上传字节
+转 base64 data URL 走 `images` 入参（与首帧渲染的参考图同一条图生图通道），不带则
+纯文生图——下载后以二进制直接回浏览器（`Cache-Control: no-store`），**不建作业、
+不写库、不落盘**；只有用户点保存，那张图才随既有 multipart 建档/换图接口过魔数判定
+落进 `characters/<owner_id>/`。两套提示词模板（参考图模式钉身份、文生图模式接设定，
+硬性要求共用）放在后端 `services/characters/prompts.py` 集中维护，迭代措辞不需要发版前端。
 
 ### 为什么删除也走回收期而不是直接硬删
 
@@ -93,15 +100,15 @@
 | --- | --- |
 | `backend/app/models/entities.py` `VideoCharacter` | 表 `video_character`：name/persona/outfit/features + 形象图 rel_path/mime/size；`VideoProject.character_ids` JSON 列存项目角色组 |
 | `backend/app/services/characters/store.py` | 形象图落盘（`characters/<owner_id>/<随机 id>.<ext>`，只收图片、魔数判型、320px WebP 缩略图） |
-| `backend/app/services/characters/prompts.py` | 三视图提示词模板 `build_turnaround_prompt()`：正面/侧面/背面、同一人三视角、纯色背景与无文字水印约束，角色描述原样拼接 |
+| `backend/app/services/characters/prompts.py` | 三视图提示词模板 `build_turnaround_prompt(description, has_reference=...)`：参考图/文生图两套开场（前者钉「与参考图同一个人」、描述可空）共用同一份硬性要求（三视角、纯色背景、无文字水印） |
 | `backend/app/services/characters/service.py` | `CharacterService`：owner 收敛的列表/搜索/CRUD、配额闸门（只算正常行）、`characters_for` 批量解析（含回收期内行）、`usage`/`project_usage_map` 引用反查、`remove` 软删、`restore_many`/`purge_expired`/`list_trash`/`trash_count` 回收站 |
 | `backend/app/services/media/store.py` | 路径守卫 `_ROOTS` 增加 `characters` 根；`resolve_url`/`delete_blob`（连带删缩略图）对新树直接生效 |
-| `backend/app/routers/characters.py` | `/office/characters` 一组接口；multipart 建档/换图、列表带项目引用数与回收站角标、`GET /trash` 与 `POST /batch-restore`；`POST /portrait-preview` 同步 AI 三视图（默认图片模型 + `ark.generate_image`/`download`，二进制 no-store 回传，`sniff_media` 二次验型） |
+| `backend/app/routers/characters.py` | `/office/characters` 一组接口；multipart 建档/换图、列表带项目引用数与回收站角标、`GET /trash` 与 `POST /batch-restore`；`POST /portrait-preview` 同步 AI 三视图（multipart：可选参考图经 `ark.image_data_url` 内联走图生图、可选描述，二者至少一个；默认图片模型 + `ark.generate_image`/`download`，二进制 no-store 回传，入口与产物各做一次 `sniff_media` 验型） |
 | `backend/app/services/videos/service.py` | `_normalize_character_ids`（写入侧校验）、`_characters_note`（档案段落）、`_character_portraits`（形象图路径）、`_merge_reference_images`（预算合并）；接入 create/update、`_start_script_run`、`render_frames`、`render_clips`、`to_detail` |
 | `backend/app/services/workflows/builtin.py` | `video-script-generation` 新增可选输入 `characters_note`，两步 prompt 都插 `{{characters_note}}`；启动 seed 自动刷新 |
 | `backend/app/bootstrap.py` | 旧库幂等补列 `video_project.character_ids JSON NULL` 与 `video_character.deleted_at DATETIME NULL`；新表随 `create_all` 建 |
-| `frontend/src/api/characters.ts` | `charactersApi` 与 `MAX_CHARACTERS_PER_PROJECT`，含 `trash`/`restore`/`portraitPreview`（blob 响应，失败体用 `blobErrorMessage` 拆） |
-| `frontend/src/components/videos/CharactersPanel.vue` | 人物库页签：卡片网格与项目引用角标、建档/编辑弹窗（重名二次确认、AI 三视图生成区）、回收站抽屉与倒计时 |
+| `frontend/src/api/characters.ts` | `charactersApi` 与 `MAX_CHARACTERS_PER_PROJECT`，含 `trash`/`restore`/`portraitPreview`（multipart 带可选参考图、blob 响应，失败体用 `blobErrorMessage` 拆） |
+| `frontend/src/components/videos/CharactersPanel.vue` | 人物库页签：卡片网格与项目引用角标、建档/编辑弹窗（重名二次确认、AI 三视图生成区：参考图上传/移除 + 补充描述，图生图与文生图两档）、回收站抽屉与倒计时 |
 | `frontend/src/utils/errors.ts` | `blobErrorMessage()`：blob 错误响应里的 JSON 信封拆信，TTS 试听与 AI 生图共用 |
 | `frontend/src/components/videos/CharacterPicker.vue` | 项目角色组选择器（多选 3 个、搜索、内联简版建档并自动勾选） |
 | `frontend/src/views/Videos.vue`（壳）、`components/videos/VideoProjectsPanel.vue`、`VideoWorkbench.vue` | 三页签合并壳与「片子」页签的创建弹窗、全片 tab 的角色组选择；payload/detail 增加 `character_ids` |
@@ -112,7 +119,7 @@
 | --- | --- | --- |
 | GET | `/office/characters?q=&limit=&offset=` | 角色列表，`q` 只搜名字；每条带 `project_count`，响应带回收站 `trash_count`/`trash_ttl_seconds` |
 | POST | `/office/characters` | multipart 建档：`file` + `name`（必填）+ persona/outfit/features；非图片或空名走 `code=-1` 业务拒绝 |
-| POST | `/office/characters/portrait-preview` | AI 三视图：JSON `{prompt}`（1-1000 字），同步返回图片二进制（`no-store`）；无图片模型/未测通/空白/上游错误/非图片产物均 400 |
+| POST | `/office/characters/portrait-preview` | AI 三视图，multipart：可选 `file`（参考图，只收图片、10MB 闸门）+ 可选 `prompt`（≤1000 字），二者至少一个；带图走图生图、不带走文生图，同步返回图片二进制（`no-store`）；无图片模型/未测通/两依据皆空/参考图非图片或超限/上游错误/产物非图片均 400 |
 | PUT | `/office/characters/{id}` | 改文字档案，全可选；name 给了不能是空白，他人/不存在为 404 |
 | PUT | `/office/characters/{id}/portrait` | multipart 换形象图，旧图 best-effort 删 |
 | POST | `/office/characters/usage` | 批量查引用：每个角色被哪些项目选进角色组 |
@@ -137,8 +144,10 @@
   （默认 3）、`CHARACTER_TRASH_TTL_SECONDS`（默认 600）；形象图大小闸门复用
   `MATERIAL_MAX_IMAGE_BYTES`（10MB）。
 - AI 三视图是纯增量接口（`POST /office/characters/portrait-preview`）：无 DDL、
-  无新配置项，复用用途为 `image` 的默认模型与 `MEDIA_IMAGE_MAX_BYTES` 下载闸门；
-  没配图片模型的账号只在点生成时收到 400 提示，建档/上传等既有行为完全不变。
+  无新配置项，复用用途为 `image` 的默认模型、`MATERIAL_MAX_IMAGE_BYTES` 参考图闸门
+  与 `MEDIA_IMAGE_MAX_BYTES` 产物下载闸门；没配图片模型的账号只在点生成时收到 400
+  提示，建档/上传等既有行为完全不变。接口形态由首版 JSON 改为 multipart（前端是
+  唯一调用方，随同一功能未发布版本一起切换，无外部兼容负担）。
 
 ## 测试
 
@@ -149,9 +158,12 @@
     恢复、过期真删行与文件、恢复受配额限制、usage；
   - HTTP：multipart 信封、非图片/空名业务拒绝、改档/换图/软删/404/usage、
     `GET /trash` 的剩余秒数与 `batch-restore` 整条恢复；
-  - AI 三视图：提示词模板含三视角关键词与描述、预览接口回图片二进制且 `no-store`、
-    无模型/未测通/空白描述三道前置门、`ArkError` 翻译成 400 人话、非图片产物被
-    `sniff_media` 拦下（ark 的 `generate_image`/`download` 全程 monkeypatch，不打真实上游）。
+  - AI 三视图：两套提示词模板（文生图/参考图模式）的三视角关键词与身份约束、
+    文生图回图片二进制且 `no-store`、参考图以 `data:image/...;base64` 内联进
+    `generate_image` 的 `images` 入参、参考图+空白描述放行而两依据皆空拦截、
+    无模型/未测通前置门、参考图非图片（视频/非媒体）与超限拒绝、`ArkError`
+    翻译成 400 人话、非图片产物被 `sniff_media` 拦下（ark 的 `generate_image`/
+    `download` 全程 monkeypatch，不打真实上游）。
 - `backend/tests/test_videos.py` 的角色集成用例：角色组写入归一（未知/他人 id
   丢弃、上限 3、空列表清空）、`_characters_note` 档案段落、首帧注入角色图且角色
   在前、合计超 4 张的截断、参考图档注入而首帧档不混图；软删角色在回收期内仍注入、

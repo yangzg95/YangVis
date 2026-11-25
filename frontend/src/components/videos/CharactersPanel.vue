@@ -92,8 +92,8 @@
           </a-upload>
           <div class="hint">只收图片（PNG / JPEG / GIF / WebP / BMP），视频会被服务端拒绝。</div>
 
-          <!-- AI 生成：后端同步出一张正面/侧面/背面三视角合一的设定图，转成 File
-               走与手工上传完全相同的保存路径，取消或重生成都不会在服务器留垃圾。 -->
+          <!-- AI 生成：可带参考图走图生图，后端同步出一张正面/侧面/背面三视角合一的
+               设定图，转成 File 走与手工上传完全相同的保存路径，取消或重生成不留垃圾。 -->
           <div class="ai-portrait">
             <div class="ai-portrait-head">
               <span class="ai-portrait-title"><ThunderboltOutlined /> AI 生成三视图形象</span>
@@ -101,26 +101,59 @@
                 填入档案描述
               </a-button>
             </div>
+            <div class="ai-ref-row">
+              <a-upload
+                list-type="picture-card"
+                :show-upload-list="false"
+                :before-upload="pickGenFile"
+                accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"
+                class="ai-ref-upload"
+              >
+                <img
+                  v-if="genObjectUrl"
+                  class="upload-preview"
+                  :src="genObjectUrl"
+                  alt="参考图预览"
+                />
+                <div v-else class="upload-placeholder">
+                  <UploadOutlined />
+                  <span>参考图</span>
+                </div>
+              </a-upload>
+              <div v-if="genFile" class="ai-ref-side">
+                <div class="hint ai-ref-name" :title="genFile.name">{{ genFile.name }}</div>
+                <a-button size="small" type="text" danger @click="releaseGenFile">
+                  移除参考图
+                </a-button>
+              </div>
+              <div v-else class="hint ai-ref-hint">
+                传一张单人肖像或立绘当参考，三视图会严格保持同一人的五官与穿搭；
+                不传参考图则只按下面的文字描述生成
+              </div>
+            </div>
             <a-textarea
               v-model:value="genPrompt"
               :rows="3"
               :maxlength="1000"
               show-count
-              placeholder="描述性别年龄、发型、脸型、体型、服装与标志物，例如：28 岁女性，齐肩黑发、圆框眼镜，米白色西装外套、牛仔裤、白球鞋"
+              :placeholder="genFile
+                ? '可选：补充要求，例如保持微笑、换成站姿叉腰；留空则完全按参考图生成'
+                : '描述性别年龄、发型、脸型、体型、服装与标志物，例如：28 岁女性，齐肩黑发、圆框眼镜，米白色西装外套、牛仔裤、白球鞋'"
             />
             <div class="ai-portrait-actions">
               <a-button
                 type="primary"
                 ghost
                 :loading="generating"
-                :disabled="!genPrompt.trim()"
+                :disabled="!genPrompt.trim() && !genFile"
                 @click="onGeneratePortrait"
               >
                 <template #icon><ThunderboltOutlined /></template>
                 生成三视图
               </a-button>
               <span class="hint">
-                正面 / 侧面 / 背面三视角合一，按次计费；生成后替换当前形象图，点保存才落库
+                {{ genFile ? '按参考图图生图' : '纯文字文生图' }}，正面 / 侧面 / 背面三视角合一，
+                按次计费；生成后替换当前形象图，点保存才落库
               </span>
             </div>
           </div>
@@ -311,11 +344,37 @@ function releasePreview() {
   previewUrl.value = ''
 }
 
-onBeforeUnmount(releasePreview)
+onBeforeUnmount(() => {
+  releasePreview()
+  releaseGenFile()
+})
 
-// AI 三视图生成：genPrompt 是用户可改的角色描述，generating 跟一次真计费调用。
+// AI 三视图生成：genPrompt 是可空的补充描述，genFile 是可选参考图，generating 跟一次真计费调用。
 const genPrompt = ref('')
 const generating = ref(false)
+const genFile = ref<File | null>(null)
+const genObjectUrl = ref('')
+
+/** 移除参考图：一并释放本地预览 URL，避免反复重选累积 blob。 */
+function releaseGenFile() {
+  if (genObjectUrl.value) {
+    URL.revokeObjectURL(genObjectUrl.value)
+    genObjectUrl.value = ''
+  }
+  genFile.value = null
+}
+
+function pickGenFile(file: File) {
+  if (!ACCEPTED_TYPES.includes(file.type)) {
+    message.warning('只支持 PNG / JPEG / GIF / WebP / BMP 图片')
+    return false
+  }
+  releaseGenFile()
+  genFile.value = file
+  genObjectUrl.value = URL.createObjectURL(file)
+  // 返回 false 阻止 antd 自动上传，点生成时才随 multipart 发出去。
+  return false
+}
 
 // 后端 sniff 认出来的图片 MIME 都在这张表里；认不出时按 png 落，保存时后端还会再判一次。
 const MIME_EXTENSIONS: Record<string, string> = {
@@ -445,6 +504,7 @@ function resetEditor() {
   editor.file = null
   editor.currentUrl = ''
   genPrompt.value = ''
+  releaseGenFile()
   releasePreview()
 }
 
@@ -496,13 +556,13 @@ function fillPromptFromProfile() {
 /** 调后端同步生成三视图，拿到的二进制转成 File 走与手工上传完全相同的保存路径。 */
 async function onGeneratePortrait() {
   const prompt = genPrompt.value.trim()
-  if (!prompt) {
-    message.warning('先写一段角色外形描述')
+  if (!prompt && !genFile.value) {
+    message.warning('先上传参考图或写一段角色描述')
     return
   }
   generating.value = true
   try {
-    const blob = await charactersApi.portraitPreview(prompt)
+    const blob = await charactersApi.portraitPreview(prompt, genFile.value)
     const mime = blob.type || 'image/png'
     const file = new File([blob], `ai-turnaround${MIME_EXTENSIONS[mime] ?? '.png'}`, {
       type: mime,
@@ -826,6 +886,38 @@ onMounted(load)
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 8px;
+}
+
+/* 参考图行：上传卡固定小尺寸，右侧说明/文件名占剩余宽度并垂直居中。 */
+.ai-ref-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.ai-ref-upload :deep(.ant-upload.ant-upload-select) {
+  width: 84px;
+  height: 84px;
+}
+
+.ai-ref-side {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ai-ref-name {
+  max-width: 280px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ai-ref-hint {
+  flex: 1;
+  min-width: 0;
 }
 
 .delete-alert {
