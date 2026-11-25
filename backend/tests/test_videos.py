@@ -69,7 +69,12 @@ from app.services.materials import service as material_service
 from app.services.materials import store as material_store
 from app.services.materials.store import store_material
 from app.services.materials.service import MaterialService
-from app.services.videos.normalize import MAX_SHOTS_FROM_MODEL, shots_from_model, text_of
+from app.services.videos.normalize import (
+    MAX_SHOTS_FROM_MODEL,
+    SHOT_MAX_S,
+    shots_from_model,
+    text_of,
+)
 from app.services.videos import service as video_service
 from app.services.videos.service import VideoService, _script_inputs
 from app.services.workflows import (
@@ -246,6 +251,8 @@ def _shot(overrides: dict) -> dict:
     row = {
         "duration_s": 5,
         "scene": "办公室工位",
+        # 同一场景的默认值：链式衔接认这个标识，测试里要造「换了场景」就单独覆盖它。
+        "scene_key": "办公室工位",
         "camera": "推镜",
         "action": "主角抬头",
         "dialogue": "季度复盘不是写文档",
@@ -463,6 +470,45 @@ def test_shots_from_model_never_carries_material_ids():
     assert "ref_asset_ids" not in shot and "material_ids" not in shot
 
 
+def test_shots_from_model_grows_the_slot_for_long_dialogue():
+    """台词念不完就加长这一镜：槽位不够是点「成片」之后才炸的错，这里先补掉。
+
+    口径是 4.5 字/秒、最多提速 1.3 倍：25 字自然要 5.6 秒，压到 1.3 倍也要 4.3 秒，
+    所以 4 秒的槽位抬到 5 秒。
+    """
+    shots = shots_from_model([{"image_prompt": "p", "duration_s": 4, "dialogue": "一" * 25}])
+    assert shots[0]["duration_s"] == 5
+
+
+def test_shots_from_model_only_grows_a_slot_and_never_past_the_window():
+    """只抬不压，也抬不过生成端的区间上限：留白是节奏，不该由代码替用户剪画面。"""
+    shots = shots_from_model(
+        [
+            {"image_prompt": "a", "duration_s": 8, "dialogue": "这句话说得很短"},
+            {"image_prompt": "b", "duration_s": 4, "dialogue": "长" * 200},
+            {"image_prompt": "c", "duration_s": 6, "dialogue": ""},
+        ]
+    )
+
+    assert [shot["duration_s"] for shot in shots] == [8, SHOT_MAX_S, 6]
+
+
+def test_shots_from_model_does_not_count_punctuation_as_speech():
+    """标点不占发音时间：整句只数汉字，否则一句多逗号的台词会被算成更长。"""
+    shots = shots_from_model(
+        [{"image_prompt": "p", "duration_s": 4, "dialogue": "，。、；：！？" * 6}]
+    )
+
+    assert shots[0]["duration_s"] == 4
+
+
+def test_shots_from_model_carries_the_scene_key_for_chaining():
+    """场景标识是衔接的唯一依据：模型写了就要带下去，超过列宽裁掉而不是丢。"""
+    assert shots_from_model([{"image_prompt": "p"}])[0]["scene_key"] == ""
+    shot = shots_from_model([{"image_prompt": "p", "scene_key": "办公室工位" * 20}])[0]
+    assert len(shot["scene_key"]) == 64
+
+
 # ---- 整批保存镜头 ------------------------------------------------------------
 
 
@@ -481,6 +527,21 @@ def test_save_shots_recomputes_order_and_timeline(db):
     # 超出 2.0 系窗口的时长夹到 15：总时长算错比少给几秒更难被发现。
     assert [row.duration_s for row in rows] == [5, 15, 4]
     assert [row.start_s for row in rows] == [0, 5, 20]
+
+
+def test_save_shots_keeps_the_scene_key_and_detail_carries_it_back(db):
+    """标识是衔接的唯一依据，所以要存得下、也回得来：工作台改一次就要能看见。"""
+    project = _project(db)
+    service = _service(db)
+    service.save_shots(
+        project.id,
+        [_shot({"scene_key": "办公室工位"}), _shot({"scene_key": "楼下街道"})],
+    )
+
+    rows = service.shots_of(project.id)
+    assert [row.scene_key for row in rows] == ["办公室工位", "楼下街道"]
+    detail = service.to_detail(service.get_project(project.id))
+    assert [shot.scene_key for shot in detail.shots] == ["办公室工位", "楼下街道"]
 
 
 def test_save_shots_clamps_prompts_to_the_ark_limit(db):
@@ -853,12 +914,17 @@ def _chain_project(db, **project_overrides):
     return _project(db, params=params, **project_overrides)
 
 
-def test_chain_enqueue_snapshots_prev_job_and_keeps_head_unchained(db):
+def test_chain_links_each_shot_to_the_clip_made_before_it_in_the_same_batch(db):
+    """一次渲全片：每一镜接的是同一批里前一镜刚建的那条作业，不是它上一次的老产物。
+
+    成片用的就是各镜最新成功的片段。接前一镜的旧产物等于把一个已经被这次渲染作废的
+    画面缝进新片；接新作业则由执行器等它出片，再注入尾帧。
+    """
     project = _chain_project(db)
     service = _service(db)
     rows, _ = _rendered(db, project.id, 3)  # 首帧全部就绪，片段作业另行挂
-    prev_first = _clip_with_last_frame(db, project.id, rows[0])
-    prev_second = _clip_with_last_frame(db, project.id, rows[1])
+    first_old = _clip_with_last_frame(db, project.id, rows[0])
+    _clip_with_last_frame(db, project.id, rows[1])
     _video_model(db)
 
     jobs = service.render_clips(project.id, [])
@@ -867,18 +933,59 @@ def test_chain_enqueue_snapshots_prev_job_and_keeps_head_unchained(db):
     chain_2 = jobs[1].request["chain"]
     chain_3 = jobs[2].request["chain"]
     assert chain_2["enabled"] and chain_2["injected"] is False
-    assert chain_2["prev_job_id"] == prev_first.id and chain_2["prev_shot_order"] == 1
-    # 快照的是上镜**当时那条作业**：叙事顺序上的紧邻前镜，不是选中集合里的前一个。
-    assert chain_3["prev_job_id"] == prev_second.id and chain_3["prev_shot_order"] == 2
+    assert chain_2["prev_job_id"] == jobs[0].id and chain_2["prev_shot_order"] == 1
+    assert chain_3["prev_job_id"] == jobs[1].id and chain_3["prev_shot_order"] == 2
+    assert first_old.status == JOB_SUCCEEDED, "上一版产物还在，只是这次不接它"
     # 入队阶段不替换 images：尾帧注入发生在作业执行的提交前。
     assert jobs[1].request["images"][0]["role"] == ROLE_FIRST_FRAME
 
 
-def test_chain_rejects_when_the_previous_shot_has_no_last_frame(db):
+def test_chain_only_links_adjacent_shots_of_the_same_scene(db):
+    """同场景才链：场景标识换了地方就各自渲各自的。
+
+    把上一个场景的尾帧当这一镜的首帧，画面里会拖进不属于这里的人或物，那种接缝比
+    硬切更难看——这正是这一条改成按标识判定的原因。
+    """
     project = _chain_project(db)
     service = _service(db)
-    rows = _shots(db, project.id, 2)
-    # 只有普通成功片段、没有尾帧：链式衔接缺素材，入队就要拒绝，不能等到执行期。
+    rows, _ = _rendered(db, project.id, 3)
+    service.save_shots(
+        project.id,
+        [
+            _shot({"id": rows[0].id, "scene_key": "办公室工位"}),
+            _shot({"id": rows[1].id, "scene_key": "办公室工位"}),
+            _shot({"id": rows[2].id, "scene_key": "楼下街道"}),
+        ],
+    )
+    _video_model(db)
+
+    jobs = service.render_clips(project.id, [])
+
+    assert jobs[1].request["chain"]["prev_shot_order"] == 1, "同场景的两镜接上"
+    assert "chain" not in jobs[2].request, "镜 3 换了场景，不接镜 2 的尾帧"
+
+
+def test_chain_skips_shots_without_a_scene_key(db):
+    """标识没写 = 场景关系未知，一律不接：存量项目和用户手填的镜头保持老行为。"""
+    project = _chain_project(db)
+    service = _service(db)
+    rows, _ = _rendered(db, project.id, 2)
+    service.save_shots(
+        project.id, [_shot({"id": rows[0].id, "scene_key": ""}), _shot({"id": rows[1].id, "scene_key": ""})]
+    )
+    _video_model(db)
+
+    jobs = service.render_clips(project.id, [])
+
+    assert all("chain" not in job.request for job in jobs)
+
+
+def test_chain_skips_a_previous_clip_that_has_no_last_frame(db):
+    """前一镜是「成功但没有尾帧」的存量片段：不接，也不把它当成还在跑而干等。"""
+    project = _chain_project(db)
+    service = _service(db)
+    rows, _ = _rendered(db, project.id, 2)
+    # 只有普通成功片段、没有尾帧：老数据正是这个形状。
     stored = media_store.store_blob(project.id, MP4)
     job = MediaJob(
         owner_id=OWNER, provider="ark", kind=KIND_VIDEO, biz_type=BIZ_VIDEO_SHOT,
@@ -891,14 +998,32 @@ def test_chain_rejects_when_the_previous_shot_has_no_last_frame(db):
     db.commit()
     _video_model(db)
 
-    with pytest.raises(ValueError, match="第 2 镜"):
-        service.render_clips(project.id, [])
+    jobs = service.render_clips(project.id, [rows[1].id])
+
+    assert len(jobs) == 1, "接不上就自己渲，不再整批拒绝"
+    assert "chain" not in jobs[0].request
 
 
-def test_chain_strict_mode_rejects_t2v_and_reference_shots(db):
+def test_chain_skips_a_previous_shot_that_already_failed(db):
+    """前一镜这次注定没有产物（失败/取消/过期）：不接，免得被衔接闸门判成连带失败。"""
     project = _chain_project(db)
     service = _service(db)
-    rows = _shots(db, project.id, 2)
+    rows, _ = _rendered(db, project.id, 2)
+    failed = _clip_with_last_frame(db, project.id, rows[0])
+    failed.status = JOB_FAILED
+    db.commit()
+    _video_model(db)
+
+    jobs = service.render_clips(project.id, [rows[1].id])
+
+    assert "chain" not in jobs[0].request
+
+
+def test_chain_skips_shots_that_cannot_take_a_frame(db):
+    """非首帧档接不上：t2v 与参考图档没有可替换的首帧输入，跳过它而不拦整批。"""
+    project = _chain_project(db)
+    service = _service(db)
+    rows, _ = _rendered(db, project.id, 2)
     _clip_with_last_frame(db, project.id, rows[0])
     service.save_shots(
         project.id,
@@ -906,13 +1031,15 @@ def test_chain_strict_mode_rejects_t2v_and_reference_shots(db):
     )
     _video_model(db)
 
-    with pytest.raises(ValueError, match="首帧模式"):
-        service.render_clips(project.id, [])
+    jobs = service.render_clips(project.id, [])
+
+    assert len(jobs) == 2
+    assert "chain" not in jobs[1].request
 
 
 def test_chain_off_writes_no_chain_block(db):
-    """开关默认关：入队形状与链式上线前一字不差。"""
-    project = _project(db)
+    """显式关掉开关：入队形状与链式上线前一字不差。"""
+    project = _project(db, params={"chain_clips": False})
     service = _service(db)
     rows, _ = _rendered(db, project.id, 2)
     _video_model(db)
@@ -920,6 +1047,11 @@ def test_chain_off_writes_no_chain_block(db):
     jobs = service.render_clips(project.id, [])
 
     assert all("chain" not in job.request for job in jobs)
+
+
+def test_params_default_links_the_same_scene(db):
+    """默认就是「同场景自动衔接」：接不接由分镜师写的标识决定，用户不用再拨开关。"""
+    assert _project(db).params["chain_clips"] is True
 
 
 def test_chain_yields_to_reference_previous(db, monkeypatch):
@@ -946,14 +1078,14 @@ def test_chain_partial_render_follows_the_project_order(db):
     project = _chain_project(db)
     service = _service(db)
     rows, _ = _rendered(db, project.id, 3)
-    _clip_with_last_frame(db, project.id, rows[1])  # 镜 2 就绪
+    prev_second = _clip_with_last_frame(db, project.id, rows[1])  # 镜 2 已出片
     _video_model(db)
 
     jobs = service.render_clips(project.id, [rows[2].id])
 
     assert len(jobs) == 1
     chain = jobs[0].request["chain"]
-    assert chain["prev_shot_order"] == 2
+    assert chain["prev_shot_order"] == 2 and chain["prev_job_id"] == prev_second.id
 
 
 def test_render_clips_reference_sends_image_materials_only(db):

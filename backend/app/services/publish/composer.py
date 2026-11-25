@@ -5,13 +5,20 @@
 Windows 上也没有 PATH / 动态库那一摊事——与 requirements 里 pillow「wheel 自带
 FreeType」是同一种取舍。
 
-两段式策略（``-c copy`` 直拼，失败再重编码）：
+两段拼接策略（``-c copy`` 直拼，失败再重编码）：
 
 * 同一型号、同一档参数渲出来的片段，编码/分辨率/帧率一致，concat demuxer 直接封装
-  即可，**无损且只要几秒**，这是常态路径；
+  即可，**无损且只要几秒**，这是「不设转场」时的路径；
 * 片段参数不一致（混过型号、混过分辨率）时直拼会被 ffmpeg 拒掉，回退到 libx264
   统一重编码。视频片段本身不带音轨（方舟侧 ``generate_audio`` 显式关着），回退档
   ``-an``，不让编码器自己造一条静音轨。
+
+默认走的是第三条路 :func:`_concat_styled`（``VIDEO_TRANSITION_S`` / ``VIDEO_MOTION_ZOOM``
+任一非 0 时）：每个镜头边界淡出到黑再淡入、每镜匀速递进一小圈，然后一次性重编码。
+这两件事都是**逐帧滤镜**，流拷贝档做不到，所以代价是整段重编；换来的是实测里那两个
+观感问题——镜头之间单帧突变、以及片段后半段趋近静止（30 秒样片里 82% 的帧几乎不动）
+——不再依赖模型是否肯动。交叉溶解要 ``xfade``，那是 FFmpeg 4.3 才有的滤镜，线上
+imageio-ffmpeg 0.5.1 自带 4.2.2，所以只用 ``fade``/``zoompan`` 这类老滤镜。
 
 配音（TTS）是叠在视频拼接**之后**的第三段：每句台词已经按镜头单独合成成 mp3，
 本模块把它们按镜头槽位补齐/截短后依次拼接（``concat``），说太长的句子先加速
@@ -41,6 +48,8 @@ _STERR_TAIL = 400
 
 # ffmpeg -i 的 stderr 里时长行形状：「Duration: 00:00:05.04, start: 0.000000, ...」。
 _DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+# Stream 行里的画面尺寸：「..., yuv420p, 1280x720 [SAR 1:1 DAR 16:9], 24 fps, ...」。
+_SIZE_RE = re.compile(r"Video:.*?(\d{2,5})x(\d{2,5})")
 # 实测比槽位长这一点点以内不加速：帧级误差不值得为它挂一个 atempo 滤镜。
 _SLOT_TOLERANCE_S = 0.05
 _AUDIO_BITRATE = "128k"
@@ -386,6 +395,42 @@ async def _concat_silent(
     logger.info("ffmpeg re-encode ok: out=%s", out_path.name)
 
 
+def _styled_enabled(source_count: int) -> bool:
+    """这次拼接要不要走「淡入淡出 + 缓推」那一档。
+
+    两档的差别只在要不要逐帧滤镜：``-c copy`` 流拷贝出不了转场，也出不了推近。
+    把两个参数都调回 0 就退回原来的硬切直拼（低配机上想省这次重编码时用）。
+    """
+    motion = float(settings.VIDEO_MOTION_ZOOM) > 0
+    transition = float(settings.VIDEO_TRANSITION_S) > 0 and source_count > 1
+    return motion or transition
+
+
+async def _concat_video(
+    exe: str,
+    sources: Sequence[Path],
+    list_file: Path,
+    out_path: Path,
+    *,
+    progress: ProgressCallback | None = None,
+    percent_range: tuple[int, int] = (30, 60),
+) -> None:
+    """拼无声中间片的分流处：带观感滤镜的一档 vs 原来的直拼/重编码。"""
+    if _styled_enabled(len(sources)):
+        await _concat_styled(
+            exe, sources, out_path, progress=progress, percent_range=percent_range
+        )
+        return
+    await _concat_silent(
+        exe,
+        list_file,
+        out_path,
+        progress=progress,
+        percent_range=percent_range,
+        source_count=len(sources),
+    )
+
+
 async def probe_duration(exe: str, path: Path) -> float:
     """读一个音/视频文件的时长（秒）。
 
@@ -405,6 +450,151 @@ async def probe_duration(exe: str, path: Path) -> float:
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
+async def probe_size(exe: str, path: Path) -> tuple[int, int]:
+    """读一条视频的画面尺寸（``宽, 高``），拼接片按它统一各镜。
+
+    和时长一样只认 stderr：Stream 行形如 ``Video: h264 (...), yuv420p, 1280x720
+    [SAR 1:1 DAR 16:9], 24 fps``。concat **滤镜**要求各输入同尺寸，而混过型号或分辨率
+    的片段本来就可能不一样，所以尺寸取第一条、其余按它缩放。
+    """
+    _, stderr = await _run_ffmpeg(
+        [exe, "-nostdin", "-hide_banner", "-i", str(path)], stage="画面尺寸探测"
+    )
+    match = _SIZE_RE.search(stderr)
+    if not match:
+        raise PublishComposeError(
+            f"ffmpeg 读不到画面尺寸（{path.name}），无法统一各镜的拼接画幅"
+        )
+    return int(match.group(1)), int(match.group(2))
+
+
+def _styled_filter(
+    count: int,
+    durations: Sequence[float],
+    width: int,
+    height: int,
+    *,
+    transition_s: float,
+    motion_zoom: float,
+    fps: int,
+) -> str:
+    """拼出「逐镜淡入淡出 + 缓推」的 ``filter_complex``，与镜头数量同长。
+
+    每镜一条链：先按目标画幅缩放并补边（不拉伸），拉到 ``fps`` 恒定帧率，再
+    ``zoompan`` 从 1.0 匀速推到 ``1 + motion_zoom``；中间镜的尾巴淡出到黑、下一镜的
+    头从黑淡起，各占 ``transition_s`` 的一半，切点因此是一段渐变而不是单帧突变。
+
+    ``zoompan`` 的位移精度受输入分辨率限制：整数取整会让相邻几帧完全一样，所以先把
+    画面放大到两倍再让它输出回目标尺寸（实测这样才把近重复帧压到 1 帧）。首尾不淡：
+    第一镜不该以黑场开场，结尾的黑交给平台/播放器。
+    """
+    half = max(0.0, transition_s / 2)
+    chains: list[str] = []
+    labels: list[str] = []
+    for index, duration_s in enumerate(durations):
+        frames = max(1, round(duration_s * fps))
+        if motion_zoom > 0:
+            # 先进两倍图再让 zoompan 输出回目标尺寸：位移取整的精度是输入像素级的，
+            # 直接按目标尺寸推 5% 会得到一批完全相同的相邻帧（实测近重复 10 帧）。
+            steps = [
+                f"[{index}:v]scale={width * 2}:{height * 2}:force_original_aspect_ratio=increase",
+                f"crop={width * 2}:{height * 2},setsar=1,fps={fps}",
+                f"zoompan=z='1+{motion_zoom:g}*on/{frames - 1}'"
+                ":d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                f":s={width}x{height}:fps={fps}",
+            ]
+        else:
+            steps = [
+                f"[{index}:v]scale={width}:{height}:force_original_aspect_ratio=decrease",
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps}",
+            ]
+        if half > 0 and index:
+            steps.append(f"fade=t=in:st=0:d={half:.3f}")
+        if half > 0 and index < count - 1:
+            steps.append(f"fade=t=out:st={max(0.0, duration_s - half):.3f}:d={half:.3f}")
+        steps.append("format=yuv420p")
+        # 一镜一条链，链尾就是它在这张图上的标签；只有一镜时没有 concat 可接，
+        # 直接把标签叫 outv，省掉一个中间 pad。
+        label = "outv" if count == 1 else f"v{index}"
+        chains.append(",".join(steps) + f"[{label}]")
+        labels.append(f"[{label}]")
+    if count == 1:
+        return chains[0]
+    return ";".join(chains) + f";{''.join(labels)}concat=n={count}:v=1:a=0[outv]"
+
+
+async def _concat_styled(
+    exe: str,
+    sources: Sequence[Path],
+    out_path: Path,
+    *,
+    progress: ProgressCallback | None = None,
+    percent_range: tuple[int, int] = (30, 60),
+) -> None:
+    """带镜头转场与运动兜底地拼出一条**无声**中间片：整段重编码。
+
+    时长与直拼一致（淡出淡入只改亮度、不重叠画面），所以配音槽位不需要跟着转场
+    换算。逐条探测片段时长是为了把淡出起点和推近速度算准，探测本身很便宜。
+    """
+    start, end = percent_range
+    count = len(sources)
+    detail = f"正在拼接 {count} 个片段（镜头边界淡入淡出）" if count > 1 else "正在处理单个片段"
+    await _emit(progress, ComposeProgress("reencode", start, detail, 0, count))
+    width, height = await probe_size(exe, sources[0])
+    durations = [await probe_duration(exe, path) for path in sources]
+    chain = _styled_filter(
+        count,
+        durations,
+        width,
+        height,
+        transition_s=max(0.0, float(settings.VIDEO_TRANSITION_S)),
+        motion_zoom=max(0.0, float(settings.VIDEO_MOTION_ZOOM)),
+        fps=max(1, int(settings.VIDEO_COMPOSE_FPS)),
+    )
+    args = [
+        exe,
+        "-nostdin",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        *[item for path in sources for item in ("-i", str(path))],
+        "-filter_complex",
+        chain,
+        "-map",
+        "[outv]",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+        "-movflags",
+        "+faststart",
+        str(out_path),
+    ]
+    code, stderr = await _run_ffmpeg(
+        args,
+        stage="带转场拼接",
+        duration_s=sum(durations),
+        on_progress=(
+            (lambda fraction: _emit(
+                progress,
+                ComposeProgress(
+                    "reencode", _stage_percent(start, end, fraction), detail, count, count
+                ),
+            ))
+            if progress is not None
+            else None
+        ),
+    )
+    if code != 0 or not _output_ok(out_path):
+        detail_error = stderr.strip()[-_STERR_TAIL:] or f"退出码 {code}"
+        raise PublishComposeError(f"ffmpeg 带转场拼接失败：{detail_error}")
+    logger.info("ffmpeg styled concat ok: clips=%s out=%s", count, out_path.name)
+
+
 async def build_voiceover(
     exe: str,
     plan: VoiceoverPlan,
@@ -421,11 +611,18 @@ async def build_voiceover(
     在多个延迟输入混音时会一直等不到 EOF，30 秒的片子也会卡死。槽位串拼不需要
     等待其他输入结束，兼容旧版 FFmpeg，也不会像 ``duration=first`` 那样把第一句
     之后的台词全丢掉。
+
+    ``VIDEO_AUDIO_LEAD_S`` 是 J-cut：从第二句起，每句都比自己镜头的画面起点提前
+    这么多秒入轨，让声音先跨过切点、画面随后才换，镜头边界就不读成「翻页」。串拼
+    的轨道不能有重叠，所以这份提前量从**第一句**的槽位尾部扣掉（第一句之后的每句
+    本来就整段提前，彼此仍然首尾相接），代价是第一句若把槽位说满，会被压掉这一档的
+    时长——所以它只有零点几秒。全片音频轨因此比画面短这一档，末尾按总时长补静音。
     """
     if not plan.lines:
         raise PublishComposeError("配音计划为空：没有任何镜头带台词")
 
     line_count = len(plan.lines)
+    lead_s = max(0.0, float(settings.VIDEO_AUDIO_LEAD_S))
     await _emit(
         progress,
         ComposeProgress("voiceover", 62, "正在检查各句配音的时长", 0, line_count),
@@ -440,10 +637,13 @@ async def build_voiceover(
             raise PublishComposeError(f"第 {line.sort_order} 镜的配音文件不存在：{line.path.name}")
         if line.slot_s <= 0:
             raise PublishComposeError(f"第 {line.sort_order} 镜的时长为 0，无法放置配音")
-        gap_s = line.start_s - cursor_s
+        start_s = line.start_s - (lead_s if index and lead_s else 0.0)
+        pad_s = line.slot_s - (lead_s if index == 0 and lead_s and line_count > 1 else 0.0)
+        pad_s = max(0.5, pad_s)
+        gap_s = start_s - cursor_s
         if gap_s < -_SLOT_TOLERANCE_S:
             raise PublishComposeError(
-                f"第 {line.sort_order} 镜的配音起点 {line.start_s:.2f} 秒早于上一槽位终点 "
+                f"第 {line.sort_order} 镜的配音起点 {start_s:.2f} 秒早于上一槽位终点 "
                 f"{cursor_s:.2f} 秒，配音时间轴重叠"
             )
         if gap_s > _SLOT_TOLERANCE_S:
@@ -464,23 +664,23 @@ async def build_voiceover(
             ),
         )
         chain = f"[{index}:a]"
-        if duration_s - line.slot_s > _SLOT_TOLERANCE_S:
+        if duration_s - pad_s > _SLOT_TOLERANCE_S:
             # atempo 只作用在人声本体上；槽位不足时先压到槽位内。
-            factor = duration_s / line.slot_s
+            factor = duration_s / pad_s
             if factor > settings.TTS_MAX_ATEMPO:
                 raise PublishComposeError(
                     f"第 {line.sort_order} 镜台词太长：配音约 {duration_s:.1f} 秒，镜头槽位只有 "
-                    f"{line.slot_s:.0f} 秒，加速到上限 {settings.TTS_MAX_ATEMPO:g}x 仍放不下，"
+                    f"{pad_s:.1f} 秒，加速到上限 {settings.TTS_MAX_ATEMPO:g}x 仍放不下，"
                     "请删减该镜台词或加长镜头后重新合成"
                 )
             chain += f"atempo={factor:.4f},"
         chain += (
-            f"apad,atrim=0:{line.slot_s:.3f},aresample={settings.TTS_SAMPLE_RATE},"
+            f"apad,atrim=0:{pad_s:.3f},aresample={settings.TTS_SAMPLE_RATE},"
             f"aformat=channel_layouts=stereo[s{index}]"
         )
         filters.append(chain)
         timeline_inputs.append(f"[s{index}]")
-        cursor_s = line.start_s + line.slot_s
+        cursor_s = start_s + pad_s
 
     filters.append(
         f"{''.join(timeline_inputs)}concat=n={len(timeline_inputs)}:v=0:a=1[joined]"
@@ -604,22 +804,20 @@ async def compose(
     write_concat_list(sources, list_file)
 
     if voiceover is None:
-        await _concat_silent(
+        await _concat_video(
             exe,
+            sources,
             list_file,
             out_path,
             progress=progress,
             percent_range=(5, 92),
-            source_count=len(sources),
         )
         return
 
     # 配音链路先落无声中间片：视频流只编/拷一次，最后封装是纯 remux，失败也能
     # 从中间片分清是「拼接」还是「混音」哪一段出的错。
     silent_path = out_path.parent / "silent.mp4"
-    await _concat_silent(
-        exe, list_file, silent_path, progress=progress, source_count=len(sources)
-    )
+    await _concat_video(exe, sources, list_file, silent_path, progress=progress)
     await _emit(progress, ComposeProgress("voiceover", 61, "正在读取成片时长"))
     total_s = await probe_duration(exe, silent_path)
     track_path = out_path.parent / "voiceover.m4a"

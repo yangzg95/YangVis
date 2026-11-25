@@ -97,6 +97,12 @@ def media_dir(tmp_path, monkeypatch):
         TTS_DEFAULT_VOICE="",
         TTS_MAX_ATEMPO=1.6,
         TTS_SAMPLE_RATE=44100,
+        # 拼接层的观感档位按服务端默认给（淡入淡出 + 缓推 + 配音提前），需要验老
+        # 的硬切直拼契约时用 hard_cut 夹具归零，而不是在这里写死 0。
+        VIDEO_TRANSITION_S=real_settings.VIDEO_TRANSITION_S,
+        VIDEO_MOTION_ZOOM=real_settings.VIDEO_MOTION_ZOOM,
+        VIDEO_AUDIO_LEAD_S=real_settings.VIDEO_AUDIO_LEAD_S,
+        VIDEO_COMPOSE_FPS=real_settings.VIDEO_COMPOSE_FPS,
     )
     monkeypatch.setattr(media_store, "settings", fake)
     monkeypatch.setattr(material_store, "settings", fake)
@@ -478,6 +484,18 @@ def fake_ffmpeg(monkeypatch):
     monkeypatch.setattr(composer, "ffmpeg_exe", lambda: "ffmpeg")
 
 
+@pytest.fixture
+def hard_cut(monkeypatch):
+    """把合成层的观感滤镜调回 0，验「硬切直拼」那一档的原有契约。
+
+    默认档位现在是淡入淡出 + 缓推 + 配音提前，那些行为另有专门的测试；留在这几行的
+    是「参数形状与回退顺序」，它们只在关掉滤镜时才走 `-c copy` / concat demuxer。
+    """
+    monkeypatch.setattr(composer.settings, "VIDEO_TRANSITION_S", 0.0)
+    monkeypatch.setattr(composer.settings, "VIDEO_MOTION_ZOOM", 0.0)
+    monkeypatch.setattr(composer.settings, "VIDEO_AUDIO_LEAD_S", 0.0)
+
+
 class _FakeProc:
     def __init__(self, code: int, action=None):
         self._code = code
@@ -602,7 +620,7 @@ def test_concat_list_uses_forward_slashes_and_quotes(tmp_path):
     assert content.startswith("file '")
 
 
-def test_compose_copy_path_writes_output(tmp_path, monkeypatch, fake_ffmpeg):
+def test_compose_copy_path_writes_output(tmp_path, monkeypatch, fake_ffmpeg, hard_cut):
     out = tmp_path / "final.mp4"
 
     def fake_exec(*args, **kwargs):
@@ -620,7 +638,9 @@ def test_compose_copy_path_writes_output(tmp_path, monkeypatch, fake_ffmpeg):
     assert out.is_file()
 
 
-def test_compose_falls_back_to_reencode_then_succeeds(tmp_path, monkeypatch, fake_ffmpeg):
+def test_compose_falls_back_to_reencode_then_succeeds(
+    tmp_path, monkeypatch, fake_ffmpeg, hard_cut
+):
     out = tmp_path / "final.mp4"
     calls: list[list[str]] = []
 
@@ -644,7 +664,9 @@ def test_compose_falls_back_to_reencode_then_succeeds(tmp_path, monkeypatch, fak
     assert "-an" in calls[1], "本期不做口播，回退档统一不要音轨"
 
 
-def test_compose_reports_real_concat_progress_range(tmp_path, monkeypatch, fake_ffmpeg):
+def test_compose_reports_real_concat_progress_range(
+    tmp_path, monkeypatch, fake_ffmpeg, hard_cut
+):
     out = tmp_path / "final.mp4"
     updates: list[ComposeProgress] = []
 
@@ -673,7 +695,9 @@ def test_compose_reports_real_concat_progress_range(tmp_path, monkeypatch, fake_
     assert all(update.total == 2 for update in updates)
 
 
-def test_compose_raises_when_both_attempts_fail(tmp_path, monkeypatch, fake_ffmpeg):
+def test_compose_raises_when_both_attempts_fail(
+    tmp_path, monkeypatch, fake_ffmpeg, hard_cut
+):
     def fake_exec(*args, **kwargs):
         async def run():
             return _FakeProc(1)
@@ -686,9 +710,119 @@ def test_compose_raises_when_both_attempts_fail(tmp_path, monkeypatch, fake_ffmp
         asyncio.run(composer.compose([tmp_path / "a.mp4"], tmp_path / "final.mp4"))
 
 
+def test_styled_filter_fades_interior_cuts_and_pushes_every_shot():
+    """镜头边界的淡出淡入只加在**中间**切点，推近每一镜都要有。
+
+    滤镜图在这里单独验形状：线上跑的是 imageio-ffmpeg 自带的 FFmpeg 4.2.2，没有
+    xfade，所以淡入淡出走 ``fade``、运动兜底走 ``zoompan``，这两样都是老滤镜。
+    """
+    graph = composer._styled_filter(
+        3, [4.0, 5.0, 4.0], 720, 1280, transition_s=0.4, motion_zoom=0.05, fps=24
+    )
+    chains = graph.split(";")[:3]
+    first, second, last = chains
+    # 第一镜不淡入：片子不该以黑场开场；它的尾巴照样淡出到切点。
+    assert "fade=t=in" not in first
+    assert "fade=t=out:st=3.800:d=0.200" in first
+    assert "fade=t=in:st=0:d=0.200" in second and "fade=t=out:st=4.800:d=0.200" in second
+    # 最后一镜不淡出：结尾的黑留给平台/播放器。
+    assert "fade=t=in:st=0:d=0.200" in last and "fade=t=out" not in last
+    # 推近按帧数摊开（5 秒 24fps = 120 帧 → 除 119），且先进两倍图再输出回目标画幅。
+    assert "zoompan=z='1+0.05*on/119'" in second
+    assert "scale=1440:2560" in second and ":s=720x1280:fps=24" in second
+    assert graph.endswith("[v0][v1][v2]concat=n=3:v=1:a=0[outv]")
+
+
+def test_styled_filter_without_motion_zoom_only_letterboxes():
+    graph = composer._styled_filter(
+        1, [4.0], 720, 1280, transition_s=0.4, motion_zoom=0.0, fps=24
+    )
+    assert "zoompan" not in graph and "fade" not in graph
+    assert "pad=720:1280" in graph and graph.endswith("[outv]")
+
+
+def test_compose_default_stage_encodes_with_transition(tmp_path, monkeypatch, fake_ffmpeg):
+    """默认档位不再走 `-c copy` 流拷贝：转场是逐帧滤镜，只能整段重编码。"""
+    sources = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
+    for path in sources:
+        path.write_bytes(MP4)
+    out = tmp_path / "final.mp4"
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        composer.asyncio,
+        "create_subprocess_exec",
+        _routing_exec(calls, {"a.mp4": 4.0, "b.mp4": 4.0}),
+    )
+
+    asyncio.run(composer.compose(sources, out))
+
+    assert out.is_file()
+    assert not any("concat" in argv for argv in calls), "不该再出现 concat demuxer 直拼"
+    encode = next(argv for argv in calls if "-filter_complex" in argv)
+    graph = encode[encode.index("-filter_complex") + 1]
+    assert "zoompan" in graph and "fade=t=in" in graph and "concat=n=2:v=1:a=0" in graph
+    assert encode[encode.index("-c:v") + 1] == "libx264"
+    assert "-an" in encode, "配音在后面的槽位串拼里装配，这一档不造音轨"
+
+
+def test_compose_single_shot_still_gets_motion_floor(tmp_path, monkeypatch, fake_ffmpeg):
+    """一镜一条片子：没有切点可转场，但静止兜底的推近还是要给。"""
+    source = tmp_path / "a.mp4"
+    source.write_bytes(MP4)
+    out = tmp_path / "final.mp4"
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        composer.asyncio, "create_subprocess_exec", _routing_exec(calls, {"a.mp4": 4.0})
+    )
+
+    asyncio.run(composer.compose([source], out))
+
+    encode = next(argv for argv in calls if "-filter_complex" in argv)
+    assert "zoompan" in encode[encode.index("-filter_complex") + 1]
+
+
+def test_build_voiceover_leads_lines_after_the_first(tmp_path, monkeypatch, fake_ffmpeg):
+    """J-cut：第二句起每句都比画面起点提前 ``VIDEO_AUDIO_LEAD_S``，提前量从第一句尾部扣。"""
+    plan = VoiceoverPlan(_voice_lines(tmp_path))  # (start 0, slot 5) + (start 5, slot 5)
+    out = tmp_path / "voiceover.m4a"
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        composer.asyncio,
+        "create_subprocess_exec",
+        _routing_exec(calls, {"line_0.mp3": 3.0, "line_1.mp3": 4.0}),
+    )
+
+    lead = float(composer.settings.VIDEO_AUDIO_LEAD_S)
+    asyncio.run(composer.build_voiceover("ffmpeg", plan, total_s=10.0, out_path=out))
+
+    graph = next(
+        argv[argv.index("-filter_complex") + 1]
+        for argv in calls
+        if "-filter_complex" in argv
+    )
+    assert f"apad,atrim=0:{5 - lead:.3f}" in graph.split("[s0]")[0], "第一句让出提前量"
+    assert f"apad,atrim=0:5.000" in graph.split("[s1]")[0], "后面每句仍是整槽"
+    # 两句仍然首尾相接：既不重叠（没有插静音补位），也不能靠 adelay/amix 错位。
+    assert "[s0][s1]concat=n=2:v=0:a=1[joined]" in graph
+    assert "adelay" not in graph and "amix" not in graph
+
+
+def test_build_voiceover_first_line_overflow_reports_shrunken_slot(tmp_path, monkeypatch, fake_ffmpeg):
+    """第一句把槽位说满时，报的是扣掉提前量之后的预算，不是原槽长。"""
+    plan = VoiceoverPlan(_voice_lines(tmp_path))
+    out = tmp_path / "voiceover.m4a"
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        composer.asyncio,
+        "create_subprocess_exec",
+        _routing_exec(calls, {"line_0.mp3": 9.0, "line_1.mp3": 3.0}),
+    )
+
+    with pytest.raises(PublishComposeError, match="镜头槽位只有 4.8 秒"):
+        asyncio.run(composer.build_voiceover("ffmpeg", plan, total_s=10.0, out_path=out))
+
+
 # ---- HTTP 端到端 --------------------------------------------------------------
-
-
 def test_compose_endpoint_runs_the_background_job(client, db, monkeypatch):
     project = _project(db)
     _all_clips_ready(db, project.id)
@@ -957,13 +1091,21 @@ class _Proc:
         pass
 
 
-def _duration_stderr(seconds: float) -> bytes:
+def _duration_stderr(seconds: float, *, size: str = "1280x720") -> bytes:
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = seconds % 60
+    # 带一条 Stream 行：探测画面尺寸靠的就是它，形状照 ffmpeg 的真实输出抄。
     return (
-        f"  Duration: {hours:02d}:{minutes:02d}:{secs:05.2f}, start: 0.000000"
+        f"  Duration: {hours:02d}:{minutes:02d}:{secs:05.2f}, start: 0.000000, bitrate: 100 kb/s\n"
+        f"  Stream #0:0(und): Video: h264 (High) (avc1 / 0x31637661), yuv420p, {size}, "
+        f"SAR 1:1 DAR 16:9, 24 fps, 24 tbr, 12288 tbn"
     ).encode()
+
+
+def _named_duration(durations: dict[str, float], name: str) -> bytes:
+    """探针用的假 stderr：没登记过的文件按 4 秒回，别让新滤镜链的探测次数卡住老用例。"""
+    return _duration_stderr(durations.get(name, 4.0))
 
 
 def test_probe_duration_parses_ffmpeg_stderr(tmp_path, monkeypatch, fake_ffmpeg):
@@ -1018,7 +1160,7 @@ def _routing_exec(calls: list, durations: dict[str, float]):
         async def run():
             if argv[-2] == "-i":  # 探针调用：[exe, -nostdin, -hide_banner, -i, path]
                 name = Path(argv[-1]).name
-                return _Proc(1, _duration_stderr(durations[name]))
+                return _Proc(1, _named_duration(durations, name))
             Path(argv[-1]).write_bytes(MP4)
             return _Proc(0)
 
@@ -1028,7 +1170,7 @@ def _routing_exec(calls: list, durations: dict[str, float]):
 
 
 def test_build_voiceover_places_lines_without_atempo_when_they_fit(
-    tmp_path, monkeypatch, fake_ffmpeg
+    tmp_path, monkeypatch, fake_ffmpeg, hard_cut
 ):
     plan = VoiceoverPlan(_voice_lines(tmp_path))
     out = tmp_path / "voiceover.m4a"
@@ -1058,7 +1200,9 @@ def test_build_voiceover_places_lines_without_atempo_when_they_fit(
     assert "aresample=44100" in graph
 
 
-def test_build_voiceover_preserves_silent_shot_gaps(tmp_path, monkeypatch, fake_ffmpeg):
+def test_build_voiceover_preserves_silent_shot_gaps(
+    tmp_path, monkeypatch, fake_ffmpeg, hard_cut
+):
     first, second = _voice_lines(tmp_path)
     second = VoiceoverLine(second.path, second.sort_order, start_s=8.0, slot_s=5.0)
     out = tmp_path / "voiceover.m4a"
@@ -1085,7 +1229,9 @@ def test_build_voiceover_preserves_silent_shot_gaps(tmp_path, monkeypatch, fake_
     assert "atrim=0:13.000" in graph
 
 
-def test_build_voiceover_speeds_up_overflowing_line(tmp_path, monkeypatch, fake_ffmpeg):
+def test_build_voiceover_speeds_up_overflowing_line(
+    tmp_path, monkeypatch, fake_ffmpeg, hard_cut
+):
     plan = VoiceoverPlan(_voice_lines(tmp_path))
     out = tmp_path / "voiceover.m4a"
     calls: list[list[str]] = []
@@ -1111,7 +1257,7 @@ def test_build_voiceover_speeds_up_overflowing_line(tmp_path, monkeypatch, fake_
 
 
 def test_build_voiceover_avoids_amix_longest_eof_hang(
-    tmp_path, monkeypatch, fake_ffmpeg
+    tmp_path, monkeypatch, fake_ffmpeg, hard_cut
 ):
     plan = VoiceoverPlan(_voice_lines(tmp_path))
     out = tmp_path / "voiceover.m4a"
@@ -1136,7 +1282,7 @@ def test_build_voiceover_avoids_amix_longest_eof_hang(
 
 
 def test_build_voiceover_fails_when_speedup_exceeds_cap(
-    tmp_path, monkeypatch, fake_ffmpeg
+    tmp_path, monkeypatch, fake_ffmpeg, hard_cut
 ):
     plan = VoiceoverPlan(_voice_lines(tmp_path))
     out = tmp_path / "voiceover.m4a"
@@ -1155,7 +1301,7 @@ def test_build_voiceover_fails_when_speedup_exceeds_cap(
 
 
 def test_compose_with_voiceover_runs_three_stage_pipeline(
-    tmp_path, monkeypatch, fake_ffmpeg
+    tmp_path, monkeypatch, fake_ffmpeg, hard_cut
 ):
     sources = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
     for path in sources:

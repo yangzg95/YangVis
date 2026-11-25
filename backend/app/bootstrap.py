@@ -513,6 +513,14 @@ def _retire_project_assets(column_names) -> None:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE video_shot DROP COLUMN ref_asset_ids"))
         logger.info("dropped video_shot.ref_asset_ids")
+    # 场景标识：链式衔接用它判断相邻两镜是不是同一个场景。存量行留空串（= 没写标识，
+    # 那一镜不参与衔接），新库随 create_all 已带这一列。
+    if shot_cols and "scene_key" not in shot_cols:
+        with engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE video_shot ADD COLUMN scene_key VARCHAR(64) NOT NULL DEFAULT ''")
+            )
+        logger.info("added video_shot.scene_key")
 
     project_cols = column_names("video_project")
     if project_cols and "assets" in project_cols:

@@ -89,7 +89,12 @@ from app.services.publish import (
     PUBLISH_ACTIVE_STATES,
     PUBLISH_QUEUED,
 )
-from app.services.videos.normalize import shots_from_model, text_of
+from app.services.videos.normalize import (
+    SHOT_MAX_S,
+    SHOT_MIN_S,
+    shots_from_model,
+    text_of,
+)
 from app.services.workflows.builtin import finish_builtin_step, start_builtin
 from app.services.workflows.defs import WorkflowService
 from app.services.workflows.runs import (
@@ -113,10 +118,8 @@ WORKFLOW_SCRIPT = "video-script-generation"
 STEP_BRIEF = "brief"
 STEP_SCRIPT = "script"
 
-# 镜头时长的落地区间，取自方舟 2.0 系的 duration 窗口。seedance 2.5 能到 30 秒，
-# 按低的那一档约束总不会错：模型多给了就裁，用户在工作台里手动加宽就行。
-SHOT_MIN_S = 4
-SHOT_MAX_S = 15
+# 镜头时长的落地区间跟着 normalize.SHOT_MIN_S / SHOT_MAX_S 走：那一层按台词长度
+# 重算时长用的就是这两个数，两处各写一份迟早会漂。
 
 # 平台只影响人设里的节奏与时长偏好，不写死任何平台规则；这里是给策划师的那句话。
 PLATFORM_LABELS = {
@@ -748,6 +751,7 @@ class VideoService:
                 self._db.add(row)
             row.duration_s = max(SHOT_MIN_S, min(SHOT_MAX_S, int(item.get("duration_s") or 5)))
             row.scene = text_of(item.get("scene"), 512) or None
+            row.scene_key = text_of(item.get("scene_key"), 64)
             row.camera = text_of(item.get("camera"), 256) or None
             row.action = text_of(item.get("action"), 256) or None
             row.dialogue = text_of(item.get("dialogue"), 512) or None
@@ -879,6 +883,11 @@ class VideoService:
 
         这一档**不再发首帧**，因此也不要求首帧已出图：方舟禁止首帧/尾帧与参考素材
         混用，而上一版成片已经承载了画面。任务类型随之变成纯「参考生视频」。
+
+        ``params.chain_clips``（同场景自动衔接）是逐镜判定而不是整批开关：只有紧邻的
+        前一镜与它 ``scene_key`` 一致、且这一镜走首帧档，才把上一镜的尾帧换成本镜的
+        首帧输入（见 :func:`chain_source`）。接不上的镜头不报错也不拦批，按自己的
+        首帧单独渲——跨场景硬接会把上一个场景的人或物拖进这一镜，比原来的跳切更糟。
         """
         project = self.get_project(project_id)
         config = self.require_video_config()
@@ -907,10 +916,30 @@ class VideoService:
         # 项目全量镜头的序号 → 行：链式找的是叙事意义上的紧邻前镜，不是本次选中集合
         # 里的前一个（只选 3、5 两镜时，镜 5 要接的是镜 4 而不是镜 3）。
         shot_by_order = {row.sort_order: row for row in rows}
+
+        def chain_source(row: VideoShot) -> Optional[VideoShot]:
+            """这一镜要接的前镜；返回 ``None`` 就是不接，各渲各的。
+
+            只认「相邻且同场景」：两镜的 ``scene_key`` 都写了、且一字不差，才把上一镜
+            的尾帧接过来。标识为空一律不接——宁可不接也不能拿别的场景的尾帧当这一镜的
+            首帧，那种把上一个场景拖进来的接缝比硬切更难看；存量项目和用户手填的镜头
+            因此保持老行为（各镜用自己的首帧，彼此并发）。非首帧档没有可替换的首帧
+            输入，也不接。要整片串起来就把所有镜头写成同一个标识。
+            """
+            prev = shot_by_order.get(row.sort_order - 1)
+            if prev is None or row.gen_mode != MODE_FIRST_FRAME:
+                return None
+            key = (row.scene_key or "").strip()
+            return prev if key and key == (prev.scene_key or "").strip() else None
+
+        # None 也要留在字典里：下面按 sort_order 取，缺键和「取到 None」是两件事。
+        chain_targets = (
+            {row.sort_order: chain_source(row) for row in picked} if chain_on else {}
+        )
         prev_job_ids = [
-            shot_by_order[row.sort_order - 1].video_job_id
-            for row in picked
-            if row.sort_order - 1 in shot_by_order
+            prev.video_job_id
+            for prev in chain_targets.values()
+            if prev is not None and prev.video_job_id
         ]
         prev_jobs = self._latest_jobs(prev_job_ids) if chain_on else {}
         materials = self._materials().materials_for(
@@ -967,52 +996,34 @@ class VideoService:
                 problems.append(
                     f"第 {_shot_nums(no_clip)} 镜还没有可参考的上一版片段，先关掉「参考上一版」或把它们渲出来"
                 )
-        if chain_on:
-            # 严格模式：链式衔接只支持首帧模式，t2v/参考图没有可替换的首帧输入。
-            bad_mode = [
-                row.sort_order for row in picked if row.gen_mode != MODE_FIRST_FRAME
-            ]
-            if bad_mode:
-                problems.append(
-                    f"第 {_shot_nums(bad_mode)} 镜不是首帧模式：尾帧链式渲染要求所有镜头统一走"
-                    "「首帧生视频」，请改回后再渲染，或先关闭链式开关"
-                )
-            no_prev_frame: List[int] = []
-            for row in picked:
-                prev_shot = shot_by_order.get(row.sort_order - 1)
-                if prev_shot is None:
-                    continue  # 项目第一镜是链头，用它自己的首帧定调。
-                prev_job = prev_jobs.get(prev_shot.video_job_id or 0)
-                # 与本函数其他闸门同口径：只认作业行上的 rel_path 非空，不查盘——
-                # 文件真被清掉时，执行期 to_ark_image_url 的 read_blob 会抛可读错误。
-                frame_rel = getattr(prev_job, "last_frame_rel_path", None) if prev_job else None
-                if not frame_rel:
-                    no_prev_frame.append(row.sort_order)
-            if no_prev_frame:
-                problems.append(
-                    f"第 {_shot_nums(no_prev_frame)} 镜的上一镜还没有带尾帧的成功片段，"
-                    "链式渲染要按镜头顺序来：先把紧邻的前一镜渲成功，再渲这些镜头"
-                )
         if problems:
             raise ValueError("；".join(problems) + "。先补齐再渲染")
 
-        # chain 快照必须在入队循环之前预算：循环里会把新作业 id 回写到
-        # row.video_job_id，而 shot_by_order 持有的是同一 session 的同一对象，
-        # 循环内再读前镜指针，读到的就是刚入队的新作业而不是它上一版成功片段。
+        # 衔接对象逐镜现取，而不是入队前一次预算：同一批里前一镜刚建的那条新作业才是
+        # 这一镜要接的东西——成片用的是各镜最新成功的片段，接一版已经被这次渲染作废的
+        # 画面等于把旧片缝进新片。链式默认开之后「一次渲全片」是主路径，它得自己串起来，
+        # 而不是要用户一镜一镜地点（老写法为此整批拒绝，现在改成等与不接）。
+        # 前一镜这次接不上（还没渲过、已经判死、或成功但手上没有尾帧的存量作业）就不接：
+        # 这一镜用自己的首帧单独渲。衔接是观感增益，不值得为它拒掉或拖死一次渲染。
         chain_plans: Dict[int, Dict[str, Any]] = {}
-        if chain_on:
-            for row in picked:
-                prev_shot = shot_by_order.get(row.sort_order - 1)
-                if prev_shot is None:
-                    continue  # 项目第一镜是链头，用它自己的首帧定调。
-                prev_job = prev_jobs.get(prev_shot.video_job_id or 0)
-                if prev_job is not None:
-                    chain_plans[row.sort_order] = {
-                        "enabled": True,
-                        "prev_job_id": prev_job.id,
-                        "prev_shot_order": prev_shot.sort_order,
-                        "injected": False,
-                    }
+        jobs_by_order: Dict[int, MediaJob] = {}
+
+        def chain_plan(prev: VideoShot) -> Optional[Dict[str, Any]]:
+            prev_job = jobs_by_order.get(prev.sort_order) or prev_jobs.get(prev.video_job_id or 0)
+            if prev_job is None:
+                return None
+            if prev_job.status == JOB_SUCCEEDED:
+                # 已经出片的那一版要手上有尾帧才接得过来；存量片段没有尾帧，等也等不出东西。
+                if not prev_job.last_frame_rel_path:
+                    return None
+            elif prev_job.status in JOB_FINAL_STATES:
+                return None  # 失败/取消/过期：不接，免得被衔接闸门连带判死。
+            return {
+                "enabled": True,
+                "prev_job_id": prev_job.id,
+                "prev_shot_order": prev.sort_order,
+                "injected": False,
+            }
 
         created: List[MediaJob] = []
         for row in picked:
@@ -1064,10 +1075,14 @@ class VideoService:
                 },
                 "images": images,
             }
-            if chain_on and row.sort_order in chain_plans:
-                # 快照上一镜的视频作业 id 而不是镜头 id：上镜之后重做产生新作业，
-                # 不影响这次已经入队的衔接，与 publish_job 的 sources 快照同哲学。
-                request_body["chain"] = chain_plans[row.sort_order]
+            prev_shot = chain_targets.get(row.sort_order) if chain_on else None
+            if prev_shot is not None:
+                plan = chain_plan(prev_shot)
+                if plan is not None:
+                    chain_plans[row.sort_order] = plan
+                    # 快照的是**当时**那条前镜作业的 id：上镜之后重做产生新作业，
+                    # 不影响这次已经入队的衔接，与 publish_job 的 sources 快照同哲学。
+                    request_body["chain"] = plan
             job = media_jobs.enqueue(
                 self._db,
                 self._owner_id,
@@ -1078,14 +1093,16 @@ class VideoService:
                 config=config,
             )
             row.video_job_id = job.id
+            jobs_by_order[row.sort_order] = job
             created.append(job)
         self._db.commit()
         logger.info(
-            "video clips enqueued: project=%s owner=%s jobs=%s materials=%s characters=%s "
-            "reference_previous=%s",
+            "video clips enqueued: project=%s owner=%s jobs=%s chained=%s materials=%s "
+            "characters=%s reference_previous=%s",
             project.id,
             self._owner_id,
             len(created),
+            len(chain_plans),
             len(materials),
             len(cast_paths),
             reference_previous,
@@ -1596,6 +1613,7 @@ class VideoService:
                     start_s=row.start_s,
                     duration_s=row.duration_s,
                     scene=row.scene or "",
+                    scene_key=row.scene_key or "",
                     camera=row.camera or "",
                     action=row.action or "",
                     dialogue=row.dialogue or "",

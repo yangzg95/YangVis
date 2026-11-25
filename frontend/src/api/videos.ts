@@ -64,7 +64,7 @@ export interface VideoParams {
   tts_enabled: boolean
   /** 音色 ID；空串表示用服务端 TTS_DEFAULT_VOICE。 */
   tts_voice: string
-  /** 尾帧链式渲染：上一镜尾帧作为下一镜首帧，镜间画面物理连续；开启后同项目片段串行渲染。 */
+  /** 尾帧链式渲染：上一镜尾帧作为下一镜首帧，镜间画面物理连续；只在相邻两镜 scene_key 相同时发生。 */
   chain_clips: boolean
 }
 
@@ -104,6 +104,8 @@ export interface VideoShot {
   start_s: number
   duration_s: number
   scene: string
+  /** 场景标识（短名词，不是描述句）：相邻两镜写成同一个词才会自动衔接画面，空 = 不参与衔接。 */
+  scene_key: string
   camera: string
   action: string
   dialogue: string
@@ -122,6 +124,7 @@ export interface VideoShotInput {
   id?: number | null
   duration_s: number
   scene: string
+  scene_key: string
   camera: string
   action: string
   dialogue: string

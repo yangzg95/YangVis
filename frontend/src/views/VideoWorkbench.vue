@@ -221,6 +221,18 @@
                     @change="markShotDirty"
                   />
                 </a-form-item>
+                <a-form-item label="场景标识">
+                  <a-input
+                    v-model:value="current.scene_key"
+                    :maxlength="64"
+                    placeholder="例如：办公室工位"
+                    @change="markShotDirty"
+                  />
+                  <div class="hint">
+                    相邻两镜写成同一个词才会自动衔接画面（上一镜的尾帧当下一镜的首帧）；
+                    换了地方就换个词。留空表示这一镜不参与衔接。
+                  </div>
+                </a-form-item>
                 <a-form-item label="首帧提示词">
                   <a-textarea
                     v-model:value="current.image_prompt"
@@ -631,15 +643,16 @@
                     </a-form-item>
                   </a-col>
                 </a-row>
-                <a-form-item label="尾帧链式衔接">
+                <a-form-item label="同场景自动衔接">
                   <a-switch
                     v-model:checked="params.chain_clips"
                     @change="dirtyProject = true"
                   />
                   <div class="hint">
-                    开启后按镜头顺序渲染：上一镜片段的尾帧自动成为下一镜的首帧，人物与场景跨镜物理连续，
-                    不再每镜重新抽卡。代价是同项目片段从并发改为串行，总渲染时间变长；要求所有镜头都是
-                    「首帧生视频」，且要按顺序逐镜渲（上一镜没成功时下一镜会排队等待）。
+                    默认开：相邻两镜的「场景标识」写成同一个词时，上一镜片段的尾帧自动成为下一镜的首帧，
+                    人物与场景在这一段里物理连续，不再每镜重新抽卡。场景换了标识就各渲各的，
+                    不会把上一个场景的画面拖进来。只有同一场景的那几镜会串行（下一镜排队等上一镜出片），
+                    其余镜头照旧并发；没填标识的镜头不参与衔接。
                   </div>
                 </a-form-item>
                 <a-form-item label="片段自带音频">
@@ -1123,8 +1136,8 @@
         type="warning"
         show-icon
         class="render-alert"
-        message="尾帧链式衔接已开启：片段将按镜头顺序串行渲染"
-        description="上一镜成功并产出尾帧后下一镜才会提交，后面的镜头会停在「等待第 N 镜」；任一镜失败会阻断后续镜头，需按顺序重渲。"
+        message="同场景自动衔接已开启：标识相同的相邻镜头会串行渲染"
+        description="上一镜成功并产出尾帧后下一镜才提交，中间会停在「等待第 N 镜」。场景标识不同、或没填标识的镜头各渲各的，照旧并发；接不上的那一镜用自己的首帧出片，不会因为前一镜没出片而被拒。"
       />
       <a-alert
         v-if="clipResolutionWarning"
@@ -1331,7 +1344,8 @@ const params = reactive<VideoParams>({
   image_size: '2K',
   tts_enabled: false,
   tts_voice: '',
-  chain_clips: false,
+  // 与后端 VideoParams 默认一致：同场景自动衔接默认开，接不上的镜头自己渲。
+  chain_clips: true,
 })
 const publish = reactive<VideoPublish>({ title_candidates: [], tags: [], cover_prompt: '' })
 
@@ -1673,6 +1687,7 @@ function blankShot(): VideoShot {
     start_s: 0,
     duration_s: 5,
     scene: '',
+    scene_key: '',
     camera: '',
     action: '',
     dialogue: '',
@@ -1914,6 +1929,7 @@ function shotsInput(): VideoShotInput[] {
     id: shot.id || null,
     duration_s: shot.duration_s,
     scene: shot.scene,
+    scene_key: shot.scene_key,
     camera: shot.camera,
     action: shot.action,
     dialogue: shot.dialogue,

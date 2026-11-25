@@ -10,6 +10,7 @@ function shot(over: Partial<VideoShot> = {}): VideoShot {
     start_s: 0,
     duration_s: 5,
     scene: '',
+    scene_key: '',
     camera: '',
     action: '',
     dialogue: '',

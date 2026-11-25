@@ -3081,10 +3081,11 @@ class VideoParams(BaseModel):
     tts_enabled: bool = False
     # 音色 ID（各家模型的音色字表不同，代码不做枚举）；空串 = 用系统默认音色。
     tts_voice: str = Field(default="", max_length=128)
-    # 尾帧链式渲染：上一镜片段的尾帧作为下一镜的首帧输入，镜间画面物理连续。
-    # 开了它片段就从并发变串行（同项目内一次只跑一条），严格模式下非首帧模式的
-    # 镜头入队即拒。默认关，关掉时每条片段仍是互相独立的一次生成。
-    chain_clips: bool = False
+    # 同场景链式衔接：相邻两镜的场景标识（scene_key）相同且这一镜走首帧模式时，
+    # 把上一镜片段的尾帧当这一镜的首帧输入，镜间画面物理连续。代价是片段由并发变
+    # 串行（同项目一次只跑一条），且要先有前镜的成功片段才能渲后一镜。
+    # 默认开：衔接不上（标识为空、模式不是首帧、前镜还没出片）时那一镜自己渲，不拦。
+    chain_clips: bool = True
 
 
 class VideoStyle(BaseModel):
@@ -3387,6 +3388,8 @@ class VideoShotOut(BaseModel):
     start_s: int = 0
     duration_s: int = 5
     scene: str = ""
+    # 场景标识（给系统看的短名词，不是描述句）：链式衔接靠它判断相邻两镜是否同场景。
+    scene_key: str = ""
     camera: str = ""
     action: str = ""
     dialogue: str = ""
@@ -3411,6 +3414,8 @@ class VideoShotIn(BaseModel):
     id: Optional[int] = None
     duration_s: int = Field(default=5, ge=2, le=30)
     scene: str = Field(default="", max_length=512)
+    # 与 VideoShotOut 同义：同一场景的相邻镜头写同一个标识，链式衔接才认。
+    scene_key: str = Field(default="", max_length=64)
     camera: str = Field(default="", max_length=256)
     action: str = Field(default="", max_length=256)
     dialogue: str = Field(default="", max_length=512)

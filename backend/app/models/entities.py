@@ -1304,6 +1304,9 @@ class VideoShot(Base):
 
     # 给人看的四行：画面、运镜、动作、台词/字幕。
     scene: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # 场景标识（分镜师写的「办公室工位」这种短名词）：链式衔接只认它，用来判断相邻
+    # 两镜是不是同一个场景。空串是没写——老数据与用户手填的镜头都落在这一档。
+    scene_key: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     camera: Mapped[str | None] = mapped_column(String(256), nullable=True)
     action: Mapped[str | None] = mapped_column(String(256), nullable=True)
     dialogue: Mapped[str | None] = mapped_column(String(512), nullable=True)
