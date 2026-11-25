@@ -13,6 +13,7 @@ venv/
 env/
 
 # Frontend
+/node_modules/
 frontend/dist/
 frontend/node_modules/
 frontend/.vite/
@@ -52,6 +53,7 @@ build/
 .claude/
 .agents/
 .jbeval/
+.design-qa/
 /backend/101653523865571655119686385private.json
 /.zcode/
 /.openidea/
