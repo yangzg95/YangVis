@@ -352,10 +352,11 @@ location ^~ /api/ops/servers/ {
 
 ### 短视频 TTS 配音
 
-成片合成可选叠 TTS 配音：工作台「渲染参数」里打开「TTS 配音」开关，合成时按每一镜的台词逐句调 TTS（用途 `tts` 的模型配置，与图片/视频同一张 `model_config` 表；支持 Agent Plan 的 openspeech 套餐端点与 OpenAI 兼容 `/audio/speech` 两种协议，按模型地址自动识别），再由本机 ffmpeg 按镜头时间轴混音封装。片段始终静音，`generate_audio` 保持关闭。零 DDL，开关关闭时链路与之前完全一致。详见 [video-tts.md](docs/features/video-tts.md)。
+成片合成可选叠 TTS 配音：工作台「渲染参数」里打开「TTS 配音」开关，合成时按每一镜的台词逐句调 TTS（用途 `tts` 的模型配置，与图片/视频同一张 `model_config` 表；支持 Agent Plan 的 openspeech 套餐端点与 OpenAI 兼容 `/audio/speech` 两种协议，按模型地址自动识别），再由本机 ffmpeg 按镜头槽位补齐/截短并依次拼接音轨。片段始终静音，`generate_audio` 保持关闭。零 DDL，开关关闭时链路与之前完全一致。详见 [video-tts.md](docs/features/video-tts.md)。
 
 - 音色取项目参数 `tts_voice`，留空退到环境变量 `TTS_DEFAULT_VOICE`；两者都空时入队被拒。
 - 台词比镜头槽位长时自动 `atempo` 加速，倍率超过 `TTS_MAX_ATEMPO`（默认 1.6）则作业失败、点名镜号，不产出加速怪声。
+- 发布作业显示真实阶段进度：TTS 按完成句数，FFmpeg 按 `out_time_us` 已处理时长；进度复用 `publish_job.request.progress` 和详情接口的 5 秒轮询，不新增数据库列。
 - 相关环境变量：`TTS_DEFAULT_VOICE`、`TTS_HTTP_TIMEOUT`（60s）、`TTS_AUDIO_MAX_BYTES`（10MB）、`TTS_MAX_ATEMPO`（1.6）、`TTS_SAMPLE_RATE`（44100）。
 
 ### 短视频成片合成超时
@@ -369,6 +370,8 @@ PUBLISH_COMPOSE_TIMEOUT=3600
 ```
 
 改后执行 `docker-compose up -d app` 重建应用容器使配置生效。若反复卡在「片段重编码」，优先统一各镜的生成模型、分辨率和帧率，避免触发整片重编码；单纯继续调大超时不会加快编码。
+
+若旧版本卡在「配音混音」且 FFmpeg 输出为空，是 `imageio-ffmpeg` 自带的 FFmpeg 4.2.2 在 `adelay + amix=duration=longest` 上等待 EOF 的已知卡死，不是 TTS 慢或机器性能不足。当前实现已改为逐镜头槽位 `apad/atrim + concat`；部署包含该修复的版本即可，不需要继续调大 `PUBLISH_COMPOSE_TIMEOUT`。
 
 ## API 概览
 

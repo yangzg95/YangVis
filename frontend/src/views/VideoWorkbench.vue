@@ -759,6 +759,30 @@
                         {{ publishStatusText(publishJob.status) }}
                       </a-tag>
                     </div>
+                    <div v-if="publishJob.progress || publishActive" class="publish-progress">
+                      <div class="job-row">
+                        <span>{{ publishStageText }}</span>
+                        <span>{{ publishPercent }}%</span>
+                      </div>
+                      <a-progress
+                        :percent="publishPercent"
+                        :status="publishProgressStatus"
+                        :show-info="false"
+                        size="small"
+                      />
+                      <div class="job-row publish-progress-detail">
+                        <span class="muted">
+                          {{ publishJob.progress?.detail || '等待后台开始合成' }}
+                        </span>
+                        <span
+                          v-if="publishJob.progress?.stage === 'tts' && publishJob.progress.total"
+                          class="muted"
+                        >
+                          {{ publishJob.progress.current || 0 }}/{{ publishJob.progress.total }} 句
+                        </span>
+                      </div>
+                      <div class="hint">按已完成配音句数和 FFmpeg 已处理时长计算，每 5 秒刷新。</div>
+                    </div>
                     <div class="job-row">
                       <span class="muted">用时</span>
                       <span>{{ publishJob.elapsed_ms ? fmtElapsed(publishJob.elapsed_ms) : '—' }}</span>
@@ -1474,6 +1498,35 @@ const clipResolutionWarning = computed(() => {
 const publishActive = computed(
   () => Boolean(publishJob.value) && PUBLISH_ACTIVE.includes(publishJob.value!.status),
 )
+const publishPercent = computed(() => {
+  const job = publishJob.value
+  if (!job) return 0
+  if (job.status === 'succeeded') return 100
+  return Math.min(100, Math.max(0, job.progress?.percent ?? 0))
+})
+const publishStageText = computed(() => {
+  const stage = publishJob.value?.progress?.stage
+  if (!stage) return publishJob.value ? publishStatusText(publishJob.value.status) : ''
+  return (
+    {
+      queued: '等待开始',
+      validating: '检查片段',
+      tts: '生成配音',
+      concat: '拼接片段',
+      reencode: '重编码片段',
+      voiceover: '混音配音',
+      mux: '封装音视频',
+      storing: '保存成片',
+      succeeded: '合成完成',
+      failed: '合成失败',
+    }[stage] || stage
+  )
+})
+const publishProgressStatus = computed((): 'active' | 'exception' | 'success' => {
+  if (publishJob.value?.status === 'failed') return 'exception'
+  if (publishJob.value?.status === 'succeeded') return 'success'
+  return 'active'
+})
 /**
  * 合成按钮的前置门槛，与服务端 ``compose_publish`` 的拒绝一一对应：
  * 预检先把人话摆在按钮旁边，服务端那道是绕过界面时的同一口径。
@@ -3162,6 +3215,22 @@ onUnmounted(() => window.removeEventListener('beforeunload', guard))
 /* 发布区的作业卡片夹在按钮行下面，补一点呼吸。 */
 .publish-job {
   margin-top: 10px;
+}
+
+.publish-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 0 4px;
+}
+
+.publish-progress :deep(.ant-progress) {
+  margin-inline-end: 0;
+  line-height: 1;
+}
+
+.publish-progress-detail {
+  align-items: flex-start;
 }
 
 .job-kind {

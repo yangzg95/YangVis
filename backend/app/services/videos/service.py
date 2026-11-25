@@ -45,6 +45,7 @@ from app.models.schemas import (
     MediaJobOut,
     ModelPurpose,
     PublishJobOut,
+    PublishJobProgress,
     VideoBrief,
     VideoParams,
     VideoProjectDetail,
@@ -1695,6 +1696,12 @@ def _publish_out(job: Optional[PublishJob]) -> Optional[PublishJobOut]:
     """发布作业的对外视图：成片地址同样只给站内的，rel_path 不出门。"""
     if job is None:
         return None
+    raw_progress = (job.request or {}).get("progress")
+    progress = (
+        PublishJobProgress.model_validate(raw_progress)
+        if isinstance(raw_progress, dict)
+        else None
+    )
     return PublishJobOut(
         id=job.id,
         platform=job.platform,
@@ -1706,4 +1713,5 @@ def _publish_out(job: Optional[PublishJob]) -> Optional[PublishJobOut]:
         elapsed_ms=job.elapsed_ms,
         created_at=job.created_at,
         finished_at=job.finished_at,
+        progress=progress,
     )

@@ -3608,6 +3608,16 @@ PublishJobStatus = Literal["queued", "running", "succeeded", "failed"]
 PublishChannel = Literal["manual"]
 
 
+class PublishJobProgress(BaseModel):
+    """成片作业的实时进度；百分比只由真实句数或 ffmpeg 输出时间推进。"""
+
+    stage: str
+    percent: int = Field(default=0, ge=0, le=100)
+    detail: str = ""
+    current: Optional[int] = None
+    total: Optional[int] = None
+
+
 class PublishJobOut(BaseModel):
     """一条发布作业的对外形状：合成状态与成片地址都从这一行读。
 
@@ -3626,6 +3636,7 @@ class PublishJobOut(BaseModel):
     elapsed_ms: Optional[int] = None
     created_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
+    progress: Optional[PublishJobProgress] = None
 
 
 # ---- 智能应用 · 创作（写小说 / 写文章）-----------------------------------------

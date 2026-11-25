@@ -157,6 +157,15 @@ export interface VideoScriptRun {
 export type PublishJobStatus = 'queued' | 'running' | 'succeeded' | 'failed'
 export type PublishChannel = 'manual'
 
+export interface PublishJobProgress {
+  stage: string
+  percent: number
+  detail: string
+  /** TTS 等按数量推进的阶段给出已完成/总数；其他阶段为 null。 */
+  current: number | null
+  total: number | null
+}
+
 /**
  * 一条发布作业（成片合成 + 手动发布包）。``url`` 是成片的站内地址，
  * 还没合成成功时是空串——rel_path 不出后端，前端只认这个地址。
@@ -173,6 +182,7 @@ export interface PublishJob {
   elapsed_ms: number | null
   created_at: string | null
   finished_at: string | null
+  progress: PublishJobProgress | null
 }
 
 export interface VideoStageProgress {

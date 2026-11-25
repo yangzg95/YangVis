@@ -14,7 +14,8 @@
          └─ OpenAI 兼容：Bearer + /audio/speech，直接回音频二进制
          └─ 临时目录 line_00.mp3、line_01.mp3 …
 片段（静音）─concat→ silent.mp4
-各句 mp3 ─atempo（超限兜底）→adelay（按镜头起点定位，逐声道列延迟）→amix→volume（补回增益）→ voiceover.m4a
+各句 mp3 ─atempo（超限兜底）→apad/atrim（补齐/截到镜头槽位）─┐
+无台词空镜 ─anullsrc/atrim（等长静音）──────────────────────────┴→concat（按时间轴串拼）→ voiceover.m4a
 silent.mp4 + voiceover.m4a ─流拷贝封装→ final.mp4
 ```
 
@@ -46,10 +47,13 @@ Agent Plan 专属 Key 走 HTTP 调用的**，费用从套餐 AFP 额度抵扣（
   开关打开但语音模型未测通时，页面在开关下方直接出配置引导，合成按钮同步置灰。
 - **合成成片**：入队时把台词、每镜起点/槽位、音色、模型信息快照进 `publish_job.request.tts`，
   之后改分镜不影响这次作业。无台词的镜头不进快照，时间轴上它就是一段静音。
-- **台词太长怎么办**：合成后逐句探测时长，配音比镜头槽位长则按倍率 `atempo` 加速
-  （先加速再定位，避免把定位静音一起缩短）；倍率超过 `TTS_MAX_ATEMPO`（默认 1.6）
-  直接判作业失败，报错点出是第几镜、配音多长、槽位多长，让人删台词或加长镜头——
-  不产出加速怪声，也不悄悄截断句子。
+- **台词太长怎么办**：合成后逐句探测时长，配音比镜头槽位长则按倍率 `atempo` 加速；
+  倍率超过 `TTS_MAX_ATEMPO`（默认 1.6）直接判作业失败，报错点出是第几镜、配音多长、
+  槽位多长，让人删台词或加长镜头——不产出加速怪声，也不悄悄截断句子。无台词镜头
+  不合成语音，但会在时间轴里保留等长静音段，不会让后面的台词提前。
+- **合成进度**：发布作业卡片显示当前阶段、百分比、TTS 已完成/总句数和现场说明。
+  TTS 按真实完成句数推进；FFmpeg 按 `-progress` 的 `out_time_us` 计算当前阶段已处理时长。
+  进度写进 `publish_job.request.progress`，复用详情接口的 5 秒轮询，不新增数据库列。
 - **编辑期试听与时长预检**：打开 TTS 开关后，每镜「台词」下出现「试听这句」按钮，
   用项目音色（留空走 `TTS_DEFAULT_VOICE`）真合成一段 mp3 就地播放。试听是真计费
   调用，只由按钮显式触发；同一按钮承担播放/停止，切镜头或离开页面自动停。台词框
@@ -82,41 +86,41 @@ concat demuxer 拼的是同参数片段，音频塞进去会让「同编码直�
 三段式（无声拼接 → 混音 → 封装）下视频流只编/拷一次，最后一步是纯 remux（`-c copy`），
 失败时还能从中间片 `silent.mp4` / `voiceover.m4a` 分清是拼接还是混音的锅。
 
-### amix 后为什么挂 volume=N 补增益
+### 为什么按镜头槽位 concat，不用 adelay + amix
 
-ffmpeg 的 `amix` 默认按输入数把音量等比调小（防削顶的老默认值），单人配音各句在时间轴
-上互不重叠，这个默认只会把人声整体压闷。新版 ffmpeg（≥4.3）可以用 `normalize=0` 关掉
-它，但部署机是更老的 ffmpeg 时该选项不存在，整张滤镜图会被拒（报
-`Option 'normalize' not found`）。兼容写法是接受默认的 1/N 缩放、在混音后挂一个
-`volume=N` 把增益乘回来——任一时刻只有一句在响，补完与 `normalize=0` 数学等价且不会
-削顶，而 `volume` 滤镜所有 ffmpeg 版本都自带。再用 `apad + atrim` 把音轨垫到、也截到
-与视频完全等长，封装时的 `-shortest` 只是双保险。
+线上 `imageio-ffmpeg` 自带的是 FFmpeg 4.2.2。该版本在多个 `adelay` 输入上使用
+`amix=duration=longest` 时会一直等待 EOF：哪怕只有 7 句、成片总共 30 秒，也会无
+stderr 输出地卡到 1800 秒超时。改成 `duration=first` 虽能结束，却会在第一句输入
+结束时停止混音，把后面的台词全部丢掉，也不能用。
 
-### adelay 为什么逐声道列延迟，不用 all=1
+现在的做法是每句先按需 `atempo`，再用 `apad + atrim` 补齐/截到自己的镜头槽位；
+无台词镜头按 `start_s` 的间隔插入 `anullsrc + atrim` 静音段，最后用音频 `concat`
+按真实时间轴串拼。槽位之间本来连续，因此不需要绝对起点延迟；每个输入都在自己的
+槽位边界结束，也不会出现等待其他输入 EOF 的死锁。实测同一组 7 句/30 秒输入在新
+滤镜下约 0.64 秒完成，输出时长仍为 30 秒；带 4 秒无台词空镜的 12 秒时间轴也已
+验证静音段位置与总时长。
 
-`adelay=DELAY:all=1` 里的 `all` 选项是 FFmpeg 4.4 才加的，部署机若挂着更老的 ffmpeg
-（或 `IMAGEIO_FFMPEG_EXE` 指向系统旧二进制），整张滤镜图会在初始化阶段被拒，报
-`Option 'all' not found`。改为探针先读出每句 mp3 的声道数，按声道显式列延迟：
-mono 写 `adelay=DELAY`，stereo 写 `adelay=DELAY|DELAY`——这套语法所有 ffmpeg 版本
-都认，且与 `all=1` 语义完全等价。声道信息从 `probe_audio` 复用的那次 `ffmpeg -i`
-stderr 里解析，不新增进程调用；解析不到冷门布局时按单声道兜底并打 warning。同理，
-`amix` 的 `normalize=0`（FFmpeg 4.3 才有）也不用，改成混音后 `volume=N` 补增益，
-见上一节。
+### 进度为什么不用假动画
+
+TTS 的分子是已成功落盘的句数，分母是快照里的非空台词数；FFmpeg 的分子是
+`out_time_us`，分母是当前阶段对应的成片/音轨时长。阶段之间按固定区间换算成
+0–100%，所以百分比表示“当前阶段的真实处理量”，不是整片剩余时间预测。秒级完成
+的直拼可能直接从阶段起点跳到终点，这是真实情况，不用定时器补一段假进度。
 
 ## 实现结构
 
 | 位置 | 职责 |
 | --- | --- |
 | `backend/app/services/media/tts.py` | 双协议 TTS 客户端：`_is_plan_endpoint` 按 base_url 分流；套餐分支处理 X-Api-Key/X-Api-Resource-Id 头、`req_params` 请求体与 JSON 行流（base64 分块拼回、终止码 20000000）；OpenAI 分支处理 Bearer 鉴权与二进制/JSON 双态响应；中文错误翻译与大小闸门 |
-| `backend/app/services/publish/composer.py` | `VoiceoverLine/VoiceoverPlan`、`probe_duration`/`probe_audio`（无 ffprobe，一次 `ffmpeg -i` 的 stderr 同时解析时长与声道数）、`build_voiceover`（atempo→adelay 逐声道延迟→amix→volume 补增益→apad/atrim，全滤镜兼容旧版 ffmpeg）、`mux_voiceover`（流拷贝封装）；无配音走原 `_concat_silent` |
-| `backend/app/services/publish/runner.py` | `_synthesize_voiceover`：读快照、运行时解析 TTS 默认配置、逐句合成落临时目录、构造时间轴计划 |
-| `backend/app/services/videos/service.py` | `_tts_snapshot`：入队门槛（配置存在/已测通/音色非空/至少一句台词）与 `request.tts` 快照 |
+| `backend/app/services/publish/composer.py` | `VoiceoverLine/VoiceoverPlan`、`probe_duration`（无 ffprobe，从 `ffmpeg -i` stderr 解析时长）、`build_voiceover`（atempo→逐槽位 apad/atrim→按 start_s 插入无台词静音段→音频 concat，避开 FFmpeg 4.2.2 的 amix EOF 卡死）、`mux_voiceover`（流拷贝封装）；`-progress` 解析 `out_time_us` 给上层回报真实阶段进度；无配音走原 `_concat_silent` |
+| `backend/app/services/publish/runner.py` | `_synthesize_voiceover`：读快照、运行时解析 TTS 默认配置、逐句合成落临时目录、构造时间轴计划；按完成句数写 `request.progress`，串联 FFmpeg 与落盘阶段 |
+| `backend/app/services/videos/service.py` | `_tts_snapshot`：入队门槛（配置存在/已测通/音色非空/至少一句台词）与 `request.tts` 快照；`_publish_out` 只把进度白名单字段暴露给详情接口 |
 | `backend/app/routers/videos.py` | `POST /office/videos/tts-preview`：单句试听，复用发布作业的准入口径（默认 TTS 配置存在且已测通、音色非空），成功直接回 `audio/mpeg` 二进制，失败仍走统一信封 JSON |
 | `backend/app/routers/settings.py` | tts 用途的探测分支与 `/settings/models/status` 的 `tts` 就绪位（不参与短视频页面准入，只在工作台开关处提示） |
-| `backend/app/models/schemas.py` | `ModelPurpose.TTS`、`VideoParams.tts_enabled/tts_voice`、`ReadinessStatus.tts` |
+| `backend/app/models/schemas.py` | `ModelPurpose.TTS`、`VideoParams.tts_enabled/tts_voice`、`ReadinessStatus.tts`、`PublishJobProgress` |
 | `backend/app/config.py` | `TTS_HTTP_TIMEOUT` / `TTS_DEFAULT_VOICE` / `TTS_AUDIO_MAX_BYTES` / `TTS_MAX_ATEMPO` / `TTS_SAMPLE_RATE` |
 | `frontend/src/views/Settings.vue` | 用途「语音」的筛选、表单、型号提示与 request_extra 透传入口 |
-| `frontend/src/views/VideoWorkbench.vue` | 配音开关、音色输入、未就绪告警与合成按钮前置门槛、单句试听（blob 播放）与台词时长三档预检 |
+| `frontend/src/views/VideoWorkbench.vue` | 配音开关、音色输入、未就绪告警与合成按钮前置门槛、单句试听（blob 播放）、台词时长三档预检、发布作业阶段进度条 |
 | `frontend/src/api/{settings,videos}.ts` | `ModelPurpose` / `ReadinessStatus.tts` / `VideoParams` 两个新字段 |
 
 零 DDL：`model_config.purpose` 与 `video_project.params` 本来就是 VARCHAR/JSON，
@@ -130,7 +134,7 @@ stderr 里解析，不新增进程调用；解析不到冷门布局时按单声�
 | `TTS_HTTP_TIMEOUT` | 60 | 单句合成的 HTTP 超时（秒） |
 | `TTS_AUDIO_MAX_BYTES` | 10 MB | 单句音频落盘前闸门，超出判失败（防把错误页当音频存盘） |
 | `TTS_MAX_ATEMPO` | 1.6 | 台词超槽位时的最大加速倍率，超出即作业失败 |
-| `TTS_SAMPLE_RATE` | 44100 | 配音轨统一重采样率，避免各句 mp3 采样率不一被 amix 拒绝 |
+| `TTS_SAMPLE_RATE` | 44100 | 配音轨统一重采样率，避免各句 mp3 采样率不一致 |
 
 ## 测试
 
@@ -142,8 +146,10 @@ stderr 里解析，不新增进程调用；解析不到冷门布局时按单声�
 - `backend/tests/test_publish_compose.py` 新增：入队四道门（无配置/未测通/无音色/
   全空台词）、服务端默认音色兜底、快照只保留有台词的镜头且起点按时间轴累加、runner
   逐句合成并构造计划、配置入队后被删则作业失败、TTS 异常落作业行；合成器侧覆盖
-  Duration 解析、放得下不加速、超限按倍率加速且滤镜顺序正确、超上限失败、三段式
-  六次 ffmpeg 调用的形状与流拷贝封装。
+  Duration 解析、放得下不加速、超限按倍率加速、超上限失败、逐槽位 concat 且不再出现
+  `amix=duration=longest`、无台词空镜按 `start_s` 插入静音段、三段式六次 ffmpeg 调用的
+  形状与流拷贝封装；进度侧覆盖
+  `out_time_us` 解析、阶段百分比区间、TTS 句数、失败保留现场与终态 100%。
 - 既有无声链路的测试全部保留原断言（`voiceover is None`、回退档 `-an`），保证开关
   关闭时行为零变化。
 - `test_videos.py` 的 `tts_preview` 用例：成功回 mp3 二进制且文本/音色透传、

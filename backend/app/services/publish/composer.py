@@ -14,9 +14,9 @@ FreeType」是同一种取舍。
   ``-an``，不让编码器自己造一条静音轨。
 
 配音（TTS）是叠在视频拼接**之后**的第三段：每句台词已经按镜头单独合成成 mp3，
-本模块只负责把它们放上时间轴（``adelay``）、说太长的句子加速（``atempo``）、
-混成一条 AAC（``amix``），再无损封装进成片。语音从哪来是 :mod:`app.services.media.tts`
-与 ``runner`` 的事，这里只认识「音频文件 + 起点 + 槽位」。
+本模块把它们按镜头槽位补齐/截短后依次拼接（``concat``），说太长的句子先加速
+（``atempo``），最后统一重采样成 AAC 并封装进成片。语音从哪来是
+:mod:`app.services.media.tts` 与 ``runner`` 的事，这里只认识「音频文件 + 槽位」。
 
 调用方（``runner``）负责临时目录生命周期与产物登记，本模块只产出文件。
 """
@@ -28,7 +28,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Awaitable, Callable, Sequence
 
 from app.config import Settings, get_settings
 
@@ -41,24 +41,6 @@ _STERR_TAIL = 400
 
 # ffmpeg -i 的 stderr 里时长行形状：「Duration: 00:00:05.04, start: 0.000000, ...」。
 _DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
-# 音频流行形状：「Stream #0:0: Audio: mp3, 44100 Hz, mono, fltp, 128 kb/s」。
-# 声道布局那一栏可能是 mono/stereo、5.1(side) 或「2 channels」，截到逗号/括号前。
-_AUDIO_STREAM_RE = re.compile(r"Audio:\s*[^,]+,\s*\d+\s*Hz,\s*([^,\[(]+)")
-# 常见布局名 → 声道数；TTS 产物实际只会落在 mono/stereo，其余只是兜底。
-_LAYOUT_CHANNELS = {
-    "mono": 1,
-    "stereo": 2,
-    "2.1": 3,
-    "3.0": 3,
-    "4.0": 4,
-    "quad": 4,
-    "5.0": 5,
-    "5.1": 6,
-    "6.0": 6,
-    "6.1": 7,
-    "7.0": 7,
-    "7.1": 8,
-}
 # 实测比槽位长这一点点以内不加速：帧级误差不值得为它挂一个 atempo 滤镜。
 _SLOT_TOLERANCE_S = 0.05
 _AUDIO_BITRATE = "128k"
@@ -66,6 +48,20 @@ _AUDIO_BITRATE = "128k"
 
 class PublishComposeError(RuntimeError):
     """合成失败：ffmpeg 缺失、超时或返回非零。路由按业务拒绝（``code=-1``）呈现。"""
+
+
+@dataclass(frozen=True)
+class ComposeProgress:
+    """一次合成里的可展示进度；stage 是稳定键，detail 是给人看的现场。"""
+
+    stage: str
+    percent: int
+    detail: str
+    current: int | None = None
+    total: int | None = None
+
+
+ProgressCallback = Callable[[ComposeProgress], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -116,23 +112,85 @@ def write_concat_list(sources: Sequence[Path], list_file: Path) -> None:
     list_file.write_text("\n".join(lines), encoding="utf-8")
 
 
-async def _run_ffmpeg(args: Sequence[str], *, stage: str = "处理") -> tuple[int, str]:
-    """跑一次 ffmpeg，返回 ``(返回码, stderr 文本)``；超时杀进程并抛错。"""
+async def _consume_lines(stream, chunks: list[bytes], on_line=None) -> bytes:
+    while line := await stream.readline():
+        chunks.append(line)
+        if on_line is not None:
+            await on_line(line.decode("utf-8", "replace"))
+    return b"".join(chunks)
+
+
+async def _run_ffmpeg(
+    args: Sequence[str],
+    *,
+    stage: str = "处理",
+    on_progress: Callable[[float], Awaitable[None]] | None = None,
+    duration_s: float | None = None,
+) -> tuple[int, str]:
+    """跑一次 ffmpeg，返回 ``(返回码, stderr 文本)``；超时杀进程并抛错。
+
+    传了 ``on_progress`` 时让 ffmpeg 把机器可读进度写到 stdout，回调参数是
+    ``0..1``。总时长优先用调用方算好的配音/视频时长，否则从 stderr 的 Duration 行读；
+    这样百分比是已处理的输出时间，不是按阶段估出来的假进度。
+    """
     started = time.monotonic()
-    logger.info("ffmpeg %s invoke: %s", stage, " ".join(str(arg) for arg in args[:8]))
+    invoke_args = list(args)
+    if on_progress is not None:
+        invoke_args[1:1] = ["-nostats", "-progress", "pipe:1"]
+        if "-loglevel" in invoke_args:
+            invoke_args[invoke_args.index("-loglevel") + 1] = "info"
+    logger.info("ffmpeg %s invoke: %s", stage, " ".join(str(arg) for arg in invoke_args[:10]))
     try:
         process = await asyncio.create_subprocess_exec(
-            *args,
+            *invoke_args,
             stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE if on_progress is not None else asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
     except OSError as exc:
         raise PublishComposeError(f"ffmpeg 启动失败（{stage}）：{exc}") from exc
 
-    communication = asyncio.create_task(process.communicate())
+    readers: list[asyncio.Task] = []
+    if on_progress is None:
+        communication = asyncio.create_task(process.communicate())
+    else:
+        stderr_chunks: list[bytes] = []
+        stdout_chunks: list[bytes] = []
+        total_s = duration_s
+        latest_out_s = 0.0
+
+        async def consume_stderr(line: str) -> None:
+            nonlocal total_s
+            if total_s is not None:
+                return
+            match = _DURATION_RE.search(line)
+            if match:
+                hours, minutes, seconds = match.groups()
+                total_s = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+        async def consume_stdout(line: str) -> None:
+            nonlocal latest_out_s
+            key, separator, value = line.strip().partition("=")
+            if not separator or key != "out_time_us":
+                return
+            try:
+                latest_out_s = max(latest_out_s, int(value) / 1_000_000)
+            except ValueError:
+                return
+            if total_s and total_s > 0:
+                await on_progress(min(1.0, max(0.0, latest_out_s / total_s)))
+
+        stderr_reader = asyncio.create_task(
+            _consume_lines(process.stderr, stderr_chunks, consume_stderr)
+        )
+        stdout_reader = asyncio.create_task(
+            _consume_lines(process.stdout, stdout_chunks, consume_stdout)
+        )
+        readers = [stderr_reader, stdout_reader]
+        communication = asyncio.gather(*readers)
+
     try:
-        _, stderr_bytes = await asyncio.wait_for(
+        result = await asyncio.wait_for(
             asyncio.shield(communication), timeout=settings.PUBLISH_COMPOSE_TIMEOUT
         )
     except asyncio.TimeoutError as exc:
@@ -141,7 +199,10 @@ async def _run_ffmpeg(args: Sequence[str], *, stage: str = "处理") -> tuple[in
         except ProcessLookupError:
             pass
         await process.wait()
-        _, stderr_bytes = await communication
+        if readers:
+            stderr_bytes, _ = await asyncio.gather(*readers)
+        else:
+            _, stderr_bytes = await communication
         detail = stderr_bytes.decode("utf-8", "replace").strip()
         logger.warning(
             "ffmpeg %s timed out: elapsed=%.1fs stderr=%s",
@@ -153,13 +214,32 @@ async def _run_ffmpeg(args: Sequence[str], *, stage: str = "处理") -> tuple[in
         raise PublishComposeError(
             f"ffmpeg {stage}超过 {settings.PUBLISH_COMPOSE_TIMEOUT:g} 秒，已终止{suffix}"
         ) from exc
+    except BaseException:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        await process.wait()
+        if readers:
+            await asyncio.gather(*readers, return_exceptions=True)
+        else:
+            await asyncio.gather(communication, return_exceptions=True)
+        raise
+
+    if readers:
+        stderr_bytes, _ = result
+    else:
+        _, stderr_bytes = result
+    code = process.returncode or 0
+    if code == 0 and on_progress is not None:
+        await on_progress(1.0)
     logger.info(
         "ffmpeg %s finished: code=%s elapsed=%.1fs",
         stage,
         process.returncode,
         time.monotonic() - started,
     )
-    return process.returncode or 0, stderr_bytes.decode("utf-8", "replace")
+    return code, stderr_bytes.decode("utf-8", "replace")
 
 
 def _copy_args(exe: str, list_file: Path, out_path: Path) -> list[str]:
@@ -222,10 +302,49 @@ def _output_ok(out_path: Path) -> bool:
         return False
 
 
-async def _concat_silent(exe: str, list_file: Path, out_path: Path) -> None:
+def _stage_percent(start: int, end: int, fraction: float) -> int:
+    return start + round((end - start) * min(1.0, max(0.0, fraction)))
+
+
+async def _emit(progress: ProgressCallback | None, update: ComposeProgress) -> None:
+    if progress is not None:
+        await progress(update)
+
+
+async def _concat_silent(
+    exe: str,
+    list_file: Path,
+    out_path: Path,
+    *,
+    progress: ProgressCallback | None = None,
+    percent_range: tuple[int, int] = (30, 60),
+    source_count: int = 0,
+) -> None:
     """按镜头清单拼出一条**无声**中间片：直拼优先，失败回退重编码。"""
+    start, end = percent_range
+    await _emit(
+        progress,
+        ComposeProgress(
+            "concat",
+            start,
+            f"正在直接拼接 {source_count} 个片段（不重新编码）",
+            current=0,
+            total=source_count,
+        ),
+    )
     code, stderr = await _run_ffmpeg(
-        _copy_args(exe, list_file, out_path), stage="片段直拼"
+        _copy_args(exe, list_file, out_path),
+        stage="片段直拼",
+        on_progress=(lambda fraction: _emit(
+            progress,
+            ComposeProgress(
+                "concat",
+                _stage_percent(start, end, fraction),
+                f"正在直接拼接 {source_count} 个片段（不重新编码）",
+                current=0,
+                total=source_count,
+            ),
+        )) if progress is not None else None,
     )
     if code == 0 and _output_ok(out_path):
         logger.info("ffmpeg concat-copy ok: out=%s", out_path.name)
@@ -237,8 +356,29 @@ async def _concat_silent(exe: str, list_file: Path, out_path: Path) -> None:
         stderr[-_STERR_TAIL:],
     )
     out_path.unlink(missing_ok=True)
+    await _emit(
+        progress,
+        ComposeProgress(
+            "reencode",
+            start,
+            "片段参数不一致，正在统一重编码",
+            current=0,
+            total=source_count,
+        ),
+    )
     code, stderr = await _run_ffmpeg(
-        _reencode_args(exe, list_file, out_path), stage="片段重编码"
+        _reencode_args(exe, list_file, out_path),
+        stage="片段重编码",
+        on_progress=(lambda fraction: _emit(
+            progress,
+            ComposeProgress(
+                "reencode",
+                _stage_percent(start, end, fraction),
+                "片段参数不一致，正在统一重编码",
+                current=0,
+                total=source_count,
+            ),
+        )) if progress is not None else None,
     )
     if code != 0 or not _output_ok(out_path):
         detail = stderr.strip()[-_STERR_TAIL:] or f"退出码 {code}"
@@ -254,7 +394,7 @@ async def probe_duration(exe: str, path: Path) -> float:
     所以这里不看返回码，只认正则；解析不到就是真失败，抛错让作业落失败状态。
     """
     _, stderr = await _run_ffmpeg(
-        [exe, "-nostdin", "-hide_banner", "-i", str(path)], stage="成片时长探测"
+        [exe, "-nostdin", "-hide_banner", "-i", str(path)], stage="文件时长探测"
     )
     match = _DURATION_RE.search(stderr)
     if not match:
@@ -265,77 +405,67 @@ async def probe_duration(exe: str, path: Path) -> float:
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
-def _parse_audio_channels(stderr: str) -> int:
-    """从 ``ffmpeg -i`` 的 stderr 里认音频声道数；认不出来按单声道兜底。
-
-    TTS 两路协议产出的都是单声道 mp3，兜底成 1 与现实一致；真碰到冷门布局
-    （5.1 之类）只打 warning，不为它阻断整条发布作业。
-    """
-    match = _AUDIO_STREAM_RE.search(stderr)
-    if not match:
-        logger.warning("ffmpeg 输出里找不到音频流信息，按单声道处理配音延迟")
-        return 1
-    token = match.group(1).strip().lower()
-    if token in _LAYOUT_CHANNELS:
-        return _LAYOUT_CHANNELS[token]
-    explicit = re.fullmatch(r"(\d+)\s*channels?", token)
-    if explicit:
-        return int(explicit.group(1))
-    logger.warning("无法识别的音频声道布局 %r，按单声道处理配音延迟", token)
-    return 1
-
-
-async def probe_audio(exe: str, path: Path) -> tuple[float, int]:
-    """一次 ``ffmpeg -i`` 同时读音频时长（秒）与声道数。
-
-    声道数是给 ``adelay`` 逐声道列延迟用的：``adelay=D:all=1`` 只有
-    FFmpeg ≥ 4.4 认识，部署机上的旧 ffmpeg 会整张滤镜图拒掉（报
-    "Option 'all' not found"）；显式写成 ``adelay=D``（mono）或
-    ``adelay=D|D``（stereo）则哪个版本都吃。
-    """
-    _, stderr = await _run_ffmpeg(
-        [exe, "-nostdin", "-hide_banner", "-i", str(path)],
-        stage=f"配音时长探测（{path.name}）",
-    )
-    match = _DURATION_RE.search(stderr)
-    if not match:
-        raise PublishComposeError(
-            f"ffmpeg 读不到文件时长（{path.name}），无法对齐配音时间轴"
-        )
-    hours, minutes, seconds = match.groups()
-    duration_s = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-    return duration_s, _parse_audio_channels(stderr)
-
-
 async def build_voiceover(
-    exe: str, plan: VoiceoverPlan, total_s: float, out_path: Path
+    exe: str,
+    plan: VoiceoverPlan,
+    total_s: float,
+    out_path: Path,
+    *,
+    progress: ProgressCallback | None = None,
 ) -> None:
-    """把各句 mp3 按镜头时间轴混成一条与成片等长的 AAC（m4a 封装）。
+    """把各句 mp3 按镜头槽位串成一条与成片等长的 AAC（m4a 封装）。
 
-    滤镜顺序有讲究：``atempo`` 必须在 ``adelay`` 之前——否则加速会把前面那段
-    定位静音一起缩短，句子的起点就漂了。``adelay`` 按探针读到的声道数逐声道列
-    延迟（``D|D``），不用 ``all=1``——那是 FFmpeg 4.4 才有的选项，旧 ffmpeg 会
-    直接拒掉整张滤镜图。``amix`` 同样不用 4.3 才有的 ``normalize=0``：旧版 amix
-    固定按输入数 N 把音量等比调小，混音后挂 ``volume=N`` 补回增益，单人配音各句
-    互不重叠，不会削顶。最后 ``apad + atrim`` 把整条轨垫到、也截到与视频完全等长，
-    封装阶段 ``-shortest`` 只是双保险。
+    每句先按需 ``atempo``，再用 ``apad + atrim`` 补齐到自己的镜头槽位；无台词镜头
+    不在 ``plan.lines`` 里，因此按 ``start_s`` 显式插入等长静音段，最后 ``concat``
+    依次拼接。这里不能用 ``adelay + amix=duration=longest``：线上 FFmpeg 4.2.2
+    在多个延迟输入混音时会一直等不到 EOF，30 秒的片子也会卡死。槽位串拼不需要
+    等待其他输入结束，兼容旧版 FFmpeg，也不会像 ``duration=first`` 那样把第一句
+    之后的台词全丢掉。
     """
     if not plan.lines:
         raise PublishComposeError("配音计划为空：没有任何镜头带台词")
 
+    line_count = len(plan.lines)
+    await _emit(
+        progress,
+        ComposeProgress("voiceover", 62, "正在检查各句配音的时长", 0, line_count),
+    )
     inputs: list[str] = []
     filters: list[str] = []
+    timeline_inputs: list[str] = []
+    cursor_s = 0.0
+    silence_index = 0
     for index, line in enumerate(plan.lines):
         if not line.path.is_file():
             raise PublishComposeError(f"第 {line.sort_order} 镜的配音文件不存在：{line.path.name}")
         if line.slot_s <= 0:
             raise PublishComposeError(f"第 {line.sort_order} 镜的时长为 0，无法放置配音")
+        gap_s = line.start_s - cursor_s
+        if gap_s < -_SLOT_TOLERANCE_S:
+            raise PublishComposeError(
+                f"第 {line.sort_order} 镜的配音起点 {line.start_s:.2f} 秒早于上一槽位终点 "
+                f"{cursor_s:.2f} 秒，配音时间轴重叠"
+            )
+        if gap_s > _SLOT_TOLERANCE_S:
+            label = f"g{silence_index}"
+            filters.append(
+                f"anullsrc=channel_layout=stereo:sample_rate={settings.TTS_SAMPLE_RATE},"
+                f"atrim=0:{gap_s:.3f}[{label}]"
+            )
+            timeline_inputs.append(f"[{label}]")
+            silence_index += 1
         inputs.extend(["-i", str(line.path)])
 
-        duration_s, channels = await probe_audio(exe, line.path)
+        duration_s = await probe_duration(exe, line.path)
+        await _emit(
+            progress,
+            ComposeProgress(
+                "voiceover", 62, "正在检查各句配音的时长", index + 1, line_count
+            ),
+        )
         chain = f"[{index}:a]"
         if duration_s - line.slot_s > _SLOT_TOLERANCE_S:
-            # 先加速再定位：atempo 只作用在人声本体上，不吃掉前面的定位静音。
+            # atempo 只作用在人声本体上；槽位不足时先压到槽位内。
             factor = duration_s / line.slot_s
             if factor > settings.TTS_MAX_ATEMPO:
                 raise PublishComposeError(
@@ -344,24 +474,19 @@ async def build_voiceover(
                     "请删减该镜台词或加长镜头后重新合成"
                 )
             chain += f"atempo={factor:.4f},"
-        delay_ms = max(0, round(line.start_s * 1000))
-        # 逐声道列延迟（mono: adelay=D；stereo: adelay=D|D），不用 4.4 才有的 all=1。
-        delay_args = "|".join([str(delay_ms)] * channels)
-        chain += f"adelay={delay_args}[a{index}]"
+        chain += (
+            f"apad,atrim=0:{line.slot_s:.3f},aresample={settings.TTS_SAMPLE_RATE},"
+            f"aformat=channel_layouts=stereo[s{index}]"
+        )
         filters.append(chain)
+        timeline_inputs.append(f"[s{index}]")
+        cursor_s = line.start_s + line.slot_s
 
-    line_count = len(plan.lines)
-    mix_inputs = "".join(f"[a{index}]" for index in range(line_count))
-    # 不用 amix 的 normalize=0：那是 FFmpeg 4.3 才有的选项，旧 ffmpeg 会整张滤镜图
-    # 拒掉（报 Option 'normalize' not found）。旧版 amix 固定把混合结果除以输入数 N，
-    # 混音后挂 volume=N 把增益补回来——各句在时间轴上互不重叠，任一时刻只有一句在响，
-    # 补完与 normalize=0 数学等价且不会削顶；volume 滤镜所有 ffmpeg 版本都自带。
     filters.append(
-        f"{mix_inputs}amix=inputs={line_count}:duration=longest:"
-        f"dropout_transition=0,volume={line_count}[mixed]"
+        f"{''.join(timeline_inputs)}concat=n={len(timeline_inputs)}:v=0:a=1[joined]"
     )
     filters.append(
-        f"[mixed]apad,atrim=0:{total_s:.3f},aresample={settings.TTS_SAMPLE_RATE}[aout]"
+        f"[joined]apad,atrim=0:{total_s:.3f},aresample={settings.TTS_SAMPLE_RATE}[aout]"
     )
 
     args = [
@@ -382,15 +507,44 @@ async def build_voiceover(
         _AUDIO_BITRATE,
         str(out_path),
     ]
-    code, stderr = await _run_ffmpeg(args, stage="配音混音")
+    await _emit(
+        progress,
+        ComposeProgress(
+            "voiceover", 65, f"正在混音 {line_count} 句配音", line_count, line_count
+        ),
+    )
+    code, stderr = await _run_ffmpeg(
+        args,
+        stage="配音混音",
+        duration_s=total_s,
+        on_progress=(lambda fraction: _emit(
+            progress,
+            ComposeProgress(
+                "voiceover",
+                _stage_percent(65, 85, fraction),
+                f"正在混音 {line_count} 句配音",
+                line_count,
+                line_count,
+            ),
+        )) if progress is not None else None,
+    )
     if code != 0 or not _output_ok(out_path):
         detail = stderr.strip()[-_STERR_TAIL:] or f"退出码 {code}"
         raise PublishComposeError(f"ffmpeg 配音混音失败：{detail}")
     logger.info("ffmpeg voiceover built: lines=%s out=%s", len(plan.lines), out_path.name)
 
 
-async def mux_voiceover(exe: str, video_path: Path, audio_path: Path, out_path: Path) -> None:
+async def mux_voiceover(
+    exe: str,
+    video_path: Path,
+    audio_path: Path,
+    out_path: Path,
+    *,
+    total_s: float,
+    progress: ProgressCallback | None = None,
+) -> None:
     """把配音轨封进无声中间片：视频与音频都只做流拷贝，不再重编码。"""
+    await _emit(progress, ComposeProgress("mux", 88, "正在把配音封装进成片"))
     args = [
         exe,
         "-nostdin",
@@ -415,7 +569,15 @@ async def mux_voiceover(exe: str, video_path: Path, audio_path: Path, out_path: 
         "+faststart",
         str(out_path),
     ]
-    code, stderr = await _run_ffmpeg(args, stage="音视频封装")
+    code, stderr = await _run_ffmpeg(
+        args,
+        stage="音视频封装",
+        duration_s=total_s,
+        on_progress=(lambda fraction: _emit(
+            progress,
+            ComposeProgress("mux", _stage_percent(88, 96, fraction), "正在把配音封装进成片"),
+        )) if progress is not None else None,
+    )
     if code != 0 or not _output_ok(out_path):
         detail = stderr.strip()[-_STERR_TAIL:] or f"退出码 {code}"
         raise PublishComposeError(f"ffmpeg 音视频封装失败：{detail}")
@@ -426,6 +588,8 @@ async def compose(
     sources: Sequence[Path],
     out_path: Path,
     voiceover: VoiceoverPlan | None = None,
+    *,
+    progress: ProgressCallback | None = None,
 ) -> None:
     """把 ``sources`` 按顺序合成到 ``out_path``；失败抛 :class:`PublishComposeError`。
 
@@ -440,14 +604,26 @@ async def compose(
     write_concat_list(sources, list_file)
 
     if voiceover is None:
-        await _concat_silent(exe, list_file, out_path)
+        await _concat_silent(
+            exe,
+            list_file,
+            out_path,
+            progress=progress,
+            percent_range=(5, 92),
+            source_count=len(sources),
+        )
         return
 
     # 配音链路先落无声中间片：视频流只编/拷一次，最后封装是纯 remux，失败也能
     # 从中间片分清是「拼接」还是「混音」哪一段出的错。
     silent_path = out_path.parent / "silent.mp4"
-    await _concat_silent(exe, list_file, silent_path)
+    await _concat_silent(
+        exe, list_file, silent_path, progress=progress, source_count=len(sources)
+    )
+    await _emit(progress, ComposeProgress("voiceover", 61, "正在读取成片时长"))
     total_s = await probe_duration(exe, silent_path)
     track_path = out_path.parent / "voiceover.m4a"
-    await build_voiceover(exe, voiceover, total_s, track_path)
-    await mux_voiceover(exe, silent_path, track_path, out_path)
+    await build_voiceover(exe, voiceover, total_s, track_path, progress=progress)
+    await mux_voiceover(
+        exe, silent_path, track_path, out_path, total_s=total_s, progress=progress
+    )

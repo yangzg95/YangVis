@@ -45,6 +45,7 @@ from app.services.publish import (
 )
 from app.services.publish import composer, runner
 from app.services.publish.composer import (
+    ComposeProgress,
     PublishComposeError,
     VoiceoverLine,
     VoiceoverPlan,
@@ -348,11 +349,15 @@ def test_runner_composes_registers_and_succeeds(db, media_dir, monkeypatch):
     sources = [db.get(MediaJob, shot.video_job_id).rel_path for shot in rows]
     job = _service(db).compose_publish(project.id)
 
-    async def fake_compose(actual_sources, out_path: Path, voiceover=None):
+    seen: list[dict] = []
+
+    async def fake_compose(actual_sources, out_path: Path, voiceover=None, *, progress=None):
         # 合成器收到的顺序要与入队快照一致；产物写到调用方给的临时路径。
         assert [p.name for p in actual_sources] == [Path(rel).name for rel in sources]
         # 没开配音的既有链路：计划必须是 None，行为与配音功能上线前一致。
         assert voiceover is None
+        await progress(ComposeProgress("concat", 55, "正在直接拼接片段"))
+        seen.append(dict(db.get(PublishJob, job.id).request["progress"]))
         out_path.write_bytes(MP4 + b"x" * 64)
 
     monkeypatch.setattr(runner, "compose", fake_compose)
@@ -369,8 +374,20 @@ def test_runner_composes_registers_and_succeeds(db, media_dir, monkeypatch):
     assert media_store.is_safe_rel_path(done.rel_path)
     assert (media_dir / done.rel_path).is_file()
     assert done.file_size == (media_dir / done.rel_path).stat().st_size
+    assert seen == [
+        {"stage": "concat", "percent": 55, "detail": "正在直接拼接片段", "current": None, "total": None}
+    ]
+    assert done.request["progress"] == {
+        "stage": "succeeded",
+        "percent": 100,
+        "detail": "成片已保存",
+        "current": None,
+        "total": None,
+    }
     detail = _service(db).to_detail(_service(db).get_project(project.id))
     assert detail.publish_job.url.endswith(done.rel_path)
+    assert detail.publish_job.progress is not None
+    assert detail.publish_job.progress.percent == 100
 
 
 def test_runner_marks_failure_instead_of_raising(db, monkeypatch):
@@ -378,7 +395,8 @@ def test_runner_marks_failure_instead_of_raising(db, monkeypatch):
     _all_clips_ready(db, project.id)
     job = _service(db).compose_publish(project.id)
 
-    async def boom(sources, out_path, voiceover=None):
+    async def boom(sources, out_path, voiceover=None, *, progress=None):
+        await progress(ComposeProgress("reencode", 47, "正在统一重编码"))
         raise PublishComposeError("ffmpeg 合成失败：模拟故障")
 
     monkeypatch.setattr(runner, "compose", boom)
@@ -389,6 +407,8 @@ def test_runner_marks_failure_instead_of_raising(db, monkeypatch):
     done = db.get(PublishJob, job.id)
     assert done.status == PUBLISH_FAILED
     assert "模拟故障" in (done.error_msg or "")
+    assert done.request["progress"]["stage"] == "failed"
+    assert done.request["progress"]["percent"] == 47
     assert done.finished_at is not None
     # 失败是终态：同一个项目可以立刻重新发起，不被活跃闸门拦住。
     assert _service(db).compose_publish(project.id).status == PUBLISH_QUEUED
@@ -515,6 +535,62 @@ def test_ffmpeg_timeout_reports_stage_and_drains_stderr(monkeypatch):
     assert "encoder stalled" in str(exc_info.value)
 
 
+class _MemoryStream:
+    def __init__(self, data: bytes):
+        self._lines = iter(data.splitlines(keepends=True))
+
+    async def readline(self) -> bytes:
+        return next(self._lines, b"")
+
+
+class _ProgressProc:
+    def __init__(self, stdout: bytes, stderr: bytes = b"", code: int = 0):
+        self.returncode = code
+        self.stdout = _MemoryStream(stdout)
+        self.stderr = _MemoryStream(stderr)
+
+    async def wait(self):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+
+
+def test_ffmpeg_progress_uses_output_time_and_finishes_at_one(monkeypatch):
+    process = _ProgressProc(
+        b"out_time_us=2500000\nout_time_us=7500000\nprogress=continue\n",
+        _duration_stderr(10.0),
+    )
+    invoked: list[list[str]] = []
+
+    async def fake_exec(*args, **kwargs):
+        invoked.append(list(args))
+        assert kwargs["stdout"] == asyncio.subprocess.PIPE
+        return process
+
+    monkeypatch.setattr(composer.asyncio, "create_subprocess_exec", fake_exec)
+    fractions: list[float] = []
+
+    async def report(fraction: float) -> None:
+        fractions.append(fraction)
+
+    async def run():
+        return await composer._run_ffmpeg(
+            ["ffmpeg", "-loglevel", "error", "-i", "in.mp4", "out.mp4"],
+            stage="片段重编码",
+            on_progress=report,
+        )
+
+    code, stderr = asyncio.run(run())
+
+    assert code == 0
+    assert "Duration:" in stderr
+    assert fractions == [0.25, 0.75, 1.0]
+    assert "-progress" in invoked[0]
+    assert "pipe:1" in invoked[0]
+    assert invoked[0][invoked[0].index("-loglevel") + 1] == "info"
+
+
 def test_concat_list_uses_forward_slashes_and_quotes(tmp_path):
     bad = tmp_path / "a'b" / "clip one.mp4"
     list_file = tmp_path / "concat.txt"
@@ -568,6 +644,35 @@ def test_compose_falls_back_to_reencode_then_succeeds(tmp_path, monkeypatch, fak
     assert "-an" in calls[1], "本期不做口播，回退档统一不要音轨"
 
 
+def test_compose_reports_real_concat_progress_range(tmp_path, monkeypatch, fake_ffmpeg):
+    out = tmp_path / "final.mp4"
+    updates: list[ComposeProgress] = []
+
+    async def fake_run(args, *, stage="处理", on_progress=None, duration_s=None):
+        if on_progress is not None:
+            await on_progress(0.5)
+            await on_progress(1.0)
+        Path(args[-1]).write_bytes(MP4)
+        return 0, ""
+
+    monkeypatch.setattr(composer, "_run_ffmpeg", fake_run)
+
+    async def report(update: ComposeProgress) -> None:
+        updates.append(update)
+
+    asyncio.run(
+        composer.compose(
+            [tmp_path / "a.mp4", tmp_path / "b.mp4"],
+            out,
+            progress=report,
+        )
+    )
+
+    assert [update.percent for update in updates] == [5, 49, 92]
+    assert all(update.stage == "concat" for update in updates)
+    assert all(update.total == 2 for update in updates)
+
+
 def test_compose_raises_when_both_attempts_fail(tmp_path, monkeypatch, fake_ffmpeg):
     def fake_exec(*args, **kwargs):
         async def run():
@@ -588,7 +693,7 @@ def test_compose_endpoint_runs_the_background_job(client, db, monkeypatch):
     project = _project(db)
     _all_clips_ready(db, project.id)
 
-    async def fake_compose(sources, out_path: Path, voiceover=None):
+    async def fake_compose(sources, out_path: Path, voiceover=None, *, progress=None):
         out_path.write_bytes(MP4)
 
     monkeypatch.setattr(runner, "compose", fake_compose)
@@ -599,6 +704,7 @@ def test_compose_endpoint_runs_the_background_job(client, db, monkeypatch):
     # 响应体在 BackgroundTasks 开跑前就序列化了：回来的这一刻只能是排队中。
     assert body["data"]["publish_job"]["status"] == PUBLISH_QUEUED
     assert body["data"]["publish_job"]["url"] == ""
+    assert body["data"]["publish_job"]["progress"] is None
 
     # 后台任务用另一条 session 提交；本会话先过期身份映射，再走接口看终态。
     db.expire_all()
@@ -760,8 +866,9 @@ def test_runner_synthesizes_lines_and_passes_voiceover_plan(db, monkeypatch):
 
     captured: dict = {}
 
-    async def fake_compose(sources, out_path: Path, voiceover=None):
+    async def fake_compose(sources, out_path: Path, voiceover=None, *, progress=None):
         captured["plan"] = voiceover
+        captured["progress"] = dict(db.get(PublishJob, job.id).request["progress"])
         # 临时目录在 with 块退出即删，音频文件存在性只能在这一档验。
         assert all(line.path.is_file() for line in voiceover.lines)
         out_path.write_bytes(MP4)
@@ -779,6 +886,13 @@ def test_runner_synthesizes_lines_and_passes_voiceover_plan(db, monkeypatch):
     assert [line.sort_order for line in plan.lines] == [1, 3]
     assert [line.start_s for line in plan.lines] == [0.0, 10.0]
     assert [line.slot_s for line in plan.lines] == [5.0, 5.0]
+    assert captured["progress"] == {
+        "stage": "tts",
+        "percent": 30,
+        "detail": "已完成 2/2 句配音",
+        "current": 2,
+        "total": 2,
+    }
 
 
 def test_runner_fails_when_tts_config_disappeared(db, monkeypatch):
@@ -843,16 +957,13 @@ class _Proc:
         pass
 
 
-def _duration_stderr(seconds: float, channels: int | None = None) -> bytes:
+def _duration_stderr(seconds: float) -> bytes:
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = seconds % 60
-    text = f"  Duration: {hours:02d}:{minutes:02d}:{secs:05.2f}, start: 0.000000"
-    if channels is not None:
-        # 仿 ffmpeg -i 的音频流行：1 声道印 mono，2 声道印 stereo，其余印 N channels。
-        layout = "mono" if channels == 1 else "stereo" if channels == 2 else f"{channels} channels"
-        text += f"\n  Stream #0:0: Audio: mp3, 44100 Hz, {layout}, fltp, 128 kb/s"
-    return text.encode()
+    return (
+        f"  Duration: {hours:02d}:{minutes:02d}:{secs:05.2f}, start: 0.000000"
+    ).encode()
 
 
 def test_probe_duration_parses_ffmpeg_stderr(tmp_path, monkeypatch, fake_ffmpeg):
@@ -886,57 +997,6 @@ def test_probe_duration_raises_when_line_missing(tmp_path, monkeypatch, fake_ffm
         asyncio.run(composer.probe_duration("ffmpeg", target))
 
 
-def _audio_stderr(seconds: float, stream_token: str) -> bytes:
-    return (
-        _duration_stderr(seconds).decode()
-        + f"\n  Stream #0:0: Audio: mp3, 44100 Hz, {stream_token}, fltp, 128 kb/s"
-    ).encode()
-
-
-@pytest.mark.parametrize(
-    ("stream_token", "expected"),
-    [
-        ("mono", 1),
-        ("stereo", 2),
-        ("5.1(side)", 6),
-        ("2 channels", 2),
-    ],
-)
-def test_probe_audio_parses_duration_and_channels(
-    tmp_path, monkeypatch, fake_ffmpeg, stream_token, expected
-):
-    target = tmp_path / "a.mp3"
-    target.write_bytes(MP4)
-
-    def fake_exec(*args, **kwargs):
-        async def run():
-            return _Proc(1, _audio_stderr(12.5, stream_token))
-
-        return run()
-
-    monkeypatch.setattr(composer.asyncio, "create_subprocess_exec", fake_exec)
-
-    assert asyncio.run(composer.probe_audio("ffmpeg", target)) == (12.5, expected)
-
-
-def test_probe_audio_falls_back_to_mono_when_stream_line_absent(
-    tmp_path, monkeypatch, fake_ffmpeg
-):
-    target = tmp_path / "a.mp3"
-    target.write_bytes(MP4)
-
-    def fake_exec(*args, **kwargs):
-        async def run():
-            # 只有 Duration 没有音频流行：不抛错，按单声道兜底，作业不被冷门文件卡死。
-            return _Proc(1, _duration_stderr(3.0))
-
-        return run()
-
-    monkeypatch.setattr(composer.asyncio, "create_subprocess_exec", fake_exec)
-
-    assert asyncio.run(composer.probe_audio("ffmpeg", target)) == (3.0, 1)
-
-
 def _voice_lines(tmp_path: Path) -> list[VoiceoverLine]:
     lines = []
     for index, (start, slot) in enumerate(((0, 5), (5, 5))):
@@ -948,13 +1008,8 @@ def _voice_lines(tmp_path: Path) -> list[VoiceoverLine]:
     return lines
 
 
-def _routing_exec(calls: list, durations: dict[str, float], channels: dict[str, int] | None = None):
-    """按调用形状路由的假 ffmpeg：探针回 Duration，其余落产物文件。
-
-    ``channels`` 按文件名给音频探针定制声道数；mp3 探针默认 mono，视频探针
-    （silent.mp4）不带音频流行，保持与真实无声中间片一致。
-    """
-    channels = channels or {}
+def _routing_exec(calls: list, durations: dict[str, float]):
+    """按调用形状路由的假 ffmpeg：探针回 Duration，其余落产物文件。"""
 
     def fake_exec(*args, **kwargs):
         argv = list(args)
@@ -963,10 +1018,7 @@ def _routing_exec(calls: list, durations: dict[str, float], channels: dict[str, 
         async def run():
             if argv[-2] == "-i":  # 探针调用：[exe, -nostdin, -hide_banner, -i, path]
                 name = Path(argv[-1]).name
-                probe_channels = channels.get(name)
-                if probe_channels is None and name.endswith(".mp3"):
-                    probe_channels = 1
-                return _Proc(1, _duration_stderr(durations[name], probe_channels))
+                return _Proc(1, _duration_stderr(durations[name]))
             Path(argv[-1]).write_bytes(MP4)
             return _Proc(0)
 
@@ -993,19 +1045,44 @@ def test_build_voiceover_places_lines_without_atempo_when_they_fit(
     assert out.is_file()
     mix_call = next(argv for argv in calls if "-filter_complex" in argv)
     graph = mix_call[mix_call.index("-filter_complex") + 1]
-    # 都放得进 5 秒槽位：不该出现加速；mono 输入逐声道只列一个延迟值。
+    # 都放得进 5 秒槽位：不该出现加速；每句先补/截到槽位，再按镜头顺序串拼。
     assert "atempo" not in graph
-    assert "adelay=0[a0]" in graph
-    assert "adelay=5000[a1]" in graph
-    # 旧版 ffmpeg（<4.4）不认 all=1，滤镜图里绝不能再出现这个写法。
-    assert "all=" not in graph
-    assert "amix=inputs=2" in graph
-    # 旧版 ffmpeg（<4.3）不认 normalize 选项：靠 amix 后的 volume=N 补回被
-    # 输入数等比调小的增益，滤镜图里不能再出现 normalize。
-    assert "volume=2[mixed]" in graph
+    assert "[0:a]apad,atrim=0:5.000,aresample=44100,aformat=channel_layouts=stereo[s0]" in graph
+    assert "[1:a]apad,atrim=0:5.000,aresample=44100,aformat=channel_layouts=stereo[s1]" in graph
+    assert "[s0][s1]concat=n=2:v=0:a=1[joined]" in graph
+    # FFmpeg 4.2.2 的 adelay + amix=duration=longest 会卡到超时，绝不能回退。
+    assert "adelay" not in graph
+    assert "amix" not in graph
     assert "normalize=" not in graph
     assert "atrim=0:10.000" in graph
     assert "aresample=44100" in graph
+
+
+def test_build_voiceover_preserves_silent_shot_gaps(tmp_path, monkeypatch, fake_ffmpeg):
+    first, second = _voice_lines(tmp_path)
+    second = VoiceoverLine(second.path, second.sort_order, start_s=8.0, slot_s=5.0)
+    out = tmp_path / "voiceover.m4a"
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        composer.asyncio,
+        "create_subprocess_exec",
+        _routing_exec(calls, {"line_0.mp3": 3.0, "line_1.mp3": 4.0}),
+    )
+
+    asyncio.run(
+        composer.build_voiceover(
+            "ffmpeg", VoiceoverPlan([first, second]), total_s=13.0, out_path=out
+        )
+    )
+
+    graph = next(
+        argv[argv.index("-filter_complex") + 1]
+        for argv in calls
+        if "-filter_complex" in argv
+    )
+    assert "anullsrc=channel_layout=stereo:sample_rate=44100,atrim=0:3.000[g0]" in graph
+    assert "[s0][g0][s1]concat=n=3:v=0:a=1[joined]" in graph
+    assert "atrim=0:13.000" in graph
 
 
 def test_build_voiceover_speeds_up_overflowing_line(tmp_path, monkeypatch, fake_ffmpeg):
@@ -1027,23 +1104,23 @@ def test_build_voiceover_speeds_up_overflowing_line(tmp_path, monkeypatch, fake_
         for argv in calls
         if "-filter_complex" in argv
     )
-    # 顺序必须是先 atempo 再 adelay：反过来会把定位静音一起加速。
-    assert "[0:a]atempo=1.6000,adelay=0[a0]" in graph
-    assert "[1:a]adelay=5000[a1]" in graph
+    # 先加速再截到槽位；concat 本身按顺序定位，不再叠加绝对起点延迟。
+    assert "[0:a]atempo=1.6000,apad,atrim=0:5.000" in graph
+    assert "[1:a]apad,atrim=0:5.000" in graph
+    assert "adelay" not in graph
 
 
-def test_build_voiceover_emits_per_channel_delay_for_stereo(
+def test_build_voiceover_avoids_amix_longest_eof_hang(
     tmp_path, monkeypatch, fake_ffmpeg
 ):
     plan = VoiceoverPlan(_voice_lines(tmp_path))
     out = tmp_path / "voiceover.m4a"
     calls: list[list[str]] = []
     durations = {"line_0.mp3": 3.0, "line_1.mp3": 4.0}
-    # 两路配音都是立体声：adelay 必须逐声道列两个延迟，而不是用 all=1。
     monkeypatch.setattr(
         composer.asyncio,
         "create_subprocess_exec",
-        _routing_exec(calls, durations, {"line_0.mp3": 2, "line_1.mp3": 2}),
+        _routing_exec(calls, durations),
     )
 
     asyncio.run(composer.build_voiceover("ffmpeg", plan, total_s=10.0, out_path=out))
@@ -1053,9 +1130,9 @@ def test_build_voiceover_emits_per_channel_delay_for_stereo(
         for argv in calls
         if "-filter_complex" in argv
     )
-    assert "adelay=0|0[a0]" in graph
-    assert "adelay=5000|5000[a1]" in graph
-    assert "all=" not in graph
+    assert "concat=n=2:v=0:a=1" in graph
+    assert "amix" not in graph
+    assert "duration=longest" not in graph
 
 
 def test_build_voiceover_fails_when_speedup_exceeds_cap(

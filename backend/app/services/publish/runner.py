@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -33,6 +34,8 @@ from app.services.publish import (
     PUBLISH_SUCCEEDED,
 )
 from app.services.publish.composer import (
+    ComposeProgress,
+    ProgressCallback,
     PublishComposeError,
     VoiceoverLine,
     VoiceoverPlan,
@@ -45,8 +48,29 @@ logger = logging.getLogger("yangvis.publish.runner")
 settings = get_settings()
 
 
+def _progress_reporter(db: Session, job: PublishJob) -> ProgressCallback:
+    """把进度写进入队快照的独立键；相同内容不重复提交。"""
+    last: ComposeProgress | None = None
+
+    async def report(update: ComposeProgress) -> None:
+        nonlocal last
+        if update == last:
+            return
+        request = dict(job.request or {})
+        request["progress"] = asdict(update)
+        job.request = request
+        db.commit()
+        last = update
+
+    return report
+
+
 async def _synthesize_voiceover(
-    db: Session, job: PublishJob, work_dir: Path
+    db: Session,
+    job: PublishJob,
+    work_dir: Path,
+    *,
+    progress: ProgressCallback | None = None,
 ) -> VoiceoverPlan | None:
     """按作业快照逐句合成配音，返回 ffmpeg 用的时间轴计划；没开配音返回 None。
 
@@ -79,12 +103,26 @@ async def _synthesize_voiceover(
             "没有可用的音色 ID：项目渲染参数与服务端 TTS_DEFAULT_VOICE 都为空"
         )
 
+    total = sum(1 for item in raw_lines if (item.get("text") or "").strip())
+    done = 0
+    if progress is not None:
+        await progress(ComposeProgress("tts", 5, "正在准备配音", 0, total))
     plan_lines: list[VoiceoverLine] = []
     for index, item in enumerate(raw_lines):
         text = (item.get("text") or "").strip()
         if not text:
             # 无台词镜头不入计划，时间轴上它本就是一段静音。
             continue
+        if progress is not None:
+            await progress(
+                ComposeProgress(
+                    "tts",
+                    5 + round(25 * done / total),
+                    f"正在合成第 {done + 1}/{total} 句配音",
+                    done,
+                    total,
+                )
+            )
         audio = await tts.synthesize(config, text=text, voice=voice)
         audio_path = work_dir / f"line_{index:02d}.mp3"
         audio_path.write_bytes(audio)
@@ -96,6 +134,17 @@ async def _synthesize_voiceover(
                 slot_s=float(item.get("duration_s", 0)),
             )
         )
+        done += 1
+        if progress is not None:
+            await progress(
+                ComposeProgress(
+                    "tts",
+                    5 + round(25 * done / total),
+                    f"已完成 {done}/{total} 句配音",
+                    done,
+                    total,
+                )
+            )
 
     if not plan_lines:
         raise PublishComposeError("配音开关已打开，但所有镜头的台词都是空的")
@@ -122,8 +171,10 @@ async def run_publish_job(db: Session, job_id: int) -> None:
     started = time.monotonic()
     job.status = PUBLISH_RUNNING
     db.commit()
+    report = _progress_reporter(db, job)
     logger.info("publish job started: id=%s project=%s", job.id, job.project_id)
     try:
+        await report(ComposeProgress("validating", 2, "正在检查片段文件"))
         sources = [
             settings.upload_media_path / str(rel)
             for rel in (job.request or {}).get("sources", [])
@@ -141,10 +192,11 @@ async def run_publish_job(db: Session, job_id: int) -> None:
             work_dir = Path(tmp)
             out_path = work_dir / "final.mp4"
             # 没有配音快照时返回 None，compose 走与以前完全一致的无声拼接路径。
-            voiceover = await _synthesize_voiceover(db, job, work_dir)
-            await compose(sources, out_path, voiceover=voiceover)
+            voiceover = await _synthesize_voiceover(db, job, work_dir, progress=report)
+            await compose(sources, out_path, voiceover=voiceover, progress=report)
             # 登记这一步还要过文件头魔数与大小闸门：ffmpeg 真出了意外容器，
             # 这里会抛 MediaFileError，被下面同一档接住。
+            await report(ComposeProgress("storing", 98, "正在校验并保存成片"))
             stored = store.store_file(job.project_id, out_path)
 
         job.rel_path = stored.rel_path
@@ -152,6 +204,7 @@ async def run_publish_job(db: Session, job_id: int) -> None:
         job.file_size = stored.size
         job.status = PUBLISH_SUCCEEDED
         job.error_msg = None
+        await report(ComposeProgress("succeeded", 100, "成片已保存"))
         logger.info(
             "publish job succeeded: id=%s project=%s bytes=%s elapsed=%.1fs",
             job.id,
@@ -160,8 +213,14 @@ async def run_publish_job(db: Session, job_id: int) -> None:
             time.monotonic() - started,
         )
     except Exception as exc:  # noqa: BLE001 - 见函数 docstring，失败只落作业行
+        previous = (job.request or {}).get("progress") or {}
         job.status = PUBLISH_FAILED
         job.error_msg = str(exc)[:512]
+        await report(
+            ComposeProgress(
+                "failed", int(previous.get("percent", 0)), "合成失败，请查看下方原因"
+            )
+        )
         logger.warning("publish job failed: id=%s error=%s", job.id, exc, exc_info=True)
     finally:
         job.elapsed_ms = int((time.monotonic() - started) * 1000)
